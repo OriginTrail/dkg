@@ -15,12 +15,12 @@ import {
 import type { AddressInfo } from 'node:net';
 
 // CLI subcommand tests for `dkg okf {import,export}` against a tiny in-process
-// stub that mimics the daemon's knowledge-asset / shared-memory / query routes.
+// stub that mimics the daemon's knowledge-asset / query routes.
 // The CLI talks to the stub via the standard DKG_API_PORT + auth-token channel
 // ApiClient.connect() reads, so these run the compiled CLI binary end-to-end
 // without booting the daemon. They lock down the behaviours the pure mapper
 // tests cannot: dry-run must NOT connect, WM import vs --share advance, the
-// --private bulk SWM path + manifest, and the export skolem-node filter.
+// --private bulk lifecycle path + manifest, and the export skolem-node filter.
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -113,10 +113,6 @@ function okfDaemonHandler(createdCGs: Set<string>): StubHandler {
     }
     if (m === 'POST' && /\/api\/knowledge-assets\/.+\/swm\/share$/.test(path)) {
       return { status: 200, body: { swmShared: true, promotedCount: 1 } };
-    }
-    if (m === 'POST' && path === '/api/shared-memory/write') {
-      const quads = JSON.parse(body || '{}').quads ?? [];
-      return { status: 200, body: { shareOperationId: 'op-1', contextGraphId: 'x', graph: 'g', triplesWritten: quads.length } };
     }
     return { status: 404, body: { error: 'NotFound', path } };
   };
@@ -254,7 +250,7 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private bulk-streams quads via /api/shared-memory/write with a chunked manifest', async () => {
+  it('--private bulk-stages quads through one lifecycle KA with a chunked manifest', async () => {
     clear();
     const bundle = await makeBundle();
     const r = await runCli(
@@ -263,14 +259,17 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     );
     expect(r.exitCode).toBe(0);
     const out = parseJsonTail(r.stdout);
-    expect(out.importMode).toBe('bulk-private-swm');
+    expect(out.importMode).toBe('bulk-private-lifecycle');
     expect(out.datasetPointer).toBe('did:dkg:context-graph:cg-priv');
     expect(out.triplesWritten).toBeGreaterThan(0);
+    expect(out.assetName).toBe('okf-private-bulk-root');
 
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    expect(paths).toContain('POST /api/shared-memory/write');
-    // The private bulk path never creates per-concept KAs.
-    expect(paths.some((p) => p === 'POST /api/knowledge-assets')).toBe(false);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(1);
+    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/write');
+    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/swm/share');
+    expect(paths.some((p) => p === 'POST /api/shared-memory/write')).toBe(false);
 
     // PRIVACY CONTRACT: the Context Graph must be created invite-only. A regression
     // that dropped `{ private: true, accessPolicy: 1 }` would bulk-write the corpus
@@ -284,11 +283,15 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(createBody.accessPolicy).toBe(1);
 
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
-    expect(manifest.mode).toBe('bulk-private-swm');
+    expect(manifest.mode).toBe('bulk-private-lifecycle');
+    expect(manifest.assetName).toBe('okf-private-bulk-root');
     expect(manifest.chunksDone).toBe(manifest.totalChunks);
+    expect(manifest.draftCreated).toBe(true);
+    expect(manifest.finalized).toBe(true);
+    expect(manifest.shared).toBe(true);
   });
 
-  it('--private forwards --sub-graph-name into the shared-memory write body + manifest', async () => {
+  it('--private forwards --sub-graph-name through lifecycle bodies + manifest', async () => {
     clear();
     const bundle = await makeBundle();
     const r = await runCli(
@@ -296,13 +299,16 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
       env(),
     );
     expect(r.exitCode).toBe(0);
-    // Every bulk write must carry the sub-graph so data lands in cg/team SWM, not root.
-    const writes = stub.calls.filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/shared-memory/write');
-    expect(writes.length).toBeGreaterThan(0);
-    for (const w of writes) expect(JSON.parse(w.body || '{}').subGraphName).toBe('team');
+    // Every lifecycle call must carry the sub-graph so data lands in cg/team SWM, not root.
+    const lifecycleCalls = stub.calls.filter((c) =>
+      c.method === 'POST' && c.url.split('?')[0].startsWith('/api/knowledge-assets'),
+    );
+    expect(lifecycleCalls.length).toBeGreaterThan(0);
+    for (const call of lifecycleCalls) expect(JSON.parse(call.body || '{}').subGraphName).toBe('team');
     // The resumability manifest records the sub-graph (so a resume can't mix root/sub-graph).
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
     expect(manifest.subGraphName).toBe('team');
+    expect(manifest.assetName).toBe('okf-private-bulk-team');
   });
 
   it('refuses --private into an existing PUBLIC Context Graph; --allow-public-context-graph overrides', async () => {
@@ -321,10 +327,10 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     };
     stub.setHandler(publicCgHandler);
 
-    // Refusal: non-zero exit, and NO bulk write happened.
+    // Refusal: non-zero exit, and NO lifecycle write happened.
     const refused = await runCli(['okf', 'import', bundle, '--context-graph-id', 'cg-pub', '--private'], env());
     expect(refused.exitCode).not.toBe(0);
-    expect(stub.calls.some((c) => c.url.split('?')[0] === '/api/shared-memory/write')).toBe(false);
+    expect(stub.calls.some((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]))).toBe(false);
     expect(refused.stderr).toMatch(/Refusing --private/);
 
     // Override: --allow-public-context-graph proceeds and writes.
@@ -334,7 +340,7 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
       env(),
     );
     expect(allowed.exitCode).toBe(0);
-    expect(stub.calls.slice(before).some((c) => c.url.split('?')[0] === '/api/shared-memory/write')).toBe(true);
+    expect(stub.calls.slice(before).some((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]))).toBe(true);
 
     stub.setHandler(okfDaemonHandler(createdCGs));
   });
@@ -431,7 +437,16 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     await writeFile(join(dir, 'a.md'), '---\ntype: Thing\ntitle: A\n---\n\nbody\n');
     const secret = join(dir, 'secret.txt');
     await writeFile(secret, 'SECRET-XYZ');
-    await symlink(secret, join(dir, 'leak.md'));
+    try {
+      await symlink(secret, join(dir, 'leak.md'));
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'EPERM' || code === 'EACCES' || code === 'ENOTSUP') {
+        await rm(dir, { recursive: true, force: true });
+        return;
+      }
+      throw err;
+    }
     const r = await runCli(['okf', 'import', dir, '--context-graph-id', 'cg', '--dry-run'], env());
     expect(r.exitCode).toBe(0);
     expect(r.stderr).toContain('skipped symlinked bundle entry');
