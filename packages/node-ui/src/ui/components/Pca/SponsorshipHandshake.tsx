@@ -3,7 +3,7 @@ import { WalletRow } from './WalletRow.js';
 import { CopyButton, useCopy } from './CopyButton.js';
 
 /**
- * The asymmetric copy/paste packet between an edge node and its sponsor (UX
+ * The asymmetric copy/paste packet between an edge node and a PCA owner (UX
  * §5.4 step 6 / §5.6 step 3): the edge SHARES its operational wallets; the core
  * RETURNS the created account id. Two labelled halves — deliberately NOT a
  * forced-symmetric reuse. `role` only changes which half is emphasized.
@@ -31,7 +31,7 @@ export function SponsorshipHandshake({
         <header className="v10-pca-handshake-head">
           <span className="v10-pca-handshake-title">Operational wallets</span>
           <span className="v10-pca-handshake-sub">
-            The edge node shares these; the sponsor approves them.
+            The edge node shares these; the PCA owner approves them.
           </span>
         </header>
         {wallets.length === 0 ? (
@@ -60,9 +60,9 @@ export function SponsorshipHandshake({
         data-emphasis={role === 'core' ? 'true' : 'false'}
       >
         <header className="v10-pca-handshake-head">
-          <span className="v10-pca-handshake-title">Conviction account id</span>
+          <span className="v10-pca-handshake-title">PCA ID from owner</span>
           <span className="v10-pca-handshake-sub">
-            The sponsor sends this back after approving the wallets.
+            The PCA owner sends this back after approving the wallets.
           </span>
         </header>
         {accountId ? (
@@ -72,7 +72,7 @@ export function SponsorshipHandshake({
           </div>
         ) : (
           <p className="v10-pca-handshake-empty">
-            Pending — enter it once your sponsor confirms the approval.
+            Pending - enter it once the PCA owner confirms the approval.
           </p>
         )}
       </section>

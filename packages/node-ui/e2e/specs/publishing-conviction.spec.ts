@@ -1,5 +1,5 @@
 /**
- * Publishing Conviction (PCA) tab — UI-driving e2e (P0).
+ * Publisher Conviction (PCA) tab — UI-driving e2e (P0).
  *
  * Page-fixture spec (exemplar: create-project.spec.ts) that drives the real
  * node-UI against the devnet node1 (auto-staked, PCA contracts deployed by
@@ -38,7 +38,7 @@ async function openProjectTab(page: Page, name: string) {
     .click();
 }
 
-test.describe('Publishing Conviction tab (PCA) — P0', () => {
+test.describe('Publisher Conviction tab (PCA) — P0', () => {
   test.beforeEach(async ({ shell }) => {
     await shell.goto();
   });
@@ -231,11 +231,10 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
 
   // ── S3 manage detail (@mutating; CI devnet — needs an owned account) — Batch D ──
 
-  test('S3 @mutating: manage an owned PCA — detail shows the settle + top-up owner controls', async ({ conviction }) => {
+  test('S3 @mutating: manage an owned PCA — detail shows top-up owner controls', async ({ conviction }) => {
     // Reachable only with an OWNED account: create one (devnet @mutating), then
     // open Manage from the success screen. Assert the STATIC owner-management
-    // surface — the detail root, the permissionless settle button, and the
-    // top-up form — plus a non-destructive interaction (the top-up enable-toggle;
+    // surface — the detail root and the top-up form — plus a non-destructive interaction (the top-up enable-toggle;
     // we NEVER submit, which would commit a real tx). We deliberately do NOT
     // assert the per-wallet agent rows: those depend on the per-wallet
     // registration probe whose timing flaked the old S4 assertion. §8A: the
@@ -251,9 +250,6 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
 
     // The detail tab renders the owner-management surface.
     await expect(conviction.detail).toBeVisible({ timeout: 30_000 });
-    // Settlement is permissionless and enabled on a fresh (un-swept) account.
-    await expect(conviction.settleBtn).toBeVisible();
-    await expect(conviction.settleBtn).toBeEnabled();
     // The top-up owner control renders.
     await expect(conviction.topUpBtn).toBeVisible();
     // Non-destructive interaction: "Add funds" is disabled until a valid amount
@@ -272,9 +268,8 @@ test.describe('Publishing Conviction tab (PCA) — P0', () => {
     const status = await fetchApiInPage<{ nodeRole?: string }>(page, '/api/status');
     test.skip(status.json?.nodeRole !== 'edge', 'edge-only screen (S6)');
     await conviction.open();
-    // The panel opens on click of the edge "Share my wallet → get sponsored"
-    // CTA (toolbar button or the no-discount banner's "Get sponsored").
-    await page.getByRole('button', { name: /get sponsored|share my wallet/i }).first().click();
+    // The panel opens on click of the edge "Get added to a PCA" CTA.
+    await page.getByRole('button', { name: /get added to a PCA/i }).first().click();
     await expect(conviction.getSponsoredPanel).toBeVisible();
     // Regression guard for fbc88a16d: the panel must NOT false-empty — the edge's
     // op-wallets load (here: 3 → "Copy all 3"), and "No operational wallets

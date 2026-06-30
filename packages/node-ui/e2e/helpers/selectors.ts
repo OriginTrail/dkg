@@ -277,7 +277,7 @@ export const sel = {
     shutdownBtn: '.settings-stack .card button',
   },
 
-  // Publishing Conviction (PCA) tab — GREENFIELD (P0). These are the e2e
+  // Publisher Conviction (PCA) tab — GREENFIELD (P0). These are the e2e
   // selector CONTRACT for the new node-UI surface (plan §2.3 file targets +
   // PCA-NODE-UI-UX-PROPOSAL screens S1–S7/S2b). data-testid is used for every
   // e2e-critical anchor so specs don't bind to volatile design-system classes;
@@ -286,7 +286,7 @@ export const sel = {
   conviction: {
     // Header launch button → openTab({ id:'conviction', ... }) (Header.tsx).
     // Uses a data-testid (not title): the title is the proposal §3.1 benefit-cue
-    // tooltip "Publishing Conviction — publishing discounts & sponsorship".
+    // tooltip "Publisher Conviction — publishing discounts".
     headerBtn: '[data-testid="pca-launch-btn"]',
     // PublishingConviction.tsx tab root (pages/PublishingConviction.tsx)
     view: '[data-testid="pca-view"]',
@@ -314,7 +314,6 @@ export const sel = {
     agentList: '[data-testid="pca-agent-list"]',            // PcaAgentList (B3)
     agentRow: '[data-testid="pca-agent-row"]',              // WalletRow
     topUpBtn: '[data-testid="pca-topup-btn"]',
-    settleBtn: '[data-testid="pca-settle-btn"]',            // permissionless (enabled for everyone)
     deregisterBtn: '[data-testid="pca-deregister-btn"]',    // two-step: shows after "Remove" confirm
     actionResult: '[data-testid="pca-action-result"]',      // funding/settle/bind result line
     // S4 approve wallets
@@ -331,7 +330,7 @@ export const sel = {
     discountBadge: '[data-testid="pca-discount-badge"]',           // DiscountAppliedBadge (B8; degrade-to-hidden)
     // S6 edge onboarding
     getSponsoredPanel: '[data-testid="pca-get-sponsored"]',        // GetSponsoredPanel / SponsorshipHandshake
-    // Predictive bell (NotificationsPane "Publishing conviction" section)
+    // Predictive bell (NotificationsPane "Publisher Conviction" section)
     bellAlert: '[data-testid="pca-bell-alert"]',
   },
 } as const;

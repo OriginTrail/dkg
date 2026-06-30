@@ -34,9 +34,9 @@ export function PcaDashboardRow() {
       <button
         type="button"
         className="v10-ws-pca-cta"
-        onClick={() => openTab({ id: 'conviction', label: 'Publishing Conviction', closable: true })}
+        onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
       >
-        {role === 'edge' ? 'Get sponsored' : 'Set up conviction account'} →
+        {role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'} -&gt;
       </button>
     </div>
   );

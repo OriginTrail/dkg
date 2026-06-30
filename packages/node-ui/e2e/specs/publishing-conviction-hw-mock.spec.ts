@@ -366,7 +366,7 @@ async function openWalletManagedPca(page: Page) {
   await expect(page.getByTestId('pca-detail')).toBeVisible();
 }
 
-test.describe('Publishing Conviction hardware-wallet mock lane', () => {
+test.describe('Publisher Conviction hardware-wallet mock lane', () => {
   test.beforeEach(async ({ page }) => {
     await installMockApis(page);
     await installMockWallet(page);

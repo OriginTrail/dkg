@@ -49,6 +49,7 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
@@ -58,6 +59,7 @@
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
+  min-width: 0;
 }
 .v10-pca-wallet-status {
   font-size: 11px;
@@ -353,13 +355,17 @@
   gap: 5px;
 }
 .v10-pca-device-progress-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   font-size: 11px;
   color: var(--text-secondary);
+  min-width: 0;
 }
+.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
 .v10-pca-device-progress-row[data-state='active'] { color: var(--text-primary); }
+.v10-pca-device-progress-row[data-state='submitted'] { color: var(--text-warning); }
 .v10-pca-device-progress-row[data-state='confirmed'] { color: var(--text-success); }
 .v10-pca-device-progress-row[data-state='failed'],
 .v10-pca-device-progress-row[data-state='aborted'] { color: var(--text-danger); }
@@ -373,8 +379,21 @@
   color: var(--text-link);
   font-family: var(--font-mono);
   font-size: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.v10-pca-device-progress-error { margin-left: auto; color: var(--text-danger); }
+.v10-pca-device-progress-error {
+  grid-column: 2 / -1;
+  color: var(--text-danger);
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.v10-pca-device-progress-row[data-state='submitted'] .v10-pca-device-progress-error {
+  color: var(--text-warning);
+}
 
 /* Condensed chip on the publish CTA */
 .v10-pca-verdict-chip {
@@ -500,6 +519,52 @@
 .v10-pca-filter-tab:focus-visible { outline: 2px solid var(--text-link); outline-offset: -2px; }
 .v10-pca-overview-caveat,
 .v10-pca-overview-foot { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin: 12px 0 0; }
+.v10-pca-section {
+  margin-top: 18px;
+}
+.v10-pca-section + .v10-pca-section {
+  margin-top: 24px;
+}
+.v10-pca-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.v10-pca-section-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.v10-pca-coverage-summary {
+  padding: 14px 0 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-pca-overview-cta-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.v10-pca-overview-wallet {
+  width: min(460px, 100%);
+}
+.v10-pca-wallet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 680px;
+  margin-top: 10px;
+}
+.v10-pca-inline-status {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
 
 /* ----- PcaAccountCard ----- */
 .v10-pca-card-grid {
@@ -605,6 +670,12 @@
 }
 .v10-pca-track-panel { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .v10-pca-track-panel .v10-form-input { max-width: 220px; }
+.v10-pca-track-status {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
 
 /* ----- S3 Detail (scaffold) ----- */
 .v10-pca-detail-band { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
@@ -616,6 +687,9 @@
   font-size: 12px;
   color: var(--text-tertiary);
   line-height: 1.5;
+}
+.v10-pca-detail .v10-stat-strip-value {
+  min-height: 42px;
 }
 
 /* ----- Dashboard "Publishing discount" row (B3) ----- */
@@ -680,12 +754,53 @@
 .v10-pca-create-recon code { word-break: break-all; }
 .v10-pca-create-recon-actions { margin: 8px 0 0; padding-left: 18px; }
 .v10-pca-create-recon-actions li { margin-bottom: 4px; }
+.v10-pca-modal-box .v10-modal-error,
+.v10-pca-modal-box .v10-modal-warning,
+.v10-pca-modal-box .v10-modal-tip {
+  overflow-wrap: anywhere;
+}
+.v10-pca-owner-key-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+.v10-pca-owner-key-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  min-width: 0;
+}
+.v10-pca-owner-key-card.selected {
+  border-color: var(--text-link);
+}
+.v10-pca-owner-key-card strong,
+.v10-pca-owner-key-card small {
+  display: block;
+  min-width: 0;
+}
+.v10-pca-owner-key-card small {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.v10-pca-owner-key-readiness {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
 
 /* ----- S4 Approve modal (C2) ----- */
 .v10-pca-approve-checklist { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
 .v10-pca-approve-self-row { display: flex; align-items: center; gap: 8px; }
 .v10-pca-approve-self-row .v10-pca-wallet-row { flex: 1; }
-.v10-pca-approve-counts { font-size: 11px; color: var(--text-secondary); margin: 8px 0; display: flex; align-items: center; gap: 6px; }
+.v10-pca-approve-counts { font-size: 11px; color: var(--text-secondary); margin: 8px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .v10-pca-approve-results { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .v10-pca-approve-summary { font-size: 12px; font-weight: 600; color: var(--text-primary); margin: 4px 0 0; }
 .v10-pca-approve-handoff { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
@@ -695,12 +810,16 @@
 .v10-pca-detail-section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px; }
 .v10-pca-detail-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin: 6px 0; }
 .v10-pca-detail-subhead { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 12px 0 6px; }
-.v10-pca-detail-form { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.v10-pca-detail-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .v10-pca-detail-form .v10-form-input,
 .v10-pca-detail-form .v10-form-select { max-width: 280px; }
 .v10-pca-detail-form .v10-pca-address-crux { flex: 1; min-width: 240px; }
 .v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: 1.5; }
-.v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 8px; }
+.v10-pca-detail-agentlist + .v10-pca-card-btn,
+.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn {
+  margin-top: 10px;
+}
 .v10-pca-agent-row { display: flex; }
 .v10-pca-agent-row .v10-pca-wallet-row { flex: 1; }
 .v10-pca-agent-confirm {

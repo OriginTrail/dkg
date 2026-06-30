@@ -1,6 +1,6 @@
 import React from 'react';
 
-export type DeviceConfirmStepState = 'pending' | 'active' | 'confirmed' | 'failed' | 'aborted';
+export type DeviceConfirmStepState = 'pending' | 'active' | 'submitted' | 'confirmed' | 'failed' | 'aborted';
 
 export interface DeviceConfirmStep {
   id: string;
@@ -12,6 +12,7 @@ export interface DeviceConfirmStep {
 
 function glyphFor(state: DeviceConfirmStepState): string {
   if (state === 'confirmed') return 'OK';
+  if (state === 'submitted') return 'TX';
   if (state === 'failed') return 'ERR';
   if (state === 'aborted') return 'STOP';
   if (state === 'active') return '...';

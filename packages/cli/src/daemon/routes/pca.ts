@@ -147,9 +147,13 @@ function pcaRpcParamsError(method: PcaRpcMethod, params: unknown[] | undefined):
       if (p.length !== 2) return 'PCA RPC eth_getBlockByNumber requires block id and includeTransactions=false';
       const block = p[0];
       const includeTransactions = p[1];
-      const allowedBlock = block === 'latest' || block === 'safe' || block === 'finalized' || isBlockQuantity(block);
-      if (!allowedBlock || includeTransactions !== false) {
-        return 'PCA RPC eth_getBlockByNumber only allows latest/safe/finalized or hex block ids with includeTransactions=false';
+      const namedBlock = block === 'latest' || block === 'safe' || block === 'finalized';
+      const exactBlock = isBlockQuantity(block);
+      const allowed =
+        (namedBlock && includeTransactions === false) ||
+        (exactBlock && (includeTransactions === false || includeTransactions === true));
+      if (!allowed) {
+        return 'PCA RPC eth_getBlockByNumber only allows latest/safe/finalized with includeTransactions=false, or exact hex block ids with includeTransactions true/false';
       }
       return null;
     }

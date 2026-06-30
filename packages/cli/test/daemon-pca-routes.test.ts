@@ -1554,6 +1554,23 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     expect(rpcMock).toHaveBeenCalledWith('eth_getBlockByNumber', ['0xffffffffffff', false]);
   });
 
+  it('POST /api/pca/rpc allows viem receipt reconciliation full-block reads for exact block ids', async () => {
+    const block = { number: '0x2cc9b11', transactions: [{ hash: '0x' + '22'.repeat(32) }] };
+    const rpcMock = vi.fn(async () => block);
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 10,
+      method: 'eth_getBlockByNumber',
+      params: ['0x2cc9b11', true],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 10, result: block });
+    expect(rpcMock).toHaveBeenCalledWith('eth_getBlockByNumber', ['0x2cc9b11', true]);
+  });
+
   it('POST /api/pca/rpc rejects over-broad non-PCA read params before adapter delegation', async () => {
     const rpcMock = vi.fn();
     const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
@@ -1564,6 +1581,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       { id: 4, method: 'eth_getTransactionByHash', params: ['0x' + '11'.repeat(31)] },
       { id: 5, method: 'eth_getBlockByNumber', params: ['latest', true] },
       { id: 6, method: 'eth_getBlockByNumber', params: ['pending', false] },
+      { id: 7, method: 'eth_getBlockByNumber', params: ['0x2cc9b11', 'true'] },
     ];
 
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, cases);

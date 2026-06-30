@@ -9,7 +9,7 @@ function pct(bps: number | null): string {
 }
 
 /**
- * Settings → "Publishing Conviction" card (UX §3.2), inserted after Blockchain
+ * Settings → "Publisher Conviction" card (UX §3.2), inserted after Blockchain
  * Config. Driven from the SAME tracked-set summary as S1 (not a phantom backend
  * "current tier"); an operator auditing wallets/RPC is in the right mindset to
  * check their publishing discount.
@@ -22,11 +22,11 @@ export function PcaSettingsCard() {
   return (
     <section className="card">
       <div className="card-header">
-        <h2 className="card-title">Publishing Conviction</h2>
+        <h2 className="card-title">Publisher Conviction</h2>
       </div>
       <div className="card-body">
         {tracked === 0 ? (
-          <p className="v10-pca-settings-line">No tracked Publishing Conviction Account on this node.</p>
+          <p className="v10-pca-settings-line">No tracked Publisher Conviction Account on this node.</p>
         ) : covered ? (
           <p className="v10-pca-settings-line">
             This node’s publishes get up to <strong>{pct(bestCoveringDiscountBps)}</strong> off
@@ -46,9 +46,9 @@ export function PcaSettingsCard() {
         <button
           type="button"
           className="v10-pca-card-btn"
-          onClick={() => openTab({ id: 'conviction', label: 'Publishing Conviction', closable: true })}
+          onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
         >
-          Manage publishing conviction →
+          Manage publisher conviction -&gt;
         </button>
       </div>
     </section>

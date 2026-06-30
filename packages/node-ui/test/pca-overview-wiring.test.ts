@@ -116,7 +116,7 @@ afterEach(() => { document.body.innerHTML = ''; });
 describe('ConvictionOverview — create→self-coverage wiring', () => {
   it('the create-success hand-off opens ApproveWalletsModal with selfCoverage=true (self mode)', async () => {
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'Publishing Conviction');
+    await waitForText(container, 'Publisher Conviction');
     // Open Create (core), then fire the mint's "approve own wallets" hand-off.
     await click(container.querySelector('[data-testid="pca-create-btn"]')!);
     await click(container.querySelector('[data-testid="mock-create-approve-own"]')!);

@@ -318,7 +318,7 @@ function ViewContainer() {
 
   if (activeTabId === 'conviction') {
     return (
-      <Suspense fallback={<div className="lazy-spinner">Loading publishing conviction...</div>}>
+      <Suspense fallback={<div className="lazy-spinner">Loading Publisher Conviction...</div>}>
         <PublishingConvictionView />
       </Suspense>
     );

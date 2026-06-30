@@ -14,7 +14,7 @@ export const DEFAULT_ADDRESS_CRUX_NOTE: ReactNode = (
     transactions (on-chain <code>msg.sender</code>). <strong>NOT</strong> its peerId.{' '}
     <strong>NOT</strong> its admin wallet. <strong>NOT</strong> a content-author identity. The
     other operator gets these from <code>dkg wallet</code>, or from their node's{' '}
-    <em>Get sponsored</em> panel.
+    <em>Get added to a PCA</em> panel.
   </>
 );
 

@@ -3,6 +3,9 @@ import { mockApi } from './mocks/provider.js';
 
 let useMocks: boolean | null = null;
 let detectMockModePromise: Promise<boolean> | null = null;
+const MOCK_MODE_DETECTION_TIMEOUT_MS = 5000;
+const MOCK_MODE_DETECTION_ATTEMPTS = 2;
+const MOCK_MODE_DETECTION_RETRY_MS = 250;
 
 // Subscribers (e.g. the MockModeBanner) that want to know when the UI has
 // fallen back to fabricated demo data so they can surface a visible indicator
@@ -37,25 +40,36 @@ function authHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probeMockMode(): Promise<boolean> {
+  for (let attempt = 1; attempt <= MOCK_MODE_DETECTION_ATTEMPTS; attempt += 1) {
+    try {
+      const resp = await fetch('/api/status', {
+        cache: 'no-store',
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(MOCK_MODE_DETECTION_TIMEOUT_MS),
+      });
+      if (resp.ok || resp.status === 401) {
+        return false;
+      }
+    } catch {
+      // Retry below; a single transient timeout/proxy hiccup should not latch demo data.
+    }
+    if (attempt < MOCK_MODE_DETECTION_ATTEMPTS) {
+      await delay(MOCK_MODE_DETECTION_RETRY_MS);
+    }
+  }
+  return true;
+}
+
 async function detectMockMode(): Promise<boolean> {
   if (useMocks !== null) return useMocks;
   if (detectMockModePromise) return detectMockModePromise;
   detectMockModePromise = (async () => {
-    try {
-      const resp = await fetch('/api/status', {
-        headers: authHeaders(),
-        signal: AbortSignal.timeout(2000),
-      });
-      if (resp.ok) {
-        useMocks = false;
-      } else if (resp.status === 401) {
-        useMocks = false;
-      } else {
-        useMocks = true;
-      }
-    } catch {
-      useMocks = true;
-    }
+    useMocks = await probeMockMode();
     // Observability: surface the silent demo-data fallback so operators — and
     // the e2e suite's mock-mode guard (fixtures/base.ts) — can tell the UI is
     // NOT showing live node state. Without this flag the swap to fabricated

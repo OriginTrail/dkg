@@ -1605,7 +1605,7 @@ export function describePromoteError(
   return null;
 }
 
-// --- Publishing Conviction Accounts (PCA) ---------------------------------
+// --- Publisher Conviction Accounts (PCA) ----------------------------------
 //
 // Client helpers for the daemon's `/api/pca/*` routes (see
 // `packages/cli/src/daemon/routes/pca.ts`). They route through the private
@@ -1897,7 +1897,7 @@ export interface PcaErrorInfo {
    * `AgentAlreadyRegistered`. The P1 daemon NOW returns it (`resolveConflictingAccountId`
    * + the register route populate it), so `describePcaError` names "PCA #M — deregister
    * it there first". It is `undefined` only on the rare case the daemon can't resolve the
-   * id, where the copy degrades to "another conviction account".
+   * id, where the copy degrades to "another PCA".
    */
   existingAccountId?: string;
 }
@@ -1963,7 +1963,7 @@ export function describePcaError(
   const status = err.status;
   const body = (err.body ?? {}) as { error?: string; existingAccountId?: string | number };
   const raw = typeof body.error === 'string' && body.error.length > 0 ? body.error : err.message;
-  const pcaRef = opts.accountId ? `PCA #${opts.accountId}` : 'this Publishing Conviction Account';
+  const pcaRef = opts.accountId ? `PCA #${opts.accountId}` : 'this Publisher Conviction Account';
   const existingAccountId =
     body.existingAccountId != null ? String(body.existingAccountId) : undefined;
 
@@ -1983,7 +1983,7 @@ export function describePcaError(
     return {
       code: 'FEATURE_UNAVAILABLE',
       status,
-      message: "Publishing Conviction Accounts aren't available on this network.",
+      message: "Publisher Conviction Accounts aren't available on this network.",
     };
   }
 
@@ -2021,7 +2021,7 @@ export function describePcaError(
       case 'AgentAlreadyRegistered':
         message = existingAccountId
           ? `This operational wallet is already an approved publishing wallet on PCA #${existingAccountId} — deregister it there first.`
-          : 'This operational wallet is already approved on another conviction account — deregister it there first.';
+          : 'This operational wallet is already approved on another PCA — deregister it there first.';
         break;
       case 'AgentNotRegistered':
         message = `This operational wallet isn't an approved publishing wallet on ${pcaRef}.`;

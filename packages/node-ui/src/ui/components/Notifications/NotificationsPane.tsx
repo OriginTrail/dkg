@@ -79,9 +79,9 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         {/* E2 — predictive PCA alerts (client-derived; shown regardless of the
             server feed's state). Additive: omitted entirely when there are none. */}
         {hasPca && (
-          <section className="v10-notif-section v10-notif-section-pca" aria-label="Publishing conviction">
+          <section className="v10-notif-section v10-notif-section-pca" aria-label="Publisher Conviction">
             <div className="v10-notif-section-head">
-              <span className="v10-notif-section-label">Publishing conviction</span>
+              <span className="v10-notif-section-label">Publisher Conviction</span>
               <span className="v10-notif-section-count">{pcaAlerts.length}</span>
             </div>
             <div className="v10-notif-section-rows">

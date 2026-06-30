@@ -7,7 +7,6 @@ import { classifyCoverage } from '../../pca/coverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
-  SponsorshipHandshake,
   useCopy,
   nativeGasSymbol,
   isTestnetChain,
@@ -39,9 +38,9 @@ interface ProbeRow {
 }
 
 /**
- * S6 — Edge "Get sponsored" panel. Share operational wallets with a sponsoring
- * core node, fund their native gas (the PCA covers TRAC, never gas — faucet CTA
- * testnet-only), and track approval against the sponsor's account id. Ready =
+ * S6 — Edge "get added to a PCA" panel. Share operational wallets with a PCA
+ * owner, fund their native gas (the PCA covers TRAC, never gas — faucet CTA
+ * testnet-only), and track approval against the owner-provided PCA id. Ready =
  * ≥1 wallet approved AND gas-funded → publish.
  */
 export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
@@ -89,7 +88,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
   const check = async () => {
     const id = sponsorId.trim();
-    if (!/^\d+$/.test(id)) { setProbeError('Enter the numeric account id your sponsor gave you.'); return; }
+    if (!/^\d+$/.test(id)) { setProbeError('Enter the numeric PCA ID the owner gave you.'); return; }
     setChecking(true);
     setProbeError(null);
     try {
@@ -135,8 +134,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     <PcaModalShell
       onClose={onClose}
       testId="pca-get-sponsored"
-      title="Get sponsored"
-      subtitle="Share your operational wallets with a core node — they approve them; you keep paying your own gas."
+      title="Get added to a PCA"
+      subtitle="Share this node's operational publishing wallets with the PCA owner. They approve them; this node still pays its own gas."
     >
       <div className="v10-modal-body">
         {/* Wallets to share */}
@@ -187,9 +186,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             </button>
           )}
           <p className="v10-pca-detail-hint">
-            Share <strong>all</strong> your wallets (the node rotates its signer per publish) or pin to
-            one. Share the exact address — a typo gets “approved” on the sponsor’s side but never
-            matches your real signer.
+            Share <strong>all</strong> wallets (the node rotates its signer per publish) or pin to one.
+            Share the exact address - a typo can be approved by the PCA owner but never match your real signer.
           </p>
         </section>
 
@@ -204,15 +202,14 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
-        {/* Handshake packet — only once wallets have loaded, so its own
-            wallets-empty half can't become a false-empty during the fetch. */}
-        {wb && !walletsReadError && <SponsorshipHandshake wallets={wallets} accountId={probed?.accountId} role="edge" />}
-
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">
           <h3 className="v10-pca-detail-section-title">Track your approval</h3>
           {/* GAP-3 discovery — surface any sponsoring PCA we found on-chain; pre-fill the
               check (the user confirms; nothing is auto-tracked). */}
+          <p className="v10-pca-detail-hint">
+            After the PCA owner confirms approval, enter the PCA ID here to track whether this node&apos;s wallets are covered.
+          </p>
           {discovered && discovered.length > 0 && (
             <p className="v10-pca-detail-hint" role="status" data-testid="pca-sponsor-discovered">
               ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
@@ -227,8 +224,8 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               type="text"
               value={sponsorId}
               onChange={(e) => setSponsorId(e.target.value)}
-              placeholder="Sponsor's account id (e.g. 7)"
-              aria-label="Sponsor account id"
+              placeholder="PCA ID from owner (e.g. 7)"
+              aria-label="PCA ID from owner"
             />
             <button type="button" className="v10-pca-card-btn primary" onClick={check} disabled={checking}>
               {checking ? 'Checking…' : 'Check approval'}
@@ -248,9 +245,9 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                     r.registered === true
                       ? r.covers
                         ? 'approved'
-                        : 'approved, but the sponsor’s PCA is expired/swept/out of budget — publishes won’t get the discount'
+                        : 'approved, but that PCA is expired, swept, or out of budget - publishes will not get the discount'
                       : r.registered === false
-                        ? 'not approved — ask the sponsor to approve it'
+                        ? 'not approved - ask the PCA owner to approve it'
                         : 'unknown'
                   }
                   statusTone={
@@ -270,7 +267,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {ready && (
           <div className="v10-pca-create-success" role="status">
-            ● Ready: ≥1 wallet is approved and gas-funded — this node can publish under PCA #{probed!.accountId}.{' '}
+            Ready: at least 1 wallet is approved and gas-funded - this node can publish under PCA #{probed!.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
             Publish from any context graph — the discount applies automatically to your approved wallets.

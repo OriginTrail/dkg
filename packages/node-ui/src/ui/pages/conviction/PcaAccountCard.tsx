@@ -46,6 +46,7 @@ export function PcaAccountCard({
   onRemove,
   onRetry,
   onSwitchNetwork,
+  view,
 }: {
   account: PcaAccountCardAccount;
   blockExplorerUrl?: string | null;
@@ -56,6 +57,7 @@ export function PcaAccountCard({
   onRemove?: (id: string) => void;
   onRetry?: (id: string) => void;
   onSwitchNetwork?: () => void;
+  view?: 'owner' | 'coverage';
 }) {
   const { accountId, snapshot, notFound, classification, ownerIsPrimaryWallet } = account;
 
@@ -149,9 +151,13 @@ export function PcaAccountCard({
           ? `Read-only here: connected as ${connectedAs}; switch to the owner wallet to manage.`
           : 'Read-only here: connect the owner wallet to manage this PCA.';
   const showOwnerCard =
-    classification === 'owned' ||
-    ownerMode === 'wallet' ||
-    (ownerMode === 'external' && account.approvedCount === 0);
+    view === 'coverage'
+      ? false
+      : view === 'owner'
+        ? true
+        : classification === 'owned' ||
+          ownerMode === 'wallet' ||
+          (ownerMode === 'external' && account.approvedCount === 0);
 
   // --- Owned / wallet-managed / tracked-external owner card ---
   if (showOwnerCard) {
@@ -243,7 +249,7 @@ export function PcaAccountCard({
     );
   }
 
-  // --- Approved / "sponsor" card (also the read-only "tracked, not approved" case) ---
+  // --- Approved-for-this-node coverage card (also the read-only tracked/error case) ---
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
   const inconclusive = account.probesInconclusive;
   const firstUnapproved = account.walletProbes.find((p) => p.registered !== true)?.wallet;
@@ -252,7 +258,7 @@ export function PcaAccountCard({
       <div className="card-body">
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>
-          <span className="v10-pca-card-sponsor">(sponsor)</span>
+          <span className="v10-pca-card-sponsor">(approved for this node)</span>
           <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)}</span>
           <span className="v10-pca-card-spacer" />
           {inconclusive ? (

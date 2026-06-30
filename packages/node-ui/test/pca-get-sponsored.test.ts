@@ -100,7 +100,7 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
-  it('tracks approval against the sponsor account id (N of M)', async () => {
+  it('tracks approval against the PCA id from the owner (N of M)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({
       wallets: [W0, W1],
       balances: [
@@ -117,7 +117,7 @@ describe('GetSponsoredPanel', () => {
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Track your approval');
-    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -125,7 +125,7 @@ describe('GetSponsoredPanel', () => {
     await waitForText(container, 'Approved on PCA #7: 1 of 2 wallets');
     // W0 approved + funded + covering → ready.
     await waitForText(container, 'Ready');
-    // N2 — a confirmed check persists the sponsor id for the overview/chip.
+    // N2 — a confirmed check persists the PCA id for the overview/chip.
     expect(usePcaStore.getState().trackedIds).toContain('7');
     await unmount();
   });
@@ -152,7 +152,7 @@ describe('GetSponsoredPanel', () => {
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Track your approval');
-    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -185,7 +185,7 @@ describe('GetSponsoredPanel', () => {
     }));
     const handle = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(handle.container, 'Track your approval');
-    setInputValue(handle.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    setInputValue(handle.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(handle.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -194,14 +194,14 @@ describe('GetSponsoredPanel', () => {
 
   it('N1 — registered on an EXPIRED sponsor PCA → warns, not Ready', async () => {
     const { container, unmount } = await runCheckOnSponsor({ expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400 });
-    await waitForText(container, 'publishes won’t get the discount');
+    await waitForText(container, 'publishes will not get the discount');
     expect(container.textContent).not.toContain('can publish under PCA');
     await unmount();
   });
 
   it('N1 — registered on a FULLY-SWEPT sponsor PCA → warns, not Ready', async () => {
     const { container, unmount } = await runCheckOnSponsor({ fullySwept: true });
-    await waitForText(container, 'publishes won’t get the discount');
+    await waitForText(container, 'publishes will not get the discount');
     expect(container.textContent).not.toContain('can publish under PCA');
     await unmount();
   });
@@ -221,7 +221,7 @@ describe('GetSponsoredPanel', () => {
     mocks.fetchPca.mockRejectedValue(new Error('rpc down')); // every per-wallet probe → null
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
     await waitForText(container, 'Track your approval');
-    setInputValue(container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, '7');
+    setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -290,7 +290,7 @@ describe('GetSponsoredPanel', () => {
     // The "Check PCA #7" affordance pre-fills the manual sponsor-id input.
     const checkDiscovered = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check PCA #7')!;
     await act(async () => { checkDiscovered.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    expect((container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement).value).toBe('7');
+    expect((container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement).value).toBe('7');
     await unmount();
   });
 });

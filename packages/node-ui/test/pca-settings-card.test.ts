@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// O5 — PcaSettingsCard (Settings → Publishing Conviction). Pins: no-tracked / covered
+// O5 — PcaSettingsCard (Settings -> Publisher Conviction). Pins: no-tracked / covered
 // ("pending confirmation") / tracked-but-uncovered copy, and the Manage CTA opens the
 // conviction tab. Deps mocked (the card is pure presentation off usePcaOverview).
 
@@ -44,7 +44,7 @@ afterEach(() => { document.body.innerHTML = ''; });
 describe('PcaSettingsCard', () => {
   it('no tracked account → the no-tracked line', async () => {
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
-    expect(container.textContent).toContain('No tracked Publishing Conviction Account');
+    expect(container.textContent).toContain('No tracked Publisher Conviction Account');
     await unmount();
   });
 
@@ -77,10 +77,10 @@ describe('PcaSettingsCard', () => {
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     await act(async () => {
       Array.from(container.querySelectorAll('button'))
-        .find((b) => /Manage publishing conviction/i.test(b.textContent ?? ''))!
+        .find((b) => /Manage publisher conviction/i.test(b.textContent ?? ''))!
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction', label: 'Publishing Conviction', closable: true });
+    expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction', label: 'Publisher Conviction', closable: true });
     await unmount();
   });
 });

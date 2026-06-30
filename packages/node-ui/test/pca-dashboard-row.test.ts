@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// N4 — PcaDashboardRow (the Dashboard "Publishing discount" row, the primary
+// N4 — PcaDashboardRow (the Dashboard "Publisher discount" row, the primary
 // discovery surface) was the lone untested PCA component. Pins: covered shows the
 // discount + "pending confirmation" (#9, data-covered=true); uncovered shows
 // "None — publishing at the direct cost"; the CTA label is role-dependent and
@@ -73,15 +73,15 @@ describe('PcaDashboardRow', () => {
     await unmount();
   });
 
-  it('CTA label is role-dependent (edge → Get sponsored; core → Set up)', async () => {
+  it('CTA label is role-dependent (edge -> Get added; core -> Set up)', async () => {
     state.nodeRole = 'edge';
     const edge = await render(React.createElement(PcaDashboardRow));
-    expect(edge.container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Get sponsored/);
+    expect(edge.container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Get added to a PCA/);
     await edge.unmount();
 
     state.nodeRole = 'core';
     const core = await render(React.createElement(PcaDashboardRow));
-    expect(core.container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Set up conviction account/);
+    expect(core.container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Set up PCA/);
     await core.unmount();
   });
 
@@ -91,7 +91,7 @@ describe('PcaDashboardRow', () => {
       container.querySelector('.v10-ws-pca-cta')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(state.openTab).toHaveBeenCalledTimes(1);
-    expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction', label: 'Publishing Conviction', closable: true });
+    expect(state.openTab).toHaveBeenCalledWith({ id: 'conviction', label: 'Publisher Conviction', closable: true });
     await unmount();
   });
 });

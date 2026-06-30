@@ -66,7 +66,7 @@ const OBSERVABILITY_ICON = (
   </svg>
 );
 
-// Publishing Conviction launcher — a "badge percent" glyph (discount +
+// Publisher Conviction launcher — a "badge percent" glyph (discount +
 // commitment connotation), styled like the sibling header icons.
 const CONVICTION_ICON = (
   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -155,8 +155,8 @@ export function Header() {
         <button
           className="v10-header-icon-btn"
           data-testid="pca-launch-btn"
-          onClick={() => openTab({ id: 'conviction', label: 'Publishing Conviction', closable: true })}
-          title="Publishing Conviction — publishing discounts & sponsorship"
+          onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
+          title="Publisher Conviction - publishing discounts"
         >
           {CONVICTION_ICON}
         </button>

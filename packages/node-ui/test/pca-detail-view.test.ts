@@ -1,8 +1,7 @@
 // @vitest-environment happy-dom
 //
 // D1 — ConvictionDetailView (S3): §8A owner-gating (owner actions enabled only
-// when owner == wallets[0]), Settlement stays permissionless, and the
-// consequence-naming deregister confirm.
+// when owner == wallets[0]) and consequence-naming deregister confirm.
 
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -92,11 +91,6 @@ function setInputValue(el: HTMLInputElement, value: string) {
   setter?.call(el, value);
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
-function setSelect(el: HTMLSelectElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-  setter?.call(el, value);
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-}
 const findBtn = (c: HTMLElement, text: string) =>
   Array.from(c.querySelectorAll('button')).find((b) => b.textContent === text)!;
 
@@ -146,55 +140,29 @@ afterEach(() => {
 });
 
 describe('ConvictionDetailView §8A owner-gating', () => {
-  it('enables owner actions + settle when owner == wallets[0]', async () => {
+  it('enables owner actions when owner == wallets[0]', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Funding');
     expect(container.textContent).not.toContain('Owner-only');
-    expect(btn(container, '[data-testid="pca-settle-btn"]').disabled).toBe(false);
     await unmount();
   });
 
-  it('disables owner actions but KEEPS settle enabled for a non-owner (permissionless)', async () => {
+  it('disables owner actions for a non-owner', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xSomeoneElse0000000000000000000000000000'], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Owner-only');
     expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
-    // Settlement is permissionless — enabled even for non-owners.
-    expect(btn(container, '[data-testid="pca-settle-btn"]').disabled).toBe(false);
     await unmount();
   });
 
-  it('disables the settle button when fullySwept', async () => {
+  it('does not render deferred settlement or context-graph controls', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
-    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
-      key ? { ...snap({ fullySwept: true }), probedKey: { key, registered: false } } : snap({ fullySwept: true }),
-    );
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Settlement');
-    expect(btn(container, '[data-testid="pca-settle-btn"]').disabled).toBe(true);
-    await unmount();
-  });
-
-  // M7 — CG-bind goes through the register classifier (not the PCA routes), so it
-  // gets its own mapping: 501 → soft "can't verify ownership", 403 → "owner wallet".
-  it('maps CG-bind 501 to a soft ownership caveat and 403 to "owner wallet" (M7)', async () => {
-    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
-    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
-    mocks.registerContextGraph
-      .mockRejectedValueOnce(new HttpError(501, 'x', { error: 'not supported' }))
-      .mockRejectedValueOnce(new HttpError(403, 'x', { error: 'signer is not the owner' }));
-
-    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Context-graph binding');
-    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-
-    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'Couldn’t verify PCA ownership');
-
-    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'Bind from the PCA owner wallet');
+    await waitForText(container, 'Funding');
+    expect(container.textContent).not.toContain('Settlement');
+    expect(container.textContent).not.toContain('Context-graph binding');
+    expect(container.querySelector('[data-testid="pca-settle-btn"]')).toBeNull();
     await unmount();
   });
 
@@ -262,17 +230,6 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
-  it('owner Settle fires pcaSettle(id) and renders the success message (C6)', async () => {
-    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
-    mocks.pcaSettle.mockResolvedValue({ accountId: '7', settled: true, txHash: '0xdef' });
-    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Settlement');
-    await act(async () => { btn(container, '[data-testid="pca-settle-btn"]').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
-    await waitForText(container, 'Settlement sweep submitted.');
-    await unmount();
-  });
-
   it('owner deregister confirm fires pcaRemoveAgent(id, wallet) (C6)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
     mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '7', agent: W0, deregistered: true });
@@ -282,57 +239,6 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await waitForText(container, 'will pay the direct cost');
     await act(async () => { container.querySelector('[data-testid="pca-deregister-btn"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('7', W0);
-    await unmount();
-  });
-
-  it('owner CG-bind fires registerContextGraph(cg, {pcaAccountId}) and shows the bound message (C6)', async () => {
-    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
-    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
-    mocks.registerContextGraph.mockResolvedValue({ registered: 'cg-1', onChainId: '1', txHash: '0x1' });
-    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Context-graph binding');
-    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    // The dropped-{pcaAccountId} regression guard + O3 forces curated publishPolicy.
-    expect(mocks.registerContextGraph).toHaveBeenCalledWith('cg-1', { pcaAccountId: '7', publishPolicy: 0 });
-    await waitForText(container, 'Bound cg-1 to PCA #7.');
-    await unmount();
-  });
-
-  // O3 (corrects N3) — bindable = UNREGISTERED, any access policy (binding forces
-  // curated PUBLISH at registration). A public-read CG is bindable; a registered
-  // CG (onChainId set) is excluded.
-  it('O3 — bind dropdown lists unregistered CGs of ANY access policy, excludes registered', async () => {
-    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
-    mocks.fetchContextGraphs.mockResolvedValue({
-      contextGraphs: [
-        { id: 'reg-curated', name: 'Registered', onChainId: '5', accessPolicy: 'private' },
-        { id: 'open-cg', name: 'Open', accessPolicy: 'public' }, // public-read → still bindable
-        { id: 'bindable-cg', name: 'Bindable', accessPolicy: 'private' },
-      ],
-    });
-    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Context-graph binding');
-    const select = container.querySelector('select.v10-form-select') as HTMLSelectElement;
-    const optionValues = Array.from(select.querySelectorAll('option')).map((o) => o.value).filter(Boolean);
-    expect(optionValues).toEqual(['open-cg', 'bindable-cg']); // both unregistered; registered excluded
-    await unmount();
-  });
-
-  // N3 — a 200 with no txHash = already registered on-chain (idempotent path that
-  // drops the new pcaAccountId). Must NOT claim "Bound" (#9 false confirmation).
-  it('N3 — bind does NOT claim "Bound" on an already-registered idempotent 200 (no txHash)', async () => {
-    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
-    mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg-1', name: 'CG One', accessPolicy: 'private' }] });
-    mocks.registerContextGraph.mockResolvedValue({ registered: 'cg-1', onChainId: '7', txHash: undefined });
-    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
-    await waitForText(container, 'Context-graph binding');
-    setSelect(container.querySelector('select.v10-form-select') as HTMLSelectElement, 'cg-1');
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    await act(async () => { findBtn(container, 'Bind context graph').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'already registered on-chain');
-    expect(container.textContent).not.toContain('Bound cg-1 to PCA #7');
     await unmount();
   });
 

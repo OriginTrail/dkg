@@ -2,9 +2,9 @@ import { type Page, type Locator } from '@playwright/test';
 import { sel } from '../helpers/selectors.js';
 
 /**
- * Page object for the GREENFIELD Publishing Conviction (PCA) tab
+ * Page object for the GREENFIELD Publisher Conviction (PCA) tab
  * (pages/PublishingConviction.tsx). Opens as a closable center tab from the
- * header "Publishing Conviction" button (Header.tsx → openTab id:'conviction').
+ * header "Publisher Conviction" button (Header.tsx -> openTab id:'conviction').
  *
  * SCAFFOLD — the tab is not built yet (P0, Batch B). This PO encodes the e2e
  * selector contract (see sel.conviction) so the driving spec
@@ -40,7 +40,6 @@ export class PublishingConvictionPage {
   readonly agentList: Locator;
   readonly agentRows: Locator;
   readonly actionResult: Locator;
-  readonly settleBtn: Locator;
   readonly topUpBtn: Locator;
   readonly topUpInput: Locator;
   readonly deregisterBtn: Locator;
@@ -79,7 +78,6 @@ export class PublishingConvictionPage {
     this.agentList = page.locator(sel.conviction.agentList);
     this.agentRows = page.locator(sel.conviction.agentRow);
     this.actionResult = page.locator(sel.conviction.actionResult);
-    this.settleBtn = page.locator(sel.conviction.settleBtn);
     this.topUpBtn = page.locator(sel.conviction.topUpBtn);
     this.topUpInput = page.getByLabel('Top-up amount in TRAC');
     this.deregisterBtn = page.locator(sel.conviction.deregisterBtn);

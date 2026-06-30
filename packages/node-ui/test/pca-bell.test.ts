@@ -124,7 +124,7 @@ describe('NotificationsPane PCA section', () => {
     const row = container.querySelector('[data-testid="pca-bell-alert"]')!;
     expect(row).toBeTruthy();
     expect(row.getAttribute('role')).toBe('alert');
-    expect(container.textContent).toContain('Publishing conviction');
+    expect(container.textContent).toContain('Publisher Conviction');
     const manage = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.includes('Manage PCA #9'))!;
     manage.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onOpenPca).toHaveBeenCalledWith('9');

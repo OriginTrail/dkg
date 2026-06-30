@@ -505,7 +505,7 @@ function GeneralSettingsTab() {
         </div>
       </section>
 
-      {/* Publishing Conviction */}
+      {/* Publisher Conviction */}
       <PcaSettingsCard />
 
       {/* Network Telemetry */}

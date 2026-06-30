@@ -35,7 +35,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect(await settingsPage.getSectionTitles()).toEqual([
       'Node Identity',
       'Blockchain Config',
-      'Publishing Conviction',
+      'Publisher Conviction',
       'Network Telemetry',
       'Local Data Retention',
       'Danger Zone',

@@ -89,7 +89,7 @@ export function EligibilityVerdictBanner({
   const isLoud = verdict === 'fallthrough' || verdict === 'fallthrough-no-funds';
   const role = isLoud ? 'alert' : 'status';
   const ariaLive = isLoud ? 'assertive' : 'polite';
-  const pcaLabel = accountId ? `PCA #${accountId}` : 'a conviction account';
+  const pcaLabel = accountId ? `PCA #${accountId}` : 'a PCA';
   // GAP-3 (#1344) — append the honest untracked note to the GREEN copy only (where a
   // covering account is named); amber/danger never claim coverage so it'd read oddly there.
   const trackedNote = accountUntracked ? ' (not tracked by this node)' : '';

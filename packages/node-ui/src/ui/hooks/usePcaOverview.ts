@@ -174,7 +174,7 @@ async function loadEntry(entry: OverviewEntry) {
     entry.error = null;
   } catch (err) {
     if (seq !== entry.seq) return;
-    entry.error = (err as Error)?.message ?? 'Failed to resolve conviction accounts.';
+    entry.error = (err as Error)?.message ?? 'Failed to resolve PCAs.';
   } finally {
     if (seq === entry.seq) {
       entry.loading = false;

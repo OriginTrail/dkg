@@ -274,8 +274,8 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       } else {
         verdict = anyCanFund ? 'fallthrough' : 'fallthrough-no-funds';
         reasons.push(`${covered.length} of ${wallets.length} signing wallets approved`);
-        if (wallets.some((w) => w.sawExpired)) reasons.push('a conviction account has expired or been fully swept');
-        if (wallets.some((w) => w.sawInsolvent)) reasons.push('a conviction account is out of budget');
+        if (wallets.some((w) => w.sawExpired)) reasons.push('a PCA has expired or been fully swept');
+        if (wallets.some((w) => w.sawInsolvent)) reasons.push('a PCA is out of budget');
         if (!conditions.gasFunded) reasons.push('a signing wallet has no gas');
         if (uncovered.some((w) => w.inconclusive)) reasons.push('a wallet’s PCA coverage couldn’t be checked');
         if (uncovered.some((w) => w.balanceUnknown)) reasons.push('a signing wallet’s balance couldn’t be checked');

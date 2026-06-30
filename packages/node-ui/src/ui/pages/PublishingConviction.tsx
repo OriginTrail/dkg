@@ -17,13 +17,13 @@ export function PublishingConvictionPage() {
   return (
     <div data-testid="pca-view">
       {status === 'loading' ? (
-        <div className="lazy-spinner">Loading publishing conviction…</div>
+        <div className="lazy-spinner">Loading publisher conviction...</div>
       ) : status === 'unavailable' ? (
         <div className="v10-pca-unavailable" data-testid="pca-unavailable">
           <EmptyState
             tone="neutral"
-            title="Publishing conviction isn’t available on this network"
-            description="This deployment’s chain adapter doesn’t support Publishing Conviction Accounts yet."
+            title="Publisher conviction isn't available on this network"
+            description="This deployment's chain adapter doesn't support Publisher Conviction Accounts yet."
             actions={[
               { label: 'Recheck', onClick: recheck, variant: 'primary', testId: 'pca-recheck-btn' },
               { label: 'Learn more', onClick: () => window.open(PCA_DOCS_URL, '_blank', 'noopener') },
