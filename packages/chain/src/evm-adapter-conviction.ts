@@ -11,7 +11,7 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, Contract } from 'ethers';
-import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation, ShardingTableNode, PcaContracts } from './chain-adapter.js';
+import type { TxResult, V10PublishingConvictionAccountInfo, ConvictionReader, PcaAccountRelation, ShardingTableNode, PcaContracts, PcaRpcMethod } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 
@@ -600,6 +600,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    *   - `token` = the TRAC ERC-20 the approve pre-step allows the wrapper to pull.
    * Both EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
    * `base:84532` form — the FE extracts the numeric tail for viem's Chain.id).
+   * `rpcUrls` contains only configured wallet-public endpoints. The daemon route
+   * replaces it with same-origin `/api/pca/rpc` for node-UI browser reads so
+   * configured operator RPC URLs/API keys never leave the node process.
    * Undeployed NFT/token → PcaUnavailableError (route → 503), the same
    * capability signal as the other PCA reads. NO Hub/logic/ShardingTable — no
    * browser owner-action touches them.
@@ -613,7 +616,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       nft: ethers.getAddress(await nft.getAddress()),
       token: ethers.getAddress(await token.getAddress()),
       chainId: this.chainId,
-      rpcUrls: this.getRpcUrls(),
+      rpcUrls: [...this.walletRpcUrls],
+      walletRpcUrls: [...this.walletRpcUrls],
     };
+  }
+
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    await this.init();
+    return this.readProvider(`pca rpc ${method}`, (provider) => provider.send(method, params));
   }
 }

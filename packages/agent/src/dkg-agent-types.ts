@@ -1011,6 +1011,8 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Public RPC URLs safe for wallet_addEthereumChain. Never use private operator RPC URLs here. */
+    walletRpcUrls?: string[];
     hubAddress: string;
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;

@@ -33,7 +33,10 @@ export interface ShardingTableNode {
  *  writes + ERC721Enumerable discovery + the mint-Transfer accountId parse),
  *  `token` = TRAC ERC-20 (the approve pre-step). Addresses EIP-55 checksummed.
  *  `chainId` is AS-IS (may be the compound `base:84532` form — the FE extracts
- *  the numeric tail for viem's Chain.id). `rpcUrls` feeds the viem transport.
+ *  the numeric tail for viem's Chain.id). `rpcUrls` is browser-safe read
+ *  transport metadata and MUST NOT expose operator/private adapter RPC URLs or
+ *  embedded provider keys; daemon HTTP bootstrap may replace it with its
+ *  same-origin proxy path.
  *  Logic/Hub/ShardingTable are intentionally excluded (no browser action
  *  touches them; the picker is daemon-served). */
 export interface PcaContracts {
@@ -41,7 +44,17 @@ export interface PcaContracts {
   token: string;
   chainId: string;
   rpcUrls: string[];
+  /** Optional public RPCs that may be handed to wallet_addEthereumChain. */
+  walletRpcUrls?: string[];
 }
+
+export type PcaRpcMethod =
+  | 'eth_chainId'
+  | 'eth_call'
+  | 'eth_getTransactionReceipt'
+  | 'eth_getTransactionByHash'
+  | 'eth_blockNumber'
+  | 'eth_getBlockByNumber';
 
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
@@ -59,6 +72,9 @@ export interface ConvictionReader {
   /** Browser-bootstrap contract addresses + chain params for the HW signing
    *  layer (sub-PR #2). Optional, same rationale as the other PCA reads. */
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  /** Daemon-internal read-only JSON-RPC bridge for the browser-safe PCA RPC
+   *  proxy. HTTP routes own the method allowlist; adapters only perform reads. */
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
 export interface IdentityProof {
@@ -968,13 +984,18 @@ export interface ChainAdapter {
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
-   * Browser-bootstrap contract addresses + chain params for the sub-PR #2 HW
-   * signing layer: { nft, token, chainId, rpcUrls } (EIP-55, chainId AS-IS).
-   * The minimal set the in-browser viem layer needs — no Hub/logic/ShardingTable
-   * (those aren't touched by any browser owner-action). Optional for the same
-   * reason as the other PCA reads.
+   * Browser-bootstrap contract addresses + browser-safe chain transport for the
+   * sub-PR #2 HW signing layer. The daemon boundary must not expose the raw
+   * operator/private adapter RPC URLs here.
    */
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
+
+  /**
+   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
+   * route owns the allowlist; adapters forward the allowed reads to their
+   * existing provider/failover layer without exposing endpoint URLs.
+   */
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

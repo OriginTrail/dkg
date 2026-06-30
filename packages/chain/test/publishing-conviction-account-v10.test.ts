@@ -271,7 +271,8 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(c.token).toBe(expectedToken); // the deployed TRAC, EIP-55 checksummed
     expect(c.nft).not.toBe(c.token);
     expect(c.chainId).toBe(reader.chainId);       // AS-IS, the adapter's configured chainId
-    expect(c.rpcUrls).toEqual(reader.getRpcUrls()); // the viem transport set
+    expect(c.rpcUrls).toEqual([]);                // raw operator RPC URLs stay daemon-internal
+    expect(c.walletRpcUrls).toEqual([]);
   });
 
   it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {

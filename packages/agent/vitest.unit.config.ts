@@ -26,6 +26,7 @@ export default defineConfig({
       "test/swm/host-mode-store.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/profile-fix-verify.test.ts",
+      "test/pca-v10-facade.test.ts",
       "test/sync-verify-collapsed.test.ts",
       "test/durable-sync-since-threading.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",

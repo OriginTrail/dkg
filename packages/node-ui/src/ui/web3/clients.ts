@@ -18,6 +18,7 @@ import {
   type WalletClient,
 } from 'viem';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
+import { authHeaders } from '../api.js';
 import { numericChainId } from './chainId.js';
 import type { Eip1193Provider } from './eip6963.js';
 
@@ -46,6 +47,22 @@ function publicClientCacheKey(chainId: string | number, rpcUrls: string[]): stri
   return `${numericChainId(chainId)}:${rpcUrls.join('|')}`;
 }
 
+function isSameOriginRpcUrl(url: string): boolean {
+  if (url.startsWith('/') && !url.startsWith('//')) return true;
+  if (typeof window === 'undefined' || !window.location?.origin) return false;
+  try {
+    return new URL(url, window.location.href).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function rpcFetchOptions(url: string): RequestInit | undefined {
+  if (!isSameOriginRpcUrl(url)) return undefined;
+  const headers = authHeaders();
+  return Object.keys(headers).length ? { headers } : undefined;
+}
+
 /**
  * A read client for the bootstrap chain (cached per chain id + RPC URL set). Transport tuning ported from
  * staking-ui: capped batching (public RPCs throttle/blackhole uncapped batches), an explicit
@@ -60,14 +77,16 @@ export function publicClientFor(chainId: string | number, rpcUrls: string[]): Pu
   const chain = synthesizeChain(chainId, rpcUrls);
   const multiRpc = rpcUrls.length > 1;
   const transport = fallback(
-    rpcUrls.map((url) =>
-      http(url, {
+    rpcUrls.map((url) => {
+      const fetchOptions = rpcFetchOptions(url);
+      return http(url, {
         batch: { batchSize: 20, wait: 16 },
         timeout: 8_000,
         retryCount: multiRpc ? 0 : 2,
         retryDelay: 200,
-      }),
-    ),
+        ...(fetchOptions ? { fetchOptions } : {}),
+      });
+    }),
     { retryCount: 1, retryDelay: 250 },
   );
   const client = createPublicClient({ chain, transport });

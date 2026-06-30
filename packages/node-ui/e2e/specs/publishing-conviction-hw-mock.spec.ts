@@ -11,7 +11,7 @@ const REGISTER_HASH = `0x${'e'.repeat(64)}`;
 const DEREGISTER_HASH = `0x${'f'.repeat(64)}`;
 const ACCOUNT_ID = '7';
 const REGISTERED_AGENT = '0x3333333333333333333333333333333333333333';
-const MOCK_RPC_PATH = '/mock-pca-rpc';
+const MOCK_RPC_PATH = '/api/pca/rpc';
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const ZERO_TOPIC = `0x${'0'.repeat(64)}`;
@@ -114,10 +114,48 @@ async function fulfillJson(route: Route, status: number, body: unknown) {
 
 async function installMockApis(page: Page) {
   let allowanceCalls = 0;
+  const handleMockRpc = async (route: Route) => {
+    const request = route.request();
+    const payload = await request.postDataJSON();
+    const calls = Array.isArray(payload) ? payload : [payload];
+    const results = calls.map((call) => {
+      const method = call.method as string;
+      const params = (call.params ?? []) as unknown[];
+      let result: unknown = '0x';
+      if (method === 'eth_chainId') result = quantity(84532);
+      if (method === 'eth_blockNumber') result = '0x123';
+      if (method === 'eth_getTransactionReceipt') result = receipt(String(params[0]));
+      if (method === 'eth_call') {
+        const tx = params[0] as { to?: string; data?: string };
+        const data = (tx.data ?? '').toLowerCase();
+        if (data.startsWith('0xdd62ed3e')) {
+          allowanceCalls += 1;
+          result = allowanceCalls === 1 ? uint256(0) : uint256(MAX_ALLOWANCE);
+        } else if (data.startsWith('0x70a08231')) {
+          result = uint256(1);
+        } else if (data.startsWith('0x2f745c59')) {
+          result = uint256(ACCOUNT_ID);
+        } else {
+          result = uint256(0);
+        }
+      }
+      return { jsonrpc: '2.0', id: call.id, result };
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(Array.isArray(payload) ? results : results[0]),
+    });
+  };
+
+  await page.route(`**${MOCK_RPC_PATH}`, handleMockRpc);
   await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url());
     const path = url.pathname;
 
+    if (path === MOCK_RPC_PATH) {
+      return handleMockRpc(route);
+    }
     if (path === '/api/status') {
       return fulfillJson(route, 200, {
         name: 'Mock PCA Core',
@@ -161,7 +199,8 @@ async function installMockApis(page: Page) {
         nft: NFT,
         token: TOKEN,
         chainId: 'base:84532',
-        rpcUrls: [`${url.origin}${MOCK_RPC_PATH}`],
+        rpcUrls: [MOCK_RPC_PATH],
+        walletRpcUrls: [],
       });
     }
     if (path === '/api/pca/designatable-nodes') {
@@ -201,40 +240,6 @@ async function installMockApis(page: Page) {
     }
 
     return fulfillJson(route, 200, {});
-  });
-
-  await page.route(`**${MOCK_RPC_PATH}`, async (route) => {
-    const request = route.request();
-    const payload = await request.postDataJSON();
-    const calls = Array.isArray(payload) ? payload : [payload];
-    const results = calls.map((call) => {
-      const method = call.method as string;
-      const params = (call.params ?? []) as unknown[];
-      let result: unknown = '0x';
-      if (method === 'eth_chainId') result = quantity(84532);
-      if (method === 'eth_blockNumber') result = '0x123';
-      if (method === 'eth_getTransactionReceipt') result = receipt(String(params[0]));
-      if (method === 'eth_call') {
-        const tx = params[0] as { to?: string; data?: string };
-        const data = (tx.data ?? '').toLowerCase();
-        if (data.startsWith('0xdd62ed3e')) {
-          allowanceCalls += 1;
-          result = allowanceCalls === 1 ? uint256(0) : uint256(MAX_ALLOWANCE);
-        } else if (data.startsWith('0x70a08231')) {
-          result = uint256(1);
-        } else if (data.startsWith('0x2f745c59')) {
-          result = uint256(ACCOUNT_ID);
-        } else {
-          result = uint256(0);
-        }
-      }
-      return { jsonrpc: '2.0', id: call.id, result };
-    });
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify(Array.isArray(payload) ? results : results[0]),
-    });
   });
 }
 

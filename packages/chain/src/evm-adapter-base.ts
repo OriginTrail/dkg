@@ -369,6 +369,8 @@ export class EVMChainAdapterBase {
 
   protected readonly rpcUrls: string[];
 
+  protected readonly walletRpcUrls: string[];
+
   /**
    * The pure per-endpoint RPC transport mechanism. Owns the read-failover loop +
    * the named timeout-policy matrix + typed exhaustion; constructed with a LIVE
@@ -602,6 +604,11 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.walletRpcUrls = Array.from(new Set(
+      (config.walletRpcUrls ?? [])
+        .map((url) => typeof url === 'string' ? url.trim() : '')
+        .filter((url) => /^https?:\/\//i.test(url)),
+    ));
     // Floor a finite `>= 1` value (so e.g. 10000.5 -> 10000, preserving the
     // window); only a `< 1` (or non-finite) value falls back to the default — a
     // fractional value in (0,1) must NOT floor to 0 (which makes pages Infinity).
