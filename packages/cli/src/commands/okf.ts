@@ -171,13 +171,13 @@ export function registerOkfCommand(program: Command): void {
       collect,
       [] as string[],
     )
-    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle). WM-only: it does NOT clear already-shared SWM or --private loose quads (those are append/dedupe; to drop removed triples there, recreate the Context Graph).')
+    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle). WM-only: it does NOT clear already-shared SWM or the --private bulk lifecycle KA.')
     .option('--create-context-graph', 'Create the Context Graph if it does not exist')
     .option('--share', 'Finalize and advance assets to Shared Working Memory (free, team-visible)')
     .option(
       '--private',
-      'Bulk-write all triples into the (private) Context Graph\'s Shared Working Memory ' +
-        'as loose quads — no per-concept finalize. Batched in 5,000-quad chunks with a ' +
+      'Bulk-write all triples into one named Knowledge Asset in the private Context Graph, ' +
+        'then finalize and share it to Shared Working Memory. Batched in 5,000-quad chunks with a ' +
         'resumable manifest; the whole bundle is mapped in memory first, so this is ' +
         'practical to ~100k concepts per run (not yet streaming). Content stays ' +
         'gossip-restricted to allowlisted peers. Implies a private CG on --create-context-graph.',
@@ -223,7 +223,7 @@ export function registerOkfCommand(program: Command): void {
               {
                 mode: 'dry-run',
                 memoryLayer: opts.private || opts.share ? 'SWM' : 'WM',
-                importMode: opts.private ? 'bulk-private-swm' : 'per-concept',
+                importMode: opts.private ? 'bulk-private-lifecycle' : 'per-concept',
                 conformant: conformance.conformant,
                 okfVersion: imported.okfVersion,
                 ...summary,
@@ -319,13 +319,9 @@ export function registerOkfCommand(program: Command): void {
         }
 
         // ─── BULK PRIVATE MODE ──────────────────────────────────────────
-        // Stream every triple into the private CG's Shared Working Memory as
-        // loose quads (one shared-memory/write per chunk), NOT as individual
-        // finalized Knowledge Assets. This is what makes a 100k–10M private
-        // corpus tractable: the cross-concept link graph (citations, families,
-        // mentions) is preserved, but there is no per-concept finalize/seal.
-        // Substance lives ONLY here; the public discoverability signal is a
-        // separate, gated step. No TRAC, no on-chain anything.
+        // Stream every triple into one named private Knowledge Asset, then
+        // finalize and share it to SWM. This keeps the bulk/private UX without
+        // reintroducing loose shared-memory writes.
         if (isPrivate) {
           const allQuads = imported.concepts.flatMap((c) =>
             c.quads.map((q: Quad) => ({
@@ -335,12 +331,16 @@ export function registerOkfCommand(program: Command): void {
               graph,
             })),
           );
+          const assetName = conceptKaName(`okf-private-bulk-${subGraphName ?? 'root'}`);
 
           // Resumable manifest keyed by chunks already acknowledged.
           const manifestPath = opts.manifest
             ? String(opts.manifest)
             : join(bundleDir, '.okf-import-manifest.json');
           let chunksDone = 0;
+          let draftCreated = false;
+          let finalized = false;
+          let shared = false;
           if (existsSync(manifestPath)) {
             try {
               const prev = JSON.parse(await readFile(manifestPath, 'utf-8')) as {
@@ -349,35 +349,67 @@ export function registerOkfCommand(program: Command): void {
                 mode?: string;
                 chunkSize?: number;
                 chunksDone?: number;
+                assetName?: string;
+                draftCreated?: boolean;
+                finalized?: boolean;
+                shared?: boolean;
               };
               if (
                 prev.contextGraphId === contextGraphId &&
                 // resume only within the SAME target sub-graph (undefined == root) —
                 // never carry a root manifest into a --sub-graph-name run or vice versa.
                 prev.subGraphName === subGraphName &&
-                prev.mode === 'bulk-private-swm' &&
+                prev.mode === 'bulk-private-lifecycle' &&
+                prev.assetName === assetName &&
                 prev.chunkSize === CHUNK &&
                 typeof prev.chunksDone === 'number'
               ) {
                 chunksDone = prev.chunksDone;
+                draftCreated = prev.draftCreated === true;
+                finalized = prev.finalized === true;
+                shared = prev.shared === true;
               }
             } catch {
-              // corrupt manifest → start over (re-writing loose quads is idempotent)
+              // corrupt manifest → start over
             }
           }
 
           const totalChunks = Math.ceil(allQuads.length / CHUNK);
           const started = Date.now();
           let triplesWritten = 0;
-          let skolemized = 0;
+          const persistPrivateManifest = async () =>
+            writeFile(
+              manifestPath,
+              JSON.stringify(
+                {
+                  contextGraphId,
+                  ...(subGraphName ? { subGraphName } : {}),
+                  mode: 'bulk-private-lifecycle',
+                  assetName,
+                  chunkSize: CHUNK,
+                  chunksDone,
+                  totalChunks,
+                  draftCreated,
+                  finalized,
+                  shared,
+                },
+                null,
+                2,
+              ),
+            );
+
+          if (!draftCreated) {
+            await client.createKnowledgeAsset(contextGraphId, assetName, { subGraphName });
+            draftCreated = true;
+            await persistPrivateManifest();
+          }
 
           // Write one slice, halving the chunk on a 413 (payload too large)
           // down to a floor, so a too-big batch degrades instead of failing.
           const writeSlice = async (slice: typeof allQuads): Promise<void> => {
             try {
-              const res = await client.sharedMemoryWrite(contextGraphId, slice, subGraphName);
-              triplesWritten += res.triplesWritten ?? slice.length;
-              skolemized += res.skolemizedBlankNodes ?? 0;
+              const res = await client.knowledgeAssetWrite(contextGraphId, assetName, slice, { subGraphName });
+              triplesWritten += res.written ?? slice.length;
             } catch (e) {
               const status = (e as { httpStatus?: number })?.httpStatus;
               if (status === 413 && slice.length > 1) {
@@ -397,14 +429,7 @@ export function registerOkfCommand(program: Command): void {
             const before = triplesWritten;
             await writeSlice(slice);
             chunksDone = ci + 1;
-            await writeFile(
-              manifestPath,
-              JSON.stringify(
-                { contextGraphId, ...(subGraphName ? { subGraphName } : {}), mode: 'bulk-private-swm', chunkSize: CHUNK, chunksDone, totalChunks },
-                null,
-                2,
-              ),
-            );
+            await persistPrivateManifest();
             const now = Date.now();
             // Instantaneous rate for THIS chunk exposes the store-growth slowdown
             // (the cost-gate signal); cumulative average alone hides it.
@@ -418,14 +443,28 @@ export function registerOkfCommand(program: Command): void {
                 `(${triplesWritten} triples; this chunk ${instRate} t/s, avg ${cumRate} t/s)`,
             );
           }
+          if (!finalized) {
+            await client.knowledgeAssetFinalize(contextGraphId, assetName, { subGraphName });
+            finalized = true;
+            await persistPrivateManifest();
+          }
+          if (!shared) {
+            await client.knowledgeAssetShare(contextGraphId, assetName, {
+              subGraphName,
+              entities: 'all',
+            });
+            shared = true;
+            await persistPrivateManifest();
+          }
 
           const elapsed = (Date.now() - started) / 1000;
           console.log(
             JSON.stringify(
               {
                 mode: 'import',
-                importMode: 'bulk-private-swm',
+                importMode: 'bulk-private-lifecycle',
                 contextGraphId,
+                assetName,
                 datasetPointer: graph,
                 memoryLayer: 'SWM',
                 accessPolicy: 'private (invite-only, off-chain)',
@@ -434,14 +473,13 @@ export function registerOkfCommand(program: Command): void {
                 entities: summary.concepts,
                 ...summary,
                 triplesWritten,
-                skolemizedBlankNodes: skolemized,
                 chunks: totalChunks,
                 chunkSize: CHUNK,
                 elapsedSeconds: Number(elapsed.toFixed(1)),
                 throughputTriplesPerSec: elapsed > 0 ? Math.round(triplesWritten / elapsed) : triplesWritten,
                 note:
-                  'Bulk-written to PRIVATE Shared Working Memory (gossip-restricted to allowlisted peers). ' +
-                  'Substance stays here; no per-concept finalize, no on-chain verification, no TRAC spent. ' +
+                  'Bulk-written as a named private Knowledge Asset and shared to Shared Working Memory. ' +
+                  'Gossip remains restricted to allowlisted peers; no on-chain verification, no TRAC spent. ' +
                   'Public discoverability + VM descriptors are separate, gated steps.',
               },
               null,
@@ -472,7 +510,7 @@ export function registerOkfCommand(program: Command): void {
               stages?: Record<string, Stage>;
               done?: string[]; // legacy format → treat as reached 'wm'
             };
-            if (prev.contextGraphId === contextGraphId && prev.mode !== 'bulk-private-swm') {
+            if (prev.contextGraphId === contextGraphId && prev.mode !== 'bulk-private-lifecycle') {
               if (prev.stages && typeof prev.stages === 'object') {
                 for (const [id, s] of Object.entries(prev.stages)) {
                   if (s === 'wm' || s === 'swm') stages.set(id, s);
@@ -694,8 +732,8 @@ export function registerOkfCommand(program: Command): void {
   // per integrity predicate against what the deterministic mapping expects.
   // Turns a silent undercount into an exact, actionable report — and exits
   // non-zero on any shortfall so it can gate a pipeline. The fix for a
-  // shortfall is to re-run the same idempotent `import --private` (a second
-  // loose-write pass; the store dedupes, so only the dropped triples land).
+  // shortfall is to re-run the same `import --private` and inspect the
+  // lifecycle manifest for the chunk that did not complete.
   // Predicates we treat as integrity signals (order = report order).
   const INTEGRITY_PREDICATES = [
     RDF_TYPE, // imported from @origintrail-official/dkg-okf — single source of truth
