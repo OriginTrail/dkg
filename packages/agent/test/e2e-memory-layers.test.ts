@@ -550,6 +550,63 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
   }, 60_000);
 
+  it('queued async VM publish rejects chain-bound seal mismatches before publisher invocation', async () => {
+    const agent = await createAgent('QueuedAsyncVmPublishChainGuardBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Publish Chain Guard E2E' });
+
+    const cases = [
+      {
+        name: 'queued-async-chain-mismatch',
+        root: `${ENTITY_BASE}:queued-chain-mismatch`,
+        mutate: (intent: Awaited<ReturnType<typeof agent.resolveFinalizedAssertionVmPublishIntent>>) => ({
+          ...intent,
+          sealChainId: (BigInt(intent.sealChainId) + 1n).toString() as `${bigint}`,
+        }),
+        message: /seal binds chainId=/,
+      },
+      {
+        name: 'queued-async-kav10-mismatch',
+        root: `${ENTITY_BASE}:queued-kav10-mismatch`,
+        mutate: (intent: Awaited<ReturnType<typeof agent.resolveFinalizedAssertionVmPublishIntent>>) => ({
+          ...intent,
+          sealKav10Address: `0x${'33'.repeat(20)}` as `0x${string}`,
+        }),
+        message: /seal binds KAv10=/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      await agent.assertion.create(CG_ID, testCase.name);
+      await agent.assertion.write(CG_ID, testCase.name, [
+        { subject: testCase.root, predicate: 'http://schema.org/name', object: `"${testCase.name}"` },
+      ]);
+      await agent.assertion.promote(CG_ID, testCase.name);
+      const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, testCase.name);
+      const badIntent = testCase.mutate(intent);
+      const fakePublisher = {
+        publish: vi.fn(),
+        clearPublishedSwmRoots: vi.fn(),
+        clearRemainingSharedMemory: vi.fn(),
+      };
+
+      await expect(
+        agent.publishQueuedKnowledgeAssetVmPublish(
+          badIntent,
+          {
+            quads: [
+              { subject: testCase.root, predicate: 'http://schema.org/name', object: `"${testCase.name}"`, graph: '' },
+            ],
+            publisherPeerId: 'peer-1',
+          },
+          { publisherOverride: fakePublisher as any },
+        ),
+      ).rejects.toThrow(testCase.message);
+      expect(fakePublisher.publish).not.toHaveBeenCalled();
+      expect(fakePublisher.clearPublishedSwmRoots).not.toHaveBeenCalled();
+      expect(fakePublisher.clearRemainingSharedMemory).not.toHaveBeenCalled();
+    }
+  }, 60_000);
+
   it('no-op SWM share after VM publish does not re-arm async publish intent', async () => {
     const agent = await createAgent('NoopShareDoesNotRearmAsyncIntentBot');
     await agent.createContextGraph({ id: CG_ID, name: 'No-op Share Async Intent E2E' });

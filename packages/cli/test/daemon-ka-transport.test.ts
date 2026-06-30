@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
+import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 function fakeRes() {
@@ -26,6 +27,15 @@ function runKaCtx(method: string, rawPath: string, agent: any, body?: unknown) {
   const url = new URL(`http://127.0.0.1${rawPath}`);
   const ctx = { req, res, agent, path: url.pathname, url } as unknown as RequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
+}
+
+function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknown) {
+  const res = fakeRes();
+  const req: any = { method, url: rawPath };
+  if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
+  const url = new URL(`http://127.0.0.1${rawPath}`);
+  const ctx = { req, res, agent, path: url.pathname, url } as unknown as RequestContext;
+  return { res, done: handleMemoryRoutes(ctx) };
 }
 
 // A write-preflight probe that fast-accepts a public, locally-writable CG, so
@@ -56,6 +66,18 @@ function timeoutErr() {
 }
 
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
+  it('does not serve KA batch-rejection endpoints from memory routes', async () => {
+    const { res, done } = runMemoryCtx(
+      'POST',
+      '/api/knowledge-assets/batch-rejections/report',
+      { resolveAgentByToken: () => undefined },
+      { contextGraphId: 'cg-1', verifyResult: { ok: false } },
+    );
+    await done;
+    expect(res.statusCode).toBe(0);
+    expect(res.body).toBe('');
+  });
+
   describe('POST /api/knowledge-assets/publish (removed)', () => {
     it('→ 404 without invoking agent.publish', async () => {
       let called = false;
