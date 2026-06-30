@@ -220,7 +220,10 @@ describe('handler — GET /register/:captureID', () => {
     const { ctx, getStatus } = mockCtx();
     getStatus.mockResolvedValueOnce({
       status: 'finalized',
-      request: { contextGraphId: 'urn:cg:demo' },
+      request: {
+        jobType: 'lift',
+        lift: { contextGraphId: 'urn:cg:demo' },
+      },
       timestamps: { acceptedAt: 1700000000000, finalizedAt: 1700000005000 },
       finalization: { ual: 'did:dkg:1/0xabc' },
     });
@@ -253,6 +256,33 @@ describe('handler — GET /register/:captureID', () => {
       ual: null,
       finalizedAt: null,
       error: null,
+    });
+  });
+  it('accepts named KA VM publish job request envelopes when checking capture ownership', async () => {
+    const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/register/cap-ka');
+    const { ctx, getStatus } = mockCtx();
+    getStatus.mockResolvedValueOnce({
+      status: 'accepted',
+      request: {
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          contextGraphId: 'urn:cg:demo',
+          subGraphName: 'streams',
+        },
+      },
+      timestamps: { acceptedAt: 1700000000000 },
+    });
+    const handler = createHandler({
+      basePath: '/api/kafka/streams',
+      contextGraphId: 'urn:cg:demo',
+      publishOptions: { subGraphName: 'streams' },
+    });
+    await handler({ ...ctx, req, res, path: '/api/kafka/streams/register/cap-ka' });
+    expect(captured.statusCode).toBe(200);
+    expect(captured.body).toMatchObject({
+      captureID: 'cap-ka',
+      state: 'accepted',
+      contextGraphId: 'urn:cg:demo',
     });
   });
   it('returns error message when state is failed', async () => {
