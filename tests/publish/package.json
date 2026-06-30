@@ -15,6 +15,8 @@
     "test:base:testnet": "mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base --exit",
     "test:base:testnode1:testnet": "NODE_TO_TEST=\"TestNode1\" mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base_node1 --exit",
     "test:base:testnode2:testnet": "NODE_TO_TEST=\"TestNode2\" mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base_node2 --exit",
+    "test:base:testnode3:testnet": "NODE_TO_TEST=\"TestNode3\" mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base_node3 --exit",
+    "test:base:testnode4:testnet": "NODE_TO_TEST=\"TestNode4\" mocha src/Base_Testnet.spec.js --reporter mochawesome --reporter-options reportFilename=testnet_base_node4 --exit",
     "insert-summary": "node scripts/insert_summary_to_db.js",
     "insert-errors": "node scripts/insert_errors_to_db.js",
     "print-errors": "node scripts/print_aggregated_errors.js"
