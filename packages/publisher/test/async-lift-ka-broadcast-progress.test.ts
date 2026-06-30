@@ -1,0 +1,145 @@
+import { beforeEach, describe, expect, it } from 'vitest';
+import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  TripleStoreAsyncLiftPublisher,
+  type AsyncLiftPublisherConfig,
+} from '../src/index.js';
+import { DEFAULT_WALLET_LOCK_GRAPH_URI, walletLockSubject } from '../src/async-lift-control-plane.js';
+import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
+
+describe('KA async VM publish broadcast progress', () => {
+  let now = 1_000;
+  let ids = 0;
+  let store: OxigraphStore;
+  let graphManager: GraphManager;
+
+  beforeEach(() => {
+    now = 1_000;
+    ids = 0;
+    store = new OxigraphStore();
+    graphManager = new GraphManager(store);
+  });
+
+  function createPublisher(
+    config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator'> = {},
+  ): TripleStoreAsyncLiftPublisher {
+    return new TripleStoreAsyncLiftPublisher(store, {
+      now: () => ++now,
+      idGenerator: () => `job-${++ids}`,
+      ...config,
+    });
+  }
+
+  function kaVmPublishRequest(overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) {
+    const authorAddress = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 7n;
+    return {
+      contextGraphId: 'music-social',
+      name: 'albums',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:album:one', 'urn:album:two'],
+      seal: {
+        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+        authorAddress: authorAddress as `0x${string}`,
+        signature: {
+          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
+          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+      intentKey: `sha256:${'ab'.repeat(32)}`,
+      wmCurrentAssertion: '12'.repeat(32),
+      swmCurrentAssertion: '12'.repeat(32),
+      kaNumber: kaNumber.toString(),
+      reservedUal: `did:dkg:31337/${authorAddress}/${kaNumber.toString()}`,
+      ...overrides,
+    };
+  }
+
+  async function stageShareSnapshot(): Promise<void> {
+    await storeWorkspaceOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: 'music-social',
+      shareOperationId: 'share-op-1',
+      rootEntities: ['urn:album:one', 'urn:album:two'],
+      publisherPeerId: 'peer-1',
+      quads: [
+        { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+        { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+      ],
+    });
+  }
+
+  it('persists KA broadcast tx hash when executor write-ahead fires before completion', async () => {
+    const txHash = `0x${'cd'.repeat(32)}` as `0x${string}`;
+    let jobId = '';
+    let statusDuringExecutor: Awaited<ReturnType<TripleStoreAsyncLiftPublisher['getStatus']>> = null;
+    const publisher = createPublisher({
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        await input.publishOptions.onPhase?.(`chain:txsigned:tx-${txHash}`, 'start');
+        statusDuringExecutor = await publisher.getStatus(jobId);
+        throw new Error('process crashed after tx submit');
+      },
+    });
+    await stageShareSnapshot();
+
+    jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const processed = await publisher.processNext('wallet-1');
+    const recovered = await publisher.recover();
+    const afterRecover = await publisher.getStatus(jobId);
+
+    expect(statusDuringExecutor?.status).toBe('broadcast');
+    expect(statusDuringExecutor?.broadcast?.txHash).toBe(txHash);
+    expect(statusDuringExecutor?.broadcast?.walletId).toBe('wallet-1');
+    expect(statusDuringExecutor?.broadcast?.merkleRoot).toBe(`0x${'12'.repeat(32)}`);
+    expect(processed?.status).toBe('broadcast');
+    expect(processed?.broadcast?.txHash).toBe(txHash);
+    expect(recovered).toBe(0);
+    expect(afterRecover?.status).toBe('broadcast');
+    expect(afterRecover?.broadcast?.txHash).toBe(txHash);
+  });
+
+  it('does not reset tx-bearing KA broadcast jobs to accepted on recovery timeout', async () => {
+    const txHash = `0x${'ef'.repeat(32)}` as `0x${string}`;
+    const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash, walletId: 'wallet-1' },
+    });
+    now += 20;
+
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+    const lock = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+
+    expect(recovered).toBe(1);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
+    expect(job?.failure?.failedFromState).toBe('broadcast');
+    expect(job?.failure?.message).toContain(txHash);
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings).toHaveLength(0);
+  });
+});

@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import type { PublishResult } from './publisher.js';
+import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
@@ -430,6 +430,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
     const preflightInput = { walletId, request, snapshot, snapshotMetadata };
 
+    let executorReturned = false;
     try {
       const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
       if (preflight?.action === 'noop') {
@@ -474,6 +475,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       if (preflight?.action === 'noop') {
         return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
+      const publicByteSize = this.computePublicByteSize(prepared.publishOptions.quads);
+      const onPhase = this.createKnowledgeAssetVmPublishBroadcastProgressCallback({
+        jobId: claimed.jobId,
+        walletId,
+        merkleRoot: request.sealMerkleRoot,
+        publicByteSize,
+        delegate: prepared.publishOptions.onPhase,
+      });
       const executionInput = {
         walletId,
         request,
@@ -481,13 +490,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         snapshotMetadata,
         validation: validated.validation,
         resolved: validated.resolved,
-        publishOptions: prepared.publishOptions,
+        publishOptions: {
+          ...prepared.publishOptions,
+          onPhase,
+        },
       };
       const publishResult = await this.knowledgeAssetVmPublishExecutor(executionInput);
+      executorReturned = true;
       return await this.recordPublishResult(claimed.jobId, publishResult, {
-        publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
+        publicByteSize,
       });
     } catch (error) {
+      const current = await this.getStatus(claimed.jobId);
+      if (!executorReturned && current?.status === 'broadcast') {
+        return current;
+      }
       const failedFromState: LiftJobState = this.isKnowledgeAssetPublishPreconditionFailure(error)
         ? 'validated'
         : 'broadcast';
@@ -527,8 +544,21 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async recoverKnowledgeAssetVmPublishInterrupted(job: LiftJob): Promise<boolean> {
     if (job.status === 'broadcast') {
+      const recoverable = job as LiftJobBroadcast;
+      if (this.chainRecoveryResolver) {
+        const resolved = await this.chainRecoveryResolver(recoverable);
+        if (resolved || this.hasInconclusiveRecoveryTimedOut(recoverable)) {
+          await this.releaseWalletLockForJob(job);
+          await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
+          return true;
+        }
+        return false;
+      }
+      if (!this.hasInconclusiveRecoveryTimedOut(recoverable)) {
+        return false;
+      }
       await this.releaseWalletLockForJob(job);
-      await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(recoverable));
       return true;
     }
     if (job.status === 'included' && this.hasInconclusiveRecoveryTimedOut(job as LiftJobIncluded)) {
@@ -636,6 +666,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
     if (!mapped.broadcast || !mapped.inclusion) {
       throw new Error(`Async lift publish result ${mapped.status} is missing chain metadata`);
+    }
+
+    if (
+      (current.status === 'broadcast' || current.status === 'included')
+      && current.broadcast.txHash !== mapped.broadcast.txHash
+    ) {
+      throw new Error(
+        `Async lift publish result tx ${mapped.broadcast.txHash} does not match persisted broadcast tx ` +
+        `${current.broadcast.txHash} for job ${jobId}`,
+      );
     }
 
     if (current.status === 'validated') {
@@ -1003,6 +1043,54 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     });
   }
 
+  private createKnowledgeAssetVmPublishBroadcastProgressCallback(params: {
+    jobId: string;
+    walletId: string;
+    merkleRoot: LiftJobHex;
+    publicByteSize?: number;
+    delegate?: PhaseCallback;
+  }): PhaseCallback {
+    let recordedTxHash: LiftJobHex | undefined;
+    return async (phase, status) => {
+      await (params.delegate?.(phase, status) as unknown as Promise<void> | void);
+      if (status !== 'start') return;
+      const txHash = txHashFromSignedPhase(phase);
+      if (!txHash || recordedTxHash) return;
+      recordedTxHash = txHash;
+      await this.recordKnowledgeAssetVmPublishBroadcastProgress({
+        jobId: params.jobId,
+        walletId: params.walletId,
+        txHash,
+        merkleRoot: params.merkleRoot,
+        publicByteSize: params.publicByteSize,
+      });
+    };
+  }
+
+  private async recordKnowledgeAssetVmPublishBroadcastProgress(params: {
+    jobId: string;
+    walletId: string;
+    txHash: LiftJobHex;
+    merkleRoot: LiftJobHex;
+    publicByteSize?: number;
+  }): Promise<void> {
+    const current = await this.getRequiredJob(params.jobId);
+    if (current.status === 'broadcast') return;
+    if (current.status !== 'validated') {
+      throw new Error(
+        `Cannot record knowledge asset VM publish broadcast for job ${params.jobId} from status ${current.status}`,
+      );
+    }
+    await this.update(params.jobId, 'broadcast', {
+      broadcast: {
+        txHash: params.txHash,
+        walletId: params.walletId,
+        merkleRoot: params.merkleRoot,
+        publicByteSize: params.publicByteSize,
+      },
+    });
+  }
+
   private parseJobPayload(binding?: string): LiftJob | null {
     if (!binding) return null;
     const payload = parseLiteral(binding);
@@ -1243,14 +1331,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     return this.mergeJob(job, 'failed', { failure: failure as any });
   }
 
-  private failKnowledgeAssetInconclusiveRecovery(job: LiftJobIncluded): LiftJob {
+  private failKnowledgeAssetInconclusiveRecovery(job: LiftJobBroadcast | LiftJobIncluded): LiftJob {
     const failure = createLiftJobFailureMetadata({
       failedFromState: job.status,
       code: 'recovery_state_inconsistent',
       message:
-        `Named knowledge asset VM publish job ${job.jobId} reached included state, but generic chain ` +
-        `recovery cannot safely perform lifecycle finalization for this job type. Inspect the on-chain ` +
-        `transaction and re-run the named lifecycle publish if needed.`,
+        `Named knowledge asset VM publish job ${job.jobId} reached ${job.status} state with tx ${job.broadcast.txHash}, ` +
+        `but generic chain recovery cannot safely perform lifecycle finalization for this job type. ` +
+        `Inspect the on-chain transaction and re-run the named lifecycle publish if needed.`,
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
     });
 
@@ -1403,4 +1491,9 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
     }
   }
   return term;
+}
+
+function txHashFromSignedPhase(phase: string): LiftJobHex | null {
+  const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
+  return match ? (match[1] as LiftJobHex) : null;
 }
