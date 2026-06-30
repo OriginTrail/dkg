@@ -70,11 +70,12 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
   isSkolemizedUri,
+  selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -1845,27 +1846,16 @@ export async function runDaemonInner(
                 const knownCorePeerIds = (agent as any).knownCorePeerIds as
                   | Set<string>
                   | undefined;
-                const confirmedCore = knownCorePeerIds && knownCorePeerIds.size > 0
-                  ? allPeers.filter((id) => knownCorePeerIds.has(id))
-                  : [];
-                const quorum = (agent as any).lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-                if (protocol === PROTOCOL_STORAGE_ACK_V2) {
-                  const knownCorePeerIdsV2 = (agent as any).knownCorePeerIdsV2 as
-                    | Set<string>
-                    | undefined;
-                  const v2Advertised = knownCorePeerIdsV2
-                    ? allPeers.filter((id) => knownCorePeerIdsV2.has(id))
-                    : [];
-                  if (v2Advertised.length >= quorum) return v2Advertised;
-                  const v2Set = new Set(v2Advertised);
-                  const remainingConfirmedCore = confirmedCore.filter((id) => !v2Set.has(id));
-                  const seen = new Set([...v2Advertised, ...remainingConfirmedCore]);
-                  const rest = allPeers.filter((id) => !seen.has(id));
-                  return [...v2Advertised, ...remainingConfirmedCore, ...rest];
-                }
-                if (confirmedCore.length >= quorum) return confirmedCore;
-                const rest = allPeers.filter((id) => !confirmedCore.includes(id));
-                return [...confirmedCore, ...rest];
+                const knownCorePeerIdsV2 = (agent as any).knownCorePeerIdsV2 as
+                  | Set<string>
+                  | undefined;
+                return selectACKCandidatePeers({
+                  connectedPeers: allPeers,
+                  knownCorePeerIds,
+                  knownCorePeerIdsV2,
+                  requiredACKs: (agent as any).lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+                  protocol,
+                });
               },
               log,
             }),

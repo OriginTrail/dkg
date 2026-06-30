@@ -1053,27 +1053,11 @@ describe('Tentative publish UAL uniqueness', () => {
     const expectedPrivateRoot = computePrivateRootV10(privateQuads)!;
     let receivedPrivateRoots: Uint8Array[] | undefined;
     const realProvider = hardhatACKProvider(_kav10Address);
-    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (
-      merkleRoot, cgId, kaCount,
-      rootEntities, byteSize, stagingQuads,
-      epochs, tokenAmount,
-      swmGraphId, subGraphName,
-      merkleLeafCount,
-      isEncryptedPayload,
-      catalogCommitment,
-      privateMerkleRoots,
-    ) => {
-      receivedPrivateRoots = privateMerkleRoots?.map((root) => new Uint8Array(root));
-      return realProvider(
-        merkleRoot, cgId, kaCount,
-        rootEntities, byteSize, stagingQuads,
-        epochs, tokenAmount,
-        swmGraphId, subGraphName,
-        merkleLeafCount,
-        isEncryptedPayload,
-        catalogCommitment,
-        privateMerkleRoots,
-      );
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params) => {
+      receivedPrivateRoots = params.ackMode.kind === 'folded-private'
+        ? params.ackMode.privateMerkleRoots.map((root) => new Uint8Array(root))
+        : undefined;
+      return realProvider(params);
     };
 
     const result = await pubS(publisher, {
@@ -1090,6 +1074,48 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(result.kaManifest[0]?.privateMerkleRoot).toBeDefined();
     expect(receivedPrivateRoots).toHaveLength(1);
     expect(receivedPrivateRoots![0]).toEqual(expectedPrivateRoot);
+  });
+
+  it('rejects encrypted private publishes before ACK collection even without a catalog floor', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const curatedCg = String(await createTestContextGraph(chain, undefined, 1, 0));
+    const curatedGraph = `did:dkg:context-graph:${curatedCg}`;
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    const entity = 'did:dkg:agent:CuratedFoldedPrivateUnsupported';
+    let ackCalled = false;
+    let encryptCalled = false;
+
+    await expect(pubS(publisher, {
+      contextGraphId: curatedCg,
+      publisherPeerId: '12D3KooWCuratedPrivateUnsupported',
+      quads: [
+        q(entity, 'http://schema.org/name', '"CuratedFoldedPrivateUnsupported"', curatedGraph),
+      ],
+      privateQuads: [
+        q(entity, 'http://dkg.io/ontology/secret', '"hidden"', curatedGraph),
+      ],
+      encryptInlinePayload: async (plaintext) => {
+        encryptCalled = true;
+        return plaintext;
+      },
+      v10ACKProvider: async () => {
+        ackCalled = true;
+        return [];
+      },
+    })).rejects.toThrow(/Encrypted inline publishes with privateQuads are not supported/);
+
+    expect(encryptCalled).toBe(false);
+    expect(ackCalled).toBe(false);
   });
 
   it('stores distinct KC metadata for each tentative publish', async () => {
@@ -1366,22 +1392,10 @@ describe('Tentative publish UAL uniqueness', () => {
     // succeeds — we still get to inspect everything the publisher
     // hands to the provider on the way through.
     const realProvider = hardhatACKProvider(_kav10Address);
-    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (
-      merkleRoot, cgId, kaCount,
-      rootEntities, byteSize, stagingQuads,
-      epochs, tokenAmount,
-      swmGraphId, subGraphName,
-      merkleLeafCount,
-    ) => {
-      receivedStagingQuads = stagingQuads;
-      receivedMerkleLeafCount = merkleLeafCount;
-      return realProvider(
-        merkleRoot, cgId, kaCount,
-        rootEntities, byteSize, stagingQuads,
-        epochs, tokenAmount,
-        swmGraphId, subGraphName,
-        merkleLeafCount,
-      );
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params) => {
+      receivedStagingQuads = params.stagingQuads;
+      receivedMerkleLeafCount = params.merkleLeafCount;
+      return realProvider(params);
     };
 
     const phases: [string, 'start' | 'end'][] = [];

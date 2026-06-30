@@ -246,7 +246,7 @@ describe('DKGPublisher', () => {
     }
   });
 
-  it('publishes with private triples (tentative under RC11 / PR1)', async () => {
+  it('publishes with private triples using folded-private ACKs', async () => {
     const result = await publishWS({
       contextGraphId: CONTEXT_GRAPH,
       quads: [q(ENTITY, 'http://schema.org/name', '"ImageBot"')],
@@ -257,15 +257,7 @@ describe('DKGPublisher', () => {
     expect(result.kaManifest[0].privateTripleCount).toBe(1);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot!).toHaveLength(32);
-    // RC11 / PR1: the publisher intentionally skips peer ACK collection
-    // when the publish carries private quads (StorageACKHandler cannot
-    // recompute private merkle roots from SWM data alone, see
-    // `dkg-publisher.ts:1785-1786`). With the self-signed ACK fallback
-    // deleted, private-data publishes now correctly downgrade to
-    // `tentative` instead of confirming via a single bogus
-    // `peerId: 'self'` ACK. The private merkle/manifest accounting we
-    // actually care about above is unaffected.
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
   });
 
   it('rejects duplicate entity (exclusivity)', async () => {

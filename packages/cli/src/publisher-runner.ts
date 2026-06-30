@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -429,22 +429,7 @@ function createV10ACKProviderForPublisher(
     log: transport.log,
   });
 
-  return async (
-    merkleRoot,
-    contextGraphId,
-    kaCount,
-    rootEntities,
-    publicByteSize,
-    stagingQuads,
-    epochs,
-    tokenAmount,
-    swmGraphId,
-    subGraphName,
-    merkleLeafCount,
-    isEncryptedPayload,
-    catalogCommitment,
-    privateMerkleRoots,
-  ) => {
+  return async (params: V10ACKProviderParams) => {
     // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
     // a real on-chain context graph; `ZeroContextGraphId` at
     // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. Reject `<= 0n`
@@ -455,11 +440,11 @@ function createV10ACKProviderForPublisher(
     // numeric.
     let cgIdBigInt: bigint;
     try {
-      cgIdBigInt = BigInt(contextGraphId);
+      cgIdBigInt = BigInt(params.contextGraphId);
     } catch {
       throw new Error(
         `Async V10 publish requires a numeric on-chain context graph id; ` +
-        `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+        `got '${params.contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
     if (cgIdBigInt <= 0n) {
@@ -468,9 +453,9 @@ function createV10ACKProviderForPublisher(
         `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
       );
     }
-    if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+    if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
       throw new Error(
-        `Async V10 publish requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+        `Async V10 publish requires a positive integer merkleLeafCount; got ${params.merkleLeafCount}. ` +
         'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
       );
     }
@@ -503,26 +488,24 @@ function createV10ACKProviderForPublisher(
       throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
     }
     const result = await collector.collect({
-      merkleRoot,
+      merkleRoot: params.merkleRoot,
       contextGraphId: cgIdBigInt,
-      contextGraphIdStr: contextGraphId,
+      contextGraphIdStr: params.contextGraphId,
       publisherPeerId: transport.publisherPeerId,
-      publicByteSize,
-      isPrivate: isEncryptedPayload === true || (privateMerkleRoots?.length ?? 0) > 0,
-      kaCount,
-      rootEntities,
+      publicByteSize: params.publicByteSize,
+      isPrivate: params.ackMode.kind !== 'public',
+      kaCount: params.kaCount,
+      rootEntities: params.rootEntities,
       chainId: chainIdBig,
       kav10Address,
       requiredACKs,
-      stagingQuads,
-      epochs,
-      tokenAmount,
-      swmGraphId,
-      subGraphName,
-      merkleLeafCount,
-      isEncryptedPayload,
-      catalogCommitment,
-      privateMerkleRoots,
+      stagingQuads: params.stagingQuads,
+      epochs: params.epochs,
+      tokenAmount: params.tokenAmount,
+      swmGraphId: params.swmGraphId,
+      subGraphName: params.subGraphName,
+      merkleLeafCount: params.merkleLeafCount,
+      ackMode: params.ackMode,
     });
     return result.acks;
   };

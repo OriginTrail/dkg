@@ -95,6 +95,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -161,7 +162,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount: foldedLeafCount,
-      privateMerkleRoots: [privateRoot],
+      ackMode: { kind: 'folded-private', privateMerkleRoots: [privateRoot] },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -216,6 +217,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -227,7 +229,7 @@ describe('ACKCollector', () => {
     ]);
   });
 
-  it('rejects folded-private roots combined with curated encrypted ACK mode', async () => {
+  it('rejects private roots smuggled into curated catalog ACK mode', async () => {
     const privateRoot = computePrivateRootV10([
       makeQuad('urn:a', 'urn:secret', '"hidden"'),
     ])!;
@@ -255,9 +257,16 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount: foldedLeafCount,
-      isEncryptedPayload: true,
-      privateMerkleRoots: [privateRoot],
-    })).rejects.toThrow('privateMerkleRoots are only valid for folded-private public-CG ACKs');
+      stagingQuads: new TextEncoder().encode('<urn:a> <urn:p> <urn:o> .'),
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: {
+          catalogRoot: new Uint8Array(32).fill(0x49),
+          catalogLeafCount: 1,
+        },
+        privateMerkleRoots: [privateRoot],
+      } as any,
+    })).rejects.toThrow('privateMerkleRoots cannot be combined with curated-catalog ACK mode');
   });
 
   it('deduplicates by peerId and nodeIdentityId', async () => {
@@ -297,6 +306,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -326,6 +336,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('no connected core peers');
   });
 
@@ -357,6 +368,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('V10 publish requires exactly one Knowledge Asset');
 
     expect(peerListCalls).toBe(0);
@@ -396,6 +408,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
   });
 
@@ -457,6 +470,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -494,6 +508,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
 
     for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
@@ -554,6 +569,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -627,6 +643,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -670,6 +687,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
   });
 });

@@ -151,9 +151,12 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     a.knownCorePeerIdsV2.add(CORE[0]);
 
     a.handlePeerUpdateForSyncRetry(CORE[0], []);
+    expect(a.knownCorePeerIdsV2.has(CORE[0])).toBe(true);
     expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
 
     a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_STORAGE_ACK]);
+    expect(a.knownCorePeerIdsV2.has(CORE[0])).toBe(false);
+    expect(a.knownCorePeerIds.has(CORE[0])).toBe(true);
     expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
   });
 });

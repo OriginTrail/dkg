@@ -50,70 +50,66 @@ export interface V10CoreNodeACK {
   subscriptionSource?: import('@origintrail-official/dkg-core').SubscriptionSource;
 }
 
+export interface V10CatalogACKCommitment {
+  catalogRoot: Uint8Array;
+  catalogLeafCount: number;
+}
+
 /**
- * Callback that collects V10 StorageACKs from 3 core nodes.
- * Called AFTER merkle root computation, BEFORE on-chain tx.
- *
- * Identifier split (remap support): `contextGraphId` is the TARGET on-chain
- * numeric CG id that the ACK digest and the on-chain tx use. `swmGraphId`
- * (optional) is the SOURCE graph where the data lives in SWM — peers load
- * quads from `<swmGraphId>` but sign the ACK over `<contextGraphId>`. When
- * omitted, peers fall back to `contextGraphId` for both.
- *
- * stagingQuads: optional N-Quads bytes to send inline to core nodes so
- * they can verify the merkle root without needing SWM pre-positioning.
- *
- * ACK modes are mutually exclusive:
- * - public: no `isEncryptedPayload`, no `catalogCommitment`, no private roots.
- * - folded-private: `privateMerkleRoots` present, `isEncryptedPayload !== true`.
- * - curated-catalog: `isEncryptedPayload === true` with `catalogCommitment`.
- * The collector and handler reject mixed folded-private + curated/encrypted
- * inputs because the curated branch cannot verify private roots.
+ * ACK modes are intentionally mutually exclusive:
+ * - public: ordinary public-CG ACKs; no private roots or catalog commitment.
+ * - folded-private: public-CG ACKs that fold private Merkle commitments into
+ *   the KC root without sending private plaintext to cores.
+ * - curated-catalog: curated-CG ACKs that sign the public `_catalog`
+ *   commitment. This mode cannot carry folded-private roots because cores
+ *   cannot verify both the curated catalog and private commitments today.
  */
-export type V10ACKProvider = (
-  merkleRoot: Uint8Array,
-  contextGraphId: string,
-  kaCount: number,
-  rootEntities: string[],
-  publicByteSize: bigint,
-  stagingQuads: Uint8Array | undefined,
-  epochs: number | undefined,
-  tokenAmount: bigint | undefined,
-  swmGraphId: string | undefined,
-  subGraphName: string | undefined,
+export type V10ACKMode =
+  | { kind: 'public' }
+  | { kind: 'folded-private'; privateMerkleRoots: readonly Uint8Array[] }
+  | { kind: 'curated-catalog'; catalogCommitment: V10CatalogACKCommitment };
+
+export interface V10ACKProviderBaseParams {
+  merkleRoot: Uint8Array;
+  /** TARGET on-chain numeric CG id that the ACK digest and on-chain tx use. */
+  contextGraphId: string;
+  kaCount: number;
+  rootEntities: string[];
+  publicByteSize: bigint;
+  epochs?: number;
+  tokenAmount?: bigint;
+  /**
+   * SOURCE graph where data lives in SWM. When omitted, peers fall back to
+   * `contextGraphId` for both source and target.
+   */
+  swmGraphId?: string;
+  subGraphName?: string;
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
-  merkleLeafCount: number,
-  /**
-   * OT-RFC-49 / WS-D — when `true`, this is a CURATED publish: `stagingQuads`
-   * carries the PUBLIC `_catalog` N-quads (plaintext — the catalog is public),
-   * and the private data is encrypted for MEMBERS only (off the ACK wire).
-   * Cores skip the flat-KC plaintext recompute (they don't hold the private
-   * data) and instead rebuild + verify the catalog root from `catalogCommitment`
-   * against the inline `stagingQuads`. Defaults to `false` so existing public-CG
-   * callers are unchanged.
-   */
-  isEncryptedPayload?: boolean,
-  /**
-   * OT-RFC-49 / WS-D — the CURATED PUBLIC `_catalog` commitment for this
-   * publish (REPLACED the stripped ciphertext-chunks commitment). When present,
-   * the publisher computed `computeCatalogRoot(catalogCommittedLeaves(...))`
-   * over the committed catalog leaf-set; the same `(catalogRoot, catalogLeafCount)`
-   * is signed into the V10 ACK digest, lands on-chain, and is what the core
-   * rebuilds over the inline catalog `stagingQuads` (DECLINE `CATALOG_ROOT_MISMATCH`
-   * on disagreement). Required when `isEncryptedPayload === true` AND the curated
-   * CG has a catalog entry; absent for public CGs.
-   */
-  catalogCommitment?: {
-    catalogRoot: Uint8Array;
-    catalogLeafCount: number;
-  },
-  /**
-   * Folded public+private KAs expose only private Merkle commitments to ACK
-   * signers. Cores use these 32-byte roots to recompute the claimed KC root
-   * together with the public quads they store, without seeing private plaintext.
-   */
-  privateMerkleRoots?: Uint8Array[],
-) => Promise<V10CoreNodeACK[]>;
+  merkleLeafCount: number;
+}
+
+export type V10ACKProviderParams =
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'public' };
+      /** Optional N-Quads bytes to send inline so cores can verify without SWM pre-positioning. */
+      stagingQuads?: Uint8Array;
+    })
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'folded-private'; privateMerkleRoots: readonly Uint8Array[] };
+      /** Public N-Quads bytes only. Private plaintext must never be sent. */
+      stagingQuads?: Uint8Array;
+    })
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'curated-catalog'; catalogCommitment: V10CatalogACKCommitment };
+      /** Public `_catalog` N-Quads bytes. Curated private data stays encrypted off the ACK wire. */
+      stagingQuads: Uint8Array;
+    });
+
+/**
+ * Callback that collects V10 StorageACKs from core nodes.
+ * Called AFTER merkle root computation, BEFORE on-chain tx.
+ */
+export type V10ACKProvider = (params: V10ACKProviderParams) => Promise<V10CoreNodeACK[]>;
 
 /**
  * V10 update ACK provider: collects core node signatures over the update ACK

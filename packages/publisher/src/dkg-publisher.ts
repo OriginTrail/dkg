@@ -2373,6 +2373,13 @@ export class DKGPublisher implements Publisher {
     // `useCuratedCatalog` gates the inline-catalog ACK path (cores rebuild the
     // catalog root from the inline plaintext and DECLINE on mismatch).
     const useCuratedCatalog = useEncryptedInline && catalogCommitment !== undefined;
+    if (useEncryptedInline && privateRoots.length > 0) {
+      throw new Error(
+        'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model. ' +
+        'The publisher can collect either curated-catalog ACKs or folded-private public-CG ACKs, ' +
+        'but not both in one publish without a mixed ACK mode that preserves curated confidentiality.',
+      );
+    }
     let stagingQuads: Uint8Array | undefined;
     let stagingByteSize = publicByteSize;
     if (useEncryptedInline) {
@@ -2607,18 +2614,49 @@ export class DKGPublisher implements Publisher {
         // the catalog footprint (`effectiveByteSize` == `catalogByteSize`) and
         // the curated commitment is `catalogCommitment`. For public CGs nothing
         // changed — `effectiveByteSize === publicByteSize` and no catalog.
-        v10ACKs = await v10ACKProvider(
-          kcMerkleRoot, v10CgDomain, kaCount, rootEntities,
-          effectiveByteSize, stagingQuads,
-          publishEpochs, precomputedTokenAmount,
-          swmGraphId, options.subGraphName,
-          kcMerkleLeafCount,
-          useCuratedCatalog,
-          catalogCommitment
-            ? { catalogRoot: catalogCommitment.root, catalogLeafCount: catalogCommitment.leafCount }
-            : undefined,
-          privateRoots,
-        );
+        const commonACKParams = {
+          merkleRoot: kcMerkleRoot,
+          contextGraphId: v10CgDomain,
+          kaCount,
+          rootEntities,
+          publicByteSize: effectiveByteSize,
+          epochs: publishEpochs,
+          tokenAmount: precomputedTokenAmount,
+          swmGraphId,
+          subGraphName: options.subGraphName,
+          merkleLeafCount: kcMerkleLeafCount,
+        };
+        if (useCuratedCatalog) {
+          if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
+            throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
+          }
+          v10ACKs = await v10ACKProvider({
+            ...commonACKParams,
+            stagingQuads,
+            ackMode: {
+              kind: 'curated-catalog',
+              catalogCommitment: {
+                catalogRoot: catalogCommitment.root,
+                catalogLeafCount: catalogCommitment.leafCount,
+              },
+            },
+          });
+        } else if (privateRoots.length > 0) {
+          v10ACKs = await v10ACKProvider({
+            ...commonACKParams,
+            stagingQuads,
+            ackMode: {
+              kind: 'folded-private',
+              privateMerkleRoots: privateRoots,
+            },
+          });
+        } else {
+          v10ACKs = await v10ACKProvider({
+            ...commonACKParams,
+            stagingQuads,
+            ackMode: { kind: 'public' },
+          });
+        }
         // PR5 ACK-provenance summary — one line per publish that names
         // every ACKing core and the LU-6 Phase B discovery path that
         // brought it to the curated CG. Lets an operator answer
@@ -3095,8 +3133,8 @@ export class DKGPublisher implements Publisher {
             merkleRoot: kcMerkleRoot,
             knowledgeAssetsAmount: kaCount,
             byteSize: effectiveByteSize,
-            catalogRoot: catalogCommitment?.root,
-            catalogLeafCount: catalogCommitment?.leafCount,
+            catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
+            catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
             // PCA strict-equality: must match the value committed to the
             // ACK digest produced by the ACK collector
             // (`packages/publisher/src/ack-collector.ts:159` invokes

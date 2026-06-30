@@ -18,7 +18,7 @@
 import { ethers } from 'ethers';
 import { computePublishACKDigest } from '@origintrail-official/dkg-core';
 import type { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import type { V10ACKProvider, V10CoreNodeACK, V10UpdateACKProvider } from '../../src/publisher.js';
+import type { V10ACKProvider, V10ACKProviderParams, V10CoreNodeACK, V10UpdateACKProvider } from '../../src/publisher.js';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 
 export interface InMemoryACKSigner {
@@ -84,33 +84,23 @@ export function makeInMemoryV10ACKProvider(
     peerId: s.peerId ?? `in-memory-core-${s.identityId}`,
   }));
 
-  return async (
-    merkleRoot,
-    contextGraphIdStr,
-    kaCount,
-    _rootEntities,
-    publicByteSize,
-    _stagingQuads,
-    epochs,
-    tokenAmount,
-    _swmGraphId,
-    _subGraphName,
-    merkleLeafCount,
-    _isEncryptedPayload,
-  ): Promise<V10CoreNodeACK[]> => {
-    const cgId = resolveCgId(contextGraphIdStr);
+  return async (params: V10ACKProviderParams): Promise<V10CoreNodeACK[]> => {
+    const cgId = resolveCgId(params.contextGraphId);
+    const catalogCommitment = params.ackMode.kind === 'curated-catalog'
+      ? params.ackMode.catalogCommitment
+      : undefined;
     const digest = computePublishACKDigest(
       chainId,
       kav10Address,
       cgId,
-      merkleRoot,
-      BigInt(kaCount),
-      publicByteSize,
-      BigInt(epochs ?? 1),
-      tokenAmount ?? 0n,
-      BigInt(merkleLeafCount),
-      new Uint8Array(32),
-      0n,
+      params.merkleRoot,
+      BigInt(params.kaCount),
+      params.publicByteSize,
+      BigInt(params.epochs ?? 1),
+      params.tokenAmount ?? 0n,
+      BigInt(params.merkleLeafCount),
+      catalogCommitment?.catalogRoot ?? new Uint8Array(32),
+      BigInt(catalogCommitment?.catalogLeafCount ?? 0),
       false,
     );
 

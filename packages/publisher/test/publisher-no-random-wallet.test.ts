@@ -167,10 +167,10 @@ interface AckEpochCapture {
 
 function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
   const provider = mockChainStubACKProvider();
-  return async (...args: Parameters<V10ACKProvider>) => {
-    capture.epochs = args[6];
-    capture.tokenAmount = args[7];
-    return provider(...args);
+  return async (params) => {
+    capture.epochs = params.epochs;
+    capture.tokenAmount = params.tokenAmount;
+    return provider(params);
   };
 }
 
