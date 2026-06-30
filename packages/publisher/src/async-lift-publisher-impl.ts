@@ -53,6 +53,7 @@ import {
   getRecoveryTxHash,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  normalizePersistedLiftJobRequest,
   rawLiftRequestFromJobRequest,
   jobSubject,
   literal,
@@ -88,6 +89,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  private readonly knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
   private readonly graphManager: GraphManager;
@@ -128,6 +130,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
     this.knowledgeAssetVmPublishExecutor = config.knowledgeAssetVmPublishExecutor;
+    this.knowledgeAssetVmPublishPreflight = config.knowledgeAssetVmPublishPreflight;
     this.resolvedSliceOverrides = config.resolvedSliceOverrides;
     this.publicSnapshotStore = config.publicSnapshotStore;
     this.graphManager = new GraphManager(store);
@@ -421,6 +424,16 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     }
     const request = claimed.request.knowledgeAssetVmPublish;
     const snapshotRequest = createKnowledgeAssetVmPublishLiftRequest(request);
+    const preflightInput = { walletId, request, liftRequest: snapshotRequest };
+
+    try {
+      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      if (preflight?.action === 'noop') {
+        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshotRequest);
+      }
+    } catch (error) {
+      return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
+    }
 
     let validated!: ReturnType<typeof validateLiftPublishPayload>;
     let prepared!: AsyncPreparedPublishPayload;
@@ -451,14 +464,19 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     }
 
     try {
-      const publishResult = await this.knowledgeAssetVmPublishExecutor({
+      const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
+      if (preflight?.action === 'noop') {
+        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshotRequest);
+      }
+      const executionInput = {
         walletId,
         request,
         liftRequest: snapshotRequest,
         validation: validated.validation,
         resolved: validated.resolved,
         publishOptions: prepared.publishOptions,
-      });
+      };
+      const publishResult = await this.knowledgeAssetVmPublishExecutor(executionInput);
       return await this.recordPublishResult(claimed.jobId, publishResult, {
         publicByteSize: this.computePublicByteSize(prepared.publishOptions.quads),
       });
@@ -937,8 +955,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (failedFromState === 'claimed' || failedFromState === 'validated') {
       const message = error instanceof Error ? error.message : String(error);
       const lower = message.toLowerCase();
+      const errorCode = (error as { code?: unknown })?.code;
       const code =
-        lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
+        errorCode === 'PUBLISH_INTENT_STALE'
+          ? 'publish_intent_stale'
+          : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
           : lower.includes('authority')
           ? 'authority_forbidden'
@@ -979,7 +1000,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!binding) return null;
     const payload = parseLiteral(binding);
     if (typeof payload !== 'string') return null;
-    return JSON.parse(payload) as LiftJob;
+    const parsed = JSON.parse(payload) as LiftJob & { request: unknown };
+    return {
+      ...parsed,
+      request: normalizePersistedLiftJobRequest(parsed.request),
+    } as LiftJob;
   }
 
   private buildClaimedJob(
@@ -1238,6 +1263,23 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     await this.writeJob(finalized);
     await this.syncWalletLockForJob(finalized);
     return finalized;
+  }
+
+  private async finalizeKnowledgeAssetVmPublishNoop(jobId: string, request: RawLiftRequest): Promise<LiftJob> {
+    const current = await this.getRequiredJob(jobId);
+    if (!current.validation) {
+      await this.update(jobId, 'validated', {
+        validation: {
+          canonicalRoots: [...request.roots],
+          canonicalRootMap: Object.fromEntries(request.roots.map((root) => [root, root])),
+          swmQuadCount: 0,
+          authorityProofRef: request.authority.proofRef,
+          transitionType: request.transitionType,
+          ...(request.priorVersion ? { priorVersion: request.priorVersion } : {}),
+        },
+      });
+    }
+    return await this.finalizeNoopPublish(jobId);
   }
 
   private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {

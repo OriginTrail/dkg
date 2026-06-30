@@ -5,7 +5,6 @@ import type {
   LiftJob,
   LiftJobHex,
   LiftJobRequest,
-  LiftRequest,
   RawLiftJobRequest,
   RawLiftRequest,
 } from './lift-job.js';
@@ -103,19 +102,47 @@ export function createKnowledgeAssetVmPublishJobRequest(
 }
 
 export function isKnowledgeAssetVmPublishJobRequest(
-  request: LiftJobRequest,
+  request: unknown,
 ): request is KnowledgeAssetVmPublishJobRequest {
-  return request.jobType === 'knowledge-asset-vm-publish';
+  return isRecord(request) && request.jobType === 'knowledge-asset-vm-publish' && isRecord(request.knowledgeAssetVmPublish);
 }
 
-export function isRawLiftJobRequest(request: LiftJobRequest): request is RawLiftJobRequest {
-  return request.jobType === 'lift';
+export function isRawLiftJobRequest(request: unknown): request is RawLiftJobRequest {
+  return isRecord(request) && request.jobType === 'lift' && isRecord(request.lift);
 }
 
 export function rawLiftRequestFromJobRequest(request: LiftJobRequest): RawLiftRequest | null {
   return isRawLiftJobRequest(request) ? request.lift : null;
 }
 
-export function isRawLiftRequest(request: LiftRequest): request is RawLiftRequest {
-  return request.jobType === undefined || request.jobType === 'lift';
+export function isRawLiftRequest(request: unknown): request is RawLiftRequest {
+  return isRecord(request)
+    && (request.jobType === undefined || request.jobType === 'lift')
+    && typeof request.swmId === 'string'
+    && typeof request.shareOperationId === 'string'
+    && Array.isArray(request.roots)
+    && typeof request.contextGraphId === 'string'
+    && typeof request.namespace === 'string'
+    && typeof request.scope === 'string'
+    && typeof request.transitionType === 'string'
+    && isRecord(request.authority)
+    && request.lift === undefined
+    && request.knowledgeAssetVmPublish === undefined;
+}
+
+export function normalizePersistedLiftJobRequest(request: unknown): LiftJobRequest {
+  if (isKnowledgeAssetVmPublishJobRequest(request)) {
+    return request;
+  }
+  if (isRawLiftJobRequest(request)) {
+    return createRawLiftJobRequest(request.lift);
+  }
+  if (isRawLiftRequest(request)) {
+    return createRawLiftJobRequest(request);
+  }
+  throw new Error('Unrecognized persisted async lift job request payload');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }

@@ -25,6 +25,7 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
+import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -699,7 +700,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     };
 
     try {
-      const result = await agent.reportBatchRejection({
+      const result = await reportBatchRejectionWithLifecycle(agent, {
         contextGraphId: resolvedContextGraphId,
         batchId: parsed.batchId,
         verifyResult,

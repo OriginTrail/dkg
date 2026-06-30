@@ -20,6 +20,7 @@ describe.sequential('assertion CLI smoke', () => {
   let lastImportContentType = '';
   let lastPublishAsyncBody = '';
   let indexCalls: Array<{ method: string; url: string; body: any }> = [];
+  let daemonCalls: Array<{ method: string; url: string }> = [];
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-assertion-cli-'));
@@ -32,6 +33,7 @@ describe.sequential('assertion CLI smoke', () => {
     await writeFile(join(dkgHome, 'sample.pdf'), Buffer.from('%PDF-1.4\nfake-pdf\n', 'utf-8'));
 
     server = createServer(async (req, res) => {
+      daemonCalls.push({ method: req.method ?? '', url: req.url ?? '' });
       if (req.method === 'POST' && req.url === '/api/knowledge-assets/paper/wm/import-file') {
         lastImportContentType = String(req.headers['content-type'] ?? '');
         const chunks: Buffer[] = [];
@@ -298,8 +300,13 @@ describe.sequential('assertion CLI smoke', () => {
   it('does not expose retired shared-memory or raw publisher enqueue commands', async () => {
     const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
 
-    await expectCliFailure(['shared-memory', 'write', 'research'], env);
-    await expectCliFailure(['publisher', 'enqueue', 'research'], env);
+    daemonCalls = [];
+    await expectUnknownCommand(['shared-memory', 'write', 'research'], env, 'shared-memory');
+    expect(daemonCalls).toEqual([]);
+
+    daemonCalls = [];
+    await expectUnknownCommand(['publisher', 'enqueue', 'research'], env, 'enqueue');
+    expect(daemonCalls).toEqual([]);
   }, 15000);
 
   it('enqueues a named KA async VM publish through the publisher CLI', async () => {
@@ -380,7 +387,7 @@ describe.sequential('assertion CLI smoke', () => {
   }, 60000);
 });
 
-async function expectCliFailure(args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+async function expectUnknownCommand(args: string[], env: NodeJS.ProcessEnv, command: string): Promise<void> {
   let failure: any;
   try {
     await execFileAsync('node', [CLI_ENTRY, ...args], { env });
@@ -389,6 +396,7 @@ async function expectCliFailure(args: string[], env: NodeJS.ProcessEnv): Promise
   }
 
   expect(failure).toBeTruthy();
-  expect(failure.code).not.toBe(0);
-  expect(`${failure.stdout ?? ''}${failure.stderr ?? ''}`).toMatch(/unknown command|error/i);
+  expect(failure.code).toBe(1);
+  expect(failure.stdout).toBe('');
+  expect(String(failure.stderr ?? '').replace(/\r\n/g, '\n')).toBe(`error: unknown command '${command}'\n`);
 }

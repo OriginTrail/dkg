@@ -70,7 +70,12 @@ import {
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncLiftPublisherConfig,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -739,9 +744,13 @@ type StartupGenesisValidation =
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
 
-export function createKnowledgeAssetVmPublishExecutor(agent: any) {
-  return async ({ request, publishOptions, publisher }: any) => {
-    const publishOpts = {
+type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
+type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
+
+export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
+  return async ({ request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput) => {
+    const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
       ...(publisher ? { publisherOverride: publisher } : {}),
     };
     try {
@@ -768,6 +777,14 @@ export function createKnowledgeAssetVmPublishExecutor(agent: any) {
       );
     }
   };
+}
+
+export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): KnowledgeAssetVmPublishPreflight {
+  return async ({ request, publisher }) =>
+    agent.preflightQueuedKnowledgeAssetVmPublishExecution(
+      request,
+      publisher ? { publisherOverride: publisher } : undefined,
+    );
 }
 
 export async function validateStartupGenesis(
@@ -1824,6 +1841,7 @@ export async function runDaemonInner(
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
             knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
             log,
           });
           publisherRuntime = runtime;

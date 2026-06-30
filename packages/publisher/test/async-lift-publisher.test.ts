@@ -40,6 +40,7 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   requestSubject,
   jobSubject,
+  literal,
   serializeWalletLock,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
@@ -205,6 +206,63 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       },
     });
     expect(job?.retries.maxRetries).toBe(10);
+  });
+
+  it('normalizes and processes legacy persisted raw lift job payloads', async () => {
+    const executorCalls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async (input) => {
+          executorCalls.push(input);
+          return confirmedPublishResult();
+        },
+      },
+    });
+    const dkgPublisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await dkgPublisher.share('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+    const legacyRequest = {
+      ...request(),
+      shareOperationId: share.shareOperationId,
+    };
+    const jobId = await publisher.lift(legacyRequest);
+    const stored = await publisher.getStatus(jobId);
+    expect(stored?.request.jobType).toBe('lift');
+    if (!stored) throw new Error('expected stored job');
+
+    await store.deleteByPattern({
+      subject: jobSubject(jobId),
+      predicate: CONTROL_PAYLOAD,
+      graph: DEFAULT_CONTROL_GRAPH_URI,
+    });
+    await store.insert([{
+      subject: jobSubject(jobId),
+      predicate: CONTROL_PAYLOAD,
+      object: literal(JSON.stringify({ ...stored, request: legacyRequest })),
+      graph: DEFAULT_CONTROL_GRAPH_URI,
+    }]);
+
+    const normalized = await publisher.getStatus(jobId);
+    expect(normalized?.request).toMatchObject({
+      jobType: 'lift',
+      lift: {
+        contextGraphId: 'music-social',
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:local:/rihana'],
+      },
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+    expect(processed?.status).toBe('finalized');
+    expect(executorCalls).toHaveLength(1);
   });
 
   it('enqueues named knowledge asset VM publish jobs', async () => {
@@ -405,6 +463,89 @@ describe('TripleStoreAsyncLiftPublisher', () => {
           ],
         },
       });
+  });
+
+  it('finalizes knowledge asset VM publish jobs as no-op when execution preflight says already published', async () => {
+    let executorCalls = 0;
+    const preflightCalls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishPreflight: async (input) => {
+          preflightCalls.push(input);
+          return { action: 'noop', reason: 'already-published' };
+        },
+        knowledgeAssetVmPublishExecutor: async () => {
+          executorCalls++;
+          throw new Error('executor should not run for preflight no-op');
+        },
+      },
+    });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+    const reloaded = await publisher.getStatus(jobId);
+
+    expect(preflightCalls).toHaveLength(1);
+    expect(executorCalls).toBe(0);
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.finalization?.mode).toBe('noop');
+    expect(reloaded?.status).toBe('finalized');
+    expect(reloaded?.finalization?.mode).toBe('noop');
+  });
+
+  it('fails stale knowledge asset VM publish jobs before executor invocation', async () => {
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishPreflight: async () => {
+          throw Object.assign(
+            new Error('queued VM publish intent is stale'),
+            { code: 'PUBLISH_INTENT_STALE' },
+          );
+        },
+        knowledgeAssetVmPublishExecutor: async () => {
+          executorCalls++;
+          throw new Error('executor should not run for stale preflight');
+        },
+      },
+    });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('claimed');
+    expect(processed?.failure?.code).toBe('publish_intent_stale');
   });
 
   it('exposes the SWM share operation contract', async () => {
