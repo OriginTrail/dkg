@@ -27,7 +27,8 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
-  createKnowledgeAssetVmPublishLiftRequest,
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
   validateLiftPublishPayload,
 } from '@origintrail-official/dkg-publisher';
@@ -387,14 +388,15 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       await startWith({}, {
         resolveFinalizedAssertionVmPublishIntent: async () => intent,
         preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
-          const liftRequest = createKnowledgeAssetVmPublishLiftRequest(request as any);
+          const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request as any);
+          const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request as any);
           try {
             const resolved = await resolveLiftWorkspaceSlice({
               store,
               graphManager: new GraphManager(store),
-              request: liftRequest,
+              request: snapshot,
             });
-            validateLiftPublishPayload({ request: liftRequest, resolved });
+            validateLiftPublishPayload({ request: snapshot, metadata: snapshotMetadata, resolved });
           } catch (err) {
             throw Object.assign(
               new Error(

@@ -1,4 +1,16 @@
-import type { KnowledgeAssetVmPublishRequest, LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobIncluded, LiftJobInclusionMetadata, LiftJobState, LiftJobValidationMetadata, RawLiftRequest } from './lift-job.js';
+import type {
+  KnowledgeAssetVmPublishRequest,
+  LiftJob,
+  LiftJobBroadcast,
+  LiftJobFinalizationMetadata,
+  LiftJobIncluded,
+  LiftJobInclusionMetadata,
+  LiftJobState,
+  LiftJobValidationMetadata,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
+  RawLiftRequest,
+} from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -50,7 +62,8 @@ export interface AsyncLiftPublishExecutionInput {
 export interface AsyncKnowledgeAssetVmPublishExecutionInput {
   readonly walletId: string;
   readonly request: KnowledgeAssetVmPublishRequest;
-  readonly liftRequest: RawLiftRequest;
+  readonly snapshot: LiftPublishSnapshotRequest;
+  readonly snapshotMetadata: LiftPublishRequestMetadata;
   readonly validation: LiftJobValidationMetadata;
   readonly resolved: LiftResolvedPublishSlice;
   readonly publishOptions: PublishOptions;
@@ -60,7 +73,8 @@ export interface AsyncKnowledgeAssetVmPublishExecutionInput {
 export interface AsyncKnowledgeAssetVmPublishPreflightInput {
   readonly walletId: string;
   readonly request: KnowledgeAssetVmPublishRequest;
-  readonly liftRequest: RawLiftRequest;
+  readonly snapshot: LiftPublishSnapshotRequest;
+  readonly snapshotMetadata: LiftPublishRequestMetadata;
   readonly publisher?: DKGPublisher;
 }
 

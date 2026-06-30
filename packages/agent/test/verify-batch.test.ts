@@ -6,10 +6,12 @@ import {
   buildBatchRejectionRecord,
   batchRejectionAssertionName,
   batchRejectionRecordToQuads,
+} from '../src/swm/verify-batch.js';
+import {
   reportBatchRejectionWithLifecycle,
   type BatchRejectionAgentLaneOptions,
   type BatchRejectionAuthorLaneOptions,
-} from '../src/swm/verify-batch.js';
+} from '../src/swm/batch-rejection-reporter.js';
 
 const Q = (s: string, p: string, o: string, g = ''): Quad => ({
   subject: s,

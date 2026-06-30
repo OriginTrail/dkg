@@ -5,6 +5,8 @@ import type {
   LiftJob,
   LiftJobHex,
   LiftJobRequest,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
   RawLiftJobRequest,
   RawLiftRequest,
 } from './lift-job.js';
@@ -55,30 +57,37 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
   return job.status === 'failed' && 'failure' in job;
 }
 
-export function createKnowledgeAssetVmPublishLiftRequest(
+export function createKnowledgeAssetVmPublishSnapshotRequest(
   request: KnowledgeAssetVmPublishRequest,
-): RawLiftRequest {
-  const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
-  const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
+): LiftPublishSnapshotRequest {
   return {
-    jobType: 'lift',
-    swmId: request.shareOperationId,
     shareOperationId: request.shareOperationId,
     roots: request.roots,
     contextGraphId: request.contextGraphId,
-    namespace: 'knowledge-assets',
-    scope: 'vm-publish',
-    transitionType: 'CREATE',
-    authority: {
-      type: 'owner',
-      proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
-    },
     ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
     ...(request.publishEpochs !== undefined ? { publishEpochs: request.publishEpochs } : {}),
     ...(request.publisherNodeIdentityIdOverride !== undefined
       ? { publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride }
       : {}),
     seal: request.seal,
+  };
+}
+
+export function createKnowledgeAssetVmPublishSnapshotMetadata(
+  request: KnowledgeAssetVmPublishRequest,
+): LiftPublishRequestMetadata {
+  const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
+  const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
+  return {
+    scope: 'vm-publish',
+    // Named-KA VM publish chooses mint/update from lifecycle state in the agent.
+    // This metadata only validates the immutable share snapshot shape: no
+    // priorVersion is expected for the sealed snapshot payload itself.
+    transitionType: 'CREATE',
+    authority: {
+      type: 'owner',
+      proofRef: `urn:dkg:knowledge-assets:${operationKey}:vm-publish`,
+    },
   };
 }
 

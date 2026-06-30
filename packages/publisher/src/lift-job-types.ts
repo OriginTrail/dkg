@@ -63,15 +63,10 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
 }
 
-export interface LiftRequestBase {
-  readonly swmId: string;
+export interface LiftPublishSnapshotRequest {
   readonly shareOperationId: string;
   readonly roots: readonly string[];
   readonly contextGraphId: string;
-  readonly namespace: string;
-  readonly scope: string;
-  readonly transitionType: LiftTransitionType;
-  readonly authority: LiftAuthorityProof;
   readonly priorVersion?: string;
   readonly subGraphName?: string;
   readonly accessPolicy?: LiftAccessPolicy;
@@ -84,6 +79,17 @@ export interface LiftRequestBase {
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
   /** Agent-signed seal. Publisher rejects on-chain publish if absent on V10. */
   readonly seal?: LiftRequestAuthorSeal;
+}
+
+export interface LiftPublishRequestMetadata {
+  readonly scope: string;
+  readonly transitionType: LiftTransitionType;
+  readonly authority: LiftAuthorityProof;
+}
+
+export interface LiftRequestBase extends LiftPublishSnapshotRequest, LiftPublishRequestMetadata {
+  readonly swmId: string;
+  readonly namespace: string;
 }
 
 export interface RawLiftRequest extends LiftRequestBase {

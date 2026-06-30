@@ -16,6 +16,8 @@ import {
   type LiftJobRequest,
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
   type RawLiftRequest,
 } from './lift-job.js';
 import type {
@@ -45,7 +47,8 @@ import {
   PAYLOAD_PREDICATE,
   STATUS_PREDICATE,
   compareAcceptedJobs,
-  createKnowledgeAssetVmPublishLiftRequest,
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
   createRawLiftJobRequest,
   createJobSlug,
@@ -423,13 +426,14 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       throw new Error(`LiftJob ${claimed.jobId} is not a knowledge asset VM publish job`);
     }
     const request = claimed.request.knowledgeAssetVmPublish;
-    const snapshotRequest = createKnowledgeAssetVmPublishLiftRequest(request);
-    const preflightInput = { walletId, request, liftRequest: snapshotRequest };
+    const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
+    const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
+    const preflightInput = { walletId, request, snapshot, snapshotMetadata };
 
     try {
       const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
       if (preflight?.action === 'noop') {
-        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshotRequest);
+        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
     } catch (error) {
       return await this.recordExecutionFailure(claimed.jobId, 'claimed', error);
@@ -441,11 +445,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       const resolved = await resolveLiftWorkspaceSlice({
         store: this.store,
         graphManager: this.graphManager,
-        request: snapshotRequest,
+        request: snapshot,
         publicSnapshotStore: this.publicSnapshotStore,
       });
       validated = validateLiftPublishPayload({
-        request: snapshotRequest,
+        request: snapshot,
+        metadata: snapshotMetadata,
         resolved: {
           ...resolved,
           ...this.resolvedSliceOverrides,
@@ -455,7 +460,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         validation: validated.validation,
       });
       prepared = prepareAsyncPublishPayload({
-        request: snapshotRequest,
+        request: snapshot,
+        metadata: snapshotMetadata,
         validation: validated.validation,
         resolved: validated.resolved,
       });
@@ -466,12 +472,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     try {
       const preflight = await this.knowledgeAssetVmPublishPreflight?.(preflightInput);
       if (preflight?.action === 'noop') {
-        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshotRequest);
+        return await this.finalizeKnowledgeAssetVmPublishNoop(claimed.jobId, snapshot, snapshotMetadata);
       }
       const executionInput = {
         walletId,
         request,
-        liftRequest: snapshotRequest,
+        snapshot,
+        snapshotMetadata,
         validation: validated.validation,
         resolved: validated.resolved,
         publishOptions: prepared.publishOptions,
@@ -1265,7 +1272,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     return finalized;
   }
 
-  private async finalizeKnowledgeAssetVmPublishNoop(jobId: string, request: RawLiftRequest): Promise<LiftJob> {
+  private async finalizeKnowledgeAssetVmPublishNoop(
+    jobId: string,
+    request: LiftPublishSnapshotRequest,
+    metadata: LiftPublishRequestMetadata,
+  ): Promise<LiftJob> {
     const current = await this.getRequiredJob(jobId);
     if (!current.validation) {
       await this.update(jobId, 'validated', {
@@ -1273,8 +1284,8 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
           canonicalRoots: [...request.roots],
           canonicalRootMap: Object.fromEntries(request.roots.map((root) => [root, root])),
           swmQuadCount: 0,
-          authorityProofRef: request.authority.proofRef,
-          transitionType: request.transitionType,
+          authorityProofRef: metadata.authority.proofRef,
+          transitionType: metadata.transitionType,
           ...(request.priorVersion ? { priorVersion: request.priorVersion } : {}),
         },
       });
