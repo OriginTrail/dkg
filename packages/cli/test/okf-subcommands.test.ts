@@ -272,6 +272,17 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     // The private bulk path never creates per-concept KAs.
     expect(paths.some((p) => p === 'POST /api/knowledge-assets')).toBe(false);
 
+    // PRIVACY CONTRACT: the Context Graph must be created invite-only. A regression
+    // that dropped `{ private: true, accessPolicy: 1 }` would bulk-write the corpus
+    // into a public CG — exactly the substance-leak this mode must prevent.
+    const createCall = stub.calls.find(
+      (c) => c.method === 'POST' && c.url.split('?')[0] === '/api/context-graph/create',
+    );
+    expect(createCall).toBeDefined();
+    const createBody = JSON.parse(createCall!.body || '{}');
+    expect(createBody.private).toBe(true);
+    expect(createBody.accessPolicy).toBe(1);
+
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
     expect(manifest.mode).toBe('bulk-private-swm');
     expect(manifest.chunksDone).toBe(manifest.totalChunks);
@@ -425,10 +436,12 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
     const NAME = 'http://schema.org/name';
     // COUNT(*) returned as a SPARQL-JSON OBJECT cell (exercises the cell() fix in verify).
+    const issuedSparql: string[] = [];
     const countHandler =
       (counts: Record<string, number>): StubHandler =>
       (req, body) => {
         const sparql = String(JSON.parse(body || '{}').sparql ?? '');
+        issuedSparql.push(sparql);
         const pred = Object.keys(counts).find((p) => sparql.includes(`<${p}>`)) ?? '';
         return {
           status: 200,
@@ -444,6 +457,13 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(okOut.complete).toBe(true);
     expect(okOut.totalMissingTriples).toBe(0);
 
+    // SCOPING CONTRACT: every COUNT must be filtered to subjects under the bundle's
+    // IRI prefix — otherwise unrelated pre-existing graph triples could mask (or
+    // inflate) a real shortfall and report "complete" while concepts are missing.
+    // A regression dropping the STRSTARTS filter fails here.
+    expect(issuedSparql.length).toBeGreaterThan(0);
+    for (const s of issuedSparql) expect(s).toMatch(/STRSTARTS\(STR\(\?s\)/);
+
     // One name missing → shortfall → complete:false, non-zero exit (pipeline gate).
     stub.setHandler(countHandler({ [TYPE]: 2, [NAME]: 1 }));
     const bad = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-v'], env());
@@ -452,6 +472,43 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     const badOut = parseJsonTail(bad.stdout);
     expect(badOut.complete).toBe(false);
     expect(badOut.totalMissingTriples).toBe(1);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('verify --relate mirrors the import mapping (COUNTs the typed predicate, not schema:mentions)', async () => {
+    clear();
+    // A Dataset→Table link: default mapping → schema:mentions; --relate → schema:hasPart.
+    const dir = await mkdtemp(join(tmpdir(), 'okf-verify-relate-'));
+    await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.1"\n---\n# Root\n');
+    await writeFile(join(dir, 'ds.md'), '---\ntype: Dataset\ntitle: DS\n---\n\nSee [t](t.md).\n');
+    await writeFile(join(dir, 't.md'), '---\ntype: Table\ntitle: T\n---\n\nplain\n');
+
+    const countOne: StubHandler = () => ({
+      status: 200,
+      body: { result: { bindings: [{ c: { value: '1', type: 'literal' } }] } },
+    });
+    const verifySparql = async (extra: string[]): Promise<string> => {
+      const issued: string[] = [];
+      stub.setHandler((req, body) => {
+        issued.push(String(JSON.parse(body || '{}').sparql ?? ''));
+        return countOne();
+      });
+      await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-vr', ...extra], env());
+      return issued.join('\n');
+    };
+
+    // Without --relate: the offline expectation falls back to the default edge predicate.
+    const def = await verifySparql([]);
+    expect(def).toContain('<http://schema.org/mentions>');
+
+    // With --relate: the expectation mirrors the import, so verify COUNTs schema:hasPart
+    // for the typed edge and NEVER schema:mentions — a real --relate import now verifies
+    // instead of reporting a false shortfall.
+    const rel = await verifySparql(['--relate', 'Dataset>Table=hasPart']);
+    expect(rel).toContain('<http://schema.org/hasPart>');
+    expect(rel).not.toContain('<http://schema.org/mentions>');
+
+    stub.setHandler(okfDaemonHandler(createdCGs));
     await rm(dir, { recursive: true, force: true });
   });
 });

@@ -708,6 +708,15 @@ export function registerOkfCommand(program: Command): void {
     .requiredOption('--context-graph-id <id>', 'Context Graph to verify')
     .option('--iri-base <base>', `IRI namespace concept subjects were minted under (default ${DEFAULT_IRI_BASE})`)
     .option('--include-code-span-links', 'Match the import: treat code-span links as edges')
+    .option(
+      '--relate <rule>',
+      'Match the import: type cross-concept edges by endpoint types ' +
+        '"<FromType>><ToType>=<predicate>" (repeatable). MUST mirror the --relate rules used at ' +
+        'import time — otherwise the offline expectation uses the default schema:mentions mapping ' +
+        'and reports a false shortfall against a graph that actually holds the typed predicate.',
+      collect,
+      [] as string[],
+    )
     .option('--list-missing <n>', 'List up to N concept IRIs missing their rdf:type (best-effort)', (v: string) => parseInt(v, 10))
     .action(async (bundleDir: string, opts: ActionOpts) => {
       try {
@@ -717,12 +726,19 @@ export function registerOkfCommand(program: Command): void {
         }
         const iriBase = opts.iriBase ? String(opts.iriBase) : DEFAULT_IRI_BASE;
         const contextGraphId = String(opts.contextGraphId);
+        // The offline expectation MUST be built with the same edge typing the import used,
+        // or a --relate'd predicate (e.g. schema:hasPart) is reconstructed as schema:mentions
+        // and verify reports a false shortfall. Mirror the import's --relate exactly.
+        const typeRelations = parseRelateRules(
+          Array.isArray(opts.relate) ? (opts.relate as string[]) : [],
+        );
 
         // Offline: what the deterministic mapping SHOULD have produced.
         const { files } = loadBundleDirWithReport(bundleDir);
         const imported = importBundle(files, {
           iriBase,
           includeCodeSpanLinks: Boolean(opts.includeCodeSpanLinks),
+          typeRelations,
         });
         const expectedByPred = new Map<string, number>();
         for (const q of imported.quads) {
