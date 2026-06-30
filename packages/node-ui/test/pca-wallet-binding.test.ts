@@ -45,6 +45,17 @@ describe('resolveWalletBinding', () => {
     expect(b).toMatchObject({ boundTo: '7', canOwn: true, inconclusive: false });
   });
 
+  it('own-bound when the bound account is owned by the connected wallet signer', async () => {
+    const CONNECTED = '0x2222222222222222222222222222222222222222';
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: W, accountId: '7' });
+    mocks.fetchPca.mockResolvedValue({ accountId: '7', owner: CONNECTED, ...LIVE });
+    const b = await resolveWalletBinding(W, [
+      { address: OWNER, kind: 'daemon' },
+      { address: CONNECTED, kind: 'wallet' },
+    ]);
+    expect(b).toMatchObject({ boundTo: '7', canOwn: true, signerKind: 'wallet', inconclusive: false });
+  });
+
   it('sponsor-bound + LIVE (NOT canOwn, boundLive) when owned by someone else & covering', async () => {
     mocks.pcaAgentAccount.mockResolvedValue({ agent: W, accountId: '9' });
     mocks.fetchPca.mockResolvedValue({ accountId: '9', owner: SPONSOR, ...LIVE });

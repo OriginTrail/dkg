@@ -340,7 +340,15 @@ export function walletOwnerActionSubmitter(
       const ctx = loadContext(deps);
       await approveExactIfNeeded(ctx, deps, amount);
       const { hash, receipt } = await writePcaContract(ctx, deps, 'createAccount', [amount, primaryNode]);
-      const accountId = extractAccountId(receipt, ctx.nft, ctx.owner).toString();
+      let accountId: string;
+      try {
+        accountId = extractAccountId(receipt, ctx.nft, ctx.owner).toString();
+      } catch (cause) {
+        // The create tx already has an action hash/receipt at this point. Treat
+        // decode/readback failures as post-broadcast so callers keep the
+        // double-mint guard and reconcile before allowing another create.
+        throw new WalletReceiptWaitError(receipt.transactionHash ?? hash, cause, 'action');
+      }
       return {
         accountId,
         txHash: receipt.transactionHash ?? hash,

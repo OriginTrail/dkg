@@ -252,6 +252,25 @@ describe('walletOwnerActionSubmitter create guards', () => {
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({ functionName: 'createAccount' });
   });
 
+  it('treats missing mint Transfer after a mined create as post-broadcast reconcile', async () => {
+    const amount = parseEther('5');
+    const h = makeHarness({
+      allowanceQueue: [amount],
+      receipts: { [ACTION_HASH]: receipt(ACTION_HASH, 'success', []) },
+    });
+    try {
+      await h.submitter.create({ tokens: '5', primaryNode: '42' });
+      throw new Error('expected create to fail');
+    } catch (err) {
+      expect(err).toBeInstanceOf(WalletReceiptWaitError);
+      expect((err as WalletReceiptWaitError).txStep).toBe('action');
+      expect((err as WalletReceiptWaitError).txHash).toBe(ACTION_HASH);
+      expect((err as WalletReceiptWaitError).cause).toBeInstanceOf(Error);
+    }
+    expect(h.writeContract).toHaveBeenCalledTimes(1);
+    expect(h.writeContract.mock.calls[0]![0]).toMatchObject({ functionName: 'createAccount' });
+  });
+
   it('wraps an action prompt failure with txStep=action after allowance is ready', async () => {
     const reject = Object.assign(new Error('user rejected'), { code: 4001 });
     const amount = parseEther('5');

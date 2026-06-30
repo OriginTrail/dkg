@@ -227,6 +227,10 @@ describe('ConvictionOverview — S1 discovery', () => {
       throw new Error(`unexpected ${functionName}`);
     });
     mocks.publicClientFor.mockReturnValue({ readContract });
+    mocks.fetchPca.mockImplementation(async (id: string) => ({
+      ...snapFixture(id),
+      owner: HW,
+    }));
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,
       providerInfo: null,
@@ -237,7 +241,10 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'connected wallet 0xCdA7…1F9B owns this account');
+    await waitForText(container, 'wallet-managed');
+    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('PCA #12');
+    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
     expect(readContract).toHaveBeenCalledWith(expect.objectContaining({
       address: CONTRACTS.nft,
       functionName: 'balanceOf',

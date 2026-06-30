@@ -399,6 +399,25 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('wallet-owned detail copy asks to switch network before signing when wrong-network disables writes', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 1,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockResolvedValue(snap({ owner: CONNECTED_OWNER }));
+
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Owner wallet matches; switch network before signing owner actions.');
+    expect(container.textContent).not.toContain('Connected owner wallet will sign');
+    expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
+    await unmount();
+  });
+
   it('W2 — top-up 504 with NO txHash stays retryable ("try again"), no warning', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
     mocks.pcaTopUp.mockRejectedValue(new HttpError(504, 'TIMEOUT', { code: 'TIMEOUT' })); // no txHash

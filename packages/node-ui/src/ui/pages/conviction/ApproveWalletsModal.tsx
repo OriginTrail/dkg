@@ -5,9 +5,10 @@ import {
   fetchPca,
   describePcaError,
   HttpError,
+  type PcaErrorInfo,
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
-import { resolveWalletBinding, planSelfCoverage } from '../../pca/walletBinding.js';
+import { resolveWalletBinding, planSelfCoverage, type SignableOwner } from '../../pca/walletBinding.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   describeWalletTxError,
@@ -28,7 +29,7 @@ import {
   type DeviceConfirmStep,
   type WalletRowTone,
 } from '../../components/Pca/index.js';
-import { useWalletStore } from '../../stores/wallet.js';
+import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 
 type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'stranded' | 'conflict' | 'cap' | 'error' | 'unverified';
 interface Row {
@@ -68,6 +69,49 @@ function walletBatchAbortMessage(err: unknown): string | null {
     return info.message;
   }
   return null;
+}
+
+function walletActionAbortMessage(err: unknown): string | null {
+  if (
+    err instanceof WalletOwnerActionAbortError ||
+    err instanceof WalletOwnerActionUnavailableError ||
+    err instanceof WalletReceiptWaitError ||
+    err instanceof WalletReceiptRevertedError ||
+    err instanceof WalletTxStepError
+  ) {
+    return walletBatchAbortMessage(err);
+  }
+  return null;
+}
+
+function describeWalletPcaRevert(err: unknown, accountId: string): PcaErrorInfo | null {
+  const info = describeWalletTxError(
+    err,
+    err instanceof WalletTxStepError ? err.txStep : 'action',
+  );
+  if (info.kind !== 'revert') return null;
+  switch (info.revertName) {
+    case 'AgentAlreadyRegistered':
+      return {
+        code: 'AgentAlreadyRegistered',
+        status: 400,
+        message: 'This operational wallet is already approved on another conviction account - deregister it there first.',
+      };
+    case 'AgentCapReached':
+      return {
+        code: 'AgentCapReached',
+        status: 400,
+        message: `PCA #${accountId} already has the maximum 100 approved publishing wallets.`,
+      };
+    case 'NotAccountOwner':
+      return {
+        code: 'NotAccountOwner',
+        status: 403,
+        message: `This wallet is not the owner of PCA #${accountId}, so it cannot manage it.`,
+      };
+    default:
+      return null;
+  }
 }
 
 const ROW_LABEL: Record<RowStatus, string> = {
@@ -154,6 +198,7 @@ export function ApproveWalletsModal({
   const nodeWallets = wb?.wallets ?? [];
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
   const connectedWallet = useWalletStore((s) => s.address);
+  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -167,6 +212,7 @@ export function ApproveWalletsModal({
   const [aborted, setAborted] = useState<string | null>(null);
   const [deviceSteps, setDeviceSteps] = useState<DeviceConfirmStep[]>([]);
   const [deviceLabel, setDeviceLabel] = useState<string | undefined>(undefined);
+  const [walletBatchSigning, setWalletBatchSigning] = useState(false);
   const stopRef = useRef(false);
   const devicePromptIndexRef = useRef(0);
   const devicePromptTotalRef = useRef(0);
@@ -194,17 +240,26 @@ export function ApproveWalletsModal({
   );
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
-  const walletManaged =
+  const targetWalletManaged =
     !!snapshot?.owner &&
     !!connectedWallet &&
+    !walletWrongNetwork &&
     !sameAddress(snapshot.owner, ownerWallet) &&
     sameAddress(snapshot.owner, connectedWallet);
+  const signableOwners = useMemo<SignableOwner[]>(
+    () => [
+      { address: ownerWallet, kind: 'daemon' },
+      { address: connectedWallet, kind: 'wallet' },
+    ],
+    [connectedWallet, ownerWallet],
+  );
 
   const runOwnerWrite = async <T extends { txHash?: string }>(
     label: string,
     write: () => Promise<T>,
+    walletSigned = false,
   ): Promise<T> => {
-    if (!walletManaged) return write();
+    if (!walletSigned) return write();
     const index = devicePromptIndexRef.current + 1;
     devicePromptIndexRef.current = index;
     const total = Math.max(devicePromptTotalRef.current, index);
@@ -233,6 +288,15 @@ export function ApproveWalletsModal({
     }
   };
 
+  const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {
+    if (!id) return undefined;
+    const oldSnapshot = await fetchPca(id).catch(() => null);
+    if (!oldSnapshot?.owner) return undefined;
+    if (sameAddress(oldSnapshot.owner, ownerWallet)) return 'daemon';
+    if (connectedWallet && !walletWrongNetwork && sameAddress(oldSnapshot.owner, connectedWallet)) return 'wallet';
+    return undefined;
+  };
+
   const run = async () => {
     // U1 — do NOT hard-block on the raw count > cap: already-approved-here addresses
     // consume NO slot (resolved per-row as 'skipped' after submit) and the FE can't
@@ -249,24 +313,35 @@ export function ApproveWalletsModal({
     devicePromptTotalRef.current = 0;
     setDeviceLabel(undefined);
     setDeviceSteps([]);
+    setWalletBatchSigning(false);
 
-    const plannedSelfCoverage = new Map<string, ReturnType<typeof planSelfCoverage>>();
+    const plannedSelfCoverage = new Map<string, {
+      action: ReturnType<typeof planSelfCoverage>;
+      signerKind?: 'daemon' | 'wallet';
+    }>();
     if (selfCoverage && mode === 'self') {
       for (const addr of addresses) {
-        plannedSelfCoverage.set(addr, planSelfCoverage(await resolveWalletBinding(addr, ownerWallet)));
+        const binding = await resolveWalletBinding(addr, signableOwners);
+        plannedSelfCoverage.set(addr, {
+          action: planSelfCoverage(binding),
+          signerKind: binding.signerKind,
+        });
       }
     }
-    devicePromptTotalRef.current = walletManaged
-      ? addresses.reduce((total, addr) => {
-          if (deregisterFrom) return total + 2;
-          if (selfCoverage && mode === 'self') {
-            const plan = plannedSelfCoverage.get(addr);
-            if (plan?.kind === 'skipSponsored' || plan?.kind === 'conflictSponsorDead') return total;
-            if (plan?.kind === 'deregisterThenRegister') return total + 2;
-          }
-          return total + 1;
-        }, 0)
-      : 0;
+    const deregisterFromSignerKind = await signerKindForAccount(deregisterFrom);
+    devicePromptTotalRef.current = addresses.reduce((total, addr) => {
+      if (deregisterFrom) {
+        return total + (deregisterFromSignerKind === 'wallet' ? 1 : 0) + (targetWalletManaged ? 1 : 0);
+      }
+      if (selfCoverage && mode === 'self') {
+        const plan = plannedSelfCoverage.get(addr);
+        if (plan?.action.kind === 'skipSponsored' || plan?.action.kind === 'conflictSponsorDead') return total;
+        const deregisterPrompt = plan?.action.kind === 'deregisterThenRegister' && plan.signerKind === 'wallet' ? 1 : 0;
+        return total + deregisterPrompt + (targetWalletManaged ? 1 : 0);
+      }
+      return total + (targetWalletManaged ? 1 : 0);
+    }, 0);
+    setWalletBatchSigning(devicePromptTotalRef.current > 0);
 
     // W1/U1 — set `current` AND sweep every still-'pending' (not-yet-processed) row to
     // `status` before a loop `break`, so a break never leaves later rows on "approving…".
@@ -302,17 +377,23 @@ export function ApproveWalletsModal({
             await runOwnerWrite(
               `Deregister ${addr} from PCA #${deregisterFrom}`,
               () => deregisterOwner.deregisterAgent(deregisterFrom, addr),
+              deregisterFromSignerKind === 'wallet',
             );
             strandedFrom = deregisterFrom;
           } catch (err) {
-            if (walletManaged && walletBatchAbortMessage(err)) throw err;
+            if (deregisterFromSignerKind === 'wallet' && walletActionAbortMessage(err)) throw err;
           }
         } else if (selfCoverage && mode === 'self') {
           // Honesty/safety gate on mode==='self': the mode radios stay enabled, so running this
           // self-coverage logic on THIRD-PARTY (sponsor-mode) addresses would mis-classify them.
           // The per-wallet classification lives in the planner (walletBinding.ts); this loop just
           // EXECUTES the plan. (Old account varies per wallet, unlike renew's deregisterFrom.)
-          const plan = plannedSelfCoverage.get(addr) ?? planSelfCoverage(await resolveWalletBinding(addr, ownerWallet));
+          let planned = plannedSelfCoverage.get(addr);
+          if (!planned) {
+            const binding = await resolveWalletBinding(addr, signableOwners);
+            planned = { action: planSelfCoverage(binding), signerKind: binding.signerKind };
+          }
+          const plan = planned.action;
           if (plan.kind === 'skipSponsored') {
             // Bound to a LIVE sponsor PCA → already discounted free; don't burn a register/conflict.
             setRows((r) => ({
@@ -339,11 +420,12 @@ export function ApproveWalletsModal({
               await runOwnerWrite(
                 `Deregister ${addr} from PCA #${plan.prevAccountId}`,
                 () => owner.deregisterAgent(plan.prevAccountId, addr),
+                planned.signerKind === 'wallet',
               );
               strandedFrom = plan.prevAccountId;
             }
             catch (err) {
-              if (walletManaged && walletBatchAbortMessage(err)) throw err;
+              if (planned.signerKind === 'wallet' && walletActionAbortMessage(err)) throw err;
               /* still bound to old — not stranded; register's conflict path recovers */
             }
           }
@@ -352,6 +434,7 @@ export function ApproveWalletsModal({
         const res = await runOwnerWrite(
           `Approve ${addr} on PCA #${accountId}`,
           () => owner.registerAgent(accountId, addr),
+          targetWalletManaged,
         );
         setRows((r) => ({
           ...r,
@@ -366,7 +449,7 @@ export function ApproveWalletsModal({
           status: 'stranded',
           message: `Removed from PCA #${strandedFrom}, not yet on #${accountId} — retry to finish.`,
         });
-        const walletAbort = walletManaged ? walletBatchAbortMessage(err) : null;
+        const walletAbort = walletActionAbortMessage(err);
         if (walletAbort) {
           setAborted(walletAbort);
           setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: walletAbort }, 'error', 'aborted'));
@@ -379,7 +462,7 @@ export function ApproveWalletsModal({
           setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: 'owner-only' }, 'error', 'aborted'));
           break;
         }
-        const info = describePcaError(err, { accountId });
+        const info = describePcaError(err, { accountId }) ?? describeWalletPcaRevert(err, accountId);
         if (info?.code === 'AgentCapReached') {
           // U1 — mark the current row AND every NOT-YET-processed row 'cap' before the
           // break, else the later rows would stay stuck on 'pending' ("approving…").
@@ -416,6 +499,7 @@ export function ApproveWalletsModal({
       }
     }
     setRunning(false);
+    setWalletBatchSigning(false);
     setDone(true);
     onApproved?.();
   };
@@ -448,7 +532,7 @@ export function ApproveWalletsModal({
       onClose={onClose}
       testId="pca-approve-modal"
       title={`Approve publishing wallets — PCA #${accountId}`}
-      dismissDisabled={running && walletManaged}
+      dismissDisabled={walletBatchSigning}
     >
       <div className="v10-modal-body">
         {/* Mode */}
@@ -609,7 +693,7 @@ export function ApproveWalletsModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={running && walletManaged}>
+        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={walletBatchSigning}>
           {done ? 'Done' : 'Cancel'}
         </button>
         {running ? (

@@ -12,8 +12,8 @@ export default defineConfig({
   workers: 1,
   timeout: CI ? 90_000 : 60_000,
   reporter: CI
-    ? [['github'], ['html', { open: 'never', outputFolder: 'playwright-report-hw-mock' }]]
-    : [['list'], ['html', { open: 'on-failure', outputFolder: 'playwright-report-hw-mock' }]],
+    ? [['github'], ['html', { open: 'never', outputFolder: 'playwright-report/hw-mock' }]]
+    : [['list'], ['html', { open: 'on-failure', outputFolder: 'playwright-report/hw-mock' }]],
   use: {
     baseURL: `http://127.0.0.1:${PORT}/ui/`,
     screenshot: 'only-on-failure',

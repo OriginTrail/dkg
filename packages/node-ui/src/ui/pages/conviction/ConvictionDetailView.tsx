@@ -584,6 +584,17 @@ function DetailBody({
   };
 
   const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
+  const walletSurfaceCopy = connectedWallet
+    ? ownerMode === 'wallet'
+      ? walletWrongNetwork
+        ? 'Owner wallet matches; switch network before signing owner actions.'
+        : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
+      : ownerMode === 'daemon'
+        ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
+        : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
+    : ownerMode === 'external'
+      ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
+      : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
 
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
@@ -595,19 +606,10 @@ function DetailBody({
         <HealthChip state={health} />
       </div>
 
-      {ownerMode === 'wallet' && (
-        <div className="v10-modal-tip" role="status">
-          Connected owner wallet will sign top-up, approve, remove, and renewal actions.
-          <WalletPill />
-        </div>
-      )}
-
-      {ownerMode === 'external' && (
-        <div className="v10-modal-tip" role="status">
-          Connect the PCA owner wallet to manage this account. Provider metadata is display-only.
-          <WalletConnectControl />
-        </div>
-      )}
+      <div className="v10-modal-tip" role="status">
+        {walletSurfaceCopy}
+        {connectedWallet ? <WalletPill /> : <WalletConnectControl />}
+      </div>
 
       {deviceSteps.length > 0 && (
         <DeviceConfirmProgress

@@ -39,6 +39,7 @@ vi.mock('../src/ui/web3/walletOwnerActionSubmitter.js', async (orig) => {
 });
 
 const { HttpError } = await import('../src/ui/api.js');
+const { WalletReceiptWaitError } = await import('../src/ui/web3/walletTxError.js');
 const { CreatePcaModal } = await import('../src/ui/pages/conviction/CreatePcaModal.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { useAgentsStore } = await import('../src/ui/stores/agents.js');
@@ -211,8 +212,9 @@ describe('CreatePcaModal', () => {
       settle: vi.fn(),
     }));
 
+    const onClose = vi.fn();
     const { container, unmount } = await render(
-      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+      React.createElement(CreatePcaModal, { onClose, onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
     );
     await waitForText(container, 'Commit amount (TRAC)');
     await click(container.querySelector('input[value="hardware"]')!);
@@ -225,6 +227,12 @@ describe('CreatePcaModal', () => {
     expect(rows[0]?.getAttribute('data-state')).toBe('active');
     expect(rows[1]?.getAttribute('data-state')).toBe('pending');
     expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    await act(async () => { container.querySelector('.v10-modal-overlay')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const footerCancel = container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement;
+    expect(footerCancel.disabled).toBe(true);
+    await click(footerCancel);
+    expect(onClose).not.toHaveBeenCalled();
     await unmount();
   });
 
@@ -596,6 +604,37 @@ describe('CreatePcaModal', () => {
     expect(marker?.txHash).toBe('0xdead');
     // No bare Retry — only the explicit "no PCA minted, clear & retry".
     expect(container.textContent).toContain('No PCA minted');
+    await unmount();
+  });
+
+  it('hardware create keeps the double-mint guard when post-broadcast mint parsing fails', async () => {
+    const txHash = `0x${'e'.repeat(64)}`;
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: HARDWARE_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.walletCreate.mockRejectedValue(
+      new WalletReceiptWaitError(txHash, new Error('No PCA mint Transfer found in the create receipt'), 'action'),
+    );
+    const { container, unmount } = await render(
+      React.createElement(CreatePcaModal, { onClose: vi.fn(), onApproveOwnWallets: vi.fn(), onManage: vi.fn(), onGetSponsored: vi.fn() }),
+    );
+    await waitForText(container, 'Commit amount (TRAC)');
+    await click(container.querySelector('input[value="hardware"]')!);
+    setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    await click(container.querySelector('[data-testid="pca-create-submit"]')!);
+
+    await waitForText(container, 'Confirm before retrying');
+    expect(container.textContent).toContain(txHash);
+    expect(container.querySelector('[data-testid="pca-create-tokens"]')).toBeNull();
+    const marker = usePcaStore.getState().createPending;
+    expect(marker?.ownerEoa).toBe(HARDWARE_OWNER);
+    expect(marker?.txHash).toBe(txHash);
     await unmount();
   });
 

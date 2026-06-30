@@ -6,12 +6,20 @@ const NFT = '0x00000000000000000000000000000000000000a1';
 const TOKEN = '0x00000000000000000000000000000000000000b2';
 const APPROVE_HASH = `0x${'a'.repeat(64)}`;
 const CREATE_HASH = `0x${'c'.repeat(64)}`;
+const TOP_UP_HASH = `0x${'d'.repeat(64)}`;
+const REGISTER_HASH = `0x${'e'.repeat(64)}`;
+const DEREGISTER_HASH = `0x${'f'.repeat(64)}`;
 const ACCOUNT_ID = '7';
+const REGISTERED_AGENT = '0x3333333333333333333333333333333333333333';
 const MOCK_RPC_PATH = '/mock-pca-rpc';
 
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const ZERO_TOPIC = `0x${'0'.repeat(64)}`;
 const MAX_ALLOWANCE = (1n << 96n) - 1n;
+const CREATE_SELECTOR = '0xb034185b';
+const TOP_UP_SELECTOR = '0x0382effb';
+const REGISTER_SELECTOR = '0x047d4c27';
+const DEREGISTER_SELECTOR = '0xf59c6b28';
 
 type WalletMode = 'auto' | 'reject-approve' | 'reject-create';
 
@@ -63,13 +71,14 @@ function pcaSnapshot(owner = WALLET) {
 }
 
 function receipt(hash: string) {
+  const nftHash = [CREATE_HASH, TOP_UP_HASH, REGISTER_HASH, DEREGISTER_HASH].includes(hash);
   return {
     transactionHash: hash,
     transactionIndex: '0x0',
     blockHash: `0x${'b'.repeat(64)}`,
     blockNumber: '0x123',
     from: WALLET,
-    to: hash === CREATE_HASH ? NFT : TOKEN,
+    to: nftHash ? NFT : TOKEN,
     cumulativeGasUsed: '0x5208',
     effectiveGasPrice: '0x1',
     gasUsed: '0x5208',
@@ -188,7 +197,7 @@ async function installMockApis(page: Page) {
       return fulfillJson(route, 200, snapshot);
     }
     if (path === `/api/pca/${ACCOUNT_ID}/agents`) {
-      return fulfillJson(route, 200, { accountId: ACCOUNT_ID, agents: [] });
+      return fulfillJson(route, 200, { accountId: ACCOUNT_ID, agents: [REGISTERED_AGENT] });
     }
 
     return fulfillJson(route, 200, {});
@@ -231,7 +240,7 @@ async function installMockApis(page: Page) {
 
 async function installMockWallet(page: Page, initialChainId = 84532) {
   await page.addInitScript(
-    ({ wallet, nft, token, approveHash, createHash, chainId }) => {
+    ({ wallet, nft, token, approveHash, createHash, topUpHash, registerHash, deregisterHash, chainId, selectors }) => {
       let mode: WalletMode = 'auto';
       let activeChain = chainId;
       const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
@@ -250,8 +259,9 @@ async function installMockWallet(page: Page, initialChainId = 84532) {
             return null;
           }
           if (method === 'eth_sendTransaction') {
-            const tx = (params?.[0] ?? {}) as { to?: string };
+            const tx = (params?.[0] ?? {}) as { to?: string; data?: string };
             const to = tx.to?.toLowerCase();
+            const data = (tx.data ?? '').toLowerCase();
             if (to === token.toLowerCase()) {
               if (mode === 'reject-approve') {
                 const err = new Error('User rejected approve') as Error & { code: number };
@@ -261,13 +271,16 @@ async function installMockWallet(page: Page, initialChainId = 84532) {
               return approveHash;
             }
             if (to === nft.toLowerCase()) {
-              if (mode === 'reject-create') {
+              if (data.startsWith(selectors.create) && mode === 'reject-create') {
                 const err = new Error('User rejected create') as Error & { code: number };
                 err.code = 4001;
                 throw err;
               }
               await new Promise((resolve) => setTimeout(resolve, 250));
-              return createHash;
+              if (data.startsWith(selectors.create)) return createHash;
+              if (data.startsWith(selectors.topUp)) return topUpHash;
+              if (data.startsWith(selectors.register)) return registerHash;
+              if (data.startsWith(selectors.deregister)) return deregisterHash;
             }
           }
           throw new Error(`Mock wallet: unhandled ${method}`);
@@ -305,7 +318,23 @@ async function installMockWallet(page: Page, initialChainId = 84532) {
         },
       };
     },
-    { wallet: WALLET, nft: NFT, token: TOKEN, approveHash: APPROVE_HASH, createHash: CREATE_HASH, chainId: initialChainId },
+    {
+      wallet: WALLET,
+      nft: NFT,
+      token: TOKEN,
+      approveHash: APPROVE_HASH,
+      createHash: CREATE_HASH,
+      topUpHash: TOP_UP_HASH,
+      registerHash: REGISTER_HASH,
+      deregisterHash: DEREGISTER_HASH,
+      chainId: initialChainId,
+      selectors: {
+        create: CREATE_SELECTOR,
+        topUp: TOP_UP_SELECTOR,
+        register: REGISTER_SELECTOR,
+        deregister: DEREGISTER_SELECTOR,
+      },
+    },
   );
 }
 
@@ -323,6 +352,15 @@ async function connectWallet(page: Page, root?: Locator) {
   await expect(page.getByText(/via Mock Hardware Wallet/i).first()).toBeVisible();
 }
 
+async function openWalletManagedPca(page: Page) {
+  await openPca(page);
+  await connectWallet(page);
+  const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+  await expect(walletCard).toBeVisible();
+  await walletCard.getByRole('button', { name: 'Manage' }).click();
+  await expect(page.getByTestId('pca-detail')).toBeVisible();
+}
+
 test.describe('Publishing Conviction hardware-wallet mock lane', () => {
   test.beforeEach(async ({ page }) => {
     await installMockApis(page);
@@ -337,9 +375,10 @@ test.describe('Publishing Conviction hardware-wallet mock lane', () => {
     await openPca(page);
     await connectWallet(page);
 
-    await expect(page.getByTestId('pca-discovered-strip')).toBeVisible();
-    await expect(page.getByTestId('pca-discovered-row')).toContainText(`PCA #${ACCOUNT_ID}`);
-    await expect(page.getByTestId('pca-discovered-row')).toContainText(/connected wallet/i);
+    const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+    await expect(walletCard).toBeVisible();
+    await expect(walletCard).toContainText(/wallet-managed/i);
+    await expect(page.getByTestId('pca-discovered-strip')).toHaveCount(0);
   });
 
   test('blocks hardware create on wrong network until the wallet switches chains', async ({ page }) => {
@@ -389,5 +428,38 @@ test.describe('Publishing Conviction hardware-wallet mock lane', () => {
     await expect(page.getByRole('alert').filter({ hasText: /allowance/i })).toBeVisible({ timeout: 20_000 });
     await expect(page.getByRole('alert').filter({ hasText: /account not created/i })).toBeVisible();
     await expect(page.getByText(/nothing changed/i)).toHaveCount(0);
+  });
+
+  test('wallet-managed top-up signs through the connected wallet and shows the top-up result', async ({ page }) => {
+    await openWalletManagedPca(page);
+    await page.getByLabel('Top-up amount in TRAC').fill('10');
+    await page.getByTestId('pca-topup-btn').click();
+
+    await expect(page.locator('.v10-pca-device-progress-row').filter({ hasText: 'Sign top-up' })).toBeVisible();
+    await expect(page.getByTestId('pca-action-result')).toContainText(/Added 10(\.00)? TRAC/i, { timeout: 20_000 });
+  });
+
+  test('wallet-managed approve registers a publishing wallet through the connected wallet', async ({ page }) => {
+    await openPca(page);
+    await connectWallet(page);
+    const walletCard = page.locator('[data-testid="pca-account-card"][data-owner-mode="wallet"]').filter({ hasText: `PCA #${ACCOUNT_ID}` });
+    await walletCard.getByRole('button', { name: 'Approve wallets' }).click();
+    await expect(page.getByTestId('pca-approve-modal')).toBeVisible();
+    await page.getByTestId('pca-approve-address').fill('0x4444444444444444444444444444444444444444');
+
+    await page.getByTestId('pca-approve-submit').click();
+
+    await expect(page.getByText(/Confirm on your device \(1 of 1\)/i)).toBeVisible();
+    await expect(page.getByTestId('pca-approve-modal')).toContainText(/approved on-chain/i, { timeout: 20_000 });
+  });
+
+  test('wallet-managed remove deregisters a publishing wallet through the connected wallet', async ({ page }) => {
+    await openWalletManagedPca(page);
+    await expect(page.getByRole('button', { name: `Remove ${REGISTERED_AGENT}` })).toBeVisible();
+    await page.getByRole('button', { name: `Remove ${REGISTERED_AGENT}` }).click();
+    await page.getByTestId('pca-deregister-btn').click();
+
+    await expect(page.getByText(/Sign remove wallet/i)).toBeVisible();
+    await expect(page.getByTestId('pca-remove-result')).toContainText(`Removed ${REGISTERED_AGENT}`, { timeout: 20_000 });
   });
 });

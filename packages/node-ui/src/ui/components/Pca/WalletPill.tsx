@@ -24,6 +24,9 @@ export function WalletPill({ className = '' }: { className?: string }) {
   const [error, setError] = useState<string | null>(null);
 
   if (!address) return null;
+  const provider = providerLabel(providerInfo?.name);
+  const stateLabel = wrongNetwork ? 'wrong network' : 'connected';
+  const ariaLabel = `Connected wallet ${address} via ${provider}; ${stateLabel}`;
 
   const onSwitch = async () => {
     setSwitching(true);
@@ -39,12 +42,17 @@ export function WalletPill({ className = '' }: { className?: string }) {
 
   return (
     <div className={['v10-pca-wallet-pill-wrap', className].filter(Boolean).join(' ')}>
-      <div className="v10-pca-wallet-pill" data-state={wrongNetwork ? 'wrong-network' : 'connected'}>
+      <div
+        className="v10-pca-wallet-pill"
+        data-state={wrongNetwork ? 'wrong-network' : 'connected'}
+        role="group"
+        aria-label={ariaLabel}
+      >
         <span className="v10-pca-wallet-pill-main" title={address}>
           {truncateAddress(address)}
         </span>
         <span className="v10-pca-wallet-pill-provider">
-          via {providerLabel(providerInfo?.name)}
+          via {provider}
         </span>
         {wrongNetwork ? (
           <span className="badge badge-warn v10-pca-wallet-pill-network" role="alert">

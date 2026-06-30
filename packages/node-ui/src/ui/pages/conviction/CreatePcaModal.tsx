@@ -112,6 +112,7 @@ export function CreatePcaModal({
   const walletExpectedChainId = useWalletStore((s) => s.expectedChainId);
   const walletChainId = useWalletStore((s) => s.chainId);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const hardwareSelected = ownerKey === 'hardware';
   const [hardwareCreateSteps, setHardwareCreateSteps] = useState<DeviceConfirmStep[]>([]);
   const [hardwareCreateLabel, setHardwareCreateLabel] = useState<string>('Confirm on your device');
   const onWalletProgress = useCallback((event: WalletTxProgressEvent) => {
@@ -197,9 +198,16 @@ export function CreatePcaModal({
   // sponsor's PCA, the new account would discount none of this node's own publishes (a loud
   // informed-consent warning — NOT a hard block; a node may create purely to sponsor others).
   // The per-wallet deregister-first then runs in the self-coverage loop (ApproveWalletsModal).
+  const bindingSigners = useMemo(
+    () => [
+      { address: ownerWallet, kind: 'daemon' as const },
+      ...(hardwareSelected ? [{ address: walletAddress, kind: 'wallet' as const }] : []),
+    ],
+    [hardwareSelected, ownerWallet, walletAddress],
+  );
   const { data: bindings } = useFetch(
-    () => (formActive ? probeWalletBindings(wallets, ownerWallet) : Promise.resolve([])),
-    [walletsKey, ownerWallet, formActive],
+    () => (formActive ? probeWalletBindings(wallets, bindingSigners) : Promise.resolve([])),
+    [walletsKey, ownerWallet, walletAddress, hardwareSelected, formActive],
     0,
   );
   const b1 = useMemo(() => selfCoverageOutlook(bindings ?? []), [bindings]);
@@ -225,7 +233,6 @@ export function CreatePcaModal({
   const belowMinTier = amountValid && amountNum < 25_000;
   const estTier = useMemo(() => discountTierForTrac(amountValid ? amountNum : null), [amountNum, amountValid]);
   const primaryValid = /^\d+$/.test(primaryNode.trim()) && Number(primaryNode.trim()) > 0;
-  const hardwareSelected = ownerKey === 'hardware';
   const hardwareReady =
     !!walletProvider &&
     !!walletAddress &&
@@ -247,6 +254,7 @@ export function CreatePcaModal({
     !statusUnknown &&
     phase === 'form' &&
     (!hardwareSelected || (hardwareReady && hardwarePrimaryLive));
+  const hardwareDismissDisabled = hardwareSelected && phase === 'creating';
 
   const hardwareReadiness = !walletAddress
     ? 'Connect the owner wallet before choosing the hardware path.'
@@ -503,7 +511,7 @@ export function CreatePcaModal({
       testId="pca-create-modal"
       title={replacingAccountId ? `Renew — new PCA to replace #${replacingAccountId}` : 'Create a Publishing Conviction Account'}
       subtitle={replacingAccountId ? 'Re-mint a fresh account seeded from the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
-      dismissDisabled={hardwareSelected && phase === 'creating'}
+      dismissDisabled={hardwareDismissDisabled}
     >
       <div className="v10-modal-body">
         {error && <div className="v10-modal-error" role="alert">{error}</div>}
@@ -733,7 +741,16 @@ export function CreatePcaModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose}>Cancel</button>
+        <button
+          type="button"
+          className="v10-modal-btn"
+          onClick={() => {
+            if (!hardwareDismissDisabled) onClose();
+          }}
+          disabled={hardwareDismissDisabled}
+        >
+          Cancel
+        </button>
         <button
           type="button"
           className="v10-modal-btn primary"

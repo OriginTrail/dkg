@@ -19,14 +19,6 @@ import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 type ViewFilter = 'owned' | 'approved';
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-interface WalletDiscoveredPca {
-  accountId: string;
-  relation: 'wallet';
-  ownerWallet: string;
-}
-
-type OverviewDiscoveredPca = DiscoveredPca | WalletDiscoveredPca;
-
 type OverviewAccount = ResolvedPcaAccount & {
   ownerMode: PcaAccountOwnerMode;
   primaryWallet?: string;
@@ -66,16 +58,12 @@ export function ConvictionOverview() {
   const openTab = useTabsStore((s) => s.openTab);
   const trackAccount = usePcaStore((s) => s.trackAccount);
   const untrackAccount = usePcaStore((s) => s.untrackAccount);
-  const trackedIds = usePcaStore((s) => s.trackedIds);
   const setWalletBootstrap = useWalletStore((s) => s.setBootstrap);
   const initWallet = useWalletStore((s) => s.initWallet);
   const walletBootstrap = useWalletStore((s) => s.bootstrap);
   const connectedWallet = useWalletStore((s) => s.address);
   const wrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);
-  const overview = usePcaOverview();
-  const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
-  const primaryWallet = overview.wallets[0];
   const [bootstrapState, setBootstrapState] = useState<{
     status: WalletBootstrapStatus;
     error: string | null;
@@ -87,6 +75,9 @@ export function ConvictionOverview() {
   }>({ loading: false, error: null, ids: [] });
   const [bootstrapNonce, setBootstrapNonce] = useState(0);
   const [walletDiscoveryNonce, setWalletDiscoveryNonce] = useState(0);
+  const overview = usePcaOverview(30_000, walletDiscovery.ids);
+  const { accounts, loading, covered, refresh, walletsInconclusive } = overview;
+  const primaryWallet = overview.wallets[0];
 
   useEffect(() => {
     let cancelled = false;
@@ -219,23 +210,6 @@ export function ConvictionOverview() {
 
   const onManage = (id: string) => openTab({ id: `conviction:${id}`, label: `PCA #${id}`, closable: true });
   const visible = filter === 'owned' ? [...daemonOwned, ...walletOwned, ...trackedExternal] : approved;
-
-  const walletDiscoveredUntracked = useMemo<WalletDiscoveredPca[]>(
-    () =>
-      walletDiscovery.ids
-        .filter((id) => !trackedIds.includes(id))
-        .filter((id) => !discoveredUntracked.some((d) => d.accountId === id))
-        .map((accountId) => ({
-          accountId,
-          relation: 'wallet',
-          ownerWallet: connectedWallet ?? '',
-        })),
-    [connectedWallet, discoveredUntracked, trackedIds, walletDiscovery.ids],
-  );
-  const discoveredItems = useMemo<OverviewDiscoveredPca[]>(
-    () => [...discoveredUntracked, ...walletDiscoveredUntracked],
-    [discoveredUntracked, walletDiscoveredUntracked],
-  );
 
   const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
   const retryWalletDiscovery = useCallback(() => setWalletDiscoveryNonce((n) => n + 1), []);
@@ -447,7 +421,7 @@ export function ConvictionOverview() {
         </p>
       )}
 
-      <DiscoveredStrip items={discoveredItems} onTrack={trackAccount} onManage={onManage} />
+      <DiscoveredStrip items={discoveredUntracked} onTrack={trackAccount} onManage={onManage} />
 
       <TrackByIdDisclosure onTrack={trackAccount} />
 
@@ -488,7 +462,7 @@ function DiscoveredStrip({
   onTrack,
   onManage,
 }: {
-  items: OverviewDiscoveredPca[];
+  items: DiscoveredPca[];
   onTrack: (id: string) => void;
   onManage: (id: string) => void;
 }) {
@@ -500,7 +474,7 @@ function DiscoveredStrip({
         ⓘ Found on-chain for this node’s wallets or the connected wallet. Track to show them in the grid above.
       </p>
       {items.map((d) => {
-        const bps = 'basics' in d ? d.basics?.discountBps : undefined;
+        const bps = d.basics?.discountBps;
         return (
           <div key={d.accountId} className="v10-pca-discovered-row" data-testid="pca-discovered-row">
             <span className="v10-pca-discovered-label">
@@ -512,9 +486,7 @@ function DiscoveredStrip({
                 ? `your wallet ${d.agentWallet ? truncateAddress(d.agentWallet) : ''} is approved here`
                 : d.relation === 'both'
                   ? 'you own this · your wallet is approved here'
-                  : d.relation === 'wallet'
-                    ? `connected wallet ${truncateAddress(d.ownerWallet)} owns this account`
-                    : 'you own this account'}
+                  : 'you own this account'}
               {/* 🟢/#9 — only show the discount on accounts this node actually DRAWS from
                   (a wallet is an approved agent). On an owned-ONLY account no wallet is
                   approved, so the account's tier isn't a discount this node realizes —

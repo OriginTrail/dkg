@@ -307,6 +307,39 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  it('B1 self-coverage: connected-wallet-owned previous PCA is moved, not treated as a sponsor', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.pcaAgentAccount.mockResolvedValue({ agent: ADDR_A, accountId: '4' });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      if (id === '4') return ownedSnap(CONNECTED_OWNER, { accountId: '4' });
+      const current = ownedSnap(CONNECTED_OWNER, { accountId: '8' });
+      return key ? { ...current, probedKey: { key, registered: true } } : current;
+    });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approved on-chain');
+
+    expect(mocks.walletDeregisterAgent).toHaveBeenCalledWith('4', ADDR_A);
+    expect(mocks.walletRegisterAgent).toHaveBeenCalledWith('8', ADDR_A);
+    expect(mocks.walletDeregisterAgent.mock.invocationCallOrder[0]).toBeLessThan(mocks.walletRegisterAgent.mock.invocationCallOrder[0]);
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('already discounted free');
+    await unmount();
+  });
+
   it('wallet-managed approval disables close/Esc dismissal while a device prompt is active', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,
@@ -322,9 +355,10 @@ describe('ApproveWalletsModal — per-row mapping', () => {
       () => new Promise((resolve) => { resolveRegister = resolve; }),
     );
 
+    const onClose = vi.fn();
     const { container, unmount } = await render(
       React.createElement(ApproveWalletsModal, {
-        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose: vi.fn(),
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
       }),
     );
     await waitForText(container, 'Wallet address(es)');
@@ -333,7 +367,46 @@ describe('ApproveWalletsModal — per-row mapping', () => {
 
     expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
     expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    await act(async () => { container.querySelector('.v10-modal-overlay')!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(onClose).not.toHaveBeenCalled();
 
+    resolveRegister({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true, txHash: '0xwalletreg' });
+    await waitForText(container, 'approved on-chain');
+    await unmount();
+  });
+
+  it('wallet-managed renew progress counts only wallet-signed writes, not daemon deregisters', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchPca.mockImplementation(async (id: string) =>
+      id === '4'
+        ? daemonSnap({ accountId: '4' })
+        : ownedSnap(CONNECTED_OWNER, { accountId: '8' }),
+    );
+    mocks.pcaRemoveAgent.mockResolvedValue({ accountId: '4', agent: ADDR_A, removed: true });
+    let resolveRegister!: (value: unknown) => void;
+    mocks.walletRegisterAgent.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveRegister = resolve; }),
+    );
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', deregisterFrom: '4', initialMode: 'sponsor', seedBulk: ADDR_A, onClose: vi.fn(),
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'Confirm on your device (1 of 1)');
+
+    expect(mocks.pcaRemoveAgent).toHaveBeenCalledWith('4', ADDR_A);
+    expect(container.textContent).not.toContain('Confirm on your device (1 of 2)');
     resolveRegister({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true, txHash: '0xwalletreg' });
     await waitForText(container, 'approved on-chain');
     await unmount();
