@@ -3032,7 +3032,10 @@ export class DKGPublisher implements Publisher {
         // phase; adapters upgrading to the new hook regain the
         // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
         let wroteAhead = false;
-        const emitWriteAheadStart = (info?: { txHash?: string }) => {
+        const emitPhase = async (phase: string, status: 'start' | 'end') => {
+          await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+        };
+        const emitWriteAheadStart = async (info?: { txHash?: string }) => {
           if (wroteAhead) return;
           wroteAhead = true;
           // PR #241 Codex iter-5: emit a hash-bearing phase BEFORE the
@@ -3052,10 +3055,10 @@ export class DKGPublisher implements Publisher {
           // matching end" golden-sequence invariant.
           if (info?.txHash) {
             const phase = `chain:txsigned:tx-${info.txHash}`;
-            onPhase?.(phase, 'start');
-            onPhase?.(phase, 'end');
+            await emitPhase(phase, 'start');
+            await emitPhase(phase, 'end');
           }
-          onPhase?.('chain:writeahead', 'start');
+          await emitPhase('chain:writeahead', 'start');
         };
         // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
         // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
@@ -3906,7 +3909,10 @@ export class DKGPublisher implements Publisher {
     let txResult: { success: boolean; hash: string; blockNumber?: number; txIndex?: number; publisherAddress?: string };
     let earlyReturn: PublishResult | undefined;
     let wroteAhead = false;
-    const emitWriteAheadStart = (info?: { txHash?: string }) => {
+    const emitPhase = async (phase: string, status: 'start' | 'end') => {
+      await (onPhase?.(phase, status) as unknown as Promise<void> | void);
+    };
+    const emitWriteAheadStart = async (info?: { txHash?: string }) => {
       if (wroteAhead) return;
       wroteAhead = true;
       // Mirror the publish path (above): emit a balanced, hash-bearing
@@ -3915,10 +3921,10 @@ export class DKGPublisher implements Publisher {
       // `chain:writeahead:start` for legacy consumers.
       if (info?.txHash) {
         const phase = `chain:txsigned:tx-${info.txHash}`;
-        onPhase?.(phase, 'start');
-        onPhase?.(phase, 'end');
+        await emitPhase(phase, 'start');
+        await emitPhase(phase, 'end');
       }
-      onPhase?.('chain:writeahead', 'start');
+      await emitPhase('chain:writeahead', 'start');
     };
     // CRITICAL CORRECTNESS INVARIANT (consensus): the digest fields the
     // peers sign MUST be byte-identical to what the on-chain update tx

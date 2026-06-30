@@ -1639,7 +1639,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.timestamps?.failedAt).toBeUndefined();
   });
 
-  it('resets broadcast knowledge asset VM publish jobs and releases wallet locks during recovery', async () => {
+  it('keeps broadcast knowledge asset VM publish jobs pending instead of blind retrying', async () => {
     const publisher = createPublisher();
 
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -1659,21 +1659,19 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     const recovered = await publisher.recover();
     const job = await publisher.getStatus(jobId);
-    const released = await store.query(`SELECT ?p ?o WHERE {
+    const lock = await store.query(`SELECT ?p ?o WHERE {
       GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
         <${walletLockSubject('wallet-1')}> ?p ?o .
       }
     }`);
 
-    expect(recovered).toBe(1);
-    expect(job?.status).toBe('accepted');
-    expect(job?.recovery?.action).toBe('reset_to_accepted');
-    expect(job?.recovery?.recoveredFromStatus).toBe('broadcast');
-    expect(job?.recovery?.txHashChecked).toBe('0xkavm');
-    expect(job?.broadcast).toBeUndefined();
-    expect(released.type).toBe('bindings');
-    if (released.type !== 'bindings') return;
-    expect(released.bindings).toHaveLength(0);
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('broadcast');
+    expect(job?.broadcast?.txHash).toBe('0xkavm');
+    expect(job?.recovery).toBeUndefined();
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings.length).toBeGreaterThan(0);
   });
 
   it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
