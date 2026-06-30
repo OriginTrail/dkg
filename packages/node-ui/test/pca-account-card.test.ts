@@ -82,8 +82,7 @@ describe('PcaAccountCard', () => {
     expect(container.querySelector('[data-state="owned"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="pca-account-card"]')).toBeTruthy(); // e2e anchor
     expect(container.textContent).toContain('discounts nothing yet');
-    // formatTrac uses toFixed (no thousands separators).
-    expect(container.textContent).toContain('100000.00 TRAC');
+    expect(container.textContent).toContain('100,000 TRAC');
     await unmount();
   });
 
@@ -135,7 +134,7 @@ describe('PcaAccountCard', () => {
     await unmount();
   });
 
-  it('disables "Approve wallets" when the owner is not manageable by this browser', async () => {
+  it('enables daemon owner actions and hides owner writes for external tracked accounts', async () => {
     const onApproveWallets = vi.fn();
     const enabled = await render(
       React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: true }), onApproveWallets }),
@@ -146,15 +145,15 @@ describe('PcaAccountCard', () => {
     expect(approveBtn.disabled).toBe(false);
     await enabled.unmount();
 
-    const disabled = await render(
+    const external = await render(
       React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: false }), onApproveWallets }),
     );
-    approveBtn = Array.from(disabled.container.querySelectorAll('button')).find(
+    approveBtn = Array.from(external.container.querySelectorAll('button')).find(
       (b) => b.textContent === 'Approve wallets',
     )!;
-    expect(approveBtn.disabled).toBe(true);
-    expect(approveBtn.getAttribute('title')?.toLowerCase()).toContain('connect owner wallet');
-    await disabled.unmount();
+    expect(approveBtn).toBeUndefined();
+    expect(external.container.textContent).toContain('tracked external');
+    await external.unmount();
   });
 
   it('enables wallet-managed owner controls and states that the connected wallet signs', async () => {
@@ -208,7 +207,7 @@ describe('PcaAccountCard', () => {
     await unmount();
   });
 
-  it('approved card surfaces the round-robin "N of M approved" footgun + copy-unapproved', async () => {
+  it('approved card surfaces the round-robin "N of M approved" footgun without duplicating wallet rows', async () => {
     const account = acct({
       classification: 'approved',
       owner: '0xSOMEONEELSE0000000000000000000000000000',
@@ -227,17 +226,39 @@ describe('PcaAccountCard', () => {
     );
     expect(container.querySelector('[data-state="approved"]')).toBeTruthy();
     expect(container.textContent).toContain('2 of 3 wallets approved');
+    expect(container.textContent).toContain('2 of 3 node publishing wallets approved');
     expect(container.textContent).toContain('pay the direct cost');
-    // The first unapproved wallet has a copy control.
-    const copy = Array.from(container.querySelectorAll('.v10-pca-copy-btn')).find((b) =>
-      b.getAttribute('aria-label')?.includes('0xE0c5'),
-    );
-    expect(copy).toBeTruthy();
+    expect(container.querySelectorAll('.v10-pca-wallet-row')).toHaveLength(1); // owner row only
     // Use-for-publishing wired.
     Array.from(container.querySelectorAll('button'))
       .find((b) => b.textContent === 'Use for publishing')!
       .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     expect(onUse).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  it('tracked external owner card exposes View details and Stop tracking', async () => {
+    const onManage = vi.fn();
+    const onRemove = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'external',
+      approvedCount: 0,
+      snapshot: snap({ owner: '0xSOMEONEELSE0000000000000000000000000000' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, view: 'owner', onManage, onRemove, onApproveWallets: vi.fn() }),
+    );
+    const view = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'View details')!;
+    const stop = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Stop tracking')!;
+    expect(view).toBeTruthy();
+    expect(stop).toBeTruthy();
+    expect(container.textContent).not.toContain('Manage');
+    view.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    stop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onManage).toHaveBeenCalledWith('7');
+    expect(onRemove).toHaveBeenCalledWith('7');
     await unmount();
   });
 

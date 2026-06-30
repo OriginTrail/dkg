@@ -4,6 +4,7 @@
 export { CopyButton, useCopy } from './CopyButton.js';
 export {
   truncateAddress,
+  formatPcaTrac,
   formatWeiToTrac,
   formatRelativeExpiry,
   nativeGasSymbol,

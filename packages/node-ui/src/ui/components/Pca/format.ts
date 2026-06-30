@@ -10,6 +10,33 @@ export function truncateAddress(address: string, head = 6, tail = 4): string {
 }
 
 /**
+ * PCA-facing TRAC display: group thousands and hide fractional noise for
+ * amounts >= 10 TRAC. Small non-zero amounts keep up to `digits` decimals so
+ * sub-10 balances/fees remain legible. Display-only; transaction inputs keep
+ * their raw strings.
+ */
+const PCA_DISPLAY_DASH = '\u2014';
+
+export function formatPcaTrac(value: unknown, digits = 2): string {
+  if (value == null) return PCA_DISPLAY_DASH;
+  let n: number;
+  if (typeof value === 'number') {
+    n = value;
+  } else {
+    const s = String(value).trim();
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return PCA_DISPLAY_DASH;
+    n = Number(s);
+  }
+  if (!Number.isFinite(n)) return PCA_DISPLAY_DASH;
+  const abs = Math.abs(n);
+  const fractionDigits = abs > 0 && abs < 10 ? digits : 0;
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: fractionDigits,
+  }).format(n);
+}
+
+/**
  * Format a wei (1e18) TRAC amount string for display. The snapshot pre-formats
  * `committedTRAC`/`topUpBuffer` into `*Trac` ether strings, but `baseEpochAllowance`
  * has no formatted twin — this converts its raw wei via BigInt so we never import
@@ -29,8 +56,7 @@ export function formatWeiToTrac(wei: string | null | undefined, digits = 2): str
   const int = v / base;
   // Padded fractional digits, truncated to `digits` (display only).
   const fracStr = (v % base + base).toString().slice(1).slice(0, digits);
-  const num = Number(`${int}.${fracStr || '0'}`);
-  return `${neg ? '-' : ''}${num.toFixed(digits)}`;
+  return formatPcaTrac(`${neg ? '-' : ''}${int}.${fracStr || '0'}`, digits);
 }
 
 // Native gas-token symbol per chain (DRIFT-4 OUTCOME = ETH/xDAI/NEURO) — the

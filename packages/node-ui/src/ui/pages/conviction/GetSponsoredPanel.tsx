@@ -204,11 +204,11 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">
-          <h3 className="v10-pca-detail-section-title">Track your approval</h3>
+          <h3 className="v10-pca-detail-section-title">Can&apos;t find it automatically?</h3>
           {/* GAP-3 discovery — surface any sponsoring PCA we found on-chain; pre-fill the
               check (the user confirms; nothing is auto-tracked). */}
           <p className="v10-pca-detail-hint">
-            After the PCA owner confirms approval, enter the PCA ID here to track whether this node&apos;s wallets are covered.
+            If the PCA owner gives you an account id, check it here to track whether this node&apos;s wallets are covered.
           </p>
           {discovered && discovered.length > 0 && (
             <p className="v10-pca-detail-hint" role="status" data-testid="pca-sponsor-discovered">

@@ -1,9 +1,8 @@
 import React from 'react';
-import { formatTrac } from '../../lib/formatTrac.js';
 import {
   HealthChip,
   WalletRow,
-  CopyButton,
+  formatPcaTrac,
   formatWeiToTrac,
   formatRelativeExpiry,
 } from '../../components/Pca/index.js';
@@ -175,8 +174,8 @@ export function PcaAccountCard({
           {titleBand}
           <StatStrip
             items={[
-              { id: 'committed', label: 'Committed', value: `${formatTrac(snapshot.committedTRACTrac)} TRAC` },
-              { id: 'buffer', label: 'Top-up buffer', value: `${formatTrac(snapshot.topUpBufferTrac)} TRAC` },
+              { id: 'committed', label: 'Committed', value: `${formatPcaTrac(snapshot.committedTRACTrac)} TRAC` },
+              { id: 'buffer', label: 'Top-up buffer', value: `${formatPcaTrac(snapshot.topUpBufferTrac)} TRAC` },
               { id: 'per-epoch', label: 'Per-epoch allowance', value: `${formatWeiToTrac(snapshot.baseEpochAllowance)} TRAC` },
               { id: 'wallets', label: 'Publishing wallets', value: `${snapshot.agentCount} / 100` },
             ]}
@@ -227,32 +226,45 @@ export function PcaAccountCard({
             <span title={`Expiry epoch ${snapshot.expiresAtEpoch}`}>epoch {snapshot.expiresAtEpoch} ⓘ</span>
           </p>
           <div className="v10-pca-card-actions">
-            <button
-              type="button"
-              className="v10-pca-card-btn primary"
-              onClick={() => onManage?.(accountId)}
-            >
-              Manage
-            </button>
-            <button
-              type="button"
-              className="v10-pca-card-btn"
-              onClick={() => onApproveWallets?.(accountId)}
-              disabled={!ownerWritesEnabled || !onApproveWallets}
-              title={ownerActionTitle}
-            >
-              Approve wallets
-            </button>
+            {onManage && (
+              <button
+                type="button"
+                className="v10-pca-card-btn primary"
+                onClick={() => onManage(accountId)}
+              >
+                {ownerMode === 'external' ? 'View details' : 'Manage'}
+              </button>
+            )}
+            {ownerMode === 'external' ? (
+              onRemove && (
+                <button
+                  type="button"
+                  className="v10-pca-card-btn"
+                  onClick={() => onRemove(accountId)}
+                >
+                  Stop tracking
+                </button>
+              )
+            ) : (
+              <button
+                type="button"
+                className="v10-pca-card-btn"
+                onClick={() => onApproveWallets?.(accountId)}
+                disabled={!ownerWritesEnabled || !onApproveWallets}
+                title={ownerActionTitle}
+              >
+                Approve wallets
+              </button>
+            )}
           </div>
         </div>
       </div>
     );
   }
 
-  // --- Approved-for-this-node coverage card (also the read-only tracked/error case) ---
+  // --- Approved-for-this-node compact account summary ---
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
   const inconclusive = account.probesInconclusive;
-  const firstUnapproved = account.walletProbes.find((p) => p.registered !== true)?.wallet;
   return (
     <div className="card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
       <div className="card-body">
@@ -275,16 +287,11 @@ export function PcaAccountCard({
           <span className="v10-pca-card-meta-sep"> · </span>
           <span title={`Expiry epoch ${snapshot.expiresAtEpoch}`}>epoch {snapshot.expiresAtEpoch} ⓘ</span>
         </p>
-        <div className="v10-pca-card-wallets">
-          {account.walletProbes.map((p) => (
-            <WalletRow
-              key={p.wallet}
-              address={p.wallet}
-              status={p.registered === true ? 'approved' : p.registered === false ? 'not approved' : 'unknown'}
-              statusTone={p.registered === true ? 'success' : p.registered === false ? 'danger' : 'neutral'}
-            />
-          ))}
-        </div>
+        <p className="v10-pca-card-summary">
+          {inconclusive
+            ? 'Approval coverage could not be fully verified.'
+            : `${account.approvedCount} of ${account.walletCount} node publishing wallet${account.walletCount === 1 ? '' : 's'} approved.`}
+        </p>
         {inconclusive ? (
           <p className="v10-pca-card-warn">Couldn’t verify which wallets are approved — retry.</p>
         ) : !allApproved && account.walletCount > 0 ? (
@@ -293,21 +300,18 @@ export function PcaAccountCard({
           </p>
         ) : null}
         <div className="v10-pca-card-actions">
+          {onManage && (
+            <button type="button" className="v10-pca-card-btn primary" onClick={() => onManage(accountId)}>
+              View details
+            </button>
+          )}
           {/* L9: no global "publish" target — the discount auto-applies at the
               per-CG publish CTA. Guidance hint, not an inert disabled button.
               (If a caller ever wires onUseForPublishing, render the action.) */}
-          {onUseForPublishing ? (
+          {onUseForPublishing && (
             <button type="button" className="v10-pca-card-btn primary" onClick={() => onUseForPublishing(accountId)}>
               Use for publishing
             </button>
-          ) : (
-            <p className="v10-pca-card-hint">
-              Publish from any context graph — the discount applies automatically to your approved
-              wallets.
-            </p>
-          )}
-          {firstUnapproved && (
-            <CopyButton value={firstUnapproved} label={`Copy unapproved wallet ${firstUnapproved}`} />
           )}
         </div>
       </div>

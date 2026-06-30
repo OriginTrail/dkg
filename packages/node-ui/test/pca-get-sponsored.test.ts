@@ -116,7 +116,7 @@ describe('GetSponsoredPanel', () => {
       probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase() } : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, 'Track your approval');
+    await waitForText(container, "Can't find it automatically?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -151,7 +151,7 @@ describe('GetSponsoredPanel', () => {
         : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, 'Track your approval');
+    await waitForText(container, "Can't find it automatically?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -184,7 +184,7 @@ describe('GetSponsoredPanel', () => {
       probedKey: key ? { key, registered: true } : undefined, // approved, but…
     }));
     const handle = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(handle.container, 'Track your approval');
+    await waitForText(handle.container, "Can't find it automatically?");
     setInputValue(handle.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(handle.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -220,7 +220,7 @@ describe('GetSponsoredPanel', () => {
     });
     mocks.fetchPca.mockRejectedValue(new Error('rpc down')); // every per-wallet probe → null
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, 'Track your approval');
+    await waitForText(container, "Can't find it automatically?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;

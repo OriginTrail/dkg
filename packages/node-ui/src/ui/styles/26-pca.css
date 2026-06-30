@@ -876,3 +876,144 @@
   cursor: pointer;
 }
 .v10-pca-alert-action:hover { text-decoration: underline; }
+
+/* ----- PCA UX follow-up: combined coverage + compact controls ----- */
+.v10-pca-linked-pcas {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+.v10-pca-card-grid-compact {
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  margin-top: 10px;
+}
+.v10-pca-card-summary {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.v10-pca-overview-owner-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.v10-pca-overview-wallet {
+  width: auto;
+  max-width: min(420px, 100%);
+  margin-left: 0;
+}
+.v10-pca-wallet-connect.compact {
+  min-width: 0;
+  max-width: 420px;
+}
+.v10-pca-wallet-connect.compact .v10-pca-wallet-note {
+  max-width: 420px;
+}
+.v10-pca-wallet-pill {
+  max-width: 100%;
+}
+.v10-pca-wallet-pill-main,
+.v10-pca-wallet-pill-provider {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-pca-wallet-pill-wrap {
+  max-width: 100%;
+}
+.v10-pca-modal-box .v10-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.v10-pca-modal-box .v10-pca-detail-section {
+  margin-top: 0;
+}
+.v10-pca-handshake-copyall {
+  margin-top: 8px;
+}
+.v10-pca-create-section {
+  margin-bottom: 0;
+}
+.v10-pca-create-section + .v10-pca-create-section {
+  padding-top: 18px;
+}
+.v10-pca-owner-key-card {
+  gap: 10px;
+  padding: 12px;
+}
+.v10-pca-owner-key-readiness .v10-pca-wallet-connect,
+.v10-pca-detail-band + .v10-modal-tip .v10-pca-wallet-pill-wrap {
+  margin-top: 8px;
+}
+.v10-pca-node-picker-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+.v10-pca-node-picker-option {
+  display: grid;
+  grid-template-columns: minmax(64px, auto) minmax(0, 1fr) auto minmax(120px, auto) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface);
+  cursor: pointer;
+}
+.v10-pca-node-picker-option.active,
+.v10-pca-node-picker-option.selected {
+  border-color: var(--text-link);
+  background: var(--bg-hover);
+}
+.v10-pca-node-picker-peer {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v10-pca-node-picker-stake {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.v10-pca-node-picker-paste {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  margin-top: 10px;
+}
+.v10-pca-create-review {
+  gap: 8px;
+  max-width: 560px;
+}
+.v10-pca-create-review > div {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, auto);
+  align-items: center;
+  gap: 16px;
+}
+@media (max-width: 720px) {
+  .v10-pca-overview-owner-actions {
+    justify-content: flex-start;
+  }
+  .v10-pca-node-picker-option {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .v10-pca-node-picker-option .badge,
+  .v10-pca-node-picker-stake,
+  .v10-pca-node-picker-own {
+    grid-column: 2;
+  }
+}

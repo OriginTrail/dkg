@@ -20,6 +20,8 @@ import {
   EligibilityVerdictBanner,
   SponsorshipHandshake,
   DeviceConfirmProgress,
+  formatPcaTrac,
+  formatWeiToTrac,
 } from '../src/ui/components/Pca/index.js';
 import {
   healthForSnapshot,
@@ -66,6 +68,22 @@ beforeEach(() => {
 });
 afterEach(() => {
   document.body.innerHTML = '';
+});
+
+describe('PCA display formatters', () => {
+  it('groups TRAC amounts and suppresses decimals at 10 TRAC and above', () => {
+    expect(formatPcaTrac('100000.0')).toBe('100,000');
+    expect(formatPcaTrac('83333.33')).toBe('83,333');
+    expect(formatPcaTrac('9.25')).toBe('9.25');
+    expect(formatPcaTrac('0')).toBe('0');
+    expect(formatPcaTrac('not-a-number')).toBe('\u2014');
+  });
+
+  it('formats wei TRAC amounts with PCA display rules', () => {
+    expect(formatWeiToTrac('1000000000000000000000')).toBe('1,000');
+    expect(formatWeiToTrac('9250000000000000000')).toBe('9.25');
+    expect(formatWeiToTrac('not-wei')).toBe('\u2014');
+  });
 });
 
 describe('HealthChip', () => {

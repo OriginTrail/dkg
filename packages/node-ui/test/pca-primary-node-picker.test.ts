@@ -61,7 +61,7 @@ describe('PrimaryNodePicker', () => {
     const rows = opts(container);
     expect(rows.length).toBe(3);
     expect(container.textContent).toContain('#11');
-    expect(container.textContent).toContain('50000.00 TRAC staked'); // wei→TRAC
+    expect(container.textContent).toContain('50,000 TRAC staked'); // wei→TRAC
     expect(container.textContent?.toLowerCase()).not.toContain('ask');
     await unmount();
   });
