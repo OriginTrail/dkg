@@ -152,6 +152,15 @@ async function makeBundle(): Promise<string> {
   return dir;
 }
 
+async function makeLargeTaggedBundle(tagCount = 5200): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'okf-large-bundle-'));
+  const tags = Array.from({ length: tagCount }, (_, i) => `  - tag-${String(i).padStart(4, '0')}`)
+    .join('\n');
+  await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.1"\n---\n\n# Root\n');
+  await writeFile(join(dir, 'bulk.md'), `---\ntype: Thing\ntitle: Bulk\ntags:\n${tags}\n---\n\nplain body\n`);
+  return dir;
+}
+
 describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
   let stub: Awaited<ReturnType<typeof startStub>>;
   let dkgHome: string;
@@ -286,6 +295,98 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(manifest.mode).toBe('bulk-private-lifecycle');
     expect(manifest.assetName).toBe('okf-private-bulk-root');
     expect(manifest.chunksDone).toBe(manifest.totalChunks);
+    expect(manifest.draftCreated).toBe(true);
+    expect(manifest.finalized).toBe(true);
+    expect(manifest.shared).toBe(true);
+  });
+
+  it('--private resumes a draft lifecycle without recreating or rewriting completed chunks', async () => {
+    clear();
+    const bundle = await makeLargeTaggedBundle();
+    await writeFile(
+      join(bundle, '.okf-import-manifest.json'),
+      JSON.stringify(
+        {
+          contextGraphId: 'cg-priv-resume',
+          mode: 'bulk-private-lifecycle',
+          assetName: 'okf-private-bulk-root',
+          chunkSize: 5000,
+          chunksDone: 1,
+          totalChunks: 2,
+          draftCreated: true,
+          finalized: false,
+          shared: false,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const r = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-resume', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.importMode).toBe('bulk-private-lifecycle');
+    expect(out.chunks).toBe(2);
+
+    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(0);
+    const writeCalls = stub.calls.filter((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]));
+    expect(writeCalls).toHaveLength(1);
+    const writeBody = JSON.parse(writeCalls[0]!.body || '{}');
+    expect(writeBody.quads).toHaveLength(Number(out.triples) - 5000);
+    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/swm/share');
+
+    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    expect(manifest.chunksDone).toBe(2);
+    expect(manifest.totalChunks).toBe(2);
+    expect(manifest.draftCreated).toBe(true);
+    expect(manifest.finalized).toBe(true);
+    expect(manifest.shared).toBe(true);
+  });
+
+  it('--private resumes after finalize by sharing without more writes', async () => {
+    clear();
+    const bundle = await makeBundle();
+    await writeFile(
+      join(bundle, '.okf-import-manifest.json'),
+      JSON.stringify(
+        {
+          contextGraphId: 'cg-priv-finalized',
+          mode: 'bulk-private-lifecycle',
+          assetName: 'okf-private-bulk-root',
+          chunkSize: 5000,
+          chunksDone: 1,
+          totalChunks: 1,
+          draftCreated: true,
+          finalized: true,
+          shared: false,
+        },
+        null,
+        2,
+      ),
+    );
+
+    const r = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-finalized', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.triplesWritten).toBe(0);
+
+    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(0);
+    expect(paths.some((p) => p.endsWith('/wm/write'))).toBe(false);
+    expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets/okf-private-bulk-root/swm/share')).toHaveLength(1);
+
+    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    expect(manifest.chunksDone).toBe(1);
+    expect(manifest.totalChunks).toBe(1);
     expect(manifest.draftCreated).toBe(true);
     expect(manifest.finalized).toBe(true);
     expect(manifest.shared).toBe(true);
