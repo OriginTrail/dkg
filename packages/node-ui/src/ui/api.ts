@@ -1829,8 +1829,8 @@ export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
  * The daemon resolves these via its Hub config (the browser does NOT re-resolve the Hub). Minimal
  * set: the NFT wrapper (every wallet-signed write + the ERC721Enumerable owned-PCA walk + the mint
  * `Transfer` accountId decode all target it), the TRAC token (approve/allowance), the chain id, and
- * the RPC endpoints for a viem publicClient. `nativeCurrency` is NOT here — the browser derives the
- * gas symbol from `nativeGasSymbol(chainId)`.
+ * the browser-safe RPC endpoints for a viem publicClient. `nativeCurrency` is NOT here — the browser
+ * derives the gas symbol from `nativeGasSymbol(chainId)`.
  */
 export interface PcaContracts {
   /** DKGPublishingConvictionNFT address (EIP-55). */
@@ -1840,8 +1840,10 @@ export interface PcaContracts {
   /** Chain id; may be the compound `"slug:chainId"` form (e.g. `"base:84532"`) — extract the numeric
    *  tail for the viem `Chain.id`. */
   chainId: string | number;
-  /** RPC endpoints for the viem publicClient (reads + receipt polling). */
+  /** Browser-safe RPC endpoints for the viem publicClient (reads + receipt polling). */
   rpcUrls: string[];
+  /** Optional wallet-public RPC endpoints safe to hand to wallet_addEthereumChain. */
+  walletRpcUrls?: string[];
 }
 
 /**

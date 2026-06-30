@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
+import type { PcaRpcMethod } from '../src/chain-adapter.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
@@ -224,12 +225,42 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
 
   it('getPublishingConvictionContracts returns checksummed nft/token plus chainId and rpcUrls', async () => {
     const mock = new MockChainAdapter('mock:31337', SIGNER);
-    const contracts = await mock.getPublishingConvictionContracts();
-    expect(contracts.nft).toBe(ethers.getAddress(contracts.nft));
-    expect(contracts.token).toBe(ethers.getAddress(contracts.token));
-    expect(contracts.nft).not.toBe(contracts.token);
-    expect(contracts.chainId).toBe('mock:31337');
-    expect(Array.isArray(contracts.rpcUrls)).toBe(true);
+    const c = await mock.getPublishingConvictionContracts();
+    expect(c.nft).toBe(ethers.getAddress(c.nft));
+    expect(c.token).toBe(ethers.getAddress(c.token));
+    expect(c.nft).not.toBe(c.token);
+    expect(c.chainId).toBe('mock:31337');
+    expect(c.rpcUrls).toEqual([]);
+    expect(c.walletRpcUrls).toEqual([]);
+  });
+
+  it('getPublishingConvictionContracts does not leak SECRETKEY from adapter getRpcUrls', async () => {
+    class SecretRpcMock extends MockChainAdapter {
+      override getRpcUrls(): string[] {
+        return ['https://rpc.example/v2/SECRETKEY'];
+      }
+    }
+    const mock = new SecretRpcMock('mock:31337', SIGNER);
+    const c = await mock.getPublishingConvictionContracts();
+    expect(JSON.stringify(c)).not.toContain('SECRETKEY');
+    expect(JSON.stringify(c)).not.toContain('https://rpc.example');
+    expect(c.rpcUrls).toEqual([]);
+  });
+
+  it('requestPublishingConvictionRpc covers the full PCA RPC method union', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const methods: PcaRpcMethod[] = [
+      'eth_chainId',
+      'eth_call',
+      'eth_getTransactionReceipt',
+      'eth_getTransactionByHash',
+      'eth_blockNumber',
+      'eth_getBlockByNumber',
+    ];
+
+    for (const method of methods) {
+      await expect(mock.requestPublishingConvictionRpc(method, [])).resolves.not.toBeUndefined();
+    }
   });
 
   it('toShardingTableNode normalizes named object and positional tuple shapes', () => {

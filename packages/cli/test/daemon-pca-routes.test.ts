@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { NoChainAdapter, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handlePcaRoutes } from '../src/daemon/routes/pca.js';
@@ -49,6 +49,10 @@ function runCtx(
   } as unknown as RequestContext;
   return { res, done: handlePcaRoutes(ctx) };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('daemon /api/pca V10 caller contract', () => {
   it('POST /api/pca with tokens + primaryNode → 200 and forwards the node (OT-RFC-51)', async () => {
@@ -1207,21 +1211,46 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   // ----- sub-PR #2: GET /api/pca/contracts (browser bootstrap) -----
   const CONTRACTS_FIXTURE = {
-    nft: '0x' + 'aB'.repeat(20),
-    token: '0x' + 'Cd'.repeat(20),
+    nft: ethers.getAddress('0x' + 'ab'.repeat(20)),
+    token: ethers.getAddress('0x' + 'cd'.repeat(20)),
     chainId: 'base:84532',
-    rpcUrls: ['https://rpc.example/1', 'https://rpc.example/2'],
+    rpcUrls: ['https://rpc.example/v2/SECRETKEY', 'https://rpc.example/2'],
+    walletRpcUrls: ['https://wallet-rpc.example/base-sepolia', '/api/pca/rpc', 'ws://wallet-rpc.example'],
   };
+  const contractsAgent = (overrides: Record<string, unknown>) => ({
+    supportsPublishingConvictionNft: true,
+    supportsPublishingConvictionRpc: true,
+    ...overrides,
+  });
 
-  it('GET /api/pca/contracts → 200 { nft, token, chainId, rpcUrls } verbatim (chainId AS-IS)', async () => {
-    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE };
+  it('GET /api/pca/contracts returns no wallet RPCs when the adapter omits them', async () => {
+    const agent = contractsAgent({
+      getPublishingConvictionContracts: async () => {
+        const { walletRpcUrls: _walletRpcUrls, ...contracts } = CONTRACTS_FIXTURE;
+        return contracts;
+      },
+    });
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).walletRpcUrls).toEqual([]);
+  });
+
+  it('GET /api/pca/contracts returns a same-origin RPC proxy and never leaks adapter URLs', async () => {
+    const agent = contractsAgent({ getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE });
     const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
     await done;
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
-    expect(body).toEqual(CONTRACTS_FIXTURE); // passed through 1:1
+    expect(body).toEqual({
+      ...CONTRACTS_FIXTURE,
+      rpcUrls: ['/api/pca/rpc'],
+      walletRpcUrls: ['https://wallet-rpc.example/base-sepolia'],
+    });
     expect(body.chainId).toBe('base:84532'); // compound, NOT pre-stripped
-    expect(Array.isArray(body.rpcUrls)).toBe(true);
+    expect(res.body).not.toContain('SECRETKEY');
+    expect(res.body).not.toContain('https://rpc.example');
+    expect(res.body).not.toContain('ws://wallet-rpc.example');
   });
 
   it('GET /api/pca/contracts → 503 when the adapter lacks the PCA surface (lookup not called)', async () => {
@@ -1233,8 +1262,21 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     expect(called).toBe(false);
   });
 
+  it('GET /api/pca/contracts returns 503 when the daemon RPC bridge is unavailable', async () => {
+    let called = false;
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: false,
+      getPublishingConvictionContracts: async () => { called = true; return CONTRACTS_FIXTURE; },
+    };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
   it('GET /api/pca/contracts → 503 FEATURE_UNAVAILABLE when the facade returns null (no code)', async () => {
-    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => null };
+    const agent = contractsAgent({ getPublishingConvictionContracts: async () => null });
     const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
     await done;
     expect(res.statusCode).toBe(503);
@@ -1245,6 +1287,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     for (const code of ['CALL_EXCEPTION', 'BAD_DATA']) {
       const agent = {
         supportsPublishingConvictionNft: true,
+        supportsPublishingConvictionRpc: true,
         getPublishingConvictionContracts: async () => { const e: any = new Error('addr read failed'); e.code = code; throw e; },
       };
       const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
@@ -1255,26 +1298,368 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
   });
 
   it('GET /api/pca/contracts → 503 transport / 503 noChain+unavailable / 500 generic', async () => {
-    const transport = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw Object.assign(new Error('exhausted'), { code: 'RPC_ENDPOINTS_EXHAUSTED' }); } };
+    const transport = contractsAgent({ getPublishingConvictionContracts: async () => { throw Object.assign(new Error('exhausted'), { code: 'RPC_ENDPOINTS_EXHAUSTED' }); } });
     const t = runCtx('GET', '/api/pca/contracts', transport); await t.done;
     expect(t.res.statusCode).toBe(503);
     expect(JSON.parse(t.res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
 
-    const noChain = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('No blockchain configured'); } };
+    const noChain = contractsAgent({ getPublishingConvictionContracts: async () => { throw new Error('No blockchain configured'); } });
     const n = runCtx('GET', '/api/pca/contracts', noChain); await n.done;
     expect(n.res.statusCode).toBe(503);
 
-    const unavail = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('DKGPublishingConvictionNFT is not deployed on this Hub'); } };
+    const unavail = contractsAgent({ getPublishingConvictionContracts: async () => { throw new Error('DKGPublishingConvictionNFT is not deployed on this Hub'); } });
     const u = runCtx('GET', '/api/pca/contracts', unavail); await u.done;
     expect(u.res.statusCode).toBe(503);
 
-    const generic = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('boom'); } };
+    const generic = contractsAgent({
+      getPublishingConvictionContracts: async () => { throw new Error('boom https://rpc.example/v2/SECRETKEY'); },
+    });
     const g = runCtx('GET', '/api/pca/contracts', generic); await g.done;
     expect(g.res.statusCode).toBe(500);
+    expect(g.res.body).toContain('getPublishingConvictionContracts failed');
+    expect(g.res.body).not.toContain('SECRETKEY');
+    expect(g.res.body).not.toContain('https://rpc.example');
+  });
+
+  it('POST /api/pca/rpc forwards allowed read JSON-RPC without leaking upstream URLs', async () => {
+    const payload = { jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] };
+    const rpcMock = vi.fn(async (method: string, params: unknown[]) => {
+      expect(method).toBe('eth_chainId');
+      expect(params).toEqual([]);
+      return '0x14a34';
+    });
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 1, result: '0x14a34' });
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(res.body).not.toContain('SECRETKEY');
+    expect(res.body).not.toContain('https://rpc.example');
+  });
+
+  it('POST /api/pca/rpc returns 503 when the daemon RPC bridge is unavailable', async () => {
+    const rpcMock = vi.fn();
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: false,
+      requestPublishingConvictionRpc: rpcMock,
+    };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_chainId',
+      params: [],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(503);
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc allows PCA-scoped eth_call and rejects unrelated eth_call before delegation', async () => {
+    const allowedCall = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_call',
+      params: [{ to: CONTRACTS_FIXTURE.nft, data: '0x70a08231' }, 'latest'],
+    };
+    const rejectedCall = {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'eth_call',
+      params: [{ to: '0x' + '33'.repeat(20), data: '0x70a08231' }, 'latest'],
+    };
+    const rpcMock = vi.fn(async () => '0x' + '0'.repeat(63) + '1');
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
+      requestPublishingConvictionRpc: rpcMock,
+    };
+
+    const ok = runCtx('POST', '/api/pca/rpc', agent, allowedCall);
+    await ok.done;
+    expect(ok.res.statusCode).toBe(200);
+    expect(JSON.parse(ok.res.body)).toEqual({ jsonrpc: '2.0', id: 1, result: '0x' + '0'.repeat(63) + '1' });
+    expect(rpcMock).toHaveBeenCalledWith('eth_call', allowedCall.params);
+
+    rpcMock.mockClear();
+    const bad = runCtx('POST', '/api/pca/rpc', agent, rejectedCall);
+    await bad.done;
+    expect(bad.res.statusCode).toBe(200);
+    const body = JSON.parse(bad.res.body);
+    expect(body.error.code).toBe(-32602);
+    expect(body.error.message).toContain('target or selector is not allowed');
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc allows the browser PCA eth_call selectors with ABI-encoded calldata', async () => {
+    const nft = new ethers.Interface([
+      'function balanceOf(address owner) view returns (uint256)',
+      'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
+      'function ownerOf(uint256 tokenId) view returns (address)',
+      'function getDiscountBps(uint96 accountId) view returns (uint16)',
+    ]);
+    const token = new ethers.Interface([
+      'function balanceOf(address owner) view returns (uint256)',
+      'function allowance(address owner, address spender) view returns (uint256)',
+    ]);
+    const owner = ethers.getAddress('0x' + '44'.repeat(20));
+    const spender = ethers.getAddress('0x' + '55'.repeat(20));
+    const cases = [
+      { to: CONTRACTS_FIXTURE.nft, data: nft.encodeFunctionData('balanceOf', [owner]) },
+      { to: CONTRACTS_FIXTURE.nft, data: nft.encodeFunctionData('tokenOfOwnerByIndex', [owner, 0n]) },
+      { to: CONTRACTS_FIXTURE.nft, data: nft.encodeFunctionData('ownerOf', [1n]) },
+      { to: CONTRACTS_FIXTURE.nft, data: nft.encodeFunctionData('getDiscountBps', [1n]) },
+      { to: CONTRACTS_FIXTURE.token, data: token.encodeFunctionData('balanceOf', [owner]) },
+      { to: CONTRACTS_FIXTURE.token, data: token.encodeFunctionData('allowance', [owner, spender]) },
+    ];
+    const rpcMock = vi.fn(async () => '0x');
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
+      requestPublishingConvictionRpc: rpcMock,
+    };
+
+    for (const [index, call] of cases.entries()) {
+      const params = [{ to: call.to, data: call.data }, 'latest'];
+      const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+        jsonrpc: '2.0',
+        id: index + 1,
+        method: 'eth_call',
+        params,
+      });
+      await done;
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: index + 1, result: '0x' });
+      expect(rpcMock).toHaveBeenLastCalledWith('eth_call', params);
+    }
+    expect(rpcMock).toHaveBeenCalledTimes(cases.length);
+  });
+
+  it('POST /api/pca/rpc rejects over-broad eth_call params before adapter delegation', async () => {
+    const call = { to: CONTRACTS_FIXTURE.nft, data: '0x70a08231' };
+    const cases = [
+      { id: 1, method: 'eth_call', params: [call, 'pending'] },
+      { id: 2, method: 'eth_call', params: [call, { blockNumber: '0x1' }] },
+      { id: 3, method: 'eth_call', params: [call, 'latest', { [CONTRACTS_FIXTURE.nft]: { balance: '0x0' } }] },
+      { id: 4, method: 'eth_call', params: [call, 'safe', {}, {}] },
+    ];
+    const getContractsMock = vi.fn(async () => CONTRACTS_FIXTURE);
+    const rpcMock = vi.fn();
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionContracts: getContractsMock,
+      requestPublishingConvictionRpc: rpcMock,
+    };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, cases);
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body).toHaveLength(cases.length);
+    for (const response of body) {
+      expect(response.error.code).toBe(-32602);
+    }
+    expect(getContractsMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc supports viem-style JSON-RPC batches', async () => {
+    const payload = [
+      { jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] },
+      { jsonrpc: '2.0', id: 2, method: 'eth_getBlockByNumber', params: ['latest', false] },
+    ];
+    const expected = [
+      { jsonrpc: '2.0', id: 1, result: '0x10' },
+      { jsonrpc: '2.0', id: 2, result: { number: '0x10' } },
+    ];
+    const rpcMock = vi.fn(async (method: string) => {
+      if (method === 'eth_blockNumber') return '0x10';
+      return { number: '0x10' };
+    });
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual(expected);
+    expect(rpcMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('POST /api/pca/rpc rejects empty JSON-RPC batches before adapter delegation', async () => {
+    const rpcMock = vi.fn();
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, []);
+    await done;
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain at least one request' });
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc rejects oversized JSON-RPC batches before adapter delegation', async () => {
+    const rpcMock = vi.fn();
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const payload = Array.from({ length: 21 }, (_, i) => ({
+      jsonrpc: '2.0',
+      id: i + 1,
+      method: 'eth_blockNumber',
+      params: [],
+    }));
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
+    await done;
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain at most 20 requests' });
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc preserves null JSON-RPC results for pending transaction reads', async () => {
+    const rpcMock = vi.fn(async () => null);
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'eth_getTransactionReceipt',
+      params: ['0x' + '11'.repeat(32)],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 7, result: null });
+    expect(rpcMock).toHaveBeenCalledWith('eth_getTransactionReceipt', ['0x' + '11'.repeat(32)]);
+  });
+
+  it('POST /api/pca/rpc preserves null JSON-RPC results for missing block reads', async () => {
+    const rpcMock = vi.fn(async () => null);
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'eth_getBlockByNumber',
+      params: ['0xffffffffffff', false],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 9, result: null });
+    expect(rpcMock).toHaveBeenCalledWith('eth_getBlockByNumber', ['0xffffffffffff', false]);
+  });
+
+  it('POST /api/pca/rpc rejects over-broad non-PCA read params before adapter delegation', async () => {
+    const rpcMock = vi.fn();
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const cases = [
+      { id: 1, method: 'eth_chainId', params: ['latest'] },
+      { id: 2, method: 'eth_blockNumber', params: [false] },
+      { id: 3, method: 'eth_getTransactionReceipt', params: ['0x1234'] },
+      { id: 4, method: 'eth_getTransactionByHash', params: ['0x' + '11'.repeat(31)] },
+      { id: 5, method: 'eth_getBlockByNumber', params: ['latest', true] },
+      { id: 6, method: 'eth_getBlockByNumber', params: ['pending', false] },
+    ];
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, cases);
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body).toHaveLength(cases.length);
+    for (const response of body) {
+      expect(response.error.code).toBe(-32602);
+    }
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it('POST /api/pca/rpc maps unsupported facade nulls to feature-unavailable errors', async () => {
+    const rpcMock = vi.fn(async () => null);
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_chainId',
+      params: [],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32004);
+    expect(body.error.message).toContain('Chain adapter does not expose V10 Publishing Conviction NFT methods');
+    expect(rpcMock).toHaveBeenCalledWith('eth_chainId', []);
+  });
+
+  it('POST /api/pca/rpc rejects write/admin JSON-RPC methods before adapter delegation', async () => {
+    const rpcMock = vi.fn();
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: rpcMock };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_sendRawTransaction',
+      params: ['0xdead'],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(rpcMock).not.toHaveBeenCalled();
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32601);
+    expect(body.error.message).toContain('eth_sendRawTransaction');
+    expect(res.body).not.toContain('SECRETKEY');
+  });
+
+  it('POST /api/pca/rpc maps transport failures to sanitized JSON-RPC errors', async () => {
+    const payload = { jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] };
+    const err = new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      'all RPC endpoints failed (https://rpc.example/v2/SECRETKEY)',
+      { rpcUrls: ['https://rpc.example/v2/SECRETKEY'] },
+    );
+    const agent = { supportsPublishingConvictionNft: true, requestPublishingConvictionRpc: async () => { throw err; } };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32002);
+    expect(body.error.data.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(res.body).not.toContain('SECRETKEY');
+    expect(res.body).not.toContain('https://rpc.example');
+  });
+
+  it('POST /api/pca/rpc sanitizes generic adapter errors', async () => {
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      requestPublishingConvictionRpc: async () => {
+        throw new Error('boom https://rpc.example/v2/SECRETKEY');
+      },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'eth_blockNumber',
+      params: [],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.error.code).toBe(-32000);
+    expect(body.error.message).toContain('PCA RPC read failed');
+    expect(res.body).not.toContain('SECRETKEY');
+    expect(res.body).not.toContain('https://rpc.example');
   });
 
   it('route ordering: /api/pca/contracts is matched BEFORE the generic GET :id (not 400 as an id)', async () => {
-    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE };
+    const agent = contractsAgent({ getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE });
     const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
     await done;
     expect(res.statusCode).toBe(200); // a generic :id match would 400 "Invalid accountId"

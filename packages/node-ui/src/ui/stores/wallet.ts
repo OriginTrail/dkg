@@ -74,6 +74,10 @@ export function isWrongNetwork(s: Pick<WalletState, 'address' | 'chainId' | 'exp
   return s.address != null && s.expectedChainId != null && s.chainId !== s.expectedChainId;
 }
 
+function rpcUrlsForWalletAdd(bootstrap: PcaContracts): string[] {
+  return (bootstrap.walletRpcUrls ?? []).filter((rpcUrl) => /^https?:\/\//i.test(rpcUrl));
+}
+
 let reconnectAttempted = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let discoverySubscribed = false;
@@ -192,6 +196,13 @@ export const useWalletStore = create<WalletState>((set, get) => {
         // 4902 = chain unknown to the wallet → offer to add it.
         if ((err as { code?: number })?.code === 4902) {
           const symbol = nativeGasSymbol(bootstrap.chainId);
+          const rpcUrls = rpcUrlsForWalletAdd(bootstrap);
+          if (rpcUrls.length === 0) {
+            throw new Error(
+              'Wallet does not know this chain and the node did not provide wallet-public RPC URLs. ' +
+              'Add the network in your wallet, then try again.',
+            );
+          }
           await provider.request({
             method: 'wallet_addEthereumChain',
             params: [
@@ -199,7 +210,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
                 chainId: hex,
                 chainName: `chain-${numericChainId(bootstrap.chainId)}`,
                 nativeCurrency: { name: symbol, symbol, decimals: 18 },
-                rpcUrls: bootstrap.rpcUrls,
+                rpcUrls,
               },
             ],
           });

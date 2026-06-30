@@ -27,6 +27,7 @@ import type {
   PcaAccountRelation,
   ShardingTableNode,
   PcaContracts,
+  PcaRpcMethod,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
 import {
@@ -752,14 +753,34 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /** Browser-bootstrap parity (sub-PR #2) — fixed checksummed addresses + the
-   *  mock chainId + rpcUrls. */
+   *  mock chainId. Browser RPC transport is daemon-owned, so the mock does not
+   *  expose adapter/private RPC endpoints here. */
   async getPublishingConvictionContracts(): Promise<PcaContracts> {
     return {
       nft: ethers.getAddress('0x' + '11'.repeat(20)),
       token: ethers.getAddress('0x' + '22'.repeat(20)),
       chainId: this.chainId,
-      rpcUrls: this.getRpcUrls(),
+      rpcUrls: [],
+      walletRpcUrls: [],
     };
+  }
+
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+    switch (method) {
+      case 'eth_chainId': {
+        const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
+        return `0x${Number(tail).toString(16)}`;
+      }
+      case 'eth_blockNumber':
+        return `0x${this.nextBlock.toString(16)}`;
+      case 'eth_call':
+        return '0x' + '0'.repeat(64);
+      case 'eth_getBlockByNumber':
+        return { number: `0x${this.nextBlock.toString(16)}` };
+      case 'eth_getTransactionReceipt':
+      case 'eth_getTransactionByHash':
+        return null;
+    }
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

@@ -11,6 +11,12 @@ import type { ApprovalPolicy } from './chain-adapter.js';
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
   rpcUrls?: string[];
+  /**
+   * Public RPC endpoints safe to hand to browser wallets for
+   * `wallet_addEthereumChain`. These are intentionally separate from
+   * rpcUrl/rpcUrls, which may be private operator/provider endpoints.
+   */
+  walletRpcUrls?: string[];
   /** Primary operational wallet key (used for identity registration, staking, etc.) */
   privateKey: string;
   /** Additional operational wallet keys for parallel transaction submission. */
