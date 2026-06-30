@@ -20,12 +20,18 @@ function fakeRes() {
   return res;
 }
 
-function runKaCtx(method: string, rawPath: string, agent: any, body?: unknown) {
+function runKaCtx(
+  method: string,
+  rawPath: string,
+  agent: any,
+  body?: unknown,
+  ctxOverrides: Partial<RequestContext> = {},
+) {
   const res = fakeRes();
   const req: any = { method, url: rawPath };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
-  const ctx = { req, res, agent, path: url.pathname, url } as unknown as RequestContext;
+  const ctx = { req, res, agent, path: url.pathname, url, ...ctxOverrides } as unknown as RequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
 }
 
@@ -65,6 +71,37 @@ function timeoutErr() {
   return new ChainRpcTransportError('RPC_TIMEOUT', 'tx 0xabc timed out waiting for a receipt after 180000ms');
 }
 
+const FAILED_VERIFY_RESULT = {
+  ok: false,
+  expectedRoot: `0x${'11'.repeat(32)}`,
+  actualRoot: `0x${'22'.repeat(32)}`,
+  leafCount: 1,
+  reason: 'root-mismatch',
+};
+
+function batchRejectionAgent(extra: Record<string, unknown> = {}) {
+  const calls: Array<{ op: string; opts?: unknown }> = [];
+  const agent = publishAgent({
+    assertion: {
+      create: async (_contextGraphId: string, _name: string, opts?: unknown) => {
+        calls.push({ op: 'create', opts });
+      },
+      write: async (_contextGraphId: string, _name: string, _quads: unknown[], opts?: unknown) => {
+        calls.push({ op: 'write', opts });
+      },
+      finalize: async (_contextGraphId: string, _name: string, opts?: unknown) => {
+        calls.push({ op: 'finalize', opts });
+      },
+      promote: async (_contextGraphId: string, _name: string, opts?: unknown) => {
+        calls.push({ op: 'promote', opts });
+        return { shareOperationId: 'share-op-1', promotedCount: 8 };
+      },
+    },
+    ...extra,
+  });
+  return { agent, calls };
+}
+
 describe('knowledge-assets publish routes — transport-status mapping (#1329)', () => {
   it('does not serve KA batch-rejection endpoints from memory routes', async () => {
     const { res, done } = runMemoryCtx(
@@ -87,6 +124,97 @@ describe('knowledge-assets publish routes — transport-status mapping (#1329)',
       expect(res.statusCode).toBe(404);
       expect(JSON.parse(res.body).code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
       expect(called).toBe(false);
+    });
+  });
+
+  describe('POST /api/knowledge-assets/batch-rejections/report', () => {
+    it('preserves an explicit rejectedBy override', async () => {
+      const { agent, calls } = batchRejectionAgent({
+        peerId: 'local-peer',
+        resolveAgentByToken: () => undefined,
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/batch-rejections/report',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          batchId: 'batch-1',
+          verifyResult: FAILED_VERIFY_RESULT,
+          rejectedBy: {
+            agentAddress: '0x00000000000000000000000000000000000000ee',
+            peerId: 'explicit-peer',
+          },
+        },
+        { requestAgentAddress: '0x00000000000000000000000000000000000000aa' },
+      );
+
+      await done;
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.record.rejectedBy).toEqual({
+        agentAddress: '0x00000000000000000000000000000000000000ee',
+        peerId: 'explicit-peer',
+      });
+      expect(calls.map((call) => call.opts)).toEqual([{}, {}, {}, {}]);
+    });
+
+    it('uses the authenticated agent-token identity and storage lane', async () => {
+      const tokenAgentAddress = '0x00000000000000000000000000000000000000ab';
+      const { agent, calls } = batchRejectionAgent({
+        peerId: 'local-peer',
+        resolveAgentByToken: (token?: string) => token === 'agent-token' ? tokenAgentAddress : undefined,
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/batch-rejections/report',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          batchId: 'batch-2',
+          verifyResult: FAILED_VERIFY_RESULT,
+        },
+        {
+          requestToken: 'agent-token',
+          requestAgentAddress: '0x00000000000000000000000000000000000000dc',
+        },
+      );
+
+      await done;
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.record.rejectedBy).toEqual({
+        agentAddress: tokenAgentAddress,
+        peerId: 'local-peer',
+      });
+      expect(calls.map((call) => call.opts)).toEqual([
+        { agentAddress: tokenAgentAddress },
+        { agentAddress: tokenAgentAddress },
+        { agentAddress: tokenAgentAddress, authorAgentAddress: tokenAgentAddress },
+        { agentAddress: tokenAgentAddress, authorAgentAddress: tokenAgentAddress },
+      ]);
+    });
+
+    it('falls back to unknown when no route identity is available', async () => {
+      const { agent } = batchRejectionAgent({
+        resolveAgentByToken: () => undefined,
+      });
+      const { res, done } = runKaCtx(
+        'POST',
+        '/api/knowledge-assets/batch-rejections/report',
+        agent,
+        {
+          contextGraphId: 'cg-1',
+          batchId: 'batch-3',
+          verifyResult: FAILED_VERIFY_RESULT,
+        },
+        { requestAgentAddress: '' },
+      );
+
+      await done;
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.record.rejectedBy).toEqual({ agentAddress: 'unknown' });
     });
   });
 
