@@ -1,4 +1,8 @@
 import type { QueryResult } from '@origintrail-official/dkg-storage';
+import {
+  LIFT_AUTHORITY_TYPES,
+  LIFT_TRANSITION_TYPES,
+} from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
@@ -113,11 +117,27 @@ export function createKnowledgeAssetVmPublishJobRequest(
 export function isKnowledgeAssetVmPublishJobRequest(
   request: unknown,
 ): request is KnowledgeAssetVmPublishJobRequest {
-  return isRecord(request) && request.jobType === 'knowledge-asset-vm-publish' && isRecord(request.knowledgeAssetVmPublish);
+  if (!isRecord(request) || request.jobType !== 'knowledge-asset-vm-publish') {
+    return false;
+  }
+  try {
+    parseKnowledgeAssetVmPublishRequest(request.knowledgeAssetVmPublish, 'request.knowledgeAssetVmPublish');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function isRawLiftJobRequest(request: unknown): request is RawLiftJobRequest {
-  return isRecord(request) && request.jobType === 'lift' && isRecord(request.lift);
+  if (!isRecord(request) || request.jobType !== 'lift' || !isRecord(request.lift)) {
+    return false;
+  }
+  try {
+    parseRawLiftRequest(request.lift, 'request.lift');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function rawLiftRequestFromJobRequest(request: LiftJobRequest): RawLiftRequest | null {
@@ -125,33 +145,259 @@ export function rawLiftRequestFromJobRequest(request: LiftJobRequest): RawLiftRe
 }
 
 export function isRawLiftRequest(request: unknown): request is RawLiftRequest {
-  return isRecord(request)
-    && (request.jobType === undefined || request.jobType === 'lift')
-    && typeof request.swmId === 'string'
-    && typeof request.shareOperationId === 'string'
-    && Array.isArray(request.roots)
-    && typeof request.contextGraphId === 'string'
-    && typeof request.namespace === 'string'
-    && typeof request.scope === 'string'
-    && typeof request.transitionType === 'string'
-    && isRecord(request.authority)
-    && request.lift === undefined
-    && request.knowledgeAssetVmPublish === undefined;
+  if (!isRecord(request) || (request.jobType !== undefined && request.jobType !== 'lift')) {
+    return false;
+  }
+  if (request.lift !== undefined || request.knowledgeAssetVmPublish !== undefined) {
+    return false;
+  }
+  try {
+    parseRawLiftRequest(request, 'request');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function normalizePersistedLiftJobRequest(request: unknown): LiftJobRequest {
-  if (isKnowledgeAssetVmPublishJobRequest(request)) {
-    return request;
+  if (!isRecord(request)) {
+    throw new Error('Unrecognized persisted async lift job request payload');
   }
-  if (isRawLiftJobRequest(request)) {
-    return createRawLiftJobRequest(request.lift);
+  if (request.jobType === 'knowledge-asset-vm-publish') {
+    return {
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: parseKnowledgeAssetVmPublishRequest(
+        request.knowledgeAssetVmPublish,
+        'request.knowledgeAssetVmPublish',
+      ),
+    };
   }
-  if (isRawLiftRequest(request)) {
-    return createRawLiftJobRequest(request);
+  if (request.jobType === 'lift' && request.lift !== undefined) {
+    return createRawLiftJobRequest(parseRawLiftRequest(request.lift, 'request.lift'));
+  }
+  if (request.jobType === undefined || request.jobType === 'lift') {
+    return createRawLiftJobRequest(parseRawLiftRequest(request, 'request'));
   }
   throw new Error('Unrecognized persisted async lift job request payload');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function parseRawLiftRequest(value: unknown, path: string): RawLiftRequest {
+  const record = expectRecord(value, path);
+  return {
+    ...(record.jobType === 'lift' ? { jobType: 'lift' as const } : {}),
+    swmId: expectString(record, 'swmId', path),
+    shareOperationId: expectString(record, 'shareOperationId', path),
+    roots: expectStringArray(record, 'roots', path),
+    contextGraphId: expectString(record, 'contextGraphId', path),
+    namespace: expectString(record, 'namespace', path),
+    scope: expectString(record, 'scope', path),
+    transitionType: expectEnum(record, 'transitionType', LIFT_TRANSITION_TYPES, path),
+    authority: parseAuthority(record.authority, `${path}.authority`),
+    ...optionalStringField(record, 'priorVersion', path),
+    ...optionalStringField(record, 'subGraphName', path),
+    ...optionalAccessPolicyField(record, 'accessPolicy', path),
+    ...optionalStringArrayField(record, 'allowedPeers', path),
+    ...optionalBooleanField(record, 'entityProofs', path),
+    ...optionalNumberField(record, 'publishEpochs', path),
+    ...optionalBigIntStringField(record, 'publisherNodeIdentityIdOverride', path),
+    ...optionalSealField(record, 'seal', path),
+  };
+}
+
+function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): KnowledgeAssetVmPublishRequest {
+  const record = expectRecord(value, path);
+  return {
+    contextGraphId: expectString(record, 'contextGraphId', path),
+    name: expectString(record, 'name', path),
+    ...optionalStringField(record, 'agentAddress', path),
+    ...optionalStringField(record, 'subGraphName', path),
+    shareOperationId: expectString(record, 'shareOperationId', path),
+    roots: expectStringArray(record, 'roots', path),
+    seal: parseSeal(record.seal, `${path}.seal`),
+    sealChainId: expectBigIntString(record, 'sealChainId', path),
+    sealKav10Address: expectHexString(record, 'sealKav10Address', path),
+    sealFinalizedAtIso: expectString(record, 'sealFinalizedAtIso', path),
+    sealMerkleRoot: expectHexString(record, 'sealMerkleRoot', path),
+    intentKey: expectString(record, 'intentKey', path),
+    ...optionalStringField(record, 'wmCurrentAssertion', path),
+    ...optionalStringField(record, 'swmCurrentAssertion', path),
+    ...optionalStringField(record, 'vmCurrentAssertion', path),
+    ...optionalStringField(record, 'kaNumber', path),
+    ...optionalStringField(record, 'reservedUal', path),
+    ...optionalNumberField(record, 'publishEpochs', path),
+    ...optionalBooleanField(record, 'clearSharedMemoryAfter', path),
+    ...optionalBigIntStringField(record, 'publisherNodeIdentityIdOverride', path),
+  };
+}
+
+function parseAuthority(value: unknown, path: string): RawLiftRequest['authority'] {
+  const record = expectRecord(value, path);
+  return {
+    type: expectEnum(record, 'type', LIFT_AUTHORITY_TYPES, path),
+    proofRef: expectString(record, 'proofRef', path),
+  };
+}
+
+function parseSeal(value: unknown, path: string): KnowledgeAssetVmPublishRequest['seal'] {
+  const record = expectRecord(value, path);
+  const signature = expectRecord(record.signature, `${path}.signature`);
+  return {
+    merkleRoot: expectHexString(record, 'merkleRoot', path),
+    authorAddress: expectHexString(record, 'authorAddress', path),
+    signature: {
+      r: expectHexString(signature, 'r', `${path}.signature`),
+      vs: expectHexString(signature, 'vs', `${path}.signature`),
+    },
+    schemeVersion: expectInteger(record, 'schemeVersion', path),
+    ...optionalBigIntStringField(record, 'reservedKaId', path),
+  };
+}
+
+function expectRecord(value: unknown, path: string): Record<string, unknown> {
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error(`${path} must be an object`);
+  }
+  return value;
+}
+
+function expectString(record: Record<string, unknown>, field: string, path: string): string {
+  const value = record[field];
+  if (typeof value !== 'string') {
+    throw new Error(`${path}.${field} must be a string`);
+  }
+  return value;
+}
+
+function expectHexString(record: Record<string, unknown>, field: string, path: string): `0x${string}` {
+  const value = expectString(record, field, path);
+  if (!/^0x[0-9a-fA-F]+$/.test(value)) {
+    throw new Error(`${path}.${field} must be a 0x-prefixed hex string`);
+  }
+  return value as `0x${string}`;
+}
+
+function expectBigIntString(record: Record<string, unknown>, field: string, path: string): `${bigint}` {
+  const value = expectString(record, field, path);
+  try {
+    BigInt(value);
+  } catch {
+    throw new Error(`${path}.${field} must be a bigint string`);
+  }
+  return value as `${bigint}`;
+}
+
+function expectInteger(record: Record<string, unknown>, field: string, path: string): number {
+  const value = record[field];
+  if (!Number.isInteger(value)) {
+    throw new Error(`${path}.${field} must be an integer`);
+  }
+  return value as number;
+}
+
+function expectStringArray(record: Record<string, unknown>, field: string, path: string): readonly string[] {
+  const value = record[field];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+    throw new Error(`${path}.${field} must be an array of strings`);
+  }
+  return value;
+}
+
+function expectEnum<T extends readonly string[]>(
+  record: Record<string, unknown>,
+  field: string,
+  allowed: T,
+  path: string,
+): T[number] {
+  const value = expectString(record, field, path);
+  if (!(allowed as readonly string[]).includes(value)) {
+    throw new Error(`${path}.${field} must be one of: ${allowed.join(', ')}`);
+  }
+  return value as T[number];
+}
+
+function optionalStringField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, string>> {
+  const value = record[field];
+  if (value === undefined) return {};
+  if (typeof value !== 'string') {
+    throw new Error(`${path}.${field} must be a string when supplied`);
+  }
+  return { [field]: value } as Partial<Record<T, string>>;
+}
+
+function optionalNumberField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, number>> {
+  const value = record[field];
+  if (value === undefined) return {};
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`${path}.${field} must be a finite number when supplied`);
+  }
+  return { [field]: value } as Partial<Record<T, number>>;
+}
+
+function optionalBooleanField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, boolean>> {
+  const value = record[field];
+  if (value === undefined) return {};
+  if (typeof value !== 'boolean') {
+    throw new Error(`${path}.${field} must be a boolean when supplied`);
+  }
+  return { [field]: value } as Partial<Record<T, boolean>>;
+}
+
+function optionalStringArrayField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, readonly string[]>> {
+  const value = record[field];
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {
+    throw new Error(`${path}.${field} must be an array of strings when supplied`);
+  }
+  return { [field]: value } as unknown as Partial<Record<T, readonly string[]>>;
+}
+
+function optionalBigIntStringField<T extends string>(
+  record: Record<string, unknown>,
+  field: T,
+  path: string,
+): Partial<Record<T, `${bigint}`>> {
+  if (record[field] === undefined) return {};
+  return { [field]: expectBigIntString(record, field, path) } as Partial<Record<T, `${bigint}`>>;
+}
+
+function optionalAccessPolicyField(
+  record: Record<string, unknown>,
+  field: 'accessPolicy',
+  path: string,
+): Pick<RawLiftRequest, 'accessPolicy'> | Record<string, never> {
+  const value = record[field];
+  if (value === undefined) return {};
+  if (value !== 'public' && value !== 'ownerOnly' && value !== 'allowList') {
+    throw new Error(`${path}.${field} must be one of: public, ownerOnly, allowList`);
+  }
+  return { accessPolicy: value };
+}
+
+function optionalSealField(
+  record: Record<string, unknown>,
+  field: 'seal',
+  path: string,
+): Pick<RawLiftRequest, 'seal'> | Record<string, never> {
+  if (record[field] === undefined) return {};
+  return { seal: parseSeal(record[field], `${path}.${field}`) };
 }
