@@ -34,7 +34,7 @@
  */
 
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { keccak256 } from '@origintrail-official/dkg-core';
+import { escapeDkgRdfLiteral, keccak256 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
@@ -215,4 +215,98 @@ export function buildBatchRejectionRecord(input: {
     reportedAt,
     digest,
   };
+}
+
+export interface BatchRejectionReporterAgent {
+  readonly assertion: {
+    create(contextGraphId: string, name: string, opts?: Record<string, unknown>): Promise<unknown>;
+    write(contextGraphId: string, name: string, quads: Quad[], opts?: Record<string, unknown>): Promise<unknown>;
+    finalize(contextGraphId: string, name: string, opts?: Record<string, unknown>): Promise<unknown>;
+    promote(
+      contextGraphId: string,
+      name: string,
+      opts?: Record<string, unknown>,
+    ): Promise<{ shareOperationId?: string; promotedCount?: number }>;
+  };
+  readonly peerId?: string;
+}
+
+export interface ReportBatchRejectionInput {
+  contextGraphId: string;
+  batchId?: string;
+  verifyResult: VerifyBatchResult;
+  rejectedBy?: { agentAddress: string; peerId?: string };
+  agentAddress?: string;
+}
+
+export interface ReportBatchRejectionResult {
+  record: BatchRejectionRecord;
+  assertionName: string;
+  gossiped: boolean;
+  shareOperationId?: string;
+  promotedCount?: number;
+  gossipError?: string;
+}
+
+export function batchRejectionAssertionName(record: BatchRejectionRecord): string {
+  return `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, '').slice(0, 48)}`;
+}
+
+export function batchRejectionRecordToQuads(record: BatchRejectionRecord): Quad[] {
+  const lit = (value: string) => `"${escapeDkgRdfLiteral(value)}"`;
+  const subject = `did:dkg:batch-rejection:${record.digest}`;
+  const NS = 'http://dkg.io/ontology/';
+  return [
+    { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
+    { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
+    { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
+    { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
+    { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
+    { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
+    { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
+    ...(record.batchId !== undefined
+      ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
+      : []),
+  ];
+}
+
+export async function reportBatchRejectionWithLifecycle(
+  agent: BatchRejectionReporterAgent,
+  input: ReportBatchRejectionInput,
+): Promise<ReportBatchRejectionResult> {
+  const rejectedBy = input.rejectedBy ?? {
+    agentAddress: input.agentAddress ?? agent.peerId ?? 'unknown',
+    peerId: agent.peerId,
+  };
+  const record = buildBatchRejectionRecord({
+    contextGraphId: input.contextGraphId,
+    ...(input.batchId !== undefined ? { batchId: input.batchId } : {}),
+    verifyResult: input.verifyResult,
+    rejectedBy,
+  });
+  const assertionName = batchRejectionAssertionName(record);
+  const quads = batchRejectionRecordToQuads(record);
+  const lane = input.agentAddress ? { agentAddress: input.agentAddress } : {};
+  const authorLane = input.agentAddress ? { authorAgentAddress: input.agentAddress } : {};
+
+  try {
+    await agent.assertion.create(input.contextGraphId, assertionName, lane);
+    await agent.assertion.write(input.contextGraphId, assertionName, quads, lane);
+    await agent.assertion.finalize(input.contextGraphId, assertionName, { ...lane, ...authorLane });
+    const share = await agent.assertion.promote(input.contextGraphId, assertionName, { ...lane, ...authorLane });
+    return {
+      record,
+      assertionName,
+      gossiped: true,
+      promotedCount: share.promotedCount,
+      ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+    };
+  } catch (err) {
+    return {
+      record,
+      assertionName,
+      gossiped: false,
+      gossipError: err instanceof Error ? err.message : String(err),
+    };
+  }
 }

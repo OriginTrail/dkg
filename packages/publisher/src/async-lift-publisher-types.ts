@@ -57,6 +57,17 @@ export interface AsyncKnowledgeAssetVmPublishExecutionInput {
   readonly publisher?: DKGPublisher;
 }
 
+export interface AsyncKnowledgeAssetVmPublishPreflightInput {
+  readonly walletId: string;
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly liftRequest: RawLiftRequest;
+  readonly publisher?: DKGPublisher;
+}
+
+export type AsyncKnowledgeAssetVmPublishPreflightResult =
+  | { readonly action: 'execute' }
+  | { readonly action: 'noop'; readonly reason?: string };
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
@@ -70,6 +81,9 @@ export interface AsyncLiftPublisherConfig {
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
   knowledgeAssetVmPublishExecutor?: (input: AsyncKnowledgeAssetVmPublishExecutionInput) => Promise<PublishResult>;
+  knowledgeAssetVmPublishPreflight?: (
+    input: AsyncKnowledgeAssetVmPublishPreflightInput,
+  ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

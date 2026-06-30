@@ -48,6 +48,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   ackTransportFactory?: () => ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -66,6 +67,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+      knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -99,6 +101,7 @@ interface PublisherRuntimeBaseArgs {
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -190,6 +193,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -203,6 +207,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -273,6 +278,15 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishPreflight!({ ...input, publisher });
+        }
+      : undefined,
     knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
       ? async (input) => {
           const publisher = publishers.get(input.walletId);

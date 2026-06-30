@@ -535,7 +535,11 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       createOperationContext('publishFromSWM'),
     );
 
+    const preflight = vi.fn(async ({ request }) =>
+      agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+    );
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishPreflight: preflight,
       knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
         agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
     });
@@ -543,11 +547,97 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const processed = await asyncPublisher.processNext('wallet-1');
     expect(processed?.jobId).toBe(jobId);
     expect(processed?.status).toBe('finalized');
+    expect(preflight).toHaveBeenCalled();
 
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
     expect(history?.state).toBe('published');
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+  }, 60_000);
+
+  it('async VM publish no-ops when the queued seal is already current in VM', async () => {
+    const agent = await createAgent('QueuedAsyncVmAlreadyPublishedBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Already Published E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-already-published';
+    const root = `${ENTITY_BASE}:queued-async-already-published`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Already Published"' },
+    ]);
+    const share = await agent.assertion.promote(CG_ID, name);
+    expect(share.publishReady).toBe(true);
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const executor = vi.fn(async () => {
+      throw new Error('executor should not run for already-published queued intent');
+    });
+    const preflight = vi.fn(async ({ request }) =>
+      agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+    );
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishPreflight: preflight,
+      knowledgeAssetVmPublishExecutor: executor,
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(intent);
+
+    const syncPublish = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(syncPublish.status).toBe('confirmed');
+
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status, JSON.stringify((processed as any)?.failure)).toBe('finalized');
+    expect(processed?.finalization?.mode).toBe('noop');
+    expect(preflight).toHaveBeenCalled();
+    expect(executor).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('async VM publish fails stale when the named KA is shared again before execution', async () => {
+    const agent = await createAgent('QueuedAsyncVmStaleAfterReshareBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Stale After Reshare E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-stale-after-reshare';
+    const root = `${ENTITY_BASE}:queued-async-stale-after-reshare`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Stale v1"' },
+    ]);
+    const firstShare = await agent.assertion.promote(CG_ID, name);
+    expect(firstShare.publishReady).toBe(true);
+    const staleIntent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+
+    const executor = vi.fn(async () => {
+      throw new Error('executor should not run for stale queued intent');
+    });
+    const preflight = vi.fn(async ({ request }) =>
+      agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
+    );
+    const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishPreflight: preflight,
+      knowledgeAssetVmPublishExecutor: executor,
+    });
+    const jobId = await asyncPublisher.enqueueKnowledgeAssetVmPublish(staleIntent);
+
+    const firstPublish = await agent.publishFromFinalizedAssertion(CG_ID, name);
+    expect(firstPublish.status).toBe('confirmed');
+    await agent.assertion.pullFrom(CG_ID, name, 'vm', { onConflict: 'replace' });
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Stale v2"' },
+    ]);
+    await agent.assertion.finalize(CG_ID, name);
+    const secondShare = await agent.assertion.promote(CG_ID, name);
+    expect(secondShare.publishReady).toBe(true);
+    expect(secondShare.shareOperationId).not.toBe(firstShare.shareOperationId);
+
+    const processed = await asyncPublisher.processNext('wallet-1');
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status, JSON.stringify((processed as any)?.failure)).toBe('failed');
+    expect(processed?.failure?.failedFromState, JSON.stringify((processed as any)?.failure)).toBe('claimed');
+    expect(processed?.failure?.code).toBe('publish_intent_stale');
+    expect(preflight).toHaveBeenCalled();
+    expect(executor).not.toHaveBeenCalled();
   }, 60_000);
 
   it('queued async VM publish rejects chain-bound seal mismatches before publisher invocation', async () => {
@@ -712,6 +802,8 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
       clearSharedMemoryAfter: true,
     });
     const asyncPublisher = new TripleStoreAsyncLiftPublisher((agent as any).store, {
+      knowledgeAssetVmPublishPreflight: async ({ request }) =>
+        agent.preflightQueuedKnowledgeAssetVmPublishExecution(request),
       knowledgeAssetVmPublishExecutor: async ({ request, publishOptions }) =>
         agent.publishQueuedKnowledgeAssetVmPublish(request, publishOptions),
     });

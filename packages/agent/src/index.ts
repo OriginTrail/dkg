@@ -74,9 +74,15 @@ export { DKGAgent } from './dkg-agent.js';
 export {
   verifyBatch,
   buildBatchRejectionRecord,
+  batchRejectionAssertionName,
+  batchRejectionRecordToQuads,
+  reportBatchRejectionWithLifecycle,
   type VerifyBatchInput,
   type VerifyBatchResult,
   type BatchRejectionRecord,
+  type BatchRejectionReporterAgent,
+  type ReportBatchRejectionInput,
+  type ReportBatchRejectionResult,
 } from './swm/verify-batch.js';
 export { createCGHostEnumerator, type CGHostEnumerator, type CGHostEnumeratorDeps } from './swm/enumerate-cg-hosts.js';
 export {

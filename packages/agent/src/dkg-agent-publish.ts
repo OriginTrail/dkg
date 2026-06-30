@@ -36,7 +36,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, escapeDkgRdfLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -130,6 +130,7 @@ import {
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   type CollectedACK, type LiftAuthorityProof, type LiftTransitionType,
   type LiftRequest, type LiftRequestAuthorSeal, type KnowledgeAssetVmPublishRequest,
+  type AsyncKnowledgeAssetVmPublishPreflightResult,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
   type WorkspaceAgentRecipientResolverInput,
@@ -398,11 +399,6 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  buildBatchRejectionRecord,
-  type BatchRejectionRecord,
-  type VerifyBatchResult,
-} from './swm/verify-batch.js';
 
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
@@ -3364,73 +3360,6 @@ export class PublishMethods extends DKGAgentBase {
     return result.type === 'quads' ? result.quads : [];
   }
 
-  async reportBatchRejection(this: DKGAgent,
-    input: {
-      contextGraphId: string;
-      batchId?: string;
-      verifyResult: VerifyBatchResult;
-      rejectedBy?: { agentAddress: string; peerId?: string };
-      agentAddress?: string;
-    },
-  ): Promise<{
-    record: BatchRejectionRecord;
-    assertionName: string;
-    gossiped: boolean;
-    shareOperationId?: string;
-    promotedCount?: number;
-    gossipError?: string;
-  }> {
-    const rejectedBy = input.rejectedBy ?? {
-      agentAddress: input.agentAddress ?? this.defaultAgentAddress ?? this.peerId ?? 'unknown',
-      peerId: this.peerId,
-    };
-    const record = buildBatchRejectionRecord({
-      contextGraphId: input.contextGraphId,
-      ...(input.batchId !== undefined ? { batchId: input.batchId } : {}),
-      verifyResult: input.verifyResult,
-      rejectedBy,
-    });
-    const lit = (value: string) => `"${escapeDkgRdfLiteral(value)}"`;
-    const subject = `did:dkg:batch-rejection:${record.digest}`;
-    const assertionName = `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, '').slice(0, 48)}`;
-    const NS = 'http://dkg.io/ontology/';
-    const quads: Quad[] = [
-      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
-      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
-      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
-      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
-      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
-      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
-      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
-      ...(record.batchId !== undefined
-        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
-        : []),
-    ];
-
-    const lane = input.agentAddress ? { agentAddress: input.agentAddress } : {};
-    const authorLane = input.agentAddress ? { authorAgentAddress: input.agentAddress } : {};
-    try {
-      await this.assertion.create(input.contextGraphId, assertionName, lane);
-      await this.assertion.write(input.contextGraphId, assertionName, quads, lane);
-      await this.assertion.finalize(input.contextGraphId, assertionName, { ...lane, ...authorLane });
-      const share = await this.assertion.promote(input.contextGraphId, assertionName, { ...lane, ...authorLane });
-      return {
-        record,
-        assertionName,
-        gossiped: true,
-        promotedCount: share.promotedCount,
-        ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
-      };
-    } catch (err) {
-      return {
-        record,
-        assertionName,
-        gossiped: false,
-        gossipError: err instanceof Error ? err.message : String(err),
-      };
-    }
-  }
-
   /**
    * #1116 — transparent register-then-publish (OT-RFC-38 LU-6).
    *
@@ -3679,6 +3608,117 @@ export class PublishMethods extends DKGAgentBase {
       (wrapped as Error & { code?: string }).code = 'PUBLISH_INTENT_STALE';
       throw wrapped;
     }
+  }
+
+  async preflightQueuedKnowledgeAssetVmPublishExecution(
+    this: DKGAgent,
+    request: KnowledgeAssetVmPublishRequest,
+    opts?: { publisherOverride?: DKGPublisher },
+  ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
+    const bareRoot = (value?: string | null): string | undefined => {
+      const trimmed = value?.trim().toLowerCase();
+      if (!trimmed) return undefined;
+      return trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
+    };
+    const stale = (message: string): Error & { code: 'PUBLISH_INTENT_STALE' } =>
+      Object.assign(new Error(message), { code: 'PUBLISH_INTENT_STALE' as const });
+
+    const queuedSealBare = bareRoot(request.sealMerkleRoot);
+    if (!queuedSealBare) {
+      throw stale(`Queued VM publish for "${request.name}" is missing a seal merkle root.`);
+    }
+
+    const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const publisher = opts?.publisherOverride ?? this.publisher;
+    const history = await this.assertion.history(request.contextGraphId, request.name, {
+      agentAddress,
+      ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+    });
+    if (!history) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `the named lifecycle record is no longer available.`,
+      );
+    }
+
+    const liveVmBare = bareRoot(history.vmCurrentAssertion);
+    const liveSwmBare = bareRoot(history.swmCurrentAssertion);
+    if (liveSwmBare && liveSwmBare !== queuedSealBare) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `SWM pointer is ${liveSwmBare}, queued seal is ${queuedSealBare}.`,
+      );
+    }
+
+    const liveWmBare = bareRoot(history.wmCurrentAssertion);
+    const queuedWmBare = bareRoot(request.wmCurrentAssertion) ?? queuedSealBare;
+    if (liveWmBare && liveWmBare !== queuedWmBare) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `WM pointer is ${liveWmBare}, queued WM pointer was ${queuedWmBare}.`,
+      );
+    }
+
+    if (liveVmBare === queuedSealBare) {
+      return { action: 'noop', reason: 'already-published' };
+    }
+
+    const queuedVmBare = bareRoot(request.vmCurrentAssertion);
+    if (liveVmBare && (!queuedVmBare || liveVmBare !== queuedVmBare)) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+        `VM pointer is ${liveVmBare}, queued VM pointer was ${queuedVmBare ?? 'none'}.`,
+      );
+    }
+
+    const liveShareComplete = await publisher.hasSwmShareComplete(
+      request.contextGraphId,
+      request.name,
+      agentAddress,
+      request.subGraphName,
+    );
+    if (!liveShareComplete) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `the queued full-share marker is no longer active for shareOperationId ${request.shareOperationId}.`,
+      );
+    }
+
+    if (!liveSwmBare) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `SWM pointer is none, queued seal is ${queuedSealBare}.`,
+      );
+    }
+    if (!liveWmBare) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `WM pointer is none, queued WM pointer was ${queuedWmBare}.`,
+      );
+    }
+
+    const liveShareOperationId = history.currentShareOperationId?.trim();
+    if (!liveShareOperationId || liveShareOperationId !== request.shareOperationId.trim()) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `shareOperationId is ${liveShareOperationId ?? 'none'}, queued shareOperationId was ${request.shareOperationId}.`,
+      );
+    }
+
+    if (history.kaNumber && request.kaNumber && history.kaNumber !== request.kaNumber) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `KA number is ${history.kaNumber}, queued KA number was ${request.kaNumber}.`,
+      );
+    }
+    if (history.reservedUal && request.reservedUal && history.reservedUal !== request.reservedUal) {
+      throw stale(
+        `Knowledge asset VM publish intent for "${request.name}" changed after enqueue: ` +
+          `reserved UAL is ${history.reservedUal}, queued reserved UAL was ${request.reservedUal}.`,
+      );
+    }
+
+    return { action: 'execute' };
   }
 
   async publishQueuedKnowledgeAssetVmPublish(

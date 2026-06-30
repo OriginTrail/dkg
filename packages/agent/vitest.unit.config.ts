@@ -35,6 +35,7 @@ export default defineConfig({
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
       "test/publish-literal-size.test.ts",
+      "test/verify-batch.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

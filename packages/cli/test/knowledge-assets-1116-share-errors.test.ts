@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   DKGPublisher,
@@ -704,6 +705,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       intentKey: `sha256:${'ef'.repeat(32)}`,
     };
     const calls: string[] = [];
+    const publisherOverrides: unknown[] = [];
     let publishAttempts = 0;
     const fakeAgent = {
       getDefaultAgentAddress: () => '0x00000000000000000000000000000000000000a1',
@@ -715,6 +717,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         calls.push(`publish#${publishAttempts}`);
         expect(request.agentAddress).toBe('0x00000000000000000000000000000000000000b2');
         expect(opts.publisherOverride).toBeDefined();
+        publisherOverrides.push(opts.publisherOverride);
         if (publishAttempts === 1) {
           throw Object.assign(
             new Error(`Context graph "${request.contextGraphId}" is not registered on-chain.`),
@@ -747,7 +750,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       chainBase: undefined,
       pollIntervalMs: 10,
       errorBackoffMs: 10,
-      knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent),
+      knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent as unknown as DKGAgent),
     });
 
     try {
@@ -762,6 +765,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         'publish#2',
       ]);
       expect(publishAttempts).toBe(2);
+      expect(publisherOverrides).toHaveLength(2);
+      expect(publisherOverrides[0]).toBe(publisherOverrides[1]);
+      expect(typeof (publisherOverrides[0] as { publish?: unknown }).publish).toBe('function');
+      expect(String((publisherOverrides[0] as { publisherAddress?: string }).publisherAddress).toLowerCase()).toBe(
+        wallet.address.toLowerCase(),
+      );
     } finally {
       await runtime.stop();
       await store.close();
