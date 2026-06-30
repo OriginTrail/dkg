@@ -2,14 +2,20 @@
 // Jenkins stage (selected by NODE_TO_TEST). Nodes sign internally; per-node
 // bearer tokens come from env.
 //
-// NOTE: the two nodes below are PLACEHOLDERS — set the real testnet node URLs
-// via TESTNET1_API_URL / TESTNET2_API_URL (or edit here) and their tokens via
-// V10_TOKEN_TESTNET1 / V10_TOKEN_TESTNET2 before running.
+// Base Sepolia testnet "beacon" fleet (V10 core), reached over Tailscale by raw
+// tailnet IP :9200 — same pattern as the mainnet specs. (The HTTPS `tailscale serve`
+// on :443 is NOT reachable from the Jenkins host; :9200 is.) Per-node bearer tokens
+// come from V10_TOKEN_TESTNET1 / V10_TOKEN_TESTNET2 (Jenkins secret-text creds, set
+// later). Node map:
+//   TestNode1 = dkg-v10-beacon-02 (100.70.65.41)
+//   TestNode2 = dkg-v10-beacon-04 (100.65.228.120)
+// beacon-01 is currently down and beacon-03 wasn't reachable from CI at setup time;
+// add them as TestNode3/4 once up if more publish load is wanted.
 import { defineChainPublishSuite } from './v10-publish-lib.js';
 
 const nodes = [
-  { name: 'TestNode1', hostname: process.env.TESTNET1_API_URL || 'http://CHANGE-ME-ot-testnet-1:9200', token: process.env.V10_TOKEN_TESTNET1 },
-  { name: 'TestNode2', hostname: process.env.TESTNET2_API_URL || 'http://CHANGE-ME-ot-testnet-2:9200', token: process.env.V10_TOKEN_TESTNET2 },
+  { name: 'TestNode1', hostname: process.env.TESTNET1_API_URL || 'http://100.70.65.41:9200',  token: process.env.V10_TOKEN_TESTNET1 },
+  { name: 'TestNode2', hostname: process.env.TESTNET2_API_URL || 'http://100.65.228.120:9200', token: process.env.V10_TOKEN_TESTNET2 },
 ];
 
 defineChainPublishSuite({
