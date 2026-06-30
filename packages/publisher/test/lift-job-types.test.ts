@@ -27,10 +27,56 @@ import {
 import {
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
+  normalizePersistedLiftJobRequest,
 } from '../src/async-lift-publisher-utils.js';
 
 function rawJobRequest(request: RawLiftRequest): RawLiftJobRequest {
   return { jobType: 'lift', lift: request };
+}
+
+function seal() {
+  return {
+    merkleRoot: `0x${'12'.repeat(32)}` as const,
+    authorAddress: '0x1111111111111111111111111111111111111111' as const,
+    signature: {
+      r: `0x${'34'.repeat(32)}` as const,
+      vs: `0x${'56'.repeat(32)}` as const,
+    },
+    schemeVersion: 1,
+    reservedKaId: '7' as const,
+  };
+}
+
+function rawLift(overrides: Partial<RawLiftRequest> = {}): RawLiftRequest {
+  return {
+    swmId: 'ws-1',
+    shareOperationId: 'op-1',
+    roots: ['urn:local:/rihana'],
+    contextGraphId: 'music-social',
+    namespace: 'aloha',
+    scope: 'person-profile',
+    transitionType: 'CREATE',
+    authority: { type: 'owner', proofRef: 'proof:namespace:aloha' },
+    ...overrides,
+  };
+}
+
+function kaVmPublish(
+  overrides: Partial<KnowledgeAssetVmPublishJobRequest['knowledgeAssetVmPublish']> = {},
+): KnowledgeAssetVmPublishJobRequest['knowledgeAssetVmPublish'] {
+  return {
+    contextGraphId: 'music-social',
+    name: 'albums',
+    shareOperationId: 'op-1',
+    roots: ['urn:local:/rihana'],
+    seal: seal(),
+    sealChainId: '31337',
+    sealKav10Address: '0x2222222222222222222222222222222222222222',
+    sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+    sealMerkleRoot: `0x${'12'.repeat(32)}`,
+    intentKey: `sha256:${'ab'.repeat(32)}`,
+    ...overrides,
+  };
 }
 
 describe('LiftJob request and record types', () => {
@@ -99,42 +145,14 @@ describe('LiftJob request and record types', () => {
   });
 
   it('models raw lift requests and persisted job payloads as exclusive variants', () => {
-    const raw: RawLiftRequest = {
-      swmId: 'ws-1',
-      shareOperationId: 'op-1',
-      roots: ['urn:local:/rihana'],
-      contextGraphId: 'music-social',
-      namespace: 'aloha',
-      scope: 'person-profile',
-      transitionType: 'CREATE',
-      authority: { type: 'owner', proofRef: 'proof:namespace:aloha' },
-    };
+    const raw: RawLiftRequest = rawLift();
     const rawJob: RawLiftJobRequest = {
       jobType: 'lift',
       lift: raw,
     };
     const ka: KnowledgeAssetVmPublishJobRequest = {
       jobType: 'knowledge-asset-vm-publish',
-      knowledgeAssetVmPublish: {
-        contextGraphId: 'music-social',
-        name: 'albums',
-        shareOperationId: 'op-1',
-        roots: ['urn:local:/rihana'],
-        seal: {
-          merkleRoot: `0x${'12'.repeat(32)}`,
-          authorAddress: '0x1111111111111111111111111111111111111111',
-          signature: {
-            r: `0x${'34'.repeat(32)}`,
-            vs: `0x${'56'.repeat(32)}`,
-          },
-          schemeVersion: 1,
-        },
-        sealChainId: '31337',
-        sealKav10Address: '0x2222222222222222222222222222222222222222',
-        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-        sealMerkleRoot: `0x${'12'.repeat(32)}`,
-        intentKey: `sha256:${'ab'.repeat(32)}`,
-      },
+      knowledgeAssetVmPublish: kaVmPublish(),
     };
 
     expectTypeOf(raw).toMatchTypeOf<LiftRequest>();
@@ -150,26 +168,7 @@ describe('LiftJob request and record types', () => {
   });
 
   it('models KA VM publish snapshot validation without raw-lift placeholder fields', () => {
-    const request = {
-      contextGraphId: 'music-social',
-      name: 'albums',
-      shareOperationId: 'op-1',
-      roots: ['urn:local:/rihana'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}` as const,
-        authorAddress: '0x1111111111111111111111111111111111111111' as const,
-        signature: {
-          r: `0x${'34'.repeat(32)}` as const,
-          vs: `0x${'56'.repeat(32)}` as const,
-        },
-        schemeVersion: 1,
-      },
-      sealChainId: '31337' as const,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as const,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}` as const,
-      intentKey: `sha256:${'ab'.repeat(32)}`,
-    };
+    const request = kaVmPublish();
 
     const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
     const metadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
@@ -193,6 +192,53 @@ describe('LiftJob request and record types', () => {
         proofRef: 'urn:dkg:knowledge-assets:music-social:albums:op-1:vm-publish',
       },
     });
+  });
+
+  it('normalizes persisted lift job request envelopes through a deep schema boundary', () => {
+    expect(normalizePersistedLiftJobRequest(rawLift())).toEqual(rawJobRequest(rawLift({ jobType: 'lift' })));
+    expect(normalizePersistedLiftJobRequest(rawJobRequest(rawLift()))).toEqual(rawJobRequest(rawLift({ jobType: 'lift' })));
+    expect(normalizePersistedLiftJobRequest({
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: kaVmPublish({ clearSharedMemoryAfter: false }),
+    })).toEqual({
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: kaVmPublish({ clearSharedMemoryAfter: false }),
+    });
+  });
+
+  it('rejects malformed persisted raw and KA job payloads at the read boundary', () => {
+    expect(() =>
+      normalizePersistedLiftJobRequest({
+        jobType: 'lift',
+        lift: {
+          ...rawLift(),
+          transitionType: 'UPSERT',
+        },
+      }),
+    ).toThrow(/request\.lift\.transitionType must be one of: CREATE, MUTATE, REVOKE/);
+
+    expect(() =>
+      normalizePersistedLiftJobRequest({
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          ...kaVmPublish(),
+          roots: 'all',
+        },
+      }),
+    ).toThrow(/request\.knowledgeAssetVmPublish\.roots must be an array of strings/);
+
+    expect(() =>
+      normalizePersistedLiftJobRequest({
+        jobType: 'knowledge-asset-vm-publish',
+        knowledgeAssetVmPublish: {
+          ...kaVmPublish(),
+          seal: {
+            ...seal(),
+            signature: undefined,
+          },
+        },
+      }),
+    ).toThrow(/request\.knowledgeAssetVmPublish\.seal\.signature must be an object/);
   });
 
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {
