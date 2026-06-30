@@ -8,6 +8,8 @@ import type {
   LiftJobFailedFromIncluded,
   LiftJobFinalized,
   LiftRequest,
+  KnowledgeAssetVmPublishLiftRequest,
+  RawLiftRequest,
 } from '../src/lift-job.js';
 import {
   LIFT_AUTHORITY_TYPES,
@@ -97,6 +99,53 @@ describe('LiftJob request and record types', () => {
 
     expect(accepted.request.authority.proofRef).toBe('proof:namespace:aloha');
     expect(accepted.retries.maxRetries).toBe(10);
+  });
+
+  it('models raw lift and KA VM publish requests as exclusive variants', () => {
+    const raw: RawLiftRequest = {
+      swmId: 'ws-1',
+      shareOperationId: 'op-1',
+      roots: ['urn:local:/rihana'],
+      contextGraphId: 'music-social',
+      namespace: 'aloha',
+      scope: 'person-profile',
+      transitionType: 'CREATE',
+      authority: { type: 'owner', proofRef: 'proof:namespace:aloha' },
+    };
+    const ka: KnowledgeAssetVmPublishLiftRequest = {
+      ...raw,
+      jobType: 'knowledge-asset-vm-publish',
+      knowledgeAssetVmPublish: {
+        contextGraphId: 'music-social',
+        name: 'albums',
+        shareOperationId: 'op-1',
+        roots: ['urn:local:/rihana'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: {
+            r: `0x${'34'.repeat(32)}`,
+            vs: `0x${'56'.repeat(32)}`,
+          },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      },
+    };
+
+    expectTypeOf(raw).toMatchTypeOf<LiftRequest>();
+    expectTypeOf(ka).toMatchTypeOf<LiftRequest>();
+
+    // @ts-expect-error Raw lift jobs cannot carry a named-KA publish sidecar.
+    const invalidRaw: RawLiftRequest = { ...raw, knowledgeAssetVmPublish: ka.knowledgeAssetVmPublish };
+    // @ts-expect-error KA publish jobs must carry the named-KA publish payload.
+    const invalidKa: KnowledgeAssetVmPublishLiftRequest = { ...raw, jobType: 'knowledge-asset-vm-publish' };
+    expect(invalidRaw).toBeDefined();
+    expect(invalidKa).toBeDefined();
   });
 
   it('requires broadcast jobs to carry claim, validation, and tx metadata', () => {

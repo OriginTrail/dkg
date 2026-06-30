@@ -1,4 +1,4 @@
-import type { KnowledgeAssetVmPublishRequest, LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobIncluded, LiftJobInclusionMetadata, LiftJobState, LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
+import type { KnowledgeAssetVmPublishLiftRequest, KnowledgeAssetVmPublishRequest, LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobIncluded, LiftJobInclusionMetadata, LiftJobState, LiftJobValidationMetadata, RawLiftRequest } from './lift-job.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
@@ -18,7 +18,7 @@ export class AsyncLiftJobConflictError extends Error {
 }
 
 export interface AsyncLiftPublisher {
-  lift(request: LiftRequest): Promise<string>;
+  lift(request: RawLiftRequest): Promise<string>;
   enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
@@ -50,7 +50,7 @@ export interface AsyncLiftPublishExecutionInput {
 export interface AsyncKnowledgeAssetVmPublishExecutionInput {
   readonly walletId: string;
   readonly request: KnowledgeAssetVmPublishRequest;
-  readonly liftRequest: LiftRequest;
+  readonly liftRequest: KnowledgeAssetVmPublishLiftRequest;
   readonly validation: LiftJobValidationMetadata;
   readonly resolved: LiftResolvedPublishSlice;
   readonly publishOptions: PublishOptions;

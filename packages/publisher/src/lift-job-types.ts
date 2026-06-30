@@ -62,9 +62,7 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
 }
 
-export interface LiftRequest {
-  readonly jobType?: 'lift' | 'knowledge-asset-vm-publish';
-  readonly knowledgeAssetVmPublish?: KnowledgeAssetVmPublishRequest;
+export interface LiftRequestBase {
   readonly swmId: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
@@ -86,6 +84,18 @@ export interface LiftRequest {
   /** Agent-signed seal. Publisher rejects on-chain publish if absent on V10. */
   readonly seal?: LiftRequestAuthorSeal;
 }
+
+export interface RawLiftRequest extends LiftRequestBase {
+  readonly jobType?: 'lift';
+  readonly knowledgeAssetVmPublish?: never;
+}
+
+export interface KnowledgeAssetVmPublishLiftRequest extends LiftRequestBase {
+  readonly jobType: 'knowledge-asset-vm-publish';
+  readonly knowledgeAssetVmPublish: KnowledgeAssetVmPublishRequest;
+}
+
+export type LiftRequest = RawLiftRequest | KnowledgeAssetVmPublishLiftRequest;
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
   'jobType',
