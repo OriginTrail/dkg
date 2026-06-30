@@ -675,6 +675,40 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/contracts — browser bootstrap (sub-PR #2 HW signing). Hands the
+  // in-browser viem layer the RESOLVED { nft, token, chainId, rpcUrls } it needs
+  // to submit owner-actions direct-to-contract, in ONE call (no in-browser Hub
+  // resolution — H2). nft/token are EIP-55; chainId is AS-IS (the FE extracts the
+  // numeric tail). Matched EXACTLY before the generic GET :id below, else
+  // 'contracts' parses as an accountId and 400s.
+  if (req.method === 'GET' && path === '/api/pca/contracts') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    try {
+      const contracts = await agent.getPublishingConvictionContracts();
+      if (contracts === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, contracts);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION/BAD_DATA here is an address-resolution read failure (the
+      // adapter may Hub-read) → 503 retryable with a DEDICATED code, NOT a 500 a
+      // browser bootstrap would treat as terminal.
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
+        return jsonResponse(res, 503, {
+          error: 'PCA contract addresses temporarily unavailable — chain read failed',
+          code: 'CONTRACTS_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionContracts failed: ${msg}`,
+      });
+    }
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
   // probes whether that address is a registered agent. Optional ?extended=1
   // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);

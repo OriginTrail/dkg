@@ -33,3 +33,10 @@ export {
 } from './EligibilityVerdictBanner.js';
 export { SponsorshipHandshake } from './SponsorshipHandshake.js';
 export { PrimaryNodePicker, type PrimaryNodeOption } from './PrimaryNodePicker.js';
+export { WalletConnectControl } from './WalletConnectControl.js';
+export { WalletPill } from './WalletPill.js';
+export {
+  DeviceConfirmProgress,
+  type DeviceConfirmStep,
+  type DeviceConfirmStepState,
+} from './DeviceConfirmProgress.js';

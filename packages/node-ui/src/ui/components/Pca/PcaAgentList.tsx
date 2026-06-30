@@ -8,9 +8,9 @@ export interface PcaAgentListProps {
   agents: string[];
   /** This node's operational wallets — the ones in `agents` get a "this node" badge. */
   nodeWallets: string[];
-  /** Owner-gated: Remove is enabled only when the node owner is the primary wallet (§8A). */
+  /** Owner-gated: Remove is enabled when this PCA is daemon-owned or connected-wallet-owned. */
   ownerIsPrimary: boolean;
-  /** Tooltip explaining why Remove is disabled (when not owner-primary). */
+  /** Tooltip explaining why Remove is disabled (when owner writes are unavailable). */
   ownerTitle?: string;
   /** The address currently mid remove-confirm (consequence-naming two-step), if any. */
   confirmRemove: string | null;

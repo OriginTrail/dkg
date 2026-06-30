@@ -12,6 +12,7 @@ export interface ConvictionReader {
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
 }
 
 /** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
@@ -30,6 +31,14 @@ export interface ShardingTableNode {
   identityId: bigint;
   ask: bigint;
   stake: bigint;
+}
+
+/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA actions. */
+export interface PcaContracts {
+  nft: string;
+  token: string;
+  chainId: string;
+  rpcUrls: string[];
 }
 
 export interface IdentityProof {
@@ -945,6 +954,13 @@ export interface ChainAdapter {
    * PCA `primaryNode`. `opts.fresh` bypasses adapter-side cache.
    */
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+
+  /**
+   * Browser-bootstrap contract addresses + chain params for the HW signing
+   * layer. The browser needs the PCA NFT address, TRAC token address, chain id,
+   * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
+   */
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

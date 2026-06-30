@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1610,6 +1610,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async listDesignatableNodes(this: DKGAgent, opts?: { fresh?: boolean }): Promise<ShardingTableNode[] | null> {
     if (typeof this.chain.listDesignatableNodes !== 'function') return null;
     return this.chain.listDesignatableNodes(opts);
+  }
+
+  /** Browser-bootstrap contract addresses + chain params for the HW signing
+   *  layer (sub-PR #2). `null` when the adapter lacks the surface (daemon → 503). */
+  async getPublishingConvictionContracts(this: DKGAgent): Promise<PcaContracts | null> {
+    if (typeof this.chain.getPublishingConvictionContracts !== 'function') return null;
+    return this.chain.getPublishingConvictionContracts();
   }
 
   // ---------------------------------------------------------------------------

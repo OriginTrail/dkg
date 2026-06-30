@@ -222,6 +222,16 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     }
   });
 
+  it('getPublishingConvictionContracts returns checksummed nft/token plus chainId and rpcUrls', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const contracts = await mock.getPublishingConvictionContracts();
+    expect(contracts.nft).toBe(ethers.getAddress(contracts.nft));
+    expect(contracts.token).toBe(ethers.getAddress(contracts.token));
+    expect(contracts.nft).not.toBe(contracts.token);
+    expect(contracts.chainId).toBe('mock:31337');
+    expect(Array.isArray(contracts.rpcUrls)).toBe(true);
+  });
+
   it('toShardingTableNode normalizes named object and positional tuple shapes', () => {
     expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n }))
       .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });

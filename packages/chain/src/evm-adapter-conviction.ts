@@ -18,6 +18,7 @@ import type {
   ConvictionReader,
   PcaAccountRelation,
   ShardingTableNode,
+  PcaContracts,
 } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
@@ -723,5 +724,33 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     }
     this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
     return nodes;
+  }
+
+  /**
+   * Browser bootstrap (sub-PR #2 HW signing) — the minimal resolved contract
+   * addresses + chain params the in-browser viem layer needs to submit
+   * owner-actions direct-to-contract, in ONE call (no in-browser Hub
+   * resolution, H2). Returns `{ nft, token, chainId, rpcUrls }`:
+   *   - `nft` = DKGPublishingConvictionNFT (wrapper) — every wallet-signed write
+   *     (create/topUp/registerAgent/deregisterAgent) targets it, and it's the
+   *     ERC721Enumerable + mint-Transfer source for discovery/accountId parse.
+   *   - `token` = the TRAC ERC-20 the approve pre-step allows the wrapper to pull.
+   * Both EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
+   * `base:84532` form — the FE extracts the numeric tail for viem's Chain.id).
+   * Undeployed NFT/token → PcaUnavailableError (route → 503), the same
+   * capability signal as the other PCA reads. NO Hub/logic/ShardingTable — no
+   * browser owner-action touches them.
+   */
+  async getPublishingConvictionContracts(): Promise<PcaContracts> {
+    await this.init();
+    const nft = this.requireConvictionNFT();
+    const token = this.contracts.token;
+    if (!token) throw new PcaUnavailableError();
+    return {
+      nft: ethers.getAddress(await nft.getAddress()),
+      token: ethers.getAddress(await token.getAddress()),
+      chainId: this.chainId,
+      rpcUrls: this.getRpcUrls(),
+    };
   }
 }

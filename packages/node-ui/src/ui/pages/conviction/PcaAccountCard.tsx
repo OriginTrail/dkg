@@ -10,6 +10,15 @@ import {
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 
+export type PcaAccountOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
+
+export type PcaAccountCardAccount = ResolvedPcaAccount & {
+  ownerMode?: PcaAccountOwnerMode;
+  primaryWallet?: string;
+  connectedWallet?: string | null;
+  walletWrongNetwork?: boolean;
+};
+
 function pct(bps: number | undefined): string {
   if (typeof bps !== 'number' || !Number.isFinite(bps)) return '—';
   const p = bps / 100;
@@ -23,9 +32,9 @@ function pct(bps: number | undefined): string {
  * Remove-from-tracked; transient → Retry). One failing card never blanks the
  * grid — that's the parent's job, this just renders its own state.
  *
- * Owner≠coverage (#11) and the §8A owner-wallet rule are enforced here: a fresh
- * owned PCA with 0 approved wallets says it discounts nothing yet, and
- * owner-write actions are disabled unless the owner is the node's primary wallet.
+ * Owner≠coverage (#11) and the three-key owner rule are enforced here: a fresh
+ * owned PCA with 0 approved wallets says it discounts nothing yet, and owner-write
+ * actions are enabled only for daemon-owned or connected-wallet-owned PCAs.
  */
 export function PcaAccountCard({
   account,
@@ -36,8 +45,9 @@ export function PcaAccountCard({
   onUseForPublishing,
   onRemove,
   onRetry,
+  onSwitchNetwork,
 }: {
-  account: ResolvedPcaAccount;
+  account: PcaAccountCardAccount;
   blockExplorerUrl?: string | null;
   nowSec?: number;
   onManage?: (id: string) => void;
@@ -45,6 +55,7 @@ export function PcaAccountCard({
   onUseForPublishing?: (id: string) => void;
   onRemove?: (id: string) => void;
   onRetry?: (id: string) => void;
+  onSwitchNetwork?: () => void;
 }) {
   const { accountId, snapshot, notFound, classification, ownerIsPrimaryWallet } = account;
 
@@ -81,11 +92,27 @@ export function PcaAccountCard({
   const expiry = formatRelativeExpiry(snapshot.expiresAtTimestamp, nowSec);
   const ownerExplorer =
     blockExplorerUrl ? `${blockExplorerUrl}/address/${snapshot.owner}` : undefined;
+  const ownerMode: PcaAccountOwnerMode = account.ownerMode ?? (ownerIsPrimaryWallet ? 'daemon' : 'external');
+  const walletWrongNetwork = ownerMode === 'wallet' && !!account.walletWrongNetwork;
+  const ownerWritesEnabled = ownerMode === 'daemon' || (ownerMode === 'wallet' && !walletWrongNetwork);
+  const connectedAs = account.connectedWallet;
+  const ownerActionTitle =
+    ownerMode === 'daemon'
+      ? undefined
+      : ownerMode === 'wallet'
+        ? walletWrongNetwork
+          ? "Wrong network - switch the connected wallet to this node's PCA network."
+          : 'Connected wallet will sign this owner action.'
+        : connectedAs
+          ? `Connected as ${connectedAs}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
+          : `Connect owner wallet ${snapshot.owner} to manage PCA #${accountId}.`;
 
   const titleBand = (
     <div className="v10-pca-card-title">
       <span className="v10-pca-card-id">PCA #{accountId}</span>
       <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)} discount</span>
+      {ownerMode === 'wallet' && <span className="badge badge-info">✎ wallet-managed</span>}
+      {ownerMode === 'external' && <span className="badge badge-warn">tracked external</span>}
       <span className="v10-pca-card-spacer" />
       {account.health && <HealthChip state={account.health} />}
     </div>
@@ -113,12 +140,31 @@ export function PcaAccountCard({
     </div>
   );
 
-  // --- Owned card ---
-  if (classification === 'owned') {
+  const ownerNote =
+    ownerMode === 'daemon'
+      ? 'Daemon-managed: owner actions use this node’s primary operational wallet.'
+      : ownerMode === 'wallet'
+        ? 'Wallet-managed: owner actions are signed by the connected wallet.'
+        : connectedAs
+          ? `Read-only here: connected as ${connectedAs}; switch to the owner wallet to manage.`
+          : 'Read-only here: connect the owner wallet to manage this PCA.';
+  const showOwnerCard =
+    classification === 'owned' ||
+    ownerMode === 'wallet' ||
+    (ownerMode === 'external' && account.approvedCount === 0);
+
+  // --- Owned / wallet-managed / tracked-external owner card ---
+  if (showOwnerCard) {
     const selfCovers = account.approvedCount > 0;
     const inconclusive = account.probesInconclusive;
     return (
-      <div className="card v10-pca-card" data-state="owned" data-account={accountId} data-testid="pca-account-card">
+      <div
+        className="card v10-pca-card"
+        data-state="owned"
+        data-owner-mode={ownerMode}
+        data-account={accountId}
+        data-testid="pca-account-card"
+      >
         <div className="card-body">
           {titleBand}
           <StatStrip
@@ -130,12 +176,34 @@ export function PcaAccountCard({
             ]}
           />
           {ownerLine}
+          {ownerMode === 'daemon' ? (
           <p className="v10-pca-card-owner-note">
             This is the node’s operational wallet — who <strong>signs</strong>, not who’s covered.
           </p>
+          ) : (
+            <p className="v10-pca-card-owner-note">{ownerNote}</p>
+          )}
           {/* #11 — owner ≠ coverage. H2: never assert "0 approved" when the
               per-wallet probes couldn't be read — caveat instead of a false
               "discounts nothing yet". */}
+          {walletWrongNetwork && (
+            <p className="v10-pca-card-warn" role="alert">
+              Wrong network. Reads still work, but wallet-owner writes are disabled until the wallet is
+              switched.{' '}
+              {onSwitchNetwork && (
+                <button type="button" className="v10-pca-inline-btn" onClick={onSwitchNetwork}>
+                  Switch network
+                </button>
+              )}
+            </p>
+          )}
+          {ownerMode === 'external' && (
+            <p className="v10-pca-card-warn">
+              {connectedAs
+                ? `Connected as ${connectedAs} - switch to ${snapshot.owner} to manage PCA #${accountId}.`
+                : `Connect ${snapshot.owner} to manage PCA #${accountId}.`}
+            </p>
+          )}
           {inconclusive ? (
             <p className="v10-pca-card-warn">
               ⚠ Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
@@ -164,12 +232,8 @@ export function PcaAccountCard({
               type="button"
               className="v10-pca-card-btn"
               onClick={() => onApproveWallets?.(accountId)}
-              disabled={!ownerIsPrimaryWallet || !onApproveWallets}
-              title={
-                ownerIsPrimaryWallet
-                  ? undefined
-                  : `Owner-only — PCA #${accountId} isn’t owned by this node’s primary operational wallet.`
-              }
+              disabled={!ownerWritesEnabled || !onApproveWallets}
+              title={ownerActionTitle}
             >
               Approve wallets
             </button>

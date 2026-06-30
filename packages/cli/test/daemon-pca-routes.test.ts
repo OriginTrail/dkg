@@ -1204,4 +1204,79 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     await done;
     expect(res.statusCode).toBe(500);
   });
+
+  // ----- sub-PR #2: GET /api/pca/contracts (browser bootstrap) -----
+  const CONTRACTS_FIXTURE = {
+    nft: '0x' + 'aB'.repeat(20),
+    token: '0x' + 'Cd'.repeat(20),
+    chainId: 'base:84532',
+    rpcUrls: ['https://rpc.example/1', 'https://rpc.example/2'],
+  };
+
+  it('GET /api/pca/contracts → 200 { nft, token, chainId, rpcUrls } verbatim (chainId AS-IS)', async () => {
+    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body).toEqual(CONTRACTS_FIXTURE); // passed through 1:1
+    expect(body.chainId).toBe('base:84532'); // compound, NOT pre-stripped
+    expect(Array.isArray(body.rpcUrls)).toBe(true);
+  });
+
+  it('GET /api/pca/contracts → 503 when the adapter lacks the PCA surface (lookup not called)', async () => {
+    let called = false;
+    const agent = { supportsPublishingConvictionNft: false, getPublishingConvictionContracts: async () => { called = true; return CONTRACTS_FIXTURE; } };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(called).toBe(false);
+  });
+
+  it('GET /api/pca/contracts → 503 FEATURE_UNAVAILABLE when the facade returns null (no code)', async () => {
+    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => null };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).code).toBeUndefined();
+  });
+
+  it('GET /api/pca/contracts → 503 CONTRACTS_READ_FAILED on a CALL_EXCEPTION/BAD_DATA (dedicated code)', async () => {
+    for (const code of ['CALL_EXCEPTION', 'BAD_DATA']) {
+      const agent = {
+        supportsPublishingConvictionNft: true,
+        getPublishingConvictionContracts: async () => { const e: any = new Error('addr read failed'); e.code = code; throw e; },
+      };
+      const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+      await done;
+      expect(res.statusCode).toBe(503);
+      expect(JSON.parse(res.body).code).toBe('CONTRACTS_READ_FAILED');
+    }
+  });
+
+  it('GET /api/pca/contracts → 503 transport / 503 noChain+unavailable / 500 generic', async () => {
+    const transport = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw Object.assign(new Error('exhausted'), { code: 'RPC_ENDPOINTS_EXHAUSTED' }); } };
+    const t = runCtx('GET', '/api/pca/contracts', transport); await t.done;
+    expect(t.res.statusCode).toBe(503);
+    expect(JSON.parse(t.res.body).code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+
+    const noChain = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('No blockchain configured'); } };
+    const n = runCtx('GET', '/api/pca/contracts', noChain); await n.done;
+    expect(n.res.statusCode).toBe(503);
+
+    const unavail = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('DKGPublishingConvictionNFT is not deployed on this Hub'); } };
+    const u = runCtx('GET', '/api/pca/contracts', unavail); await u.done;
+    expect(u.res.statusCode).toBe(503);
+
+    const generic = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => { throw new Error('boom'); } };
+    const g = runCtx('GET', '/api/pca/contracts', generic); await g.done;
+    expect(g.res.statusCode).toBe(500);
+  });
+
+  it('route ordering: /api/pca/contracts is matched BEFORE the generic GET :id (not 400 as an id)', async () => {
+    const agent = { supportsPublishingConvictionNft: true, getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE };
+    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
+    await done;
+    expect(res.statusCode).toBe(200); // a generic :id match would 400 "Invalid accountId"
+  });
 });

@@ -15,12 +15,27 @@ import { isPcaDead, hasPcaBudget } from './coverage.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
+export type SignableOwnerKind = 'daemon' | 'wallet';
+export type SignableOwner =
+  | string
+  | { address?: string | null; kind?: SignableOwnerKind };
+
+function normalizeSignableOwners(input?: SignableOwner | SignableOwner[]): Array<{ address: string; kind: SignableOwnerKind }> {
+  const items = Array.isArray(input) ? input : input != null ? [input] : [];
+  return items.flatMap((item) => {
+    if (typeof item === 'string') return item ? [{ address: item, kind: 'daemon' as const }] : [];
+    return item.address ? [{ address: item.address, kind: item.kind ?? 'daemon' }] : [];
+  });
+}
+
 export interface WalletBinding {
   wallet: string;
   /** The accountId this wallet is currently an approved agent on, or null when unbound. */
   boundTo: string | null;
   /** boundTo is owned by this node (owner == ownerWallet) → the daemon can deregister-first. */
   canOwn: boolean;
+  /** Which available signer can free boundTo, when canOwn=true. */
+  signerKind?: SignableOwnerKind;
   /** boundTo is LIVE (not expired/swept AND has budget), so the binding actually covers.
    *  Meaningful only when `boundTo != null`. A sponsor binding only counts as "already free" when
    *  this is true; a dead one is uncovered (and, being a sponsor's, unfreeable by this node). */
@@ -31,7 +46,8 @@ export interface WalletBinding {
 }
 
 /** Resolve one wallet's current binding (read-only). Used per-wallet in the self-coverage loop. */
-export async function resolveWalletBinding(wallet: string, ownerWallet?: string): Promise<WalletBinding> {
+export async function resolveWalletBinding(wallet: string, ownerWallet?: SignableOwner | SignableOwner[]): Promise<WalletBinding> {
+  const signableOwners = normalizeSignableOwners(ownerWallet);
   const acct = await pcaAgentAccount(wallet).catch(() => undefined);
   if (acct === undefined) return { wallet, boundTo: null, canOwn: false, boundLive: false, inconclusive: true };
   const boundTo = acct.accountId;
@@ -40,17 +56,19 @@ export async function resolveWalletBinding(wallet: string, ownerWallet?: string)
   // it can only deregister from a PCA it owns) AND coverage state (expiry/solvency).
   const snap = await fetchPca(boundTo).catch(() => null);
   if (snap === null) return { wallet, boundTo, canOwn: false, boundLive: false, inconclusive: true };
+  const signer = signableOwners.find((owner) => eq(snap.owner, owner.address));
   return {
     wallet,
     boundTo,
-    canOwn: eq(snap.owner, ownerWallet),
+    canOwn: !!signer,
+    signerKind: signer?.kind,
     boundLive: !isPcaDead(snap) && hasPcaBudget(snap),
     inconclusive: false,
   };
 }
 
 /** Probe every operational wallet's binding (read-only). Used at wizard-open for the preview. */
-export async function probeWalletBindings(wallets: string[], ownerWallet?: string): Promise<WalletBinding[]> {
+export async function probeWalletBindings(wallets: string[], ownerWallet?: SignableOwner | SignableOwner[]): Promise<WalletBinding[]> {
   return Promise.all(wallets.map((w) => resolveWalletBinding(w, ownerWallet)));
 }
 
