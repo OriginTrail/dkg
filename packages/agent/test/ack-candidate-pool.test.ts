@@ -112,11 +112,29 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(a.getACKCandidatePeers()).not.toContain(self);
   });
 
-  it('V2 folded-private ACKs use only peers that advertised the V2 storage-ack protocol', async () => {
+  it('V2 folded-private ACKs prefer advertised V2 peers, then keep enough candidates for wire negotiation', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: [...CORE, ...EDGE],
       lastKnownRequiredACKs: 4,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+    a.knownCorePeerIdsV2.add(CORE[2]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[2],
+      CORE[1],
+      CORE[3],
+      ...EDGE,
+    ]);
+  });
+
+  it('V2 folded-private ACKs return only V2-advertised peers once they satisfy quorum', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: [...CORE, ...EDGE],
+      lastKnownRequiredACKs: 2,
     });
     a.knownCorePeerIdsV2.add(CORE[0]);
     a.knownCorePeerIdsV2.add(CORE[2]);
@@ -133,9 +151,9 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     a.knownCorePeerIdsV2.add(CORE[0]);
 
     a.handlePeerUpdateForSyncRetry(CORE[0], []);
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([CORE[0]]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
 
     a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_STORAGE_ACK]);
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
   });
 });

@@ -1436,9 +1436,13 @@ export class DKGAgent extends DKGAgentBase {
    * cheap, while under-asking is fatal.
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
-   * PublishIntent carries field 20 (`privateMerkleRoots`). For that protocol we
-   * do not fall back to all connected peers: V1-only cores would silently ignore
-   * field 20 and recompute the wrong root during rolling upgrades.
+   * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
+   * explicitly advertise V2, but do not make peer-store protocol metadata the
+   * only gate: StorageACK handlers register after identity resolution, often
+   * after peers are already connected, and libp2p identify does not always
+   * refresh the stored protocol list. The actual compatibility gate remains
+   * the V2 wire protocol passed to `sendP2P`; V1-only peers fail negotiation
+   * and cannot silently sign against a public-only root.
    *
    * Codex review (PR #1107): the quorum threshold here must track the
    * CHAIN's runtime `requiredACKs` (ParametersStorage
@@ -1454,11 +1458,17 @@ export class DKGAgent extends DKGAgentBase {
   private getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
     const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-    if (protocol === PROTOCOL_STORAGE_ACK_V2) {
-      return connected.filter(id => this.knownCorePeerIdsV2.has(id));
-    }
     const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
     const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    if (protocol === PROTOCOL_STORAGE_ACK_V2) {
+      const v2Advertised = connected.filter(id => this.knownCorePeerIdsV2.has(id));
+      if (v2Advertised.length >= quorum) return v2Advertised;
+      const v2Set = new Set(v2Advertised);
+      const remainingConfirmedCore = confirmedCore.filter(id => !v2Set.has(id));
+      const seen = new Set([...v2Advertised, ...remainingConfirmedCore]);
+      const rest = connected.filter(id => !seen.has(id));
+      return [...v2Advertised, ...remainingConfirmedCore, ...rest];
+    }
     if (confirmedCore.length >= quorum) return confirmedCore;
     const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
     return [...confirmedCore, ...rest];
