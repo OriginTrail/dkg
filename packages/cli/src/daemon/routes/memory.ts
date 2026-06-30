@@ -1587,17 +1587,21 @@ WHERE {
 
     // 5. Write to WM through the named knowledge asset lifecycle.
     let targetGraph: string;
+    const assertionWriteOptions = {
+      ...(subGraphName ? { subGraphName } : {}),
+      ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+    };
     try {
       targetGraph = await agent.assertion.create(
         resolvedContextGraphId,
         assertionName,
-        subGraphName ? { subGraphName } : undefined,
+        Object.keys(assertionWriteOptions).length > 0 ? assertionWriteOptions : undefined,
       );
       await agent.assertion.write(
         resolvedContextGraphId,
         assertionName,
         quads,
-        subGraphName ? { subGraphName } : undefined,
+        Object.keys(assertionWriteOptions).length > 0 ? assertionWriteOptions : undefined,
       );
     } catch (err: any) {
       if (err?.code === "OVERSIZED_RDF_LITERAL") {

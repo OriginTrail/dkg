@@ -217,15 +217,23 @@ export function buildBatchRejectionRecord(input: {
   };
 }
 
+export interface BatchRejectionAgentLaneOptions {
+  agentAddress?: string;
+}
+
+export interface BatchRejectionAuthorLaneOptions extends BatchRejectionAgentLaneOptions {
+  authorAgentAddress?: string;
+}
+
 export interface BatchRejectionReporterAgent {
   readonly assertion: {
-    create(contextGraphId: string, name: string, opts?: Record<string, unknown>): Promise<unknown>;
-    write(contextGraphId: string, name: string, quads: Quad[], opts?: Record<string, unknown>): Promise<unknown>;
-    finalize(contextGraphId: string, name: string, opts?: Record<string, unknown>): Promise<unknown>;
+    create(contextGraphId: string, name: string, opts?: BatchRejectionAgentLaneOptions): Promise<unknown>;
+    write(contextGraphId: string, name: string, quads: Quad[], opts?: BatchRejectionAgentLaneOptions): Promise<unknown>;
+    finalize(contextGraphId: string, name: string, opts?: BatchRejectionAuthorLaneOptions): Promise<unknown>;
     promote(
       contextGraphId: string,
       name: string,
-      opts?: Record<string, unknown>,
+      opts?: BatchRejectionAuthorLaneOptions,
     ): Promise<{ shareOperationId?: string; promotedCount?: number }>;
   };
   readonly peerId?: string;
@@ -286,14 +294,14 @@ export async function reportBatchRejectionWithLifecycle(
   });
   const assertionName = batchRejectionAssertionName(record);
   const quads = batchRejectionRecordToQuads(record);
-  const lane = input.agentAddress ? { agentAddress: input.agentAddress } : {};
-  const authorLane = input.agentAddress ? { authorAgentAddress: input.agentAddress } : {};
+  const lane: BatchRejectionAgentLaneOptions = input.agentAddress ? { agentAddress: input.agentAddress } : {};
+  const authorLane: BatchRejectionAuthorLaneOptions = input.agentAddress ? { ...lane, authorAgentAddress: input.agentAddress } : {};
 
   try {
     await agent.assertion.create(input.contextGraphId, assertionName, lane);
     await agent.assertion.write(input.contextGraphId, assertionName, quads, lane);
-    await agent.assertion.finalize(input.contextGraphId, assertionName, { ...lane, ...authorLane });
-    const share = await agent.assertion.promote(input.contextGraphId, assertionName, { ...lane, ...authorLane });
+    await agent.assertion.finalize(input.contextGraphId, assertionName, authorLane);
+    const share = await agent.assertion.promote(input.contextGraphId, assertionName, authorLane);
     return {
       record,
       assertionName,
