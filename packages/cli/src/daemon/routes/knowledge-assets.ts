@@ -1407,8 +1407,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
       try {
-        if (!validateFinalizedAssertionPublishRequest(parsed, res)) return;
-        const opts = resolveFinalizedPublishOptions(ctx, parsed.options);
+        const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
         const publishOptions = opts as {
           publishEpochs?: number;

@@ -421,7 +421,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
           preflighted.push(request);
         },
-      }, runtime.publisher as any);
+      }, {}, runtime.publisher as any);
 
       const res = await post('vm/publish-async', { contextGraphId: CG_ID });
       expect(res.status).toBe(202);
