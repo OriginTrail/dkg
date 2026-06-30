@@ -35,6 +35,7 @@ import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-asse
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
+import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -601,6 +602,113 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         roots: ['urn:test:runtime-root'],
       });
       expect(typeof executorCalls[0].publisher.publish).toBe('function');
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
+  });
+
+  it('queued vm/publish-async execution auto-registers once and retries the same job', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-runtime-register-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share(CG_ID, [
+      {
+        subject: 'urn:test:auto-register-root',
+        predicate: 'http://schema.org/name',
+        object: '"Auto Register Root"',
+        graph: '',
+      },
+    ], { publisherPeerId: 'peer-1' });
+
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: share.shareOperationId,
+      roots: ['urn:test:auto-register-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ef'.repeat(32)}`,
+    };
+    const calls: string[] = [];
+    let publishAttempts = 0;
+    const fakeAgent = {
+      getDefaultAgentAddress: () => '0x00000000000000000000000000000000000000a1',
+      async ensureRegisteredForPublish(_cg: string, opts: Record<string, unknown>) {
+        calls.push(`register:${opts.callerAgentAddress}`);
+      },
+      async publishQueuedKnowledgeAssetVmPublish(request: typeof intent, _publishOptions: unknown, opts: Record<string, unknown>) {
+        publishAttempts += 1;
+        calls.push(`publish#${publishAttempts}`);
+        expect(opts.publisherOverride).toBeDefined();
+        if (publishAttempts === 1) {
+          throw Object.assign(
+            new Error(`Context graph "${request.contextGraphId}" is not registered on-chain.`),
+            { code: 'CG_NOT_REGISTERED' },
+          );
+        }
+        return {
+          status: 'confirmed' as const,
+          kaId: 42n,
+          ual: 'did:dkg:test/1/42',
+          merkleRoot: ethers.getBytes(request.sealMerkleRoot),
+          kaManifest: [],
+          onChainResult: {
+            batchId: 42n,
+            startKAId: 42n,
+            endKAId: 42n,
+            txHash: `0x${'ab'.repeat(32)}`,
+            blockNumber: 7,
+            blockTimestamp: 1700000007,
+            publisherAddress: wallet.address,
+          },
+        };
+      },
+    };
+
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent),
+    });
+
+    try {
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(processed?.status).toBe('finalized');
+      expect(calls).toEqual([
+        'publish#1',
+        'register:0x00000000000000000000000000000000000000a1',
+        'publish#2',
+      ]);
+      expect(publishAttempts).toBe(2);
     } finally {
       await runtime.stop();
       await store.close();

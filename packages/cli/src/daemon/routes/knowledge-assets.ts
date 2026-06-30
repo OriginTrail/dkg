@@ -45,6 +45,7 @@ import {
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
+  SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
@@ -72,7 +73,7 @@ import {
 } from "./shared-assertion-helpers.js";
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import { escapeDkgRdfLiteral, validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -659,6 +660,94 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       error:
         "POST /api/knowledge-assets/publish has been removed. Publish named knowledge assets via POST /api/knowledge-assets/:name/vm/publish after create, wm/write, wm/finalize, and swm/share.",
     });
+  }
+
+  // ── POST /api/knowledge-assets/batch-rejections/report ────────────────
+  //
+  // OT-RFC-38 LU-8 - when verifyBatch returns ok=false, the member creates
+  // and shares a named BatchRejection KA so other members can sanity-check and
+  // re-pull from a different host without using a loose shared-memory write.
+  if (method === "POST" && path === `${PREFIX}/batch-rejections/report`) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const contextGraphId = parsed.contextGraphId;
+    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
+      agent,
+      contextGraphId,
+      res,
+      writePreflightContextGraphOpts,
+    );
+    if (!resolvedContextGraphId) return;
+    const verifyResult = parsed.verifyResult;
+    if (!verifyResult || verifyResult.ok !== false) {
+      return jsonResponse(res, 400, {
+        error: "verifyResult.ok must be false; nothing to report on an ok batch",
+      });
+    }
+
+    const { buildBatchRejectionRecord } = await import("@origintrail-official/dkg-agent");
+    const inferredAgentAddress =
+      (agent as any).getAgentAddress?.() ??
+      (agent as any).agentAddress ??
+      (agent as any).config?.agentAddress ??
+      (agent as any).wallet?.address ??
+      requestAgentAddress ??
+      "unknown";
+    const rejectedBy = parsed.rejectedBy ?? {
+      agentAddress: inferredAgentAddress,
+      peerId: (agent as any).peerId,
+    };
+
+    let record;
+    try {
+      record = buildBatchRejectionRecord({
+        contextGraphId: resolvedContextGraphId,
+        batchId: parsed.batchId,
+        verifyResult,
+        rejectedBy,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? String(err) });
+    }
+
+    const lit = (s: string) => `"${escapeDkgRdfLiteral(s)}"`;
+    const subject = `did:dkg:batch-rejection:${record.digest}`;
+    const assertionName = `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, "").slice(0, 48)}`;
+    const NS = "http://dkg.io/ontology/";
+    const quads = [
+      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: "" },
+      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: "" },
+      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: "" },
+      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? "unknown"), graph: "" },
+      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: "" },
+      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ""), graph: "" },
+      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: "" },
+      ...(record.batchId !== undefined
+        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: "" }]
+        : []),
+    ];
+
+    try {
+      await agent.assertion.create(resolvedContextGraphId, assertionName);
+      await agent.assertion.write(resolvedContextGraphId, assertionName, quads);
+      await agent.assertion.finalize(resolvedContextGraphId, assertionName);
+      const share = await agent.assertion.promote(resolvedContextGraphId, assertionName);
+      return jsonResponse(res, 200, {
+        record,
+        gossiped: true,
+        assertionName,
+        shareOperationId: share.shareOperationId,
+        promotedCount: share.promotedCount,
+      });
+    } catch (err: any) {
+      return jsonResponse(res, 200, {
+        record,
+        gossiped: false,
+        assertionName,
+        gossipError: err?.message ?? String(err),
+      });
+    }
   }
 
   // ── POST /api/knowledge-assets — create KA + open WM draft (atomic shortcut) ──

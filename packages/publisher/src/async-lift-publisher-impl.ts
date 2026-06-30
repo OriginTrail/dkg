@@ -63,6 +63,14 @@ import {
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 
+type AsyncLiftJobHandler = {
+  readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
+  readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
+  readonly recoverInterrupted: (job: LiftJob) => Promise<boolean>;
+  readonly canRetryFailedRecovery: (job: PersistedFailedJob) => boolean;
+  readonly shouldPromoteFinalizedPrivateStaging: (job: LiftJob) => boolean;
+};
+
 export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
@@ -83,6 +91,26 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
   private readonly graphManager: GraphManager;
   private paused = false;
   private graphEnsured = false;
+
+  private readonly rawLiftJobHandler: AsyncLiftJobHandler = {
+    inspectPreparedPayload: (job) => this.inspectRawLiftPreparedPayload(job),
+    process: (claimed, walletId) => this.processRawLift(claimed, walletId),
+    recoverInterrupted: (job) => this.recoverRawLiftInterrupted(job),
+    canRetryFailedRecovery: (job) =>
+      isRawLiftRequest(job.request) &&
+      job.failure.resolution === 'retry_recovery' &&
+      'broadcast' in job &&
+      Boolean(job.broadcast),
+    shouldPromoteFinalizedPrivateStaging: () => true,
+  };
+
+  private readonly knowledgeAssetVmPublishJobHandler: AsyncLiftJobHandler = {
+    inspectPreparedPayload: async () => null,
+    process: (claimed, walletId) => this.processKnowledgeAssetVmPublish(claimed, walletId),
+    recoverInterrupted: (job) => this.recoverKnowledgeAssetVmPublishInterrupted(job),
+    canRetryFailedRecovery: () => false,
+    shouldPromoteFinalizedPrivateStaging: () => false,
+  };
 
   constructor(
     private readonly store: TripleStore,
@@ -271,10 +299,10 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!job) {
       return null;
     }
-    if (isKnowledgeAssetVmPublishLiftRequest(job.request)) {
-      return null;
-    }
+    return this.jobHandlerFor(job.request).inspectPreparedPayload(job);
+  }
 
+  private async inspectRawLiftPreparedPayload(job: LiftJob): Promise<AsyncPreparedPublishPayload | null> {
     const resolved = await resolveLiftWorkspaceSlice({
       store: this.store,
       graphManager: this.graphManager,
@@ -314,12 +342,12 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (!claimed) {
       return null;
     }
+    return await this.jobHandlerFor(claimed.request).process(claimed, walletId);
+  }
 
+  private async processRawLift(claimed: LiftJob, walletId: string): Promise<LiftJob> {
     let failureState: LiftJobState = claimed.status;
     try {
-      if (isKnowledgeAssetVmPublishLiftRequest(claimed.request)) {
-        return await this.processKnowledgeAssetVmPublish(claimed, walletId);
-      }
       if (!this.publishExecutor) {
         throw new Error('Async lift publisher processNext requires a configured publishExecutor');
       }
@@ -428,6 +456,50 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         : 'broadcast';
       return await this.recordExecutionFailure(claimed.jobId, failedFromState, error);
     }
+  }
+
+  private async recoverRawLiftInterrupted(job: LiftJob): Promise<boolean> {
+    if (job.status !== 'broadcast' && job.status !== 'included') {
+      return false;
+    }
+    if (!this.chainRecoveryResolver) {
+      if (job.status === 'broadcast') {
+        await this.releaseWalletLockForJob(job);
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+        return true;
+      }
+      return false;
+    }
+
+    const recoverable = job as LiftJobBroadcast | LiftJobIncluded;
+    const resolved = await this.chainRecoveryResolver(recoverable);
+    if (resolved) {
+      await this.releaseWalletLockForJob(job);
+      const finalized = this.finalizeRecoveredJob(recoverable, resolved.inclusion, resolved.finalization);
+      await this.promoteFinalizedPrivateStaging(finalized);
+      await this.writeJob(finalized);
+      return true;
+    }
+    if (this.hasInconclusiveRecoveryTimedOut(recoverable)) {
+      await this.releaseWalletLockForJob(job);
+      await this.writeJob(this.failInconclusiveRecovery(recoverable));
+      return true;
+    }
+    return false;
+  }
+
+  private async recoverKnowledgeAssetVmPublishInterrupted(job: LiftJob): Promise<boolean> {
+    if (job.status === 'broadcast') {
+      await this.releaseWalletLockForJob(job);
+      await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+      return true;
+    }
+    if (job.status === 'included' && this.hasInconclusiveRecoveryTimedOut(job as LiftJobIncluded)) {
+      await this.releaseWalletLockForJob(job);
+      await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job as LiftJobIncluded));
+      return true;
+    }
+    return false;
   }
 
   private async findActiveKnowledgeAssetVmPublishJob(
@@ -599,40 +671,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         continue;
       }
 
-      if (
-        (job.status === 'broadcast' || job.status === 'included') &&
-        this.chainRecoveryResolver &&
-        isRawLiftRequest(job.request)
-      ) {
-        const resolved = await this.chainRecoveryResolver(job);
-        if (resolved) {
-          await this.releaseWalletLockForJob(job);
-          const finalized = this.finalizeRecoveredJob(job, resolved.inclusion, resolved.finalization);
-          await this.promoteFinalizedPrivateStaging(finalized);
-          await this.writeJob(finalized);
-          recovered += 1;
-          continue;
-        }
-        if (this.hasInconclusiveRecoveryTimedOut(job)) {
-          await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.failInconclusiveRecovery(job));
-          recovered += 1;
-        }
-        continue;
-      }
-
-      if (job.status === 'included' && isKnowledgeAssetVmPublishLiftRequest(job.request)) {
-        if (this.hasInconclusiveRecoveryTimedOut(job)) {
-          await this.releaseWalletLockForJob(job);
-          await this.writeJob(this.failKnowledgeAssetInconclusiveRecovery(job));
-          recovered += 1;
-        }
-        continue;
-      }
-
-      if (job.status === 'broadcast') {
-        await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)));
+      if (await this.jobHandlerFor(job.request).recoverInterrupted(job)) {
         recovered += 1;
       }
     }
@@ -642,8 +681,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
     if (this.chainRecoveryResolver) {
       const retryRecoveryJobs = (await this.list({ status: 'failed' }))
         .filter(isFailedJob)
-        .filter((job) => isRawLiftRequest(job.request))
-        .filter((job) => job.failure.resolution === 'retry_recovery' && 'broadcast' in job && job.broadcast);
+        .filter((job) => this.jobHandlerFor(job.request).canRetryFailedRecovery(job));
 
       for (const job of retryRecoveryJobs) {
         const resolved = await this.chainRecoveryResolver(job as unknown as LiftJobBroadcast);
@@ -1192,7 +1230,7 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
 
   private async promoteFinalizedPrivateStaging(job: LiftJob): Promise<void> {
     if (job.status !== 'finalized' || !job.validation) return;
-    if (isKnowledgeAssetVmPublishLiftRequest(job.request)) return;
+    if (!this.jobHandlerFor(job.request).shouldPromoteFinalizedPrivateStaging(job)) return;
 
     const privateStore = new PrivateContentStore(this.store, this.graphManager);
     for (const sourceRoot of job.request.roots) {
@@ -1226,6 +1264,13 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
         job.request.subGraphName,
       );
     }
+  }
+
+  private jobHandlerFor(request: LiftRequest): AsyncLiftJobHandler {
+    if (isKnowledgeAssetVmPublishLiftRequest(request)) {
+      return this.knowledgeAssetVmPublishJobHandler;
+    }
+    return this.rawLiftJobHandler;
   }
 
   private computePublicByteSize(quads: readonly { subject: string; predicate: string; object: string; graph: string }[]): number {

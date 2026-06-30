@@ -739,6 +739,37 @@ type StartupGenesisValidation =
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
 
+export function createKnowledgeAssetVmPublishExecutor(agent: any) {
+  return async ({ request, publishOptions, publisher }: any) => {
+    const publishOpts = {
+      ...(publisher ? { publisherOverride: publisher } : {}),
+    };
+    try {
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    } catch (firstErr: any) {
+      if (
+        firstErr?.code !== "CG_NOT_REGISTERED" &&
+        !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))
+      ) {
+        throw firstErr;
+      }
+      const defaultAgentAddress = agent.getDefaultAgentAddress();
+      await agent.ensureRegisteredForPublish(request.contextGraphId, {
+        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+      });
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    }
+  };
+}
+
 export async function validateStartupGenesis(
   network: StartupGenesisValidationInput | null | undefined,
 ): Promise<StartupGenesisValidation> {
@@ -1792,34 +1823,7 @@ export async function runDaemonInner(
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
-            knowledgeAssetVmPublishExecutor: async ({ request, publishOptions, publisher }) => {
-              const publishOpts = {
-                ...(publisher ? { publisherOverride: publisher } : {}),
-              };
-              try {
-                return await agent.publishQueuedKnowledgeAssetVmPublish(
-                  request,
-                  publishOptions,
-                  publishOpts,
-                );
-              } catch (firstErr: any) {
-                if (
-                  firstErr?.code !== "CG_NOT_REGISTERED" &&
-                  !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))
-                ) {
-                  throw firstErr;
-                }
-                const defaultAgentAddress = agent.getDefaultAgentAddress();
-                await agent.ensureRegisteredForPublish(request.contextGraphId, {
-                  ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
-                });
-                return await agent.publishQueuedKnowledgeAssetVmPublish(
-                  request,
-                  publishOptions,
-                  publishOpts,
-                );
-              }
-            },
+            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
             log,
           });
           publisherRuntime = runtime;

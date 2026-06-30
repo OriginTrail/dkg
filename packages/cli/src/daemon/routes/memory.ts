@@ -62,7 +62,7 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
@@ -1230,119 +1230,6 @@ WHERE {
       quadsConsidered: quads.length,
       ...verifyResult,
     });
-  }
-
-  // POST /api/knowledge-assets/batch-rejections/report
-  //
-  // OT-RFC-38 LU-8 - when verifyBatch returns ok=false, the member
-  // creates and shares a named BatchRejection KA so other members can
-  // sanity-check and re-pull from a different host without using a loose
-  // shared-memory write route.
-  //
-  // Body: {
-  //   contextGraphId: string,
-  //   batchId?: string,
-  //   verifyResult: { ok: false, expectedRoot, actualRoot, leafCount, reason },
-  //   rejectedBy?: { agentAddress, peerId },    // defaults to local agent
-  // }
-  if (req.method === "POST" && path === "/api/knowledge-assets/batch-rejections/report") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const contextGraphId = parsed.contextGraphId;
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    const verifyResult = parsed.verifyResult;
-    if (!verifyResult || verifyResult.ok !== false) {
-      return jsonResponse(res, 400, {
-        error: 'verifyResult.ok must be false; nothing to report on an ok batch',
-      });
-    }
-
-    const { buildBatchRejectionRecord } = await import('@origintrail-official/dkg-agent');
-    const inferredAgentAddress =
-      (agent as any).getAgentAddress?.() ??
-      (agent as any).agentAddress ??
-      (agent as any).config?.agentAddress ??
-      (agent as any).wallet?.address ??
-      requestAgentAddress ??
-      'unknown';
-    const rejectedBy = parsed.rejectedBy ?? {
-      agentAddress: inferredAgentAddress,
-      peerId: (agent as any).peerId,
-    };
-
-    let record;
-    try {
-      record = buildBatchRejectionRecord({
-        contextGraphId: resolvedContextGraphId,
-        batchId: parsed.batchId,
-        verifyResult,
-        rejectedBy,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 400, { error: err?.message ?? String(err) });
-    }
-
-    // Persist the record as a named KA and share it to SWM so it gossips via
-    // the standard SWM substrate to other members. This intentionally avoids
-    // the retired loose shared-memory write route.
-    //
-    // Codex PR #609: every value that originates from HTTP body
-    // (contextGraphId, batchId, peerId, reason, agentAddress) is
-    // interpolated into an N-Quads literal. Without escaping, a value
-    // containing `"`, newlines, or RDF syntax either breaks the
-    // store insert outright or lets the caller smuggle malformed /
-    // attacker-controlled triples through this endpoint. We pipe
-    // every interpolated literal body through `escapeDkgRdfLiteral`
-    // (defense in depth - even fields like rootHashes that are
-    // structurally constrained to 0x-hex still get escaped, so a
-    // future input-validation regression doesn't reopen the hole).
-    const lit = (s: string) => `"${escapeDkgRdfLiteral(s)}"`;
-    const subject = `did:dkg:batch-rejection:${record.digest}`;
-    const assertionName = `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, '').slice(0, 48)}`;
-    const NS = 'http://dkg.io/ontology/';
-    const quads = [
-      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
-      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
-      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
-      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
-      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
-      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
-      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
-      ...(record.batchId !== undefined
-        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
-        : []),
-    ];
-
-    try {
-      await agent.assertion.create(resolvedContextGraphId, assertionName);
-      await agent.assertion.write(resolvedContextGraphId, assertionName, quads);
-      await agent.assertion.finalize(resolvedContextGraphId, assertionName);
-      const share = await agent.assertion.promote(resolvedContextGraphId, assertionName);
-      return jsonResponse(res, 200, {
-        record,
-        gossiped: true,
-        assertionName,
-        shareOperationId: share.shareOperationId,
-        promotedCount: share.promotedCount,
-      });
-    } catch (err: any) {
-      // The record itself is the deliverable; gossip is best-effort.
-      // Surface the error but still return the constructed record so
-      // callers can persist it elsewhere.
-      return jsonResponse(res, 200, {
-        record,
-        gossiped: false,
-        assertionName,
-        gossipError: err?.message ?? String(err),
-      });
-    }
   }
 
   // POST /api/attestation/mint
