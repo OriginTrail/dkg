@@ -26,6 +26,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
+  AsyncLiftJobConflictError,
   DKGPublisher,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
@@ -485,6 +486,45 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       publishEpochs: 2,
       clearSharedMemoryAfter: true,
       publisherNodeIdentityIdOverride: '0',
+    });
+  });
+
+  it('vm/publish-async maps incompatible duplicate jobs to 409 with existingJobId', async () => {
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: 'share-conflict',
+      roots: ['urn:test:conflict-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'cf'.repeat(32)}`,
+    };
+
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => intent,
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new AsyncLiftJobConflictError('conflict', 'job-existing');
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      error: 'conflict',
+      existingJobId: 'job-existing',
     });
   });
 

@@ -547,12 +547,21 @@ describe('#1116 seal decoupled from CG — full vs skipSeal share, seal-in-SWM',
     const processed = await asyncPublisher.processNext('wallet-1');
     expect(processed?.jobId).toBe(jobId);
     expect(processed?.status).toBe('finalized');
+    expect(processed?.broadcast?.txHash).toMatch(/^0x[0-9a-f]+$/i);
+    expect(processed?.inclusion?.blockNumber).toBeGreaterThan(0);
+    expect(processed?.finalization?.mode).not.toBe('local');
     expect(preflight).toHaveBeenCalled();
 
     const history = await agent.assertion.history(CG_ID, name);
     expect(history?.vmCurrentAssertion).toBe(intent.sealMerkleRoot.slice(2));
     expect(history?.state).toBe('published');
     expect(history?.memoryLayer).toBe(MemoryLayer.VerifiableMemory);
+
+    const vmRows = await agent.query(
+      `SELECT ?name WHERE { <${root}> <http://schema.org/name> ?name }`,
+      { contextGraphId: CG_ID },
+    );
+    expect(vmRows.bindings.map((row) => row['name'])).toContain('"Queued Async VM"');
   }, 60_000);
 
   it('async VM publish no-ops when the queued seal is already current in VM', async () => {
