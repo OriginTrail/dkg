@@ -54,6 +54,12 @@ export function mapPublishResultToLiftJobSuccess(params: {
   }
 
   if (!onChain) {
+    if ((publishResult as { localChainSkipReason?: unknown }).localChainSkipReason === 'private-no-acks') {
+      throw new Error(
+        'Async lift publish result cannot finalize legacy private-no-acks result as local success. ' +
+        'The publish targeted chain finalization but did not collect ACKs; keep the job terminal-failed or rerun publish.',
+      );
+    }
     if (publishResult.status === 'tentative') {
       // Honest local finalization: there is genuinely no chain to reach
       // (`no-chain` skip reason, or a legacy/no-chain-adapter node).

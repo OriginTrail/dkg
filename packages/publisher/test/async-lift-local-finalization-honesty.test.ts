@@ -3,6 +3,8 @@
  * for the publish. Folded private publishes now collect ACKs and confirm when
  * V2-capable cores are available, so the remaining local success shape is the
  * explicit `no-chain` branch (plus legacy results that predate the reason).
+ * A legacy `private-no-acks` result is not honest local success: it targeted
+ * chain finalization but failed before ACK quorum.
  */
 import { describe, expect, it } from 'vitest';
 import { mapPublishResultToLiftJobSuccess } from '../src/async-lift-publish-result.js';
@@ -31,5 +33,15 @@ describe('local async finalization honesty', () => {
     const res = baseResult({ status: 'tentative', localChainSkipReason: undefined });
     const mapped = mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' });
     expect(mapped.status).toBe('finalized');
+  });
+
+  it('rejects legacy private-no-acks results instead of finalizing them as local success', () => {
+    const res = baseResult({
+      status: 'tentative',
+      localChainSkipReason: 'private-no-acks',
+    } as unknown as Partial<PublishResult>);
+
+    expect(() => mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' }))
+      .toThrow(/private-no-acks/);
   });
 });
