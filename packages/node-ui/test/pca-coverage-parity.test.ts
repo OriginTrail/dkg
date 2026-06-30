@@ -190,7 +190,7 @@ const SCENARIOS: Scenario[] = [
     overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
     s5Verdict: 'fallthrough',
     s5Wait: 'No PCA discount',
-    s6: { wait: 'publishes won’t get the discount', ready: false },
+    s6: { wait: 'publishes will not get the discount', ready: false },
   },
   {
     name: 'swept approved → uncovered (dead:true)',
@@ -200,7 +200,7 @@ const SCENARIOS: Scenario[] = [
     overview: { registered: true, approvedCount: 1, inconclusive: false, covered: false, bestBps: null },
     s5Verdict: 'fallthrough',
     s5Wait: 'No PCA discount',
-    s6: { wait: 'publishes won’t get the discount', ready: false },
+    s6: { wait: 'publishes will not get the discount', ready: false },
   },
 ];
 
@@ -233,8 +233,9 @@ describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via 
       // 3. S6 panel (GetSponsoredPanel) — run the approval check
       const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
       await waitForText(s6.container, 'Track your approval');
-      setInputValue(s6.container.querySelector('input[aria-label="Sponsor account id"]') as HTMLInputElement, ACCOUNT);
-      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+      const accountIdInput = s6.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement | null;
+      expect(accountIdInput).toBeTruthy();
+      await act(async () => { setInputValue(accountIdInput!, ACCOUNT); });
       await act(async () => {
         (Array.from(s6.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!)
           .dispatchEvent(new MouseEvent('click', { bubbles: true }));
