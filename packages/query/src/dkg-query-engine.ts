@@ -2443,7 +2443,29 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string | null 
   const unionBranches = graphUris
     .map((g) => `{ GRAPH <${g}> { ${inner} } }`)
     .join(' UNION ');
-  return `${before} ${unionBranches} ${after}`;
+  // A read-both UNION scans data that is intentionally DUAL-HOMED — the canonical
+  // root graph AND the per-KA …/_verifiable_memory partitions (PR #1098 made the
+  // per-KA homes queryable, and finalization mirrors the canonical quads into the
+  // root graph). The SAME triple therefore matches in more than one branch and
+  // yields duplicate solution rows (the #1270 e2e-finalization "2 bindings"
+  // failure). Force SELECT DISTINCT to collapse those mirror duplicates. This is
+  // a no-op for a single graph (a graph is a set), which is why only the
+  // multi-branch path needs it; non-SELECT forms (CONSTRUCT/ASK/DESCRIBE) are
+  // returned unchanged.
+  return `${withSelectDistinct(before)} ${unionBranches} ${after}`;
+}
+
+/**
+ * Inject `DISTINCT` into the outer SELECT of a query prefix (the text up to and
+ * including the outer `WHERE {`), unless it is not a SELECT query or already
+ * carries DISTINCT/REDUCED. Sub-selects live inside the WHERE block, so the first
+ * SELECT in the prefix is always the outer query form.
+ */
+function withSelectDistinct(before: string): string {
+  return before.replace(
+    /\bSELECT\b(\s+)(?!DISTINCT\b|REDUCED\b)/i,
+    (_m, ws) => `SELECT${ws}DISTINCT `,
+  );
 }
 
 /** The graph variable `wrapWithGraphValues` injects. Double-underscore + a
