@@ -109,7 +109,31 @@ export type V10ACKProviderParams =
  * Callback that collects V10 StorageACKs from core nodes.
  * Called AFTER merkle root computation, BEFORE on-chain tx.
  */
-export type V10ACKProvider = (params: V10ACKProviderParams) => Promise<V10CoreNodeACK[]>;
+export type V10ACKProviderObject = (params: V10ACKProviderParams) => Promise<V10CoreNodeACK[]>;
+
+/**
+ * Compatibility shape for integrations that implemented the original
+ * positional callback contract before ACK mode became explicit. The object
+ * provider is the canonical form for new code; folded-private publishes require
+ * the object form because the old positional contract had no private-root slot.
+ */
+export type LegacyV10ACKProvider = (
+  merkleRoot: Uint8Array,
+  contextGraphId: string,
+  kaCount: number,
+  rootEntities: string[],
+  publicByteSize: bigint,
+  stagingQuads: Uint8Array | undefined,
+  epochs: number | undefined,
+  tokenAmount: bigint | undefined,
+  swmGraphId: string | undefined,
+  subGraphName: string | undefined,
+  merkleLeafCount: number,
+  isEncryptedPayload?: boolean,
+  catalogCommitment?: V10CatalogACKCommitment,
+) => Promise<V10CoreNodeACK[]>;
+
+export type V10ACKProvider = V10ACKProviderObject | LegacyV10ACKProvider;
 
 /**
  * V10 update ACK provider: collects core node signatures over the update ACK

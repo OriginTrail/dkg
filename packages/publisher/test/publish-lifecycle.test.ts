@@ -25,6 +25,7 @@ import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
 import { computePrivateRootV10, computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
+import type { LegacyV10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -1053,7 +1054,7 @@ describe('Tentative publish UAL uniqueness', () => {
     const expectedPrivateRoot = computePrivateRootV10(privateQuads)!;
     let receivedPrivateRoots: Uint8Array[] | undefined;
     const realProvider = hardhatACKProvider(_kav10Address);
-    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params) => {
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
       receivedPrivateRoots = params.ackMode.kind === 'folded-private'
         ? params.ackMode.privateMerkleRoots.map((root) => new Uint8Array(root))
         : undefined;
@@ -1392,7 +1393,7 @@ describe('Tentative publish UAL uniqueness', () => {
     // succeeds — we still get to inspect everything the publisher
     // hands to the provider on the way through.
     const realProvider = hardhatACKProvider(_kav10Address);
-    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params) => {
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
       receivedStagingQuads = params.stagingQuads;
       receivedMerkleLeafCount = params.merkleLeafCount;
       return realProvider(params);
@@ -1416,6 +1417,77 @@ describe('Tentative publish UAL uniqueness', () => {
 
     const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
     expect(started).toContain('collect_v10_acks');
+  });
+
+  it('V10: public publishes still support legacy positional v10ACKProvider callbacks', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    let receivedContextGraphId: string | undefined;
+    let receivedKaCount = 0;
+    let receivedRootEntities: string[] = [];
+    let receivedStagingQuads: Uint8Array | undefined;
+    let receivedMerkleLeafCount = 0;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: LegacyV10ACKProvider = async (
+      merkleRoot,
+      contextGraphId,
+      kaCount,
+      rootEntities,
+      publicByteSize,
+      stagingQuads,
+      epochs,
+      tokenAmount,
+      swmGraphId,
+      subGraphName,
+      merkleLeafCount,
+      isEncryptedPayload,
+      catalogCommitment,
+    ) => {
+      receivedContextGraphId = contextGraphId;
+      receivedKaCount = kaCount;
+      receivedRootEntities = [...rootEntities];
+      receivedStagingQuads = stagingQuads;
+      receivedMerkleLeafCount = merkleLeafCount;
+      expect(isEncryptedPayload).toBeUndefined();
+      expect(catalogCommitment).toBeUndefined();
+      return realProvider({
+        merkleRoot,
+        contextGraphId,
+        kaCount,
+        rootEntities,
+        publicByteSize,
+        stagingQuads,
+        epochs,
+        tokenAmount,
+        swmGraphId,
+        subGraphName,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    };
+
+    const result = await pubS(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Legacy ACK Provider"')],
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(receivedContextGraphId).toBe(CONTEXT_GRAPH);
+    expect(receivedKaCount).toBe(1);
+    expect(receivedRootEntities).toEqual([ENTITY]);
+    expect(receivedStagingQuads).toBeDefined();
+    expect(receivedMerkleLeafCount).toBeGreaterThan(0);
   });
 
   // -------------------------------------------------------------------------

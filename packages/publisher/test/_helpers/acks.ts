@@ -18,7 +18,7 @@
 import { ethers } from 'ethers';
 import { computePublishACKDigest } from '@origintrail-official/dkg-core';
 import type { EVMChainAdapter } from '@origintrail-official/dkg-chain';
-import type { V10ACKProvider, V10ACKProviderParams, V10CoreNodeACK, V10UpdateACKProvider } from '../../src/publisher.js';
+import type { V10ACKProviderObject, V10ACKProviderParams, V10CoreNodeACK, V10UpdateACKProvider } from '../../src/publisher.js';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 
 export interface InMemoryACKSigner {
@@ -71,7 +71,7 @@ export interface InMemoryACKProviderOptions {
  */
 export function makeInMemoryV10ACKProvider(
   opts: InMemoryACKProviderOptions,
-): V10ACKProvider {
+): V10ACKProviderObject {
   const { chainId, kav10Address, signers } = opts;
   if (signers.length === 0) {
     throw new Error('makeInMemoryV10ACKProvider: at least one signer required');
@@ -190,7 +190,7 @@ export function makeHardhatReceiverACKProvider(
   kav10Address: string,
   signerKeys: readonly [string, string, string],
   chainId: bigint = 31337n,
-): V10ACKProvider {
+): V10ACKProviderObject {
   if (ctx.receiverIds.length < 3) {
     throw new Error(
       `makeHardhatReceiverACKProvider: harness must have 3 receiver ids, got ${ctx.receiverIds.length}`,
@@ -222,8 +222,8 @@ export function makeHardhatReceiverACKProvider(
  * resolved before the call (typically: `beforeAll` already awaited
  * `chain.getKnowledgeAssetsLifecycleAddress()` and stashed it).
  */
-const _hardhatACKProviderCache = new Map<string, V10ACKProvider>();
-export function hardhatACKProvider(kav10Address: string): V10ACKProvider {
+const _hardhatACKProviderCache = new Map<string, V10ACKProviderObject>();
+export function hardhatACKProvider(kav10Address: string): V10ACKProviderObject {
   const cached = _hardhatACKProviderCache.get(kav10Address);
   if (cached) return cached;
   const provider = makeHardhatReceiverACKProvider(
@@ -260,7 +260,7 @@ export function hardhatACKProvider(kav10Address: string): V10ACKProvider {
 const _STUB_ACK_WALLET = new ethers.Wallet(
   '0x0000000000000000000000000000000000000000000000000000000000000001',
 );
-export function mockChainStubACKProvider(opts?: { identityId?: bigint }): V10ACKProvider {
+export function mockChainStubACKProvider(opts?: { identityId?: bigint }): V10ACKProviderObject {
   const identityId = opts?.identityId ?? 1n;
   return async (): Promise<V10CoreNodeACK[]> => {
     const sig = ethers.Signature.from(

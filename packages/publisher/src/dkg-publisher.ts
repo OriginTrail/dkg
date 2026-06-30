@@ -4,7 +4,7 @@ import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
@@ -203,6 +203,47 @@ function resolvePublishEpochsOverride(value: number | undefined): number | undef
     throw new Error(`publishEpochs must be a positive uint32 integer, got ${String(value)}`);
   }
   return value;
+}
+
+function isLegacyV10ACKProvider(
+  provider: NonNullable<PublishOptions['v10ACKProvider']>,
+): provider is LegacyV10ACKProvider {
+  return provider.length > 1;
+}
+
+async function invokeV10ACKProvider(
+  provider: NonNullable<PublishOptions['v10ACKProvider']>,
+  params: V10ACKProviderParams,
+): Promise<V10CoreNodeACK[]> {
+  if (!isLegacyV10ACKProvider(provider)) {
+    return (provider as V10ACKProviderObject)(params);
+  }
+
+  if (params.ackMode.kind === 'folded-private') {
+    throw new Error(
+      'Folded-private V10 ACK collection requires object-form v10ACKProvider ' +
+      'so privateMerkleRoots reach the ACK collector.',
+    );
+  }
+
+  const catalogCommitment = params.ackMode.kind === 'curated-catalog'
+    ? params.ackMode.catalogCommitment
+    : undefined;
+  return provider(
+    params.merkleRoot,
+    params.contextGraphId,
+    params.kaCount,
+    params.rootEntities,
+    params.publicByteSize,
+    params.stagingQuads,
+    params.epochs,
+    params.tokenAmount,
+    params.swmGraphId,
+    params.subGraphName,
+    params.merkleLeafCount,
+    params.ackMode.kind === 'curated-catalog' ? true : undefined,
+    catalogCommitment,
+  );
 }
 
 function coercePublisherAddress(value: unknown): string | undefined {
@@ -2630,7 +2671,7 @@ export class DKGPublisher implements Publisher {
           if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
             throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
           }
-          v10ACKs = await v10ACKProvider({
+          v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
             ...commonACKParams,
             stagingQuads,
             ackMode: {
@@ -2642,7 +2683,7 @@ export class DKGPublisher implements Publisher {
             },
           });
         } else if (privateRoots.length > 0) {
-          v10ACKs = await v10ACKProvider({
+          v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
             ...commonACKParams,
             stagingQuads,
             ackMode: {
@@ -2651,7 +2692,7 @@ export class DKGPublisher implements Publisher {
             },
           });
         } else {
-          v10ACKs = await v10ACKProvider({
+          v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
             ...commonACKParams,
             stagingQuads,
             ackMode: { kind: 'public' },
