@@ -42,6 +42,7 @@ export interface LiftRequestAuthorSeal {
 export interface KnowledgeAssetVmPublishRequest {
   readonly contextGraphId: string;
   readonly name: string;
+  readonly agentAddress?: string;
   readonly subGraphName?: string;
   readonly shareOperationId: string;
   readonly roots: readonly string[];
@@ -87,35 +88,26 @@ export interface LiftRequestBase {
 
 export interface RawLiftRequest extends LiftRequestBase {
   readonly jobType?: 'lift';
-  readonly knowledgeAssetVmPublish?: never;
 }
 
-export interface KnowledgeAssetVmPublishLiftRequest extends LiftRequestBase {
+export type LiftRequest = RawLiftRequest;
+
+export interface RawLiftJobRequest {
+  readonly jobType: 'lift';
+  readonly lift: RawLiftRequest;
+}
+
+export interface KnowledgeAssetVmPublishJobRequest {
   readonly jobType: 'knowledge-asset-vm-publish';
   readonly knowledgeAssetVmPublish: KnowledgeAssetVmPublishRequest;
 }
 
-export type LiftRequest = RawLiftRequest | KnowledgeAssetVmPublishLiftRequest;
+export type LiftJobRequest = RawLiftJobRequest | KnowledgeAssetVmPublishJobRequest;
 
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
   'jobType',
+  'lift',
   'knowledgeAssetVmPublish',
-  'swmId',
-  'shareOperationId',
-  'roots',
-  'contextGraphId',
-  'namespace',
-  'scope',
-  'transitionType',
-  'authority',
-  'priorVersion',
-  'subGraphName',
-  'accessPolicy',
-  'allowedPeers',
-  'entityProofs',
-  'publishEpochs',
-  'publisherNodeIdentityIdOverride',
-  'seal',
 ] as const;
 
 export interface LiftJobTimestamps {
@@ -254,7 +246,7 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
 export interface LiftJobBase {
   readonly jobId: string;
   readonly jobSlug: string;
-  readonly request: LiftRequest;
+  readonly request: LiftJobRequest;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
   readonly retries: LiftJobRetryMetadata;

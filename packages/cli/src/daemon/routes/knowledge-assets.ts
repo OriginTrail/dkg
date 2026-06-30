@@ -73,7 +73,7 @@ import {
 } from "./shared-assertion-helpers.js";
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import { escapeDkgRdfLiteral, validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -686,7 +686,6 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       });
     }
 
-    const { buildBatchRejectionRecord } = await import("@origintrail-official/dkg-agent");
     const inferredAgentAddress =
       (agent as any).getAgentAddress?.() ??
       (agent as any).agentAddress ??
@@ -699,54 +698,17 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       peerId: (agent as any).peerId,
     };
 
-    let record;
     try {
-      record = buildBatchRejectionRecord({
+      const result = await agent.reportBatchRejection({
         contextGraphId: resolvedContextGraphId,
         batchId: parsed.batchId,
         verifyResult,
         rejectedBy,
+        ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
       });
+      return jsonResponse(res, 200, result);
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? String(err) });
-    }
-
-    const lit = (s: string) => `"${escapeDkgRdfLiteral(s)}"`;
-    const subject = `did:dkg:batch-rejection:${record.digest}`;
-    const assertionName = `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, "").slice(0, 48)}`;
-    const NS = "http://dkg.io/ontology/";
-    const quads = [
-      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: "" },
-      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: "" },
-      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: "" },
-      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? "unknown"), graph: "" },
-      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: "" },
-      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ""), graph: "" },
-      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: "" },
-      ...(record.batchId !== undefined
-        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: "" }]
-        : []),
-    ];
-
-    try {
-      await agent.assertion.create(resolvedContextGraphId, assertionName);
-      await agent.assertion.write(resolvedContextGraphId, assertionName, quads);
-      await agent.assertion.finalize(resolvedContextGraphId, assertionName);
-      const share = await agent.assertion.promote(resolvedContextGraphId, assertionName);
-      return jsonResponse(res, 200, {
-        record,
-        gossiped: true,
-        assertionName,
-        shareOperationId: share.shareOperationId,
-        promotedCount: share.promotedCount,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 200, {
-        record,
-        gossiped: false,
-        assertionName,
-        gossipError: err?.message ?? String(err),
-      });
     }
   }
 
@@ -1382,6 +1344,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         };
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
+          ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
             ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }

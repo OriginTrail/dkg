@@ -485,6 +485,57 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
+  it('vm/publish-async binds the queued intent to the bearer-token agent namespace', async () => {
+    const token = 'alice-token';
+    const tokenAgentAddress = '0x00000000000000000000000000000000000000a2';
+    const seenResolveOptions: any[] = [];
+    const enqueuedIntents: any[] = [];
+
+    await startWith({}, {
+      resolveAgentByToken: (t?: string) => (t === token ? tokenAgentAddress : undefined),
+      resolveFinalizedAssertionVmPublishIntent: async (_contextGraphId: string, _name: string, opts: any) => {
+        seenResolveOptions.push(opts);
+        return {
+          contextGraphId: CG_ID,
+          name: ASSERTION_NAME,
+          agentAddress: opts.agentAddress,
+          shareOperationId: 'share-token-agent',
+          roots: ['urn:test:token-agent-root'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: tokenAgentAddress,
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: `sha256:${'ca'.repeat(32)}`,
+        };
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async (intent: unknown) => {
+        expect(intent).toMatchObject({ agentAddress: tokenAgentAddress });
+      },
+    }, { requestToken: token, requestAgentAddress: tokenAgentAddress }, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+        enqueuedIntents.push(intent);
+        return 'job-token-agent';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-token-agent');
+    expect(seenResolveOptions).toHaveLength(1);
+    expect(seenResolveOptions[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+    expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+  });
+
   it('rejects the retired create promote flag before mutation', async () => {
     for (const promote of [true, false]) {
       let mutations = 0;
@@ -634,6 +685,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const intent = {
       contextGraphId: CG_ID,
       name: ASSERTION_NAME,
+      agentAddress: '0x00000000000000000000000000000000000000b2',
       shareOperationId: share.shareOperationId,
       roots: ['urn:test:auto-register-root'],
       seal: {
@@ -661,6 +713,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       async publishQueuedKnowledgeAssetVmPublish(request: typeof intent, _publishOptions: unknown, opts: Record<string, unknown>) {
         publishAttempts += 1;
         calls.push(`publish#${publishAttempts}`);
+        expect(request.agentAddress).toBe('0x00000000000000000000000000000000000000b2');
         expect(opts.publisherOverride).toBeDefined();
         if (publishAttempts === 1) {
           throw Object.assign(
@@ -705,7 +758,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(processed?.status).toBe('finalized');
       expect(calls).toEqual([
         'publish#1',
-        'register:0x00000000000000000000000000000000000000a1',
+        'register:0x00000000000000000000000000000000000000b2',
         'publish#2',
       ]);
       expect(publishAttempts).toBe(2);

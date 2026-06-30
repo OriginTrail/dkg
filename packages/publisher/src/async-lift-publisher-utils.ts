@@ -1,10 +1,12 @@
 import type { QueryResult } from '@origintrail-official/dkg-storage';
 import type {
-  KnowledgeAssetVmPublishLiftRequest,
+  KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   LiftJobHex,
+  LiftJobRequest,
   LiftRequest,
+  RawLiftJobRequest,
   RawLiftRequest,
 } from './lift-job.js';
 export {
@@ -56,12 +58,11 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 
 export function createKnowledgeAssetVmPublishLiftRequest(
   request: KnowledgeAssetVmPublishRequest,
-): KnowledgeAssetVmPublishLiftRequest {
+): RawLiftRequest {
   const subGraphPart = request.subGraphName ? `:${request.subGraphName}` : '';
   const operationKey = `${request.contextGraphId}:${request.name}${subGraphPart}:${request.shareOperationId}`;
   return {
-    jobType: 'knowledge-asset-vm-publish',
-    knowledgeAssetVmPublish: request,
+    jobType: 'lift',
     swmId: request.shareOperationId,
     shareOperationId: request.shareOperationId,
     roots: request.roots,
@@ -82,12 +83,39 @@ export function createKnowledgeAssetVmPublishLiftRequest(
   };
 }
 
-export function isKnowledgeAssetVmPublishLiftRequest(
-  request: LiftRequest,
-): request is KnowledgeAssetVmPublishLiftRequest {
+export function createRawLiftJobRequest(request: RawLiftRequest): RawLiftJobRequest {
+  return {
+    jobType: 'lift',
+    lift: {
+      ...request,
+      jobType: request.jobType ?? 'lift',
+    },
+  };
+}
+
+export function createKnowledgeAssetVmPublishJobRequest(
+  request: KnowledgeAssetVmPublishRequest,
+): KnowledgeAssetVmPublishJobRequest {
+  return {
+    jobType: 'knowledge-asset-vm-publish',
+    knowledgeAssetVmPublish: request,
+  };
+}
+
+export function isKnowledgeAssetVmPublishJobRequest(
+  request: LiftJobRequest,
+): request is KnowledgeAssetVmPublishJobRequest {
   return request.jobType === 'knowledge-asset-vm-publish';
 }
 
+export function isRawLiftJobRequest(request: LiftJobRequest): request is RawLiftJobRequest {
+  return request.jobType === 'lift';
+}
+
+export function rawLiftRequestFromJobRequest(request: LiftJobRequest): RawLiftRequest | null {
+  return isRawLiftJobRequest(request) ? request.lift : null;
+}
+
 export function isRawLiftRequest(request: LiftRequest): request is RawLiftRequest {
-  return request.jobType !== 'knowledge-asset-vm-publish';
+  return request.jobType === undefined || request.jobType === 'lift';
 }

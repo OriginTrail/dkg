@@ -196,9 +196,14 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
     expect(job?.jobSlug).toBe('music-social/person-profile/create/op-1/rihana');
-    expect(job?.request.contextGraphId).toBe('music-social');
-    expect(job?.request.swmId).toBe('swm-1');
-    expect(job?.request.shareOperationId).toBe('op-1');
+    expect(job?.request).toMatchObject({
+      jobType: 'lift',
+      lift: {
+        contextGraphId: 'music-social',
+        swmId: 'swm-1',
+        shareOperationId: 'op-1',
+      },
+    });
     expect(job?.retries.maxRetries).toBe(10);
   });
 
@@ -215,6 +220,7 @@ describe('TripleStoreAsyncLiftPublisher', () => {
 
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
+    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/one-two');
     expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
     expect(job?.request.knowledgeAssetVmPublish).toEqual({
       contextGraphId: 'music-social',
@@ -245,9 +251,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
       clearSharedMemoryAfter: false,
       publisherNodeIdentityIdOverride: '42',
     });
-    expect(job?.request.scope).toBe('vm-publish');
-    expect(job?.request.shareOperationId).toBe('share-op-1');
-    expect(job?.request.roots).toEqual(['urn:album:one', 'urn:album:two']);
+    expect((job?.request as any).scope).toBeUndefined();
+    expect((job?.request as any).namespace).toBeUndefined();
+    expect((job?.request as any).authority).toBeUndefined();
   });
 
   it('rejects duplicate active knowledge asset VM publish jobs', async () => {
@@ -1026,7 +1032,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     const job = await publisher.getStatus(jobId);
-    expect(job?.request.shareOperationId).toBe(write.shareOperationId);
+    expect(job?.request.jobType).toBe('lift');
+    expect(job?.request.jobType === 'lift' ? job.request.lift.shareOperationId : undefined).toBe(write.shareOperationId);
     expect(job?.jobSlug).toContain(write.shareOperationId);
   });
 

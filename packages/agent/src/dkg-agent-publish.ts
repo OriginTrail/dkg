@@ -36,7 +36,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, escapeDkgRdfLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -398,6 +398,11 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import {
+  buildBatchRejectionRecord,
+  type BatchRejectionRecord,
+  type VerifyBatchResult,
+} from './swm/verify-batch.js';
 
 /**
  * #1116 (round 11) — stable code tagged on the `assertionFinalize` throws that are
@@ -3359,6 +3364,73 @@ export class PublishMethods extends DKGAgentBase {
     return result.type === 'quads' ? result.quads : [];
   }
 
+  async reportBatchRejection(this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      batchId?: string;
+      verifyResult: VerifyBatchResult;
+      rejectedBy?: { agentAddress: string; peerId?: string };
+      agentAddress?: string;
+    },
+  ): Promise<{
+    record: BatchRejectionRecord;
+    assertionName: string;
+    gossiped: boolean;
+    shareOperationId?: string;
+    promotedCount?: number;
+    gossipError?: string;
+  }> {
+    const rejectedBy = input.rejectedBy ?? {
+      agentAddress: input.agentAddress ?? this.defaultAgentAddress ?? this.peerId ?? 'unknown',
+      peerId: this.peerId,
+    };
+    const record = buildBatchRejectionRecord({
+      contextGraphId: input.contextGraphId,
+      ...(input.batchId !== undefined ? { batchId: input.batchId } : {}),
+      verifyResult: input.verifyResult,
+      rejectedBy,
+    });
+    const lit = (value: string) => `"${escapeDkgRdfLiteral(value)}"`;
+    const subject = `did:dkg:batch-rejection:${record.digest}`;
+    const assertionName = `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, '').slice(0, 48)}`;
+    const NS = 'http://dkg.io/ontology/';
+    const quads: Quad[] = [
+      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
+      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
+      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
+      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
+      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
+      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
+      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
+      ...(record.batchId !== undefined
+        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
+        : []),
+    ];
+
+    const lane = input.agentAddress ? { agentAddress: input.agentAddress } : {};
+    const authorLane = input.agentAddress ? { authorAgentAddress: input.agentAddress } : {};
+    try {
+      await this.assertion.create(input.contextGraphId, assertionName, lane);
+      await this.assertion.write(input.contextGraphId, assertionName, quads, lane);
+      await this.assertion.finalize(input.contextGraphId, assertionName, { ...lane, ...authorLane });
+      const share = await this.assertion.promote(input.contextGraphId, assertionName, { ...lane, ...authorLane });
+      return {
+        record,
+        assertionName,
+        gossiped: true,
+        promotedCount: share.promotedCount,
+        ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+      };
+    } catch (err) {
+      return {
+        record,
+        assertionName,
+        gossiped: false,
+        gossipError: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
   /**
    * #1116 — transparent register-then-publish (OT-RFC-38 LU-6).
    *
@@ -3432,13 +3504,14 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: {
       subGraphName?: string;
+      agentAddress?: string;
       publishEpochs?: number;
       clearSharedMemoryAfter?: boolean;
       publisherNodeIdentityIdOverride?: bigint | `${bigint}`;
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const agentAddress = opts?.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
@@ -3531,6 +3604,7 @@ export class PublishMethods extends DKGAgentBase {
     const canonicalIntent = {
       contextGraphId,
       name,
+      agentAddress,
       subGraphName: opts?.subGraphName ?? null,
       shareOperationId,
       roots,
@@ -3553,6 +3627,7 @@ export class PublishMethods extends DKGAgentBase {
     return {
       contextGraphId,
       name,
+      agentAddress,
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
       roots,
@@ -3618,7 +3693,7 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
-    const agentAddress = this.defaultAgentAddress ?? this.peerId;
+    const agentAddress = request.agentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const assertionUri = contextGraphAssertionUri(
       request.contextGraphId,
       agentAddress,
