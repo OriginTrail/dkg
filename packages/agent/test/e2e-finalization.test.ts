@@ -369,7 +369,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     // Both entities should now be in the data graph
     const dataAll = await nodeA.query(
-      `SELECT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?s ?name WHERE { ?s <http://schema.org/name> ?name }`,
       CONTEXT_GRAPH,
     );
     const names = dataAll.bindings.map((b: any) => String(b['name']));
@@ -408,7 +408,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     // Data graph should have the data
     const data = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
       CONTEXT_GRAPH,
     );
     expect(data.bindings.length).toBe(1);
