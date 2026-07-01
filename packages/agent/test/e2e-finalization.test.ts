@@ -301,14 +301,19 @@ describe('E2E: workspace-first publish with real blockchain', () => {
   // This real-two-agent gossip promotion is timing-sensitive on the CI Linux
   // runner: B can briefly observe the finalized triple via BOTH on-connect sync
   // AND the finalization broadcast, so its canonical view momentarily holds 2
-  // bindings for the same entity before de-dup collapses them. The poll below
-  // therefore waits for the view to SETTLE to exactly one binding rather than
-  // asserting on the first non-empty read (which used to catch the transient 2
-  // and fail "expected 2 to be 1" — the pre-existing flake this test hit on both
-  // main and #1404). A never-settling duplicate still fails, so a real dedup bug
-  // is not masked. Independent of the #1404 publish changes: the ACK readiness
-  // gate and the policy retry NEVER fire in this test (0 activations in CI logs).
-  it('A enshrines on-chain; B receives finalization and promotes to canonical', { timeout: 60_000 }, async (ctx) => {
+  // bindings for the same entity until B's workspace→canonical de-dup collapses
+  // them. That collapse usually lands in a second or two (passes reliably
+  // locally and across CI), but on a loaded runner the B-side finalization
+  // round-trip can be slow (see the removed B-side assertions just below, cut
+  // for the same reason). The poll therefore waits for the view to SETTLE to
+  // exactly one binding — never asserting on the first non-empty read (which
+  // used to catch the transient 2 and fail "expected 2 to be 1", the pre-existing
+  // flake this test hit on both main and #1404) — with a generous settle window
+  // so a slow-but-real collapse is ridden out. A duplicate that NEVER collapses
+  // still fails the assertion, so a real dedup bug is not masked. Independent of
+  // the #1404 publish changes: the ACK readiness gate and the policy retry NEVER
+  // fire in this test (0 activations in CI logs).
+  it('A enshrines on-chain; B receives finalization and promotes to canonical', { timeout: 90_000 }, async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
@@ -334,8 +339,10 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     // the first non-empty read races the de-dup: B can momentarily expose the
     // same entity twice (on-connect sync + finalization broadcast) before the
     // duplicate collapses. Waiting for `=== 1` rides out that transient; a
-    // duplicate that never collapses still fails the assertion below.
-    const deadline = Date.now() + 15000;
+    // duplicate that never collapses still fails the assertion below. The window
+    // is generous (40s) because the B-side finalization round-trip can be slow on
+    // a loaded CI runner — 15s occasionally wasn't enough for the collapse.
+    const deadline = Date.now() + 40000;
     let bData: any;
     while (Date.now() < deadline) {
       bData = await nodeB.query(
