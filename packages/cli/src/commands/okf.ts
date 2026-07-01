@@ -112,15 +112,6 @@ export function registerOkfCommand(program: Command): void {
     return count;
   }
 
-  async function createOkfAssetDraft(
-    client: ApiClient,
-    contextGraphId: string,
-    name: string,
-    subGraphName?: string,
-  ): Promise<void> {
-    await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
-  }
-
   async function discardOkfAssetDraft(
     client: ApiClient,
     contextGraphId: string,
@@ -133,15 +124,6 @@ export function registerOkfCommand(program: Command): void {
       if ((e as { httpStatus?: number })?.httpStatus === 404) return;
       throw e;
     }
-  }
-
-  async function finalizeOkfAsset(
-    client: ApiClient,
-    contextGraphId: string,
-    name: string,
-    subGraphName?: string,
-  ): Promise<void> {
-    await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
   }
 
   async function shareOkfAsset(
@@ -433,10 +415,12 @@ export function registerOkfCommand(program: Command): void {
             const sameContextGraph = prev.contextGraphId === contextGraphId;
             const hasPerConceptProgress = (prev.mode === undefined || prev.mode === 'per-concept') &&
               ((prev.stages && typeof prev.stages === 'object') || Array.isArray(prev.done));
-            if (sameContextGraph && subGraphName && prev.subGraphName === undefined && hasPerConceptProgress) {
+            if (sameContextGraph && hasPerConceptProgress && prev.subGraphName !== subGraphName) {
+              const manifestTarget = prev.subGraphName ? `sub-graph "${prev.subGraphName}"` : 'the root context graph';
+              const importTarget = subGraphName ? `sub-graph "${subGraphName}"` : 'the root context graph';
               console.error(
-                `Refusing to resume OKF manifest "${manifestPath}": it does not record subGraphName, ` +
-                  `but this import targets sub-graph "${subGraphName}". Use --replace to rebuild this ` +
+                `Refusing to resume OKF manifest "${manifestPath}": it belongs to ${manifestTarget}, ` +
+                  `but this import targets ${importTarget}. Use --replace to rebuild this ` +
                   `target intentionally, or pass a target-specific --manifest path.`,
               );
               process.exit(OKF_EXIT_CODES.CLIENT_ERROR);
@@ -497,7 +481,7 @@ export function registerOkfCommand(program: Command): void {
             if (opts.replace || current === 'draft') {
               await discardOkfAssetDraft(client, contextGraphId, name, subGraphName);
             }
-            await createOkfAssetDraft(client, contextGraphId, name, subGraphName);
+            await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
             created += 1;
             stages.set(concept.conceptId, 'draft');
             await persistManifest();
@@ -509,7 +493,7 @@ export function registerOkfCommand(program: Command): void {
             // Advance toward SWM from the last persisted lifecycle checkpoint.
             const afterWrite = stages.get(concept.conceptId);
             if (!afterWrite || stageRank[afterWrite] < stageRank.finalized) {
-              await finalizeOkfAsset(client, contextGraphId, name, subGraphName);
+              await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
               stages.set(concept.conceptId, 'finalized');
               await persistManifest();
             }

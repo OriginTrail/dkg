@@ -6,6 +6,7 @@ import {
   callPaths,
   ensureOkfCliBuilt,
   knowledgeAssetCreateBodies,
+  knowledgeAssetShareBodies,
   knowledgeAssetWriteBodies,
   makeBundle,
   makeOkfCliHome,
@@ -123,6 +124,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p.endsWith('/wm/finalize'))).toHaveLength(2);
     expect(paths.filter((p) => p.endsWith('/swm/share'))).toHaveLength(2);
+    const shareBodies = ['a', 'b'].flatMap((name) => knowledgeAssetShareBodies(stub.calls, name));
+    expect(shareBodies).toHaveLength(2);
+    expect(shareBodies.every((b) => b.entities === 'all')).toBe(true);
     // Must NOT re-create the assets that are already in WM.
     expect(paths.some((p) => p === 'POST /api/knowledge-assets')).toBe(false);
 
