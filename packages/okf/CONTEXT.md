@@ -51,6 +51,9 @@ a claim. Mapped to `schema:citation`, semantically distinct from concept edges.
   default.
 - **SWM** (Shared Working Memory): team-visible, gossip-replicated, free,
   TTL-bounded. Reached with `--share` (finalize + advance).
+- **Private import** (`--private`): same per-concept KA lifecycle as `--share`,
+  but the target Context Graph is invite-only; each concept is finalized and
+  shared to SWM without VM promotion.
 - **VM** (Verifiable Memory): on-chain, permanent, costs TRAC. **Never** written
   by this package; promotion is a separate, explicitly-gated operator step.
 
