@@ -171,15 +171,13 @@ export function registerOkfCommand(program: Command): void {
       collect,
       [] as string[],
     )
-    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle). WM-only: it does NOT clear already-shared SWM or the --private bulk lifecycle KA.')
+    .option('--replace', 'Discard any existing Working-Memory draft for each concept before writing (avoids stale triples when re-importing a changed bundle). WM-only: it does NOT clear already-shared SWM.')
     .option('--create-context-graph', 'Create the Context Graph if it does not exist')
     .option('--share', 'Finalize and advance assets to Shared Working Memory (free, team-visible)')
     .option(
       '--private',
-      'Bulk-write all triples into one named Knowledge Asset in the private Context Graph, ' +
-        'then finalize and share it to Shared Working Memory. Batched in 5,000-quad chunks with a ' +
-        'resumable manifest; the whole bundle is mapped in memory first, so this is ' +
-        'practical to ~100k concepts per run (not yet streaming). Content stays ' +
+      'Import each concept as its own named Knowledge Asset in the private Context Graph, ' +
+        'then finalize and share those assets to Shared Working Memory. Content stays ' +
         'gossip-restricted to allowlisted peers. Implies a private CG on --create-context-graph.',
     )
     .option(
@@ -191,7 +189,7 @@ export function registerOkfCommand(program: Command): void {
     )
     .option(
       '--allow-public-context-graph',
-      'Override the safety check that refuses --private bulk writes into an existing Context Graph whose accessPolicy is "public" (which would expose the private substance).',
+      'Override the safety check that refuses --private imports into an existing Context Graph whose accessPolicy is "public" (which would expose the private substance).',
     )
     .option('--manifest <path>', 'Resumability manifest path (default <bundleDir>/.okf-import-manifest.json)')
     .option('--dry-run', 'Run the deterministic mapping offline and print the summary; never touch the node')
@@ -223,7 +221,7 @@ export function registerOkfCommand(program: Command): void {
               {
                 mode: 'dry-run',
                 memoryLayer: opts.private || opts.share ? 'SWM' : 'WM',
-                importMode: opts.private ? 'bulk-private-lifecycle' : 'per-concept',
+                importMode: 'per-concept',
                 conformant: conformance.conformant,
                 okfVersion: imported.okfVersion,
                 ...summary,
@@ -287,7 +285,7 @@ export function registerOkfCommand(program: Command): void {
               (isPrivate && allowedPeers.length ? ` with ${allowedPeers.length} allowlisted peer(s).` : '.'),
           );
         } else if (isPrivate) {
-          // Existing CG + --private: REFUSE to bulk-write private substance into a
+          // Existing CG + --private: REFUSE to import private substance into a
           // Context Graph that is publicly readable. accessPolicy comes from the
           // daemon's CG list ('public' | 'ownerOnly' | 'allowList').
           const list = await client.listContextGraphs().catch(() => null);
@@ -318,177 +316,6 @@ export function registerOkfCommand(program: Command): void {
           }
         }
 
-        // ─── BULK PRIVATE MODE ──────────────────────────────────────────
-        // Stream every triple into one named private Knowledge Asset, then
-        // finalize and share it to SWM. This keeps the bulk/private UX without
-        // reintroducing loose shared-memory writes.
-        if (isPrivate) {
-          const allQuads = imported.concepts.flatMap((c) =>
-            c.quads.map((q: Quad) => ({
-              subject: q.subject,
-              predicate: q.predicate,
-              object: q.object,
-              graph,
-            })),
-          );
-          const assetName = conceptKaName(`okf-private-bulk-${subGraphName ?? 'root'}`);
-
-          // Resumable manifest keyed by chunks already acknowledged.
-          const manifestPath = opts.manifest
-            ? String(opts.manifest)
-            : join(bundleDir, '.okf-import-manifest.json');
-          let chunksDone = 0;
-          let draftCreated = false;
-          let finalized = false;
-          let shared = false;
-          if (existsSync(manifestPath)) {
-            try {
-              const prev = JSON.parse(await readFile(manifestPath, 'utf-8')) as {
-                contextGraphId?: string;
-                subGraphName?: string;
-                mode?: string;
-                chunkSize?: number;
-                chunksDone?: number;
-                assetName?: string;
-                draftCreated?: boolean;
-                finalized?: boolean;
-                shared?: boolean;
-              };
-              if (
-                prev.contextGraphId === contextGraphId &&
-                // resume only within the SAME target sub-graph (undefined == root) —
-                // never carry a root manifest into a --sub-graph-name run or vice versa.
-                prev.subGraphName === subGraphName &&
-                prev.mode === 'bulk-private-lifecycle' &&
-                prev.assetName === assetName &&
-                prev.chunkSize === CHUNK &&
-                typeof prev.chunksDone === 'number'
-              ) {
-                chunksDone = prev.chunksDone;
-                draftCreated = prev.draftCreated === true;
-                finalized = prev.finalized === true;
-                shared = prev.shared === true;
-              }
-            } catch {
-              // corrupt manifest → start over
-            }
-          }
-
-          const totalChunks = Math.ceil(allQuads.length / CHUNK);
-          const started = Date.now();
-          let triplesWritten = 0;
-          const persistPrivateManifest = async () =>
-            writeFile(
-              manifestPath,
-              JSON.stringify(
-                {
-                  contextGraphId,
-                  ...(subGraphName ? { subGraphName } : {}),
-                  mode: 'bulk-private-lifecycle',
-                  assetName,
-                  chunkSize: CHUNK,
-                  chunksDone,
-                  totalChunks,
-                  draftCreated,
-                  finalized,
-                  shared,
-                },
-                null,
-                2,
-              ),
-            );
-
-          if (!draftCreated) {
-            await client.createKnowledgeAsset(contextGraphId, assetName, { subGraphName });
-            draftCreated = true;
-            await persistPrivateManifest();
-          }
-
-          // Write one slice, halving the chunk on a 413 (payload too large)
-          // down to a floor, so a too-big batch degrades instead of failing.
-          const writeSlice = async (slice: typeof allQuads): Promise<void> => {
-            try {
-              const res = await client.knowledgeAssetWrite(contextGraphId, assetName, slice, { subGraphName });
-              triplesWritten += res.written ?? slice.length;
-            } catch (e) {
-              const status = (e as { httpStatus?: number })?.httpStatus;
-              if (status === 413 && slice.length > 1) {
-                const mid = Math.floor(slice.length / 2);
-                console.error(`  413 on ${slice.length} quads — splitting into ${mid}/${slice.length - mid}`);
-                await writeSlice(slice.slice(0, mid));
-                await writeSlice(slice.slice(mid));
-                return;
-              }
-              throw e;
-            }
-          };
-
-          let lastTick = started;
-          for (let ci = chunksDone; ci < totalChunks; ci++) {
-            const slice = allQuads.slice(ci * CHUNK, (ci + 1) * CHUNK);
-            const before = triplesWritten;
-            await writeSlice(slice);
-            chunksDone = ci + 1;
-            await persistPrivateManifest();
-            const now = Date.now();
-            // Instantaneous rate for THIS chunk exposes the store-growth slowdown
-            // (the cost-gate signal); cumulative average alone hides it.
-            const chunkSecs = (now - lastTick) / 1000;
-            const instRate = chunkSecs > 0 ? Math.round((triplesWritten - before) / chunkSecs) : triplesWritten - before;
-            const cumSecs = (now - started) / 1000;
-            const cumRate = cumSecs > 0 ? Math.round(triplesWritten / cumSecs) : triplesWritten;
-            lastTick = now;
-            console.log(
-              `  SWM(private)  chunk ${chunksDone}/${totalChunks}  ` +
-                `(${triplesWritten} triples; this chunk ${instRate} t/s, avg ${cumRate} t/s)`,
-            );
-          }
-          if (!finalized) {
-            await client.knowledgeAssetFinalize(contextGraphId, assetName, { subGraphName });
-            finalized = true;
-            await persistPrivateManifest();
-          }
-          if (!shared) {
-            await client.knowledgeAssetShare(contextGraphId, assetName, {
-              subGraphName,
-              entities: 'all',
-            });
-            shared = true;
-            await persistPrivateManifest();
-          }
-
-          const elapsed = (Date.now() - started) / 1000;
-          console.log(
-            JSON.stringify(
-              {
-                mode: 'import',
-                importMode: 'bulk-private-lifecycle',
-                contextGraphId,
-                assetName,
-                datasetPointer: graph,
-                memoryLayer: 'SWM',
-                accessPolicy: 'private (invite-only, off-chain)',
-                allowlistedPeers: allowedPeers.length,
-                okfVersion: imported.okfVersion,
-                entities: summary.concepts,
-                ...summary,
-                triplesWritten,
-                chunks: totalChunks,
-                chunkSize: CHUNK,
-                elapsedSeconds: Number(elapsed.toFixed(1)),
-                throughputTriplesPerSec: elapsed > 0 ? Math.round(triplesWritten / elapsed) : triplesWritten,
-                note:
-                  'Bulk-written as a named private Knowledge Asset and shared to Shared Working Memory. ' +
-                  'Gossip remains restricted to allowlisted peers; no on-chain verification, no TRAC spent. ' +
-                  'Public discoverability + VM descriptors are separate, gated steps.',
-              },
-              null,
-              2,
-            ),
-          );
-          return;
-        }
-
         // Resumability manifest: per-concept STAGE, not just "done". A bare
         // done-set would make the documented `import` → `import --share` flow skip
         // every concept (already "done" from the WM pass) before finalize/share
@@ -496,6 +323,7 @@ export function registerOkfCommand(program: Command): void {
         // stage each concept reached ('wm' = created+written, 'swm' = finalized+
         // shared) so a later --share advances WM concepts instead of skipping them.
         type Stage = 'wm' | 'swm';
+        type WritableOkfQuad = { subject: string; predicate: string; object: string; graph: string };
         const manifestPath = opts.manifest
           ? String(opts.manifest)
           : join(bundleDir, '.okf-import-manifest.json');
@@ -506,11 +334,15 @@ export function registerOkfCommand(program: Command): void {
           try {
             const prev = JSON.parse(await readFile(manifestPath, 'utf-8')) as {
               contextGraphId?: string;
+              subGraphName?: string;
               mode?: string;
               stages?: Record<string, Stage>;
               done?: string[]; // legacy format → treat as reached 'wm'
             };
-            if (prev.contextGraphId === contextGraphId && prev.mode !== 'bulk-private-lifecycle') {
+            const sameTarget = prev.contextGraphId === contextGraphId && prev.subGraphName === subGraphName;
+            if (sameTarget && prev.mode !== undefined && prev.mode !== 'per-concept') {
+              console.error('  warning: ignoring incompatible OKF manifest; starting per-concept lifecycle import.');
+            } else if (sameTarget) {
               if (prev.stages && typeof prev.stages === 'object') {
                 for (const [id, s] of Object.entries(prev.stages)) {
                   if (s === 'wm' || s === 'swm') stages.set(id, s);
@@ -528,17 +360,80 @@ export function registerOkfCommand(program: Command): void {
           writeFile(
             manifestPath,
             JSON.stringify(
-              { contextGraphId, mode: 'per-concept', stages: Object.fromEntries(stages) },
+              {
+                contextGraphId,
+                ...(subGraphName ? { subGraphName } : {}),
+                mode: 'per-concept',
+                stages: Object.fromEntries(stages),
+              },
               null,
               2,
             ),
           );
 
-        const layer = opts.share ? 'SWM' : 'WM';
-        const targetStage: Stage = opts.share ? 'swm' : 'wm';
+        const targetStage: Stage = isPrivate || opts.share ? 'swm' : 'wm';
+        const layer = targetStage === 'swm' ? 'SWM' : 'WM';
         let written = 0;
         let created = 0;
         let shared = 0;
+        const isPayloadTooLarge = (e: unknown) => (e as { httpStatus?: number })?.httpStatus === 413;
+        const assertCreateShareComplete = (name: string, result: Record<string, unknown>): void => {
+          const errors = Array.isArray(result.errors) ? result.errors : [];
+          if (errors.length > 0) {
+            throw new Error(`Knowledge Asset "${name}" create/share returned partial lifecycle errors: ${JSON.stringify(errors)}`);
+          }
+          if (result.swmShared !== true) {
+            throw new Error(`Knowledge Asset "${name}" create/share did not report swmShared:true`);
+          }
+        };
+        const writeSlice = async (name: string, slice: WritableOkfQuad[]): Promise<number> => {
+          try {
+            const res = await client.knowledgeAssetWrite(contextGraphId, name, slice, { subGraphName });
+            return res.written ?? slice.length;
+          } catch (e) {
+            if (isPayloadTooLarge(e) && slice.length > 1) {
+              const mid = Math.floor(slice.length / 2);
+              console.error(`  413 on ${slice.length} quads — splitting into ${mid}/${slice.length - mid}`);
+              return (await writeSlice(name, slice.slice(0, mid))) + (await writeSlice(name, slice.slice(mid)));
+            }
+            throw e;
+          }
+        };
+        const createAndWriteConcept = async (
+          name: string,
+          quads: WritableOkfQuad[],
+          stage: Stage,
+        ): Promise<number> => {
+          try {
+            const result = await client.createKnowledgeAsset(contextGraphId, name, {
+              subGraphName,
+              quads,
+              finalize: stage === 'swm',
+              ...(stage === 'swm' ? { alsoShareSwm: true } : {}),
+            });
+            if (stage === 'swm') assertCreateShareComplete(name, result);
+            return quads.length;
+          } catch (e) {
+            if (!isPayloadTooLarge(e) || quads.length <= 1) throw e;
+          }
+
+          await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
+          let count = 0;
+          for (let i = 0; i < quads.length; i += CHUNK) {
+            count += await writeSlice(name, quads.slice(i, i + CHUNK));
+          }
+          if (stage === 'swm') {
+            await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
+            const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
+              subGraphName,
+              entities: 'all',
+            });
+            if (shareResult.swmShared !== true) {
+              throw new Error(`Knowledge Asset "${name}" fallback share did not report swmShared:true`);
+            }
+          }
+          return count;
+        };
         for (const concept of imported.concepts) {
           const name = conceptKaName(concept.conceptId);
           const current = stages.get(concept.conceptId);
@@ -546,7 +441,7 @@ export function registerOkfCommand(program: Command): void {
           if (current === 'swm' || current === targetStage) continue;
 
           const needCreate = current === undefined; // not yet written to WM
-          const needShare = opts.share; // current is undefined or 'wm' here
+          const needShare = targetStage === 'swm' && current === 'wm';
 
           if (needCreate) {
             const quads = concept.quads.map((q: Quad) => ({
@@ -563,31 +458,29 @@ export function registerOkfCommand(program: Command): void {
                 .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
                 .catch(() => undefined);
             }
-            await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
-            for (let i = 0; i < quads.length; i += CHUNK) {
-              await client.knowledgeAssetWrite(contextGraphId, name, quads.slice(i, i + CHUNK), {
-                subGraphName,
-              });
-            }
-            written += quads.length;
+            written += await createAndWriteConcept(name, quads, targetStage);
             created += 1;
-            stages.set(concept.conceptId, 'wm');
+            if (targetStage === 'swm') shared += 1;
+            stages.set(concept.conceptId, targetStage);
             await persistManifest();
           }
           if (needShare) {
             // Advance WM → SWM (works whether the KA was just created or was
             // already in WM from a prior `import` run).
             await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
-            await client.knowledgeAssetShare(contextGraphId, name, {
+            const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
               subGraphName,
               entities: 'all',
             });
+            if (shareResult.swmShared !== true) {
+              throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);
+            }
             shared += 1;
             stages.set(concept.conceptId, 'swm');
             await persistManifest();
           }
           console.log(`  ${layer}  ${concept.conceptId}  →  ${concept.iri}` +
-            (needCreate ? `  (${concept.quads.length} quads)` : '  (advanced WM→SWM)'));
+            (needCreate ? `  (${concept.quads.length} quads${targetStage === 'swm' ? ', shared' : ''})` : '  (advanced WM→SWM)'));
         }
 
         console.log(
@@ -596,6 +489,8 @@ export function registerOkfCommand(program: Command): void {
               mode: 'import',
               contextGraphId,
               memoryLayer: layer,
+              importMode: 'per-concept',
+              ...(isPrivate ? { accessPolicy: 'private (invite-only, off-chain)', allowlistedPeers: allowedPeers.length } : {}),
               okfVersion: imported.okfVersion,
               ...summary,
               triplesWritten: written,

@@ -20,7 +20,7 @@ import type { AddressInfo } from 'node:net';
 // ApiClient.connect() reads, so these run the compiled CLI binary end-to-end
 // without booting the daemon. They lock down the behaviours the pure mapper
 // tests cannot: dry-run must NOT connect, WM import vs --share advance, the
-// --private bulk lifecycle path + manifest, and the export skolem-node filter.
+// --private per-concept lifecycle path + manifest, and the export skolem-node filter.
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -99,7 +99,22 @@ function okfDaemonHandler(createdCGs: Set<string>): StubHandler {
       return { status: 200, body: { invited: 'ok', contextGraphId: JSON.parse(body || '{}').contextGraphId } };
     }
     if (m === 'POST' && path === '/api/knowledge-assets') {
-      return { status: 200, body: { created: true } };
+      const parsed = JSON.parse(body || '{}');
+      const quads = Array.isArray(parsed.quads) ? parsed.quads : [];
+      if (parsed.alsoShareSwm === true) {
+        return {
+          status: 201,
+          body: {
+            created: true,
+            written: quads.length,
+            swmShared: true,
+            promotedCount: quads.length,
+            publishReady: true,
+            shareOperationId: `share-${parsed.name ?? 'asset'}`,
+          },
+        };
+      }
+      return { status: 201, body: { created: true, written: quads.length } };
     }
     if (m === 'POST' && /\/api\/knowledge-assets\/.+\/wm\/write$/.test(path)) {
       const quads = JSON.parse(body || '{}').quads ?? [];
@@ -219,8 +234,14 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
     expect(paths).toContain('POST /api/context-graph/create');
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
-    expect(paths.some((p) => p.endsWith('/wm/write'))).toBe(true);
+    const createBodies = stub.calls
+      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
+      .map((c) => JSON.parse(c.body || '{}'));
+    expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
+    expect(createBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    expect(createBodies.every((b) => b.finalize === false)).toBe(true);
     // No sealing/sharing in a plain WM import.
+    expect(paths.some((p) => p.endsWith('/wm/write'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/swm/share'))).toBe(false);
 
@@ -259,7 +280,7 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private bulk-stages quads through one lifecycle KA with a chunked manifest', async () => {
+  it('--private imports every concept as its own lifecycle KA in a private CG', async () => {
     clear();
     const bundle = await makeBundle();
     const r = await runCli(
@@ -268,20 +289,26 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     );
     expect(r.exitCode).toBe(0);
     const out = parseJsonTail(r.stdout);
-    expect(out.importMode).toBe('bulk-private-lifecycle');
-    expect(out.datasetPointer).toBe('did:dkg:context-graph:cg-priv');
+    expect(out.importMode).toBe('per-concept');
+    expect(out.memoryLayer).toBe('SWM');
     expect(out.triplesWritten).toBeGreaterThan(0);
-    expect(out.assetName).toBe('okf-private-bulk-root');
+    expect(out.assetsCreated).toBe(2);
+    expect(out.assetsShared).toBe(2);
+    expect(out.assetName).toBeUndefined();
 
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(1);
-    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/write');
-    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/finalize');
-    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/swm/share');
-    expect(paths.some((p) => p === 'POST /api/shared-memory/write')).toBe(false);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
+    const createBodies = stub.calls
+      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
+      .map((c) => JSON.parse(c.body || '{}'));
+    expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
+    expect(createBodies.every((b) => b.finalize === true && b.alsoShareSwm === true)).toBe(true);
+    expect(createBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
+    expect(paths.some((p) => p.startsWith('POST /api/shared-memory'))).toBe(false);
 
     // PRIVACY CONTRACT: the Context Graph must be created invite-only. A regression
-    // that dropped `{ private: true, accessPolicy: 1 }` would bulk-write the corpus
+    // that dropped `{ private: true, accessPolicy: 1 }` would import the corpus
     // into a public CG — exactly the substance-leak this mode must prevent.
     const createCall = stub.calls.find(
       (c) => c.method === 'POST' && c.url.split('?')[0] === '/api/context-graph/create',
@@ -292,30 +319,21 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     expect(createBody.accessPolicy).toBe(1);
 
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
-    expect(manifest.mode).toBe('bulk-private-lifecycle');
-    expect(manifest.assetName).toBe('okf-private-bulk-root');
-    expect(manifest.chunksDone).toBe(manifest.totalChunks);
-    expect(manifest.draftCreated).toBe(true);
-    expect(manifest.finalized).toBe(true);
-    expect(manifest.shared).toBe(true);
+    expect(manifest.mode).toBe('per-concept');
+    expect(manifest.assetName).toBeUndefined();
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private resumes a draft lifecycle without recreating or rewriting completed chunks', async () => {
+  it('--private resumes per-concept WM stages by sharing without recreating or rewriting', async () => {
     clear();
-    const bundle = await makeLargeTaggedBundle();
+    const bundle = await makeBundle();
     await writeFile(
       join(bundle, '.okf-import-manifest.json'),
       JSON.stringify(
         {
           contextGraphId: 'cg-priv-resume',
-          mode: 'bulk-private-lifecycle',
-          assetName: 'okf-private-bulk-root',
-          chunkSize: 5000,
-          chunksDone: 1,
-          totalChunks: 2,
-          draftCreated: true,
-          finalized: false,
-          shared: false,
+          mode: 'per-concept',
+          stages: { a: 'wm' },
         },
         null,
         2,
@@ -328,42 +346,40 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     );
     expect(r.exitCode).toBe(0);
     const out = parseJsonTail(r.stdout);
-    expect(out.importMode).toBe('bulk-private-lifecycle');
-    expect(out.chunks).toBe(2);
+    expect(out.importMode).toBe('per-concept');
+    expect(out.assetsCreated).toBe(1);
+    expect(out.assetsShared).toBe(2);
 
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(0);
-    const writeCalls = stub.calls.filter((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]));
-    expect(writeCalls).toHaveLength(1);
-    const writeBody = JSON.parse(writeCalls[0]!.body || '{}');
-    expect(writeBody.quads).toHaveLength(Number(out.triples) - 5000);
-    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/wm/finalize');
-    expect(paths).toContain('POST /api/knowledge-assets/okf-private-bulk-root/swm/share');
+    const createBodies = stub.calls
+      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
+      .map((c) => JSON.parse(c.body || '{}'));
+    expect(createBodies.map((b) => b.name)).toEqual(['b']);
+    expect(paths).toContain('POST /api/knowledge-assets/a/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/a/swm/share');
+    expect(paths.some((p) => p === 'POST /api/knowledge-assets/a/wm/write')).toBe(false);
 
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
-    expect(manifest.chunksDone).toBe(2);
-    expect(manifest.totalChunks).toBe(2);
-    expect(manifest.draftCreated).toBe(true);
-    expect(manifest.finalized).toBe(true);
-    expect(manifest.shared).toBe(true);
+    expect(manifest.mode).toBe('per-concept');
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private resumes after finalize by sharing without more writes', async () => {
+  it('--private ignores incompatible aggregate manifests and starts per-concept lifecycle', async () => {
     clear();
     const bundle = await makeBundle();
     await writeFile(
       join(bundle, '.okf-import-manifest.json'),
       JSON.stringify(
         {
-          contextGraphId: 'cg-priv-finalized',
-          mode: 'bulk-private-lifecycle',
-          assetName: 'okf-private-bulk-root',
+          contextGraphId: 'cg-priv-legacy',
+          mode: 'legacy-aggregate-private',
+          assetName: 'legacy-aggregate-root',
           chunkSize: 5000,
-          chunksDone: 1,
-          totalChunks: 1,
+          chunksDone: 999,
+          totalChunks: 999,
           draftCreated: true,
           finalized: true,
-          shared: false,
+          shared: true,
         },
         null,
         2,
@@ -371,25 +387,22 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     );
 
     const r = await runCli(
-      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-finalized', '--private', '--create-context-graph'],
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-legacy', '--private', '--create-context-graph'],
       env(),
     );
     expect(r.exitCode).toBe(0);
     const out = parseJsonTail(r.stdout);
-    expect(out.triplesWritten).toBe(0);
+    expect(out.assetsCreated).toBe(2);
+    expect(r.stderr).toContain('ignoring incompatible OKF manifest');
 
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(0);
-    expect(paths.some((p) => p.endsWith('/wm/write'))).toBe(false);
-    expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
-    expect(paths.filter((p) => p === 'POST /api/knowledge-assets/okf-private-bulk-root/swm/share')).toHaveLength(1);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
+    expect(paths.some((p) => p.includes('legacy-aggregate'))).toBe(false);
 
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
-    expect(manifest.chunksDone).toBe(1);
-    expect(manifest.totalChunks).toBe(1);
-    expect(manifest.draftCreated).toBe(true);
-    expect(manifest.finalized).toBe(true);
-    expect(manifest.shared).toBe(true);
+    expect(manifest.mode).toBe('per-concept');
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
+    expect(manifest.assetName).toBeUndefined();
   });
 
   it('--private forwards --sub-graph-name through lifecycle bodies + manifest', async () => {
@@ -409,7 +422,42 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
     // The resumability manifest records the sub-graph (so a resume can't mix root/sub-graph).
     const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
     expect(manifest.subGraphName).toBe('team');
-    expect(manifest.assetName).toBe('okf-private-bulk-team');
+    expect(manifest.mode).toBe('per-concept');
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
+    expect(manifest.assetName).toBeUndefined();
+  });
+
+  it('--private falls back to chunked lifecycle when one-shot create/share is too large', async () => {
+    clear();
+    const bundle = await makeLargeTaggedBundle();
+    stub.setHandler((req, raw) => {
+      const url = new URL(`http://127.0.0.1${req.url}`);
+      if (req.method === 'POST' && url.pathname === '/api/knowledge-assets') {
+        const parsed = JSON.parse(raw || '{}');
+        if (Array.isArray(parsed.quads) && parsed.quads.length > 5000) {
+          return { status: 413, body: { error: 'payload too large' } };
+        }
+      }
+      return okfDaemonHandler(createdCGs)(req, raw);
+    });
+
+    const r = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-large', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.assetsCreated).toBe(1);
+    expect(out.assetsShared).toBe(1);
+
+    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets/bulk/wm/write')).toHaveLength(2);
+    expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
+    expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
+
+    stub.setHandler(okfDaemonHandler(createdCGs));
   });
 
   it('refuses --private into an existing PUBLIC Context Graph; --allow-public-context-graph overrides', async () => {
@@ -441,7 +489,11 @@ describe.sequential('dkg okf subcommands', { timeout: 120_000 }, () => {
       env(),
     );
     expect(allowed.exitCode).toBe(0);
-    expect(stub.calls.slice(before).some((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]))).toBe(true);
+    expect(stub.calls.slice(before).some((c) => {
+      if (c.method !== 'POST' || c.url.split('?')[0] !== '/api/knowledge-assets') return false;
+      const parsed = JSON.parse(c.body || '{}');
+      return parsed.alsoShareSwm === true && Array.isArray(parsed.quads);
+    })).toBe(true);
 
     stub.setHandler(okfDaemonHandler(createdCGs));
   });
