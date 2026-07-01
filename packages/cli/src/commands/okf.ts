@@ -377,15 +377,6 @@ export function registerOkfCommand(program: Command): void {
         let created = 0;
         let shared = 0;
         const isPayloadTooLarge = (e: unknown) => (e as { httpStatus?: number })?.httpStatus === 413;
-        const assertCreateShareComplete = (name: string, result: Record<string, unknown>): void => {
-          const errors = Array.isArray(result.errors) ? result.errors : [];
-          if (errors.length > 0) {
-            throw new Error(`Knowledge Asset "${name}" create/share returned partial lifecycle errors: ${JSON.stringify(errors)}`);
-          }
-          if (result.swmShared !== true) {
-            throw new Error(`Knowledge Asset "${name}" create/share did not report swmShared:true`);
-          }
-        };
         const writeSlice = async (name: string, slice: WritableOkfQuad[]): Promise<number> => {
           try {
             const res = await client.knowledgeAssetWrite(contextGraphId, name, slice, { subGraphName });
@@ -399,19 +390,13 @@ export function registerOkfCommand(program: Command): void {
             throw e;
           }
         };
-        const createAndWriteConcept = async (
-          name: string,
-          quads: WritableOkfQuad[],
-          stage: Stage,
-        ): Promise<number> => {
+        const createAndWriteConcept = async (name: string, quads: WritableOkfQuad[]): Promise<number> => {
           try {
-            const result = await client.createKnowledgeAsset(contextGraphId, name, {
+            await client.createKnowledgeAsset(contextGraphId, name, {
               subGraphName,
               quads,
-              finalize: stage === 'swm',
-              ...(stage === 'swm' ? { alsoShareSwm: true } : {}),
+              finalize: false,
             });
-            if (stage === 'swm') assertCreateShareComplete(name, result);
             return quads.length;
           } catch (e) {
             if (!isPayloadTooLarge(e) || quads.length <= 1) throw e;
@@ -422,17 +407,17 @@ export function registerOkfCommand(program: Command): void {
           for (let i = 0; i < quads.length; i += CHUNK) {
             count += await writeSlice(name, quads.slice(i, i + CHUNK));
           }
-          if (stage === 'swm') {
-            await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
-            const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
-              subGraphName,
-              entities: 'all',
-            });
-            if (shareResult.swmShared !== true) {
-              throw new Error(`Knowledge Asset "${name}" fallback share did not report swmShared:true`);
-            }
-          }
           return count;
+        };
+        const finalizeAndShareConcept = async (name: string): Promise<void> => {
+          await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
+          const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
+            subGraphName,
+            entities: 'all',
+          });
+          if (shareResult.swmShared !== true) {
+            throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);
+          }
         };
         for (const concept of imported.concepts) {
           const name = conceptKaName(concept.conceptId);
@@ -441,7 +426,6 @@ export function registerOkfCommand(program: Command): void {
           if (current === 'swm' || current === targetStage) continue;
 
           const needCreate = current === undefined; // not yet written to WM
-          const needShare = targetStage === 'swm' && current === 'wm';
 
           if (needCreate) {
             const quads = concept.quads.map((q: Quad) => ({
@@ -458,23 +442,15 @@ export function registerOkfCommand(program: Command): void {
                 .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
                 .catch(() => undefined);
             }
-            written += await createAndWriteConcept(name, quads, targetStage);
+            written += await createAndWriteConcept(name, quads);
             created += 1;
-            if (targetStage === 'swm') shared += 1;
-            stages.set(concept.conceptId, targetStage);
+            stages.set(concept.conceptId, 'wm');
             await persistManifest();
           }
-          if (needShare) {
+          if (targetStage === 'swm') {
             // Advance WM → SWM (works whether the KA was just created or was
             // already in WM from a prior `import` run).
-            await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
-            const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
-              subGraphName,
-              entities: 'all',
-            });
-            if (shareResult.swmShared !== true) {
-              throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);
-            }
+            await finalizeAndShareConcept(name);
             shared += 1;
             stages.set(concept.conceptId, 'swm');
             await persistManifest();
