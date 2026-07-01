@@ -333,6 +333,9 @@
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background: var(--bg-surface);
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 .v10-pca-device-progress-title {
   margin: 0;
@@ -356,31 +359,35 @@
 }
 .v10-pca-device-progress-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto;
-  align-items: center;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
   gap: 8px;
   font-size: 11px;
   color: var(--text-secondary);
   min-width: 0;
 }
-.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
 .v10-pca-device-progress-row[data-state='active'] { color: var(--text-primary); }
 .v10-pca-device-progress-row[data-state='submitted'] { color: var(--text-warning); }
 .v10-pca-device-progress-row[data-state='confirmed'] { color: var(--text-success); }
 .v10-pca-device-progress-row[data-state='failed'],
 .v10-pca-device-progress-row[data-state='aborted'] { color: var(--text-danger); }
 .v10-pca-device-progress-glyph {
-  width: 34px;
+  width: 44px;
   font-family: var(--font-mono);
   font-size: 10px;
   color: inherit;
+  line-height: 1.45;
 }
 .v10-pca-device-progress-tx {
+  grid-column: 2;
+  display: block;
   color: var(--text-link);
   font-family: var(--font-mono);
   font-size: 10px;
   min-width: 0;
   overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 .v10-pca-device-progress-error {
   grid-column: 2 / -1;
@@ -636,6 +643,10 @@
   cursor: pointer;
 }
 .v10-pca-card-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.v10-pca-card-btn.compact {
+  padding: 4px 10px;
+  min-height: 32px;
+}
 .v10-pca-card-btn.primary {
   background: var(--accent-blue);
   border-color: var(--accent-blue);
@@ -757,6 +768,7 @@
 .v10-pca-modal-box .v10-modal-error,
 .v10-pca-modal-box .v10-modal-warning,
 .v10-pca-modal-box .v10-modal-tip {
+  margin: 0;
   overflow-wrap: anywhere;
 }
 .v10-pca-owner-key-grid {
@@ -901,10 +913,17 @@
   flex-wrap: wrap;
   max-width: 100%;
 }
+.v10-pca-owned-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
 .v10-pca-overview-wallet {
   width: auto;
   max-width: min(420px, 100%);
   margin-left: 0;
+  margin-top: 8px;
 }
 .v10-pca-wallet-connect.compact {
   min-width: 0;
@@ -931,8 +950,52 @@
   flex-direction: column;
   gap: 16px;
 }
+.v10-pca-get-added-body {
+  gap: 12px;
+}
 .v10-pca-modal-box .v10-pca-detail-section {
   margin-top: 0;
+}
+.v10-pca-get-added-body .v10-pca-detail-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+.v10-pca-get-added-body .v10-pca-detail-section {
+  padding-top: 14px;
+}
+.v10-pca-get-added-body .v10-pca-detail-agentlist {
+  margin-top: 8px;
+}
+.v10-pca-get-added-body .v10-pca-detail-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+}
+.v10-pca-get-added-body .v10-pca-detail-form .v10-form-input {
+  max-width: none;
+}
+.v10-pca-get-added-body .v10-pca-detail-form .v10-pca-card-btn.primary {
+  min-height: 36px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+.v10-pca-discovered-check {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.v10-pca-create-success {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-secondary);
 }
 .v10-pca-handshake-copyall {
   margin-top: 8px;
@@ -950,6 +1013,9 @@
 .v10-pca-owner-key-readiness .v10-pca-wallet-connect,
 .v10-pca-detail-band + .v10-modal-tip .v10-pca-wallet-pill-wrap {
   margin-top: 8px;
+}
+.v10-pca-node-picker-combo {
+  margin-top: 10px;
 }
 .v10-pca-node-picker-list {
   list-style: none;
@@ -1004,9 +1070,32 @@
   align-items: center;
   gap: 16px;
 }
+.v10-pca-create-owner-note {
+  margin-top: 12px;
+}
+.v10-pca-create-owner-note + .v10-modal-tip {
+  margin-top: 10px;
+}
+.v10-pca-create-section .v10-pca-node-picker {
+  margin-top: 10px;
+}
+.v10-pca-detail > .v10-pca-device-progress {
+  margin: 16px 0;
+}
+.v10-pca-detail .v10-modal-error {
+  max-width: 100%;
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.v10-pca-detail .v10-pca-device-progress + .v10-stat-strip {
+  margin-top: 16px;
+}
 @media (max-width: 720px) {
   .v10-pca-overview-owner-actions {
     justify-content: flex-start;
+  }
+  .v10-pca-get-added-body .v10-pca-detail-form {
+    grid-template-columns: 1fr;
   }
   .v10-pca-node-picker-option {
     grid-template-columns: auto minmax(0, 1fr);

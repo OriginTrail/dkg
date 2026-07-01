@@ -137,7 +137,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       title="Get added to a PCA"
       subtitle="Share this node's operational publishing wallets with the PCA owner. They approve them; this node still pays its own gas."
     >
-      <div className="v10-modal-body">
+      <div className="v10-modal-body v10-pca-get-added-body">
         {/* Wallets to share */}
         <section className="v10-pca-detail-section">
           <h3 className="v10-pca-detail-section-title">Your operational wallets (signers / msg.sender)</h3>
@@ -211,12 +211,12 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             If the PCA owner gives you an account id, check it here to track whether this node&apos;s wallets are covered.
           </p>
           {discovered && discovered.length > 0 && (
-            <p className="v10-pca-detail-hint" role="status" data-testid="pca-sponsor-discovered">
+            <div className="v10-pca-discovered-check" role="status" data-testid="pca-sponsor-discovered">
               ◉ We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
-              <button type="button" className="v10-pca-card-btn" onClick={() => setSponsorId(discovered[0])}>
+              <button type="button" className="v10-pca-card-btn compact" onClick={() => setSponsorId(discovered[0])}>
                 Check PCA #{discovered[0]}
               </button>
-            </p>
+            </div>
           )}
           <div className="v10-pca-detail-form">
             <input

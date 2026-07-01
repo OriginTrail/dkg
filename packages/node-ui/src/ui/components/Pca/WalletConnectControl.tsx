@@ -79,7 +79,7 @@ export function WalletConnectControl({ className = '' }: { className?: string })
         aria-expanded={pickerOpen}
       >
         {busyKey ? <Loader2 size={14} aria-hidden="true" /> : <Wallet size={14} aria-hidden="true" />}
-        <span>{busyKey ? 'Connecting...' : 'Connect hardware wallet'}</span>
+        <span>{busyKey ? 'Connecting...' : 'Connect wallet'}</span>
         {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
       </button>
       <p className="v10-pca-wallet-note">
