@@ -1795,6 +1795,20 @@ export interface PcaAgentAccountResult {
 export const pcaAgentAccount = (address: string) =>
   getJson<PcaAgentAccountResult>(`/api/pca/agent/${encodeURIComponent(address)}`);
 
+export interface MyPcaEntry extends Partial<PcaSnapshot> {
+  accountId: string;
+  relation: 'owned' | 'agent' | 'both';
+}
+
+/**
+ * GAP-1 enumeration route: every PCA this node relates to through owned PCA
+ * NFTs and/or approved operational publishing wallets. Hydration is best
+ * effort server-side, so relation rows remain useful even when snapshot fields
+ * are omitted.
+ */
+export const fetchMyPcas = (opts?: { hydrate?: boolean }) =>
+  getJson<{ accounts: MyPcaEntry[] }>(`/api/pca/mine${opts?.hydrate ? '?hydrate=1' : ''}`);
+
 /**
  * One staked sharding-table node, as the API returns it. `identityId` (DECIMAL string) is the
  * on-chain id a PCA designates as its `primaryNode` (the value Create submits); `nodeId` is a HEX
@@ -1924,6 +1938,12 @@ export function isRpcTransportError(err: unknown): boolean {
  */
 export function isPcaFeatureUnavailable(err: unknown): boolean {
   return err instanceof HttpError && err.status === 503 && !isRpcTransportError(err);
+}
+
+export function isPcaReadFailed(err: unknown): boolean {
+  if (!(err instanceof HttpError) || err.status !== 503) return false;
+  const body = err.body as { code?: string; error?: string } | undefined;
+  return body?.code === 'PCA_LOOKUP_READ_FAILED' || body?.error === 'PCA_LOOKUP_READ_FAILED';
 }
 
 // Code tokens the daemon embeds in the `{ error }` body (a bare code on a
@@ -3388,140 +3408,6 @@ export const fetchRpcHealth = () =>
       error?: string;
     }>;
   }>('/api/chain/rpc-health');
-
-// --- Admin: Publishing Conviction Accounts (PCA) ---
-
-export interface PcaSnapshot {
-  accountId: string;
-  owner: string;
-  committedTRAC: string;
-  committedTRACTrac: string;
-  baseEpochAllowance: string;
-  topUpBuffer: string;
-  topUpBufferTrac: string;
-  createdAtEpoch: number;
-  expiresAtEpoch: number;
-  createdAtTimestamp: number;
-  expiresAtTimestamp: number;
-  discountBps: number;
-  agentCount: number;
-  lastSettledWindow: number;
-  fullySwept: boolean;
-  /** OT-RFC-51 node identityId this PCA funds ('0' = unset). */
-  primaryNode?: string;
-  /** True when `primaryNode` equals this node's own identity. */
-  fundsThisNode?: boolean;
-  /** True when this PCA is owned (and thus manageable) by one of this node's wallets. */
-  owned?: boolean;
-  probedKey?: { key: string; registered: boolean; adapterSupported?: boolean; error?: string };
-}
-
-export interface PcaContractContext {
-  chainId: number;
-  hubAddress: string;
-  nftAddress: string;
-  tokenAddress: string;
-  // PublishingConviction LOGIC contract — owns the owner-gated clearAgents
-  // (the NFT wrapper has no entry point), so the wallet-connect path needs it.
-  publishingConvictionAddress: string;
-  // True once the DEPLOYED PublishingConviction is >= 10.0.6 (clearAgents lands
-  // there). The UI gates the "Clear agents" button on it so it only enables
-  // after the upgrade is live — self-healing, no node redeploy needed.
-  clearAgentsSupported: boolean;
-}
-/** Addresses + chainId the browser wallet-connect path needs to build owner-signed PCA txs. */
-export const fetchPcaContracts = () => get<PcaContractContext>('/api/pca/contracts');
-
-export const fetchPcas = () => get<{ accounts: PcaSnapshot[] }>('/api/pca');
-export const fetchPcaInfo = (accountId: string, key?: string) =>
-  get<PcaSnapshot>(
-    `/api/pca/${encodeURIComponent(accountId)}${key ? `?key=${encodeURIComponent(key)}` : ''}`,
-  );
-export const createPca = (tokens: string, primaryNode: string) =>
-  post<{ accountId: string; txHash: string; blockNumber: number; committedTokens: string }>(
-    '/api/pca',
-    { tokens, primaryNode },
-  );
-export const addPcaFunds = (accountId: string, tokens: string) =>
-  post<{ accountId: string; addedTokens: string; txHash: string; blockNumber: number }>(
-    `/api/pca/${encodeURIComponent(accountId)}/funds`,
-    { tokens },
-  );
-export const settlePca = (accountId: string) =>
-  post<{ accountId: string; settled: boolean; txHash: string; blockNumber: number }>(
-    `/api/pca/${encodeURIComponent(accountId)}/settle`,
-    {},
-  );
-export const registerPcaAgent = (accountId: string, agent: string) =>
-  post<{ accountId: string; agent: string; registered: boolean; txHash: string; blockNumber: number }>(
-    `/api/pca/${encodeURIComponent(accountId)}/agent`,
-    { agent },
-  );
-export const deregisterPcaAgent = (accountId: string, agent: string) =>
-  del<{ accountId: string; agent: string; deregistered: boolean; txHash: string; blockNumber: number }>(
-    `/api/pca/${encodeURIComponent(accountId)}/agent/${encodeURIComponent(agent)}`,
-  );
-export const setPcaPrimaryNode = (accountId: string, node: string) =>
-  post<{ accountId: string; primaryNode: string; txHash: string; blockNumber: number }>(
-    `/api/pca/${encodeURIComponent(accountId)}/primary-node`,
-    { node },
-  );
-
-// --- Admin: Node operational wallets (Identity operational keys) ---
-
-export interface OperationalWallet {
-  address: string;
-  isAdmin: boolean;
-  isPrimary: boolean;
-  /** On-chain authorization status: true/false, or null when unknown (no profile). */
-  registered: boolean | null;
-}
-export interface OperationalWalletsResponse {
-  identityId: string;
-  hasProfile: boolean;
-  adminKeyConfigured: boolean;
-  canManage: boolean;
-  wallets: OperationalWallet[];
-}
-export const fetchOperationalWallets = () =>
-  get<OperationalWalletsResponse>('/api/operational-wallets');
-export const addOperationalWallet = (address: string) =>
-  post<{ address: string; added: boolean; txHash: string; blockNumber: number }>(
-    '/api/operational-wallets',
-    { address },
-  );
-export const removeOperationalWallet = (address: string) =>
-  del<{ address: string; removed: boolean; txHash: string; blockNumber: number }>(
-    `/api/operational-wallets/${encodeURIComponent(address)}`,
-  );
-
-// --- Admin: Agent workspace encryption keys ---
-
-export interface AgentEncryptionKey {
-  encryptionKeyId: string;
-  encryptionKeyAlgorithm: string;
-  publicEncryptionKey: string;
-  encryptionKeyProof: string;
-  createdAt: string;
-  revokedAt: string | null;
-  status: 'active' | 'revoked';
-}
-export const fetchAgentEncryptionKeys = (address: string) =>
-  get<{ agentAddress: string; agentDid: string; keys: AgentEncryptionKey[] }>(
-    `/api/agent/${encodeURIComponent(address)}/encryption-keys`,
-  );
-export const rotateAgentEncryptionKey = (address: string, retireOld: boolean) =>
-  post<{ ok: true; newKeyId: string; retiredKeyId?: string; profilePublished: boolean; profilePublishError?: string }>(
-    `/api/agent/${encodeURIComponent(address)}/rotate-encryption-key`,
-    { retireOld },
-  );
-export const revokeAgentEncryptionKey = (address: string, keyId: string) =>
-  post<{ ok: true; revokedKeyId: string; revokedAt: string; profilePublished: boolean; profilePublishError?: string }>(
-    `/api/agent/${encodeURIComponent(address)}/revoke-encryption-key`,
-    { keyId },
-  );
-export const publishAgentProfile = () =>
-  post<{ ok: true; ual: string | null }>('/api/agent/publish-profile', {});
 
 // --- Node control ---
 export const shutdownNode = () =>

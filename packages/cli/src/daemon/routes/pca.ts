@@ -266,6 +266,25 @@ function classifyPcaRevert(msg: string): { status: number; error: string } | nul
   return null;
 }
 
+function positiveAccountIdString(value: unknown): string | null {
+  if (typeof value === 'bigint') return value > 0n ? value.toString() : null;
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return value;
+  return null;
+}
+
+function agentAlreadyRegisteredAccountIdFromError(err: any, msg: string): string | null {
+  const args = err?.revert?.args;
+  const named = positiveAccountIdString(args?.existingAccountId ?? args?.accountId);
+  if (named) return named;
+  if (Array.isArray(args)) {
+    const positional = positiveAccountIdString(args[1]);
+    if (positional) return positional;
+  }
+  const match = /\bAgentAlreadyRegistered\s*\([^,]+,\s*([0-9]+)\s*\)/.exec(msg);
+  return match ? positiveAccountIdString(match[1]) : null;
+}
+
 function parseAccountId(idStr: string): bigint | null {
   if (!/^\d+$/.test(idStr)) return null;
   try {
@@ -436,23 +455,6 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
-  // GET /api/pca/contracts — addresses + chainId for the browser wallet-connect
-  // path (owner signs owner-gated PCA txs client-side). Must be matched BEFORE
-  // the `/api/pca/:id` GET, else "contracts" is parsed as an accountId → 400.
-  if (req.method === 'GET' && path === '/api/pca/contracts') {
-    try {
-      const ctxAddrs = await agent.getPcaContractContext();
-      if (ctxAddrs === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      return jsonResponse(res, 200, ctxAddrs);
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
-      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (respondIfChainRpcTransportError(res, err)) return;
-      return jsonResponse(res, 500, { error: `getPcaContractContext failed: ${msg}` });
-    }
-  }
-
   // POST /api/pca — mint a conviction NFT to the daemon EOA (the owner).
   // No `lockEpochs` (global protocol param). Body: { tokens: "100000",
   // primaryNode: "42" } — `primaryNode` (the node identityId this PCA funds,
@@ -541,7 +543,30 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
         });
       }
       const revert = classifyPcaRevert(msg);
-      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      if (revert) {
+        if (revert.error === 'AgentAlreadyRegistered') {
+          const body: { error: string; accountId: string; existingAccountId?: string } = {
+            error: revert.error,
+            accountId: idStr,
+          };
+          const existingFromError = agentAlreadyRegisteredAccountIdFromError(err, msg);
+          if (existingFromError) {
+            body.existingAccountId = existingFromError;
+          } else {
+            try {
+              const lookup = (agent as any).getConvictionAgentAccountId;
+              if (typeof lookup === 'function') {
+                const existing = positiveAccountIdString(await lookup.call(agent, agentAddr));
+                if (existing) body.existingAccountId = existing;
+              }
+            } catch {
+              // Preserve the deterministic 409 even when the best-effort reverse lookup flakes.
+            }
+          }
+          return jsonResponse(res, revert.status, body);
+        }
+        return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      }
       return jsonResponse(res, 500, { error: `registerPublishingConvictionAgent failed: ${msg}` });
     }
   }

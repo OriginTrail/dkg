@@ -148,10 +148,6 @@ export function Header() {
           {OBSERVABILITY_ICON}
         </button>
 
-        {/* Admin page entry hidden pending review — the page (Admin.tsx) and its
-            render path stay; re-enable by restoring this button + the /admin route
-            in useShellRouting.ts (revert the PR that hid it). */}
-
         <button
           className="v10-header-icon-btn"
           data-testid="pca-launch-btn"

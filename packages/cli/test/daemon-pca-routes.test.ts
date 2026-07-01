@@ -1008,46 +1008,6 @@ describe('PCA write routes — node-admin caller gating', () => {
   });
 });
 
-describe('GET /api/pca/contracts — wallet-connect address context', () => {
-  it('returns chainId + nft/token/hub + publishingConviction addresses', async () => {
-    const agent = {
-      getPcaContractContext: async () => ({
-        chainId: 31337,
-        hubAddress: '0x' + '1'.repeat(40),
-        nftAddress: '0x' + '2'.repeat(40),
-        tokenAddress: '0x' + '3'.repeat(40),
-        publishingConvictionAddress: '0x' + '4'.repeat(40),
-        clearAgentsSupported: true,
-      }),
-    };
-    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
-    await done;
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({
-      chainId: 31337,
-      hubAddress: '0x' + '1'.repeat(40),
-      nftAddress: '0x' + '2'.repeat(40),
-      tokenAddress: '0x' + '3'.repeat(40),
-      publishingConvictionAddress: '0x' + '4'.repeat(40),
-      clearAgentsSupported: true,
-    });
-  });
-
-  it('503 when the chain adapter has no surface', async () => {
-    const { res, done } = runCtx('GET', '/api/pca/contracts', { getPcaContractContext: async () => null });
-    await done;
-    expect(res.statusCode).toBe(503);
-  });
-
-  it('is NOT parsed as an accountId by the :id GET (ordering guard)', async () => {
-    // If the /:id GET matched first, "contracts" → parseAccountId → 400.
-    const agent = { getPcaContractContext: async () => ({ chainId: 1, hubAddress: '0x', nftAddress: '0x', tokenAddress: '0x' }) };
-    const { res, done } = runCtx('GET', '/api/pca/contracts', agent);
-    await done;
-    expect(res.statusCode).not.toBe(400);
-  });
-});
-
 // #1370 HIGH: `owned` on the lookup-by-id GET means SERVER-MANAGEABLE, i.e. the
 // PCA's ERC-721 owner is the daemon's PRIMARY operational wallet — the single
 // signer every server-side PCA write is signed with. Admin keys and secondary
