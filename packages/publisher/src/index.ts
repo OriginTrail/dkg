@@ -62,6 +62,7 @@ export {
 export {
   ACKCollector,
   DEFAULT_REQUIRED_ACKS,
+  DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
   type ACKCollectorDeps,
   type CollectedACK,
   type ACKCollectionResult,

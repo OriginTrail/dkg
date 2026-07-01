@@ -118,6 +118,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   DEFAULT_REQUIRED_ACKS,
+  DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -1494,6 +1495,9 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Give core peers a brief window to finish connecting/identifying before
+      // the one-shot quorum snapshot — see DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS.
+      corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1673,6 +1677,9 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Give core peers a brief window to finish connecting/identifying before
+      // the one-shot quorum snapshot — see DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS.
+      corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

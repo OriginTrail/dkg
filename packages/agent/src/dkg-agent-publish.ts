@@ -2947,17 +2947,43 @@ export class PublishMethods extends DKGAgentBase {
       // resolver already does the live-on-chain proof, identity binding, and
       // bounded reads; a thrown RPC rejection is caught below and also
       // fails closed.
-      let policyState: 0 | 1 | 'unregistered' | 'unknown';
-      try {
+      // RETRY transient UNKNOWNs. The resolver fails closed to 'unknown' when a
+      // single on-chain read exceeds CHAIN_POLICY_READ_TIMEOUT_MS (2.5s) — a
+      // slow chain RPC (the dominant "LU-5: access-policy is unknown" cause on
+      // Base) blows that easily, so a publish into a CG whose policy IS live
+      // on-chain (e.g. the registered public "sports" CG) throws instead of
+      // publishing. A few bounded retries let a transiently-slow RPC land a
+      // CONFIRMED 0/1 before we fail closed; genuine unavailability still ends
+      // as 'unknown'/thrown → the caller REFUSES, so fail-closed security is
+      // preserved (never downgrade to plaintext on a guess). Only the transient
+      // 'unknown'/throw is retried — a confirmed 0 / 1 / 'unregistered' returns
+      // immediately, adding zero latency to the healthy hot path.
+      const resolvePolicyState = async (): Promise<0 | 1 | 'unregistered' | 'unknown'> => {
         if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
           const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
-          policyState = policy === 0 || policy === 1 ? policy : 'unknown';
-        } else {
-          policyState = await this.resolveOnChainAccessPolicyState(cgId, ctx);
+          return policy === 0 || policy === 1 ? policy : 'unknown';
         }
-      } catch (err) {
-        this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
-        return null;
+        return this.resolveOnChainAccessPolicyState(cgId, ctx);
+      };
+      const POLICY_PROBE_MAX_ATTEMPTS = 3;
+      const probeBackoff = (attempt: number) => new Promise<void>((r) => setTimeout(r, 300 * attempt));
+      let policyState: 0 | 1 | 'unregistered' | 'unknown' = 'unknown';
+      for (let attempt = 1; attempt <= POLICY_PROBE_MAX_ATTEMPTS; attempt++) {
+        try {
+          policyState = await resolvePolicyState();
+        } catch (err) {
+          if (attempt >= POLICY_PROBE_MAX_ATTEMPTS) {
+            this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed after ${attempt} attempt(s) — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
+            return null;
+          }
+          await probeBackoff(attempt);
+          continue;
+        }
+        if (policyState !== 'unknown') break; // confirmed 0 / 1 / 'unregistered'
+        if (attempt < POLICY_PROBE_MAX_ATTEMPTS) {
+          this.log.warn(ctx, `${logPrefix}: chain access-policy for ${cgId} came back UNKNOWN (attempt ${attempt}/${POLICY_PROBE_MAX_ATTEMPTS}) — retrying the on-chain read before failing closed`);
+          await probeBackoff(attempt);
+        }
       }
       // PUBLIC on-chain ⇒ never curated for SWM-encryption purposes, even with
       // an allowedAgent list (that governs publish authority). Decide this
