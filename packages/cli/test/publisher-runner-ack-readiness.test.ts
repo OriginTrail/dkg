@@ -11,7 +11,9 @@
  * We intercept the centralized `createProductionACKCollector` factory (which
  * injects `DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS` — proven in
  * `packages/publisher/test/v10-ack-edge-cases.test.ts`) and assert the CLI
- * provider routes through it.
+ * provider routes through it. The provider builder lives in its own intentional
+ * internal module (`src/ack-provider.ts`) with a stable contract, so this test
+ * imports it there instead of forcing `publisher-runner.ts` to widen its surface.
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
@@ -39,7 +41,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
 });
 
 // Import AFTER the mock is registered so the CLI module binds the mocked factory.
-const { createV10ACKProviderForPublisher } = await import('../src/publisher-runner.js');
+const { createV10ACKProviderForPublisher } = await import('../src/ack-provider.js');
 
 /** Minimal publisher whose `chain` satisfies every V10 capability guard. */
 function fakeV10Publisher(): DKGPublisher {
