@@ -119,6 +119,12 @@ export function registerOkfCommand(program: Command): void {
     quads: PublishQuad[],
     subGraphName?: string,
   ): Promise<number> {
+    // No manifest stage means a previous run may have died after creating or
+    // partially writing the draft. Reset before replay so chunked retries are
+    // deterministic and cannot duplicate accepted chunks.
+    await client
+      .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
+      .catch(() => undefined);
     await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
     return writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
   }
@@ -470,14 +476,6 @@ export function registerOkfCommand(program: Command): void {
               object: q.object,
               graph,
             }));
-            if (opts.replace) {
-              // Discard any existing WM draft so a changed re-import doesn't
-              // accumulate stale triples on top of the old ones (best-effort:
-              // there may be nothing to discard).
-              await client
-                .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
-                .catch(() => undefined);
-            }
             written += await createAndWriteOkfAssetDraft(client, contextGraphId, name, quads, subGraphName);
             created += 1;
             stages.set(concept.conceptId, 'written');
