@@ -580,10 +580,11 @@ export class TripleStoreAsyncLiftPublisher implements AsyncLiftPublisher {
       }
       if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
       const publish = job.request.knowledgeAssetVmPublish;
-      const sameName = publish.contextGraphId === request.contextGraphId
+      const sameLifecycleSubject = publish.contextGraphId === request.contextGraphId
         && publish.name === request.name
-        && (publish.subGraphName ?? '') === (request.subGraphName ?? '');
-      if (!sameName) continue;
+        && (publish.subGraphName ?? '') === (request.subGraphName ?? '')
+        && agentAddressScopeKey(publish.agentAddress) === agentAddressScopeKey(request.agentAddress);
+      if (!sameLifecycleSubject) continue;
       return { job, compatible: publish.intentKey === request.intentKey };
     }
     return null;
@@ -1496,4 +1497,8 @@ function canonicalizeTerm(term: string, canonicalRootMap: Readonly<Record<string
 function txHashFromSignedPhase(phase: string): LiftJobHex | null {
   const match = phase.match(/^chain:txsigned:tx-(0x[0-9a-fA-F]+)$/);
   return match ? (match[1] as LiftJobHex) : null;
+}
+
+function agentAddressScopeKey(agentAddress?: string): string {
+  return agentAddress?.trim().toLowerCase() ?? '';
 }

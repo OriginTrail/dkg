@@ -340,6 +340,49 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
   });
 
+  it('scopes active knowledge asset VM publish duplicate detection by agent address', async () => {
+    const publisher = createPublisher();
+    const agentA = `0x${'aa'.repeat(20)}`;
+    const agentAUpper = `0x${'AA'.repeat(20)}`;
+    const agentB = `0x${'bb'.repeat(20)}`;
+
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      agentAddress: agentA,
+      subGraphName: 'research',
+    }));
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        agentAddress: agentAUpper,
+        subGraphName: 'research',
+      })),
+    ).resolves.toBe(jobA);
+
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      agentAddress: agentB,
+      subGraphName: 'research',
+      shareOperationId: 'share-op-2',
+      intentKey: 'sha256:' + 'cd'.repeat(32),
+    }));
+
+    expect(jobB).toBe('job-2');
+    expect((await publisher.getStatus(jobA))?.request.knowledgeAssetVmPublish.agentAddress).toBe(agentA);
+    expect((await publisher.getStatus(jobB))?.request.knowledgeAssetVmPublish.agentAddress).toBe(agentB);
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        agentAddress: agentA,
+        subGraphName: 'research',
+        shareOperationId: 'share-op-3',
+        intentKey: 'sha256:' + 'ef'.repeat(32),
+      })),
+    ).rejects.toMatchObject({
+      name: 'AsyncLiftJobConflictError',
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
+      existingJobId: jobA,
+    });
+  });
+
   it('reaccepts a compatible retryable failed knowledge asset VM publish when enqueued again', async () => {
     const publisher = createPublisher();
     const intent = kaVmPublishRequest({ subGraphName: 'research' });
@@ -950,6 +993,52 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(finalized.status).toBe('finalized');
     expect(finalized.finalization?.ual).toBe('did:dkg:mock:31337/0xabc/1');
     expect(finalized.finalization?.batchId).toBe('7');
+  });
+
+  it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: {
+        txHash: '0xaaa',
+        walletId: 'wallet-1',
+      },
+    });
+
+    await expect(
+      publisher.recordPublishResult(jobId, {
+        kaId: 1n,
+        ual: 'did:dkg:mock:31337/0xbbb/1',
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+        kaManifest: [],
+        status: 'confirmed',
+        onChainResult: {
+          batchId: 7n,
+          startKAId: 1n,
+          endKAId: 1n,
+          txHash: '0xbbb',
+          blockNumber: 10,
+          blockTimestamp: 1700000000,
+          publisherAddress: '0x1111111111111111111111111111111111111111',
+        },
+      }),
+    ).rejects.toThrow(/does not match persisted broadcast tx 0xaaa/);
+
+    const stored = await publisher.getStatus(jobId);
+    expect(stored?.status).toBe('broadcast');
+    expect(stored?.broadcast?.txHash).toBe('0xaaa');
+    expect(stored?.inclusion).toBeUndefined();
+    expect(stored?.finalization).toBeUndefined();
   });
 
   it('records canonical publish failures back into LiftJob failed state', async () => {
