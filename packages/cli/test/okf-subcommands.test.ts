@@ -158,6 +158,34 @@ function parseJsonTail(stdout: string): Record<string, unknown> {
   return JSON.parse(stdout.slice(i)) as Record<string, unknown>;
 }
 
+function callPath(call: StubCall): string {
+  return call.url.split('?')[0];
+}
+
+function callPaths(calls: StubCall[]): string[] {
+  return calls.map((c) => `${c.method} ${callPath(c)}`);
+}
+
+function bodyOf(call: StubCall): Record<string, unknown> {
+  return JSON.parse(call.body || '{}') as Record<string, unknown>;
+}
+
+function knowledgeAssetCreateBodies(calls: StubCall[]): Record<string, unknown>[] {
+  return calls
+    .filter((c) => c.method === 'POST' && callPath(c) === '/api/knowledge-assets')
+    .map(bodyOf);
+}
+
+function knowledgeAssetWriteBodies(calls: StubCall[], name: string): Record<string, unknown>[] {
+  return calls
+    .filter((c) => c.method === 'POST' && callPath(c) === `/api/knowledge-assets/${name}/wm/write`)
+    .map(bodyOf);
+}
+
+async function manifestFor(bundle: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8')) as Record<string, unknown>;
+}
+
 /** A minimal conformant 2-concept OKF bundle in a fresh temp dir. */
 async function makeBundle(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'okf-bundle-'));
@@ -231,22 +259,21 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsCreated).toBe(2);
     expect(out.assetsShared).toBe(0);
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths).toContain('POST /api/context-graph/create');
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
-    const createBodies = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
-      .map((c) => JSON.parse(c.body || '{}'));
+    const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
-    expect(createBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
-    expect(createBodies.every((b) => b.finalize === false)).toBe(true);
+    expect(createBodies.every((b) => b.quads === undefined)).toBe(true);
+    const writeBodies = ['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(stub.calls, name));
+    expect(writeBodies).toHaveLength(2);
+    expect(writeBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
     // No sealing/sharing in a plain WM import.
-    expect(paths.some((p) => p.endsWith('/wm/write'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/swm/share'))).toBe(false);
 
     // Manifest records the per-concept stage as 'wm'.
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'wm', b: 'wm' });
   });
@@ -270,13 +297,13 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsShared).toBe(2);
     expect(out.assetsCreated).toBe(0); // already in WM — not recreated
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p.endsWith('/wm/finalize'))).toHaveLength(2);
     expect(paths.filter((p) => p.endsWith('/swm/share'))).toHaveLength(2);
     // Must NOT re-create the assets that are already in WM.
     expect(paths.some((p) => p === 'POST /api/knowledge-assets')).toBe(false);
 
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
@@ -296,14 +323,14 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsShared).toBe(2);
     expect(out.assetName).toBeUndefined();
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
-    const createBodies = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
-      .map((c) => JSON.parse(c.body || '{}'));
+    const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
-    expect(createBodies.every((b) => b.finalize === false && b.alsoShareSwm === undefined)).toBe(true);
-    expect(createBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    expect(createBodies.every((b) => b.quads === undefined && b.alsoShareSwm === undefined)).toBe(true);
+    const writeBodies = ['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(stub.calls, name));
+    expect(writeBodies).toHaveLength(2);
+    expect(writeBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
     expect(paths.filter((p) => p.endsWith('/wm/finalize'))).toHaveLength(2);
     expect(paths.filter((p) => p.endsWith('/swm/share'))).toHaveLength(2);
     expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
@@ -313,14 +340,14 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     // that dropped `{ private: true, accessPolicy: 1 }` would import the corpus
     // into a public CG — exactly the substance-leak this mode must prevent.
     const createCall = stub.calls.find(
-      (c) => c.method === 'POST' && c.url.split('?')[0] === '/api/context-graph/create',
+      (c) => c.method === 'POST' && callPath(c) === '/api/context-graph/create',
     );
     expect(createCall).toBeDefined();
-    const createBody = JSON.parse(createCall!.body || '{}');
+    const createBody = bodyOf(createCall!);
     expect(createBody.private).toBe(true);
     expect(createBody.accessPolicy).toBe(1);
 
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.assetName).toBeUndefined();
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
@@ -352,16 +379,15 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsCreated).toBe(1);
     expect(out.assetsShared).toBe(2);
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    const createBodies = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
-      .map((c) => JSON.parse(c.body || '{}'));
+    const paths = callPaths(stub.calls);
+    const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name)).toEqual(['b']);
+    expect(knowledgeAssetWriteBodies(stub.calls, 'b')).toHaveLength(1);
     expect(paths).toContain('POST /api/knowledge-assets/a/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/a/swm/share');
     expect(paths.some((p) => p === 'POST /api/knowledge-assets/a/wm/write')).toBe(false);
 
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
@@ -385,7 +411,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     );
     expect(failed.exitCode).not.toBe(0);
     expect(failed.stderr).toContain('share did not report swmShared:true');
-    let manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    let manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ a: 'wm' });
 
     clear();
@@ -395,15 +421,14 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
       env(),
     );
     expect(resumed.exitCode).toBe(0);
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    const createBodies = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
-      .map((c) => JSON.parse(c.body || '{}'));
+    const paths = callPaths(stub.calls);
+    const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name)).toEqual(['b']);
+    expect(knowledgeAssetWriteBodies(stub.calls, 'b')).toHaveLength(1);
     expect(paths).toContain('POST /api/knowledge-assets/a/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/a/swm/share');
     expect(paths.some((p) => p === 'POST /api/knowledge-assets/a/wm/write')).toBe(false);
-    manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
@@ -438,11 +463,11 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsCreated).toBe(2);
     expect(r.stderr).toContain('ignoring incompatible OKF manifest');
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
     expect(paths.some((p) => p.includes('legacy-aggregate'))).toBe(false);
 
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
     expect(manifest.assetName).toBeUndefined();
@@ -458,12 +483,12 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(r.exitCode).toBe(0);
     // Every lifecycle call must carry the sub-graph so data lands in cg/team SWM, not root.
     const lifecycleCalls = stub.calls.filter((c) =>
-      c.method === 'POST' && c.url.split('?')[0].startsWith('/api/knowledge-assets'),
+      c.method === 'POST' && callPath(c).startsWith('/api/knowledge-assets'),
     );
     expect(lifecycleCalls.length).toBeGreaterThan(0);
-    for (const call of lifecycleCalls) expect(JSON.parse(call.body || '{}').subGraphName).toBe('team');
+    for (const call of lifecycleCalls) expect(bodyOf(call).subGraphName).toBe('team');
     // The resumability manifest records the sub-graph (so a resume can't mix root/sub-graph).
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.subGraphName).toBe('team');
     expect(manifest.mode).toBe('per-concept');
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
@@ -491,12 +516,10 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
       env(),
     );
     expect(r.exitCode).toBe(0);
-    const createBodies = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')
-      .map((c) => JSON.parse(c.body || '{}'));
+    const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
     expect(createBodies.every((b) => b.subGraphName === 'team')).toBe(true);
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.subGraphName).toBe('team');
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
@@ -514,15 +537,13 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsCreated).toBe(1);
     expect(out.assetsShared).toBe(1);
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(1);
-    const createBody = JSON.parse(stub.calls.find((c) =>
-      c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')?.body || '{}');
+    const createBody = knowledgeAssetCreateBodies(stub.calls)[0];
     expect(createBody.quads).toBeUndefined();
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets/bulk/wm/write')).toHaveLength(2);
-    const writeLengths = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets/bulk/wm/write')
-      .map((c) => JSON.parse(c.body || '{}').quads?.length ?? 0);
+    const writeLengths = knowledgeAssetWriteBodies(stub.calls, 'bulk')
+      .map((b) => Array.isArray(b.quads) ? b.quads.length : 0);
     expect(writeLengths.every((length) => length <= 5000)).toBe(true);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
@@ -554,17 +575,16 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsCreated).toBe(1);
     expect(out.assetsShared).toBe(1);
 
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    const writeLengths = stub.calls
-      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets/bulk/wm/write')
-      .map((c) => JSON.parse(c.body || '{}').quads?.length ?? 0);
+    const paths = callPaths(stub.calls);
+    const writeLengths = knowledgeAssetWriteBodies(stub.calls, 'bulk')
+      .map((b) => Array.isArray(b.quads) ? b.quads.length : 0);
     expect(writeLengths).toContain(5000);
     expect(writeLengths.some((length) => length > 1000)).toBe(true);
     expect(acceptedWriteSizes.length).toBeGreaterThan(2);
     expect(acceptedWriteSizes.every((length) => length <= 1000)).toBe(true);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
-    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    const manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ bulk: 'swm' });
 
     stub.setHandler(okfDaemonHandler(createdCGs));
@@ -590,7 +610,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const refused = await runCli(['okf', 'import', bundle, '--context-graph-id', 'cg-pub', '--private'], env());
     expect(refused.exitCode).not.toBe(0);
     expect(stub.calls.some((c) => {
-      const path = c.url.split('?')[0];
+      const path = callPath(c);
       return c.method === 'POST' && (path === '/api/knowledge-assets' || path.startsWith('/api/knowledge-assets/'));
     })).toBe(false);
     expect(refused.stderr).toMatch(/Refusing --private/);
@@ -602,11 +622,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
       env(),
     );
     expect(allowed.exitCode).toBe(0);
-    expect(stub.calls.slice(before).some((c) => {
-      if (c.method !== 'POST' || c.url.split('?')[0] !== '/api/knowledge-assets') return false;
-      const parsed = JSON.parse(c.body || '{}');
-      return parsed.finalize === false && Array.isArray(parsed.quads);
-    })).toBe(true);
+    const allowedCalls = stub.calls.slice(before);
+    expect(knowledgeAssetCreateBodies(allowedCalls).map((b) => b.name).sort()).toEqual(['a', 'b']);
+    expect(['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(allowedCalls, name))).toHaveLength(2);
 
     stub.setHandler(okfDaemonHandler(createdCGs));
   });
@@ -690,7 +708,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     clear();
     const r = await runCli(['okf', 'import', bundle, '--context-graph-id', 'cg-rep', '--replace'], env());
     expect(r.exitCode).toBe(0);
-    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const paths = callPaths(stub.calls);
     expect(paths.filter((p) => p.endsWith('/wm/discard'))).toHaveLength(2);
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
     await rm(bundle, { recursive: true, force: true });

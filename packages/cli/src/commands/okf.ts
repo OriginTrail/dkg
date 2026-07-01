@@ -119,19 +119,6 @@ export function registerOkfCommand(program: Command): void {
     quads: PublishQuad[],
     subGraphName?: string,
   ): Promise<number> {
-    if (quads.length <= CHUNK) {
-      try {
-        await client.createKnowledgeAsset(contextGraphId, name, {
-          subGraphName,
-          quads,
-          finalize: false,
-        });
-        return quads.length;
-      } catch (e) {
-        if (!isPayloadTooLarge(e) || quads.length <= 1) throw e;
-      }
-    }
-
     await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
     return writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
   }
