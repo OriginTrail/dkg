@@ -123,13 +123,21 @@ export function registerOkfCommand(program: Command): void {
     return writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
   }
 
-  async function finalizeAndShareOkfAsset(
+  async function finalizeOkfAsset(
     client: ApiClient,
     contextGraphId: string,
     name: string,
     subGraphName?: string,
   ): Promise<void> {
     await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
+  }
+
+  async function shareOkfAsset(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    subGraphName?: string,
+  ): Promise<void> {
     const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
       subGraphName,
       entities: 'all',
@@ -385,9 +393,15 @@ export function registerOkfCommand(program: Command): void {
         // done-set would make the documented `import` → `import --share` flow skip
         // every concept (already "done" from the WM pass) before finalize/share
         // ran, falsely reporting SWM with nothing shared. We record the furthest
-        // stage each concept reached ('wm' = created+written, 'swm' = finalized+
-        // shared) so a later --share advances WM concepts instead of skipping them.
-        type Stage = 'wm' | 'swm';
+        // checkpoint each concept reached (`written`, `finalized`, or `swm`) so
+        // retries advance WM concepts instead of skipping or replaying them.
+        type Stage = 'written' | 'finalized' | 'swm';
+        const stageRank: Record<Stage, number> = { written: 1, finalized: 2, swm: 3 };
+        const normalizeStage = (value: unknown): Stage | undefined => {
+          if (value === 'wm' || value === 'written') return 'written';
+          if (value === 'finalized' || value === 'swm') return value;
+          return undefined;
+        };
         const manifestPath = opts.manifest
           ? String(opts.manifest)
           : join(bundleDir, '.okf-import-manifest.json');
@@ -400,8 +414,8 @@ export function registerOkfCommand(program: Command): void {
               contextGraphId?: string;
               subGraphName?: string;
               mode?: string;
-              stages?: Record<string, Stage>;
-              done?: string[]; // legacy format → treat as reached 'wm'
+              stages?: Record<string, unknown>;
+              done?: string[]; // legacy format -> treat as reached 'written'
             };
             const sameTarget = prev.contextGraphId === contextGraphId && prev.subGraphName === subGraphName;
             if (sameTarget && prev.mode !== undefined && prev.mode !== 'per-concept') {
@@ -409,10 +423,11 @@ export function registerOkfCommand(program: Command): void {
             } else if (sameTarget) {
               if (prev.stages && typeof prev.stages === 'object') {
                 for (const [id, s] of Object.entries(prev.stages)) {
-                  if (s === 'wm' || s === 'swm') stages.set(id, s);
+                  const stage = normalizeStage(s);
+                  if (stage) stages.set(id, stage);
                 }
               } else if (Array.isArray(prev.done)) {
-                for (const id of prev.done) stages.set(id, 'wm');
+                for (const id of prev.done) stages.set(id, 'written');
               }
             }
           } catch {
@@ -435,7 +450,7 @@ export function registerOkfCommand(program: Command): void {
             ),
           );
 
-        const targetStage: Stage = isPrivate || opts.share ? 'swm' : 'wm';
+        const targetStage: Stage = isPrivate || opts.share ? 'swm' : 'written';
         const layer = targetStage === 'swm' ? 'SWM' : 'WM';
         let written = 0;
         let created = 0;
@@ -444,7 +459,7 @@ export function registerOkfCommand(program: Command): void {
           const name = conceptKaName(concept.conceptId);
           const current = stages.get(concept.conceptId);
           // Already at or past the target stage for this run → nothing to do.
-          if (current === 'swm' || current === targetStage) continue;
+          if (current && stageRank[current] >= stageRank[targetStage]) continue;
 
           const needCreate = current === undefined; // not yet written to WM
 
@@ -465,13 +480,18 @@ export function registerOkfCommand(program: Command): void {
             }
             written += await createAndWriteOkfAssetDraft(client, contextGraphId, name, quads, subGraphName);
             created += 1;
-            stages.set(concept.conceptId, 'wm');
+            stages.set(concept.conceptId, 'written');
             await persistManifest();
           }
           if (targetStage === 'swm') {
-            // Advance WM → SWM (works whether the KA was just created or was
-            // already in WM from a prior `import` run).
-            await finalizeAndShareOkfAsset(client, contextGraphId, name, subGraphName);
+            // Advance toward SWM from the last persisted lifecycle checkpoint.
+            const afterWrite = stages.get(concept.conceptId);
+            if (!afterWrite || stageRank[afterWrite] < stageRank.finalized) {
+              await finalizeOkfAsset(client, contextGraphId, name, subGraphName);
+              stages.set(concept.conceptId, 'finalized');
+              await persistManifest();
+            }
+            await shareOkfAsset(client, contextGraphId, name, subGraphName);
             shared += 1;
             stages.set(concept.conceptId, 'swm');
             await persistManifest();

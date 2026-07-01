@@ -272,10 +272,10 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/swm/share'))).toBe(false);
 
-    // Manifest records the per-concept stage as 'wm'.
+    // Manifest records the per-concept lifecycle checkpoint.
     const manifest = await manifestFor(bundle);
     expect(manifest.mode).toBe('per-concept');
-    expect(manifest.stages).toEqual({ a: 'wm', b: 'wm' });
+    expect(manifest.stages).toEqual({ a: 'written', b: 'written' });
   });
 
   it('import then import --share ADVANCES WM→SWM (does not skip finalize/share)', async () => {
@@ -392,7 +392,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private records WM progress before a failed share and resumes without rewriting', async () => {
+  it('--private records finalized progress before a failed share and resumes without rewriting', async () => {
     clear();
     const bundle = await makeBundle();
     let failFirstShare = true;
@@ -412,7 +412,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(failed.exitCode).not.toBe(0);
     expect(failed.stderr).toContain('share did not report swmShared:true');
     let manifest = await manifestFor(bundle);
-    expect(manifest.stages).toEqual({ a: 'wm' });
+    expect(manifest.stages).toEqual({ a: 'finalized' });
 
     clear();
     stub.setHandler(okfDaemonHandler(createdCGs));
@@ -425,8 +425,8 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const createBodies = knowledgeAssetCreateBodies(stub.calls);
     expect(createBodies.map((b) => b.name)).toEqual(['b']);
     expect(knowledgeAssetWriteBodies(stub.calls, 'b')).toHaveLength(1);
-    expect(paths).toContain('POST /api/knowledge-assets/a/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/a/swm/share');
+    expect(paths).not.toContain('POST /api/knowledge-assets/a/wm/finalize');
     expect(paths.some((p) => p === 'POST /api/knowledge-assets/a/wm/write')).toBe(false);
     manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
@@ -545,6 +545,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const writeLengths = knowledgeAssetWriteBodies(stub.calls, 'bulk')
       .map((b) => Array.isArray(b.quads) ? b.quads.length : 0);
     expect(writeLengths.every((length) => length <= 5000)).toBe(true);
+    const totalWritten = writeLengths.reduce((sum, length) => sum + length, 0);
+    expect(totalWritten).toBe(out.triplesWritten);
+    expect(totalWritten).toBe(out.triples);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
     expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
@@ -582,6 +585,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(writeLengths.some((length) => length > 1000)).toBe(true);
     expect(acceptedWriteSizes.length).toBeGreaterThan(2);
     expect(acceptedWriteSizes.every((length) => length <= 1000)).toBe(true);
+    const acceptedTotal = acceptedWriteSizes.reduce((sum, length) => sum + length, 0);
+    expect(acceptedTotal).toBe(out.triplesWritten);
+    expect(acceptedTotal).toBe(out.triples);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
     const manifest = await manifestFor(bundle);
