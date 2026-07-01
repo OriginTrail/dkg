@@ -2947,17 +2947,16 @@ export class PublishMethods extends DKGAgentBase {
       // resolver already does the live-on-chain proof, identity binding, and
       // bounded reads; a thrown RPC rejection is caught below and also
       // fails closed.
-      // RETRY transient UNKNOWNs. The resolver fails closed to 'unknown' when a
-      // single on-chain read exceeds CHAIN_POLICY_READ_TIMEOUT_MS (2.5s) — a
-      // slow chain RPC (the dominant "LU-5: access-policy is unknown" cause on
-      // Base) blows that easily, so a publish into a CG whose policy IS live
-      // on-chain (e.g. the registered public "sports" CG) throws instead of
-      // publishing. A few bounded retries let a transiently-slow RPC land a
-      // CONFIRMED 0/1 before we fail closed; genuine unavailability still ends
-      // as 'unknown'/thrown → the caller REFUSES, so fail-closed security is
-      // preserved (never downgrade to plaintext on a guess). Only the transient
-      // 'unknown'/throw is retried — a confirmed 0 / 1 / 'unregistered' returns
-      // immediately, adding zero latency to the healthy hot path.
+      // Resolve the SHARED tri-state policy through the resolver-level bounded
+      // retry primitive ({@link retryTransientPolicyStateRead}) so publish does
+      // NOT fork its own retry behavior — it just supplies WHICH read to retry
+      // (raw on-chain slot vs the local-mapping resolver). The retry turns a
+      // transient 'unknown' (a single CHAIN_POLICY_READ_TIMEOUT_MS miss on a slow
+      // chain RPC — the dominant "LU-5: access-policy is unknown" cause on Base)
+      // into a CONFIRMED 0/1 when the CG's policy IS live; genuine unavailability
+      // still ends 'unknown'/throws, and the catch below fails closed (never
+      // downgrade to plaintext on a guess). Confirmed 0/1/'unregistered' returns
+      // immediately — zero extra reads on the healthy hot path.
       const resolvePolicyState = async (): Promise<0 | 1 | 'unregistered' | 'unknown'> => {
         if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
           const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
@@ -2965,25 +2964,14 @@ export class PublishMethods extends DKGAgentBase {
         }
         return this.resolveOnChainAccessPolicyState(cgId, ctx);
       };
-      const POLICY_PROBE_MAX_ATTEMPTS = 3;
-      const probeBackoff = (attempt: number) => new Promise<void>((r) => setTimeout(r, 300 * attempt));
-      let policyState: 0 | 1 | 'unregistered' | 'unknown' = 'unknown';
-      for (let attempt = 1; attempt <= POLICY_PROBE_MAX_ATTEMPTS; attempt++) {
-        try {
-          policyState = await resolvePolicyState();
-        } catch (err) {
-          if (attempt >= POLICY_PROBE_MAX_ATTEMPTS) {
-            this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed after ${attempt} attempt(s) — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
-            return null;
-          }
-          await probeBackoff(attempt);
-          continue;
-        }
-        if (policyState !== 'unknown') break; // confirmed 0 / 1 / 'unregistered'
-        if (attempt < POLICY_PROBE_MAX_ATTEMPTS) {
-          this.log.warn(ctx, `${logPrefix}: chain access-policy for ${cgId} came back UNKNOWN (attempt ${attempt}/${POLICY_PROBE_MAX_ATTEMPTS}) — retrying the on-chain read before failing closed`);
-          await probeBackoff(attempt);
-        }
+      let policyState: 0 | 1 | 'unregistered' | 'unknown';
+      try {
+        policyState = await this.retryTransientPolicyStateRead(resolvePolicyState, ctx, {
+          logLabel: `${logPrefix}: chain access-policy for ${cgId}`,
+        });
+      } catch (err) {
+        this.log.warn(ctx, `${logPrefix}: chain access-policy probe for ${cgId} failed — treating as UNKNOWN (fail-closed): ${err instanceof Error ? err.message : String(err)}`);
+        return null;
       }
       // PUBLIC on-chain ⇒ never curated for SWM-encryption purposes, even with
       // an allowedAgent list (that governs publish authority). Decide this

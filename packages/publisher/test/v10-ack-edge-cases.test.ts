@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { ACKCollector, DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -233,6 +233,73 @@ describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
     const uniqueIdentities = new Set(result.acks.map(a => a.nodeIdentityId));
     expect(uniqueIdentities.size).toBe(3);
   });
+});
+
+// ── ACKCollector core-peer readiness gate (#1404) ────────────────────────
+
+describe('ACKCollector core-peer readiness gate (#1404)', () => {
+  it('exports a positive production readiness timeout (providers wire this on)', () => {
+    expect(DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('gate DISABLED (no timeout): one-shot fail-fast, exactly one snapshot, no polling', async () => {
+    let snapshots = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
+      getConnectedCorePeers: () => { snapshots++; return ['peer-0', 'peer-1']; },
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect(buildCollectParams({ requiredACKs: 3 })))
+      .rejects.toThrow('quorum impossible');
+    expect(snapshots).toBe(1); // legacy one-shot: no wait
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
+  });
+
+  it('gate ENABLED: waits then PROCEEDS when the pool reaches quorum mid-wait', async () => {
+    // Below quorum on the first snapshots, reaches 3 on a later poll.
+    const snapshots = [
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1', 'peer-2'],
+    ];
+    let call = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: buildSendP2P(),
+      getConnectedCorePeers: () => snapshots[Math.min(call++, snapshots.length - 1)],
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {}, // collapse the wait — the injected sleep drives the budget
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);          // proceeded past the gate
+    expect(call).toBeGreaterThanOrEqual(3);       // it polled until quorum formed
+  });
+
+  it('gate ENABLED: still fails closed with the FINAL count if quorum never forms', async () => {
+    let snapshots = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
+      getConnectedCorePeers: () => { snapshots++; return ['peer-0', 'peer-1']; },
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {},
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect(buildCollectParams({ requiredACKs: 3 })))
+      .rejects.toThrow('need 3 ACKs but only 2 core peers connected — quorum impossible');
+    expect(snapshots).toBeGreaterThan(1);         // it polled (not a one-shot)
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
+  });
+
+  // NOTE: `collect` and `collectUpdate` both call the SAME shared preflight
+  // (`getQuorumEligibleCorePeersOrThrow`), so the cases above exercise the exact
+  // gate the UPDATE path uses. See storage-update-ack.test.ts for collectUpdate
+  // quorum coverage.
 });
 
 // ── ACKCollector identity verification ───────────────────────────────────

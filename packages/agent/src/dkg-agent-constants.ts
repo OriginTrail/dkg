@@ -299,6 +299,11 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
  * budget while allowing a single slow eth_call hop under normal load.
  */
 export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
+// #1404 — attempts for retryTransientPolicyStateRead: a single
+// CHAIN_POLICY_READ_TIMEOUT_MS (2.5s) miss on a slow chain RPC yields a transient
+// 'unknown' that a couple of bounded retries turn into a CONFIRMED policy,
+// without weakening the fail-closed contract.
+export const POLICY_STATE_RETRY_ATTEMPTS = 3;
 
 // ── SWM sender-key ────────────────────────────────────────────────────
 /** Shared operation context for pending sender-key drain logging. */
