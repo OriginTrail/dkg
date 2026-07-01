@@ -147,7 +147,10 @@ start_hardhat() {
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
   rm -f "$DEVNET_DIR/hardhat/deployed"
 
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
+  # --config hardhat.devnet.config.ts: devnet-only solc 0.8.24 + cancun so OZ 5.4.0
+  # (mcopy/EIP-5656) compiles without the 0.8.26+ "stack too deep" regression. Production
+  # config (hardhat.node.config.ts, solc 0.8.20/london) is untouched.
+  npx hardhat node --port "$HARDHAT_PORT" --no-deploy --config hardhat.devnet.config.ts \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
   local hh_pid=$!
   echo "$hh_pid" > "$pidfile"
@@ -205,7 +208,7 @@ deploy_contracts() {
   log "Deploying contracts to local Hardhat node..."
   cd "$REPO_ROOT/packages/evm-module"
   RPC_LOCALHOST="http://127.0.0.1:$HARDHAT_PORT" \
-    npx hardhat deploy --network localhost \
+    npx hardhat deploy --network localhost --config hardhat.devnet.config.ts \
     > "$DEVNET_DIR/hardhat/deploy.log" 2>&1
 
   # Extract Hub address from deployment log
