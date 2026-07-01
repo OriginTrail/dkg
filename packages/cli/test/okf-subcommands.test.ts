@@ -501,19 +501,9 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
-  it('--private falls back to chunked lifecycle when one-shot create/write is too large', async () => {
+  it('--private uses chunked lifecycle for concepts over the write chunk contract', async () => {
     clear();
     const bundle = await makeLargeTaggedBundle();
-    stub.setHandler((req, raw) => {
-      const url = new URL(`http://127.0.0.1${req.url}`);
-      if (req.method === 'POST' && url.pathname === '/api/knowledge-assets') {
-        const parsed = JSON.parse(raw || '{}');
-        if (Array.isArray(parsed.quads) && parsed.quads.length > 5000) {
-          return { status: 413, body: { error: 'payload too large' } };
-        }
-      }
-      return okfDaemonHandler(createdCGs)(req, raw);
-    });
 
     const r = await runCli(
       ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-large', '--private', '--create-context-graph'],
@@ -525,11 +515,57 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(out.assetsShared).toBe(1);
 
     const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
-    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(2);
+    expect(paths.filter((p) => p === 'POST /api/knowledge-assets')).toHaveLength(1);
+    const createBody = JSON.parse(stub.calls.find((c) =>
+      c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets')?.body || '{}');
+    expect(createBody.quads).toBeUndefined();
     expect(paths.filter((p) => p === 'POST /api/knowledge-assets/bulk/wm/write')).toHaveLength(2);
+    const writeLengths = stub.calls
+      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets/bulk/wm/write')
+      .map((c) => JSON.parse(c.body || '{}').quads?.length ?? 0);
+    expect(writeLengths.every((length) => length <= 5000)).toBe(true);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
     expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
+  });
+
+  it('--private recursively splits oversized lifecycle write chunks on 413', async () => {
+    clear();
+    const bundle = await makeLargeTaggedBundle();
+    const acceptedWriteSizes: number[] = [];
+    stub.setHandler((req, raw) => {
+      const url = new URL(`http://127.0.0.1${req.url}`);
+      if (req.method === 'POST' && url.pathname === '/api/knowledge-assets/bulk/wm/write') {
+        const quads = JSON.parse(raw || '{}').quads ?? [];
+        if (quads.length > 1000) {
+          return { status: 413, body: { error: 'payload too large' } };
+        }
+        acceptedWriteSizes.push(quads.length);
+      }
+      return okfDaemonHandler(createdCGs)(req, raw);
+    });
+
+    const r = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-write-split', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.assetsCreated).toBe(1);
+    expect(out.assetsShared).toBe(1);
+
+    const paths = stub.calls.map((c) => `${c.method} ${c.url.split('?')[0]}`);
+    const writeLengths = stub.calls
+      .filter((c) => c.method === 'POST' && c.url.split('?')[0] === '/api/knowledge-assets/bulk/wm/write')
+      .map((c) => JSON.parse(c.body || '{}').quads?.length ?? 0);
+    expect(writeLengths).toContain(5000);
+    expect(writeLengths.some((length) => length > 1000)).toBe(true);
+    expect(acceptedWriteSizes.length).toBeGreaterThan(2);
+    expect(acceptedWriteSizes.every((length) => length <= 1000)).toBe(true);
+    expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
+    const manifest = JSON.parse(await readFile(join(bundle, '.okf-import-manifest.json'), 'utf-8'));
+    expect(manifest.stages).toEqual({ bulk: 'swm' });
 
     stub.setHandler(okfDaemonHandler(createdCGs));
   });

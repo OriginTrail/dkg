@@ -18,6 +18,7 @@ import {
   type Quad,
   type TypeRelation,
 } from '@origintrail-official/dkg-okf';
+import { batchEntityQuads, type PublishQuad } from '../batching.js';
 import { ApiClient } from '../api-client.js';
 import type { ActionOpts } from '../cli-helpers.js';
 
@@ -73,6 +74,83 @@ export function registerOkfCommand(program: Command): void {
   // separators in the concept ID are mapped to '__' (the RDF subject IRI keeps
   // the original '/'). See `conceptIdToKaName` in @origintrail-official/dkg-okf.
   const conceptKaName = conceptIdToKaName;
+
+  const isPayloadTooLarge = (e: unknown) => (e as { httpStatus?: number })?.httpStatus === 413;
+
+  async function writeOkfAssetBatch(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    batch: PublishQuad[],
+    subGraphName?: string,
+  ): Promise<number> {
+    try {
+      const res = await client.knowledgeAssetWrite(contextGraphId, name, batch, { subGraphName });
+      return res.written ?? batch.length;
+    } catch (e) {
+      if (isPayloadTooLarge(e) && batch.length > 1) {
+        const mid = Math.floor(batch.length / 2);
+        console.error(`  413 on ${batch.length} quads - splitting into ${mid}/${batch.length - mid}`);
+        return (await writeOkfAssetBatch(client, contextGraphId, name, batch.slice(0, mid), subGraphName)) +
+          (await writeOkfAssetBatch(client, contextGraphId, name, batch.slice(mid), subGraphName));
+      }
+      throw e;
+    }
+  }
+
+  async function writeOkfAssetBatches(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    quads: PublishQuad[],
+    subGraphName?: string,
+  ): Promise<number> {
+    let count = 0;
+    for (const batch of batchEntityQuads(quads, { maxBatchQuads: CHUNK, splitOversizedEntities: true })) {
+      count += await writeOkfAssetBatch(client, contextGraphId, name, batch, subGraphName);
+    }
+    return count;
+  }
+
+  async function createAndWriteOkfAssetDraft(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    quads: PublishQuad[],
+    subGraphName?: string,
+  ): Promise<number> {
+    if (quads.length <= CHUNK) {
+      try {
+        await client.createKnowledgeAsset(contextGraphId, name, {
+          subGraphName,
+          quads,
+          finalize: false,
+        });
+        return quads.length;
+      } catch (e) {
+        if (!isPayloadTooLarge(e) || quads.length <= 1) throw e;
+      }
+    }
+
+    await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
+    return writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
+  }
+
+  async function finalizeAndShareOkfAsset(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
+    const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
+      subGraphName,
+      entities: 'all',
+    });
+    if (shareResult.swmShared !== true) {
+      throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);
+    }
+  }
 
   // The daemon's /api/query returns SELECT results as `{ bindings: [...] }` —
   // WITHOUT the `type: 'bindings'` discriminator the QueryResult union expects.
@@ -323,7 +401,6 @@ export function registerOkfCommand(program: Command): void {
         // stage each concept reached ('wm' = created+written, 'swm' = finalized+
         // shared) so a later --share advances WM concepts instead of skipping them.
         type Stage = 'wm' | 'swm';
-        type WritableOkfQuad = { subject: string; predicate: string; object: string; graph: string };
         const manifestPath = opts.manifest
           ? String(opts.manifest)
           : join(bundleDir, '.okf-import-manifest.json');
@@ -376,49 +453,6 @@ export function registerOkfCommand(program: Command): void {
         let written = 0;
         let created = 0;
         let shared = 0;
-        const isPayloadTooLarge = (e: unknown) => (e as { httpStatus?: number })?.httpStatus === 413;
-        const writeSlice = async (name: string, slice: WritableOkfQuad[]): Promise<number> => {
-          try {
-            const res = await client.knowledgeAssetWrite(contextGraphId, name, slice, { subGraphName });
-            return res.written ?? slice.length;
-          } catch (e) {
-            if (isPayloadTooLarge(e) && slice.length > 1) {
-              const mid = Math.floor(slice.length / 2);
-              console.error(`  413 on ${slice.length} quads — splitting into ${mid}/${slice.length - mid}`);
-              return (await writeSlice(name, slice.slice(0, mid))) + (await writeSlice(name, slice.slice(mid)));
-            }
-            throw e;
-          }
-        };
-        const createAndWriteConcept = async (name: string, quads: WritableOkfQuad[]): Promise<number> => {
-          try {
-            await client.createKnowledgeAsset(contextGraphId, name, {
-              subGraphName,
-              quads,
-              finalize: false,
-            });
-            return quads.length;
-          } catch (e) {
-            if (!isPayloadTooLarge(e) || quads.length <= 1) throw e;
-          }
-
-          await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
-          let count = 0;
-          for (let i = 0; i < quads.length; i += CHUNK) {
-            count += await writeSlice(name, quads.slice(i, i + CHUNK));
-          }
-          return count;
-        };
-        const finalizeAndShareConcept = async (name: string): Promise<void> => {
-          await client.knowledgeAssetFinalize(contextGraphId, name, { subGraphName });
-          const shareResult = await client.knowledgeAssetShare(contextGraphId, name, {
-            subGraphName,
-            entities: 'all',
-          });
-          if (shareResult.swmShared !== true) {
-            throw new Error(`Knowledge Asset "${name}" share did not report swmShared:true`);
-          }
-        };
         for (const concept of imported.concepts) {
           const name = conceptKaName(concept.conceptId);
           const current = stages.get(concept.conceptId);
@@ -442,7 +476,7 @@ export function registerOkfCommand(program: Command): void {
                 .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
                 .catch(() => undefined);
             }
-            written += await createAndWriteConcept(name, quads);
+            written += await createAndWriteOkfAssetDraft(client, contextGraphId, name, quads, subGraphName);
             created += 1;
             stages.set(concept.conceptId, 'wm');
             await persistManifest();
@@ -450,7 +484,7 @@ export function registerOkfCommand(program: Command): void {
           if (targetStage === 'swm') {
             // Advance WM → SWM (works whether the KA was just created or was
             // already in WM from a prior `import` run).
-            await finalizeAndShareConcept(name);
+            await finalizeAndShareOkfAsset(client, contextGraphId, name, subGraphName);
             shared += 1;
             stages.set(concept.conceptId, 'swm');
             await persistManifest();
