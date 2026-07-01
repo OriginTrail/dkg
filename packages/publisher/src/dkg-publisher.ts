@@ -908,11 +908,26 @@ export class DKGPublisher implements Publisher {
    * side narrowing of the private `chain` field (the base `ChainAdapter` type
    * doesn't declare these V10 methods), so consumers — notably the CLI publisher
    * ACK provider (`cli/src/ack-provider.ts`) — get a stable typed boundary
-   * instead of casting through `unknown` into private storage. If the internal
-   * chain storage ever changes, this method updates alongside it.
+   * instead of casting through `unknown` into private storage.
+   *
+   * SECURITY: returns a FRESH facade exposing ONLY the six ACK methods (each
+   * bound to the adapter, included only when actually implemented) — NEVER the
+   * raw adapter object. EVM adapters also carry secret-bearing methods (e.g. an
+   * operational private-key getter); handing back the adapter itself would turn
+   * this accessor into a secret-extraction path (`(caps as any)
+   * .getOperationalPrivateKey()`). Nothing beyond this narrow surface is
+   * reachable from the returned object.
    */
   getV10ACKChainCapabilities(): V10ACKChainCapabilities {
-    return this.chain as unknown as V10ACKChainCapabilities;
+    const chain = this.chain as unknown as V10ACKChainCapabilities;
+    const caps: V10ACKChainCapabilities = {};
+    if (typeof chain.isV10Ready === 'function') caps.isV10Ready = chain.isV10Ready.bind(chain);
+    if (typeof chain.verifyACKIdentity === 'function') caps.verifyACKIdentity = chain.verifyACKIdentity.bind(chain);
+    if (typeof chain.verifyACKIdentityDetailed === 'function') caps.verifyACKIdentityDetailed = chain.verifyACKIdentityDetailed.bind(chain);
+    if (typeof chain.getMinimumRequiredSignatures === 'function') caps.getMinimumRequiredSignatures = chain.getMinimumRequiredSignatures.bind(chain);
+    if (typeof chain.getEvmChainId === 'function') caps.getEvmChainId = chain.getEvmChainId.bind(chain);
+    if (typeof chain.getKnowledgeAssetsLifecycleAddress === 'function') caps.getKnowledgeAssetsLifecycleAddress = chain.getKnowledgeAssetsLifecycleAddress.bind(chain);
+    return caps;
   }
 
   private async refreshChainV10Readiness(): Promise<boolean> {
