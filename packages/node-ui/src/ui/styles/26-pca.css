@@ -566,6 +566,13 @@
   max-width: 680px;
   margin-top: 10px;
 }
+.v10-pca-coverage-summary .v10-pca-wallet-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 380px));
+  gap: 8px;
+  max-width: none;
+  justify-content: start;
+}
 .v10-pca-inline-status {
   margin: 12px 0 0;
   font-size: 12px;
@@ -913,17 +920,14 @@
   flex-wrap: wrap;
   max-width: 100%;
 }
-.v10-pca-owned-title-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
 .v10-pca-overview-wallet {
   width: auto;
   max-width: min(420px, 100%);
   margin-left: 0;
   margin-top: 8px;
+}
+.v10-pca-overview-wallet + .v10-pca-owned-groups {
+  margin-top: 18px;
 }
 .v10-pca-wallet-connect.compact {
   min-width: 0;
