@@ -550,10 +550,13 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     };
     stub.setHandler(publicCgHandler);
 
-    // Refusal: non-zero exit, and NO lifecycle write happened.
+    // Refusal: non-zero exit, and NO knowledge-asset mutation happened.
     const refused = await runCli(['okf', 'import', bundle, '--context-graph-id', 'cg-pub', '--private'], env());
     expect(refused.exitCode).not.toBe(0);
-    expect(stub.calls.some((c) => /\/api\/knowledge-assets\/.+\/wm\/write$/.test(c.url.split('?')[0]))).toBe(false);
+    expect(stub.calls.some((c) => {
+      const path = c.url.split('?')[0];
+      return c.method === 'POST' && (path === '/api/knowledge-assets' || path.startsWith('/api/knowledge-assets/'));
+    })).toBe(false);
     expect(refused.stderr).toMatch(/Refusing --private/);
 
     // Override: --allow-public-context-graph proceeds and writes.
