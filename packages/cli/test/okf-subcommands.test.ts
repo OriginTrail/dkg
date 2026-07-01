@@ -122,6 +122,41 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
   });
 
+  it('legacy done manifests advance to SWM without recreating completed concepts', async () => {
+    clear();
+    const bundle = await makeBundle();
+    createdCGs.add('cg-legacy-done');
+    await writeFile(
+      join(bundle, '.okf-import-manifest.json'),
+      JSON.stringify(
+        {
+          contextGraphId: 'cg-legacy-done',
+          done: ['a'],
+        },
+        null,
+        2,
+      ),
+    );
+
+    const r = await runCli(['okf', 'import', bundle, '--context-graph-id', 'cg-legacy-done', '--share'], env());
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.memoryLayer).toBe('SWM');
+    expect(out.assetsCreated).toBe(1);
+    expect(out.assetsShared).toBe(2);
+
+    const paths = callPaths(stub.calls);
+    expect(paths).toContain('POST /api/knowledge-assets/a/wm/finalize');
+    expect(paths).toContain('POST /api/knowledge-assets/a/swm/share');
+    expect(paths).not.toContain('POST /api/knowledge-assets/a/wm/write');
+    expect(knowledgeAssetCreateBodies(stub.calls).map((b) => b.name)).toEqual(['b']);
+    expect(knowledgeAssetWriteBodies(stub.calls, 'b')).toHaveLength(1);
+
+    const manifest = await manifestFor(bundle);
+    expect(manifest.mode).toBe('per-concept');
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
+  });
+
   it('export filters skolemized section nodes (no .well-known/genid files)', async () => {
     clear();
     const outDir = await mkdtemp(join(tmpdir(), 'okf-export-'));
