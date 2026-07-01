@@ -112,21 +112,27 @@ export function registerOkfCommand(program: Command): void {
     return count;
   }
 
-  async function createAndWriteOkfAssetDraft(
+  async function createOkfAssetDraft(
     client: ApiClient,
     contextGraphId: string,
     name: string,
-    quads: PublishQuad[],
     subGraphName?: string,
-  ): Promise<number> {
-    // No manifest stage means a previous run may have died after creating or
-    // partially writing the draft. Reset before replay so chunked retries are
-    // deterministic and cannot duplicate accepted chunks.
-    await client
-      .knowledgeAssetDiscard(contextGraphId, name, { subGraphName })
-      .catch(() => undefined);
+  ): Promise<void> {
     await client.createKnowledgeAsset(contextGraphId, name, { subGraphName });
-    return writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
+  }
+
+  async function discardOkfAssetDraft(
+    client: ApiClient,
+    contextGraphId: string,
+    name: string,
+    subGraphName?: string,
+  ): Promise<void> {
+    try {
+      await client.knowledgeAssetDiscard(contextGraphId, name, { subGraphName });
+    } catch (e) {
+      if ((e as { httpStatus?: number })?.httpStatus === 404) return;
+      throw e;
+    }
   }
 
   async function finalizeOkfAsset(
@@ -399,12 +405,13 @@ export function registerOkfCommand(program: Command): void {
         // done-set would make the documented `import` → `import --share` flow skip
         // every concept (already "done" from the WM pass) before finalize/share
         // ran, falsely reporting SWM with nothing shared. We record the furthest
-        // checkpoint each concept reached (`written`, `finalized`, or `swm`) so
+        // checkpoint each concept reached (`draft`, `written`, `finalized`, or `swm`) so
         // retries advance WM concepts instead of skipping or replaying them.
-        type Stage = 'written' | 'finalized' | 'swm';
-        const stageRank: Record<Stage, number> = { written: 1, finalized: 2, swm: 3 };
+        type Stage = 'draft' | 'written' | 'finalized' | 'swm';
+        const stageRank: Record<Stage, number> = { draft: 0, written: 1, finalized: 2, swm: 3 };
         const normalizeStage = (value: unknown): Stage | undefined => {
           if (value === 'wm' || value === 'written') return 'written';
+          if (value === 'draft') return 'draft';
           if (value === 'finalized' || value === 'swm') return value;
           return undefined;
         };
@@ -467,17 +474,23 @@ export function registerOkfCommand(program: Command): void {
           // Already at or past the target stage for this run → nothing to do.
           if (current && stageRank[current] >= stageRank[targetStage]) continue;
 
-          const needCreate = current === undefined; // not yet written to WM
+          const needWrite = current === undefined || current === 'draft'; // not yet fully written to WM
 
-          if (needCreate) {
+          if (needWrite) {
             const quads = concept.quads.map((q: Quad) => ({
               subject: q.subject,
               predicate: q.predicate,
               object: q.object,
               graph,
             }));
-            written += await createAndWriteOkfAssetDraft(client, contextGraphId, name, quads, subGraphName);
+            if (opts.replace || current === 'draft') {
+              await discardOkfAssetDraft(client, contextGraphId, name, subGraphName);
+            }
+            await createOkfAssetDraft(client, contextGraphId, name, subGraphName);
             created += 1;
+            stages.set(concept.conceptId, 'draft');
+            await persistManifest();
+            written += await writeOkfAssetBatches(client, contextGraphId, name, quads, subGraphName);
             stages.set(concept.conceptId, 'written');
             await persistManifest();
           }
@@ -495,7 +508,7 @@ export function registerOkfCommand(program: Command): void {
             await persistManifest();
           }
           console.log(`  ${layer}  ${concept.conceptId}  →  ${concept.iri}` +
-            (needCreate ? `  (${concept.quads.length} quads${targetStage === 'swm' ? ', shared' : ''})` : '  (advanced WM→SWM)'));
+            (needWrite ? `  (${concept.quads.length} quads${targetStage === 'swm' ? ', shared' : ''})` : '  (advanced WM→SWM)'));
         }
 
         console.log(

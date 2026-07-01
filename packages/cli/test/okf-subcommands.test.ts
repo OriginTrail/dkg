@@ -255,6 +255,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const writeBodies = ['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(stub.calls, name));
     expect(writeBodies).toHaveLength(2);
     expect(writeBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    expect(paths.some((p) => p.endsWith('/wm/discard'))).toBe(false);
     // No sealing/sharing in a plain WM import.
     expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
     expect(paths.some((p) => p.endsWith('/swm/share'))).toBe(false);
@@ -565,7 +566,31 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     );
     expect(failed.exitCode).not.toBe(0);
     expect(acceptedBeforeFailure).toEqual([5000]);
-    expect(existsSync(manifestPath)).toBe(false);
+    expect(existsSync(manifestPath)).toBe(true);
+    let manifest = await manifestFor(bundle);
+    expect(manifest.stages).toEqual({ bulk: 'draft' });
+
+    clear();
+    stub.setHandler((req, raw) => {
+      const url = new URL(`http://127.0.0.1${req.url}`);
+      if (req.method === 'POST' && url.pathname === '/api/knowledge-assets/bulk/wm/discard') {
+        return { status: 503, body: { error: 'discard unavailable' } };
+      }
+      return okfDaemonHandler(createdCGs)(req, raw);
+    });
+    const discardFailed = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-mid-write-fail', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(discardFailed.exitCode).not.toBe(0);
+    let paths = callPaths(stub.calls);
+    expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/discard');
+    expect(paths).not.toContain('POST /api/knowledge-assets');
+    expect(paths).not.toContain('POST /api/knowledge-assets/bulk/wm/write');
+    expect(paths).not.toContain('POST /api/knowledge-assets/bulk/wm/finalize');
+    expect(paths).not.toContain('POST /api/knowledge-assets/bulk/swm/share');
+    manifest = await manifestFor(bundle);
+    expect(manifest.stages).toEqual({ bulk: 'draft' });
 
     clear();
     stub.setHandler(okfDaemonHandler(createdCGs));
@@ -575,7 +600,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     );
     expect(retried.exitCode).toBe(0);
     const out = parseJsonTail(retried.stdout);
-    const paths = callPaths(stub.calls);
+    paths = callPaths(stub.calls);
     const discardIndex = paths.indexOf('POST /api/knowledge-assets/bulk/wm/discard');
     const createIndex = paths.indexOf('POST /api/knowledge-assets');
     const firstWriteIndex = paths.indexOf('POST /api/knowledge-assets/bulk/wm/write');
@@ -589,7 +614,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     expect(writeTotal).toBe(out.triples);
     expect(paths).toContain('POST /api/knowledge-assets/bulk/wm/finalize');
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
-    const manifest = await manifestFor(bundle);
+    manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ bulk: 'swm' });
   });
 
