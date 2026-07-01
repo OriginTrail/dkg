@@ -85,13 +85,14 @@ function makeAgentLike(opts: {
   agentLike.resolveOnChainAccessPolicyState = (DKGAgent.prototype as any).resolveOnChainAccessPolicyState;
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
-  // #1404 — probeIsCurated now resolves the tri-state through the shared
-  // retry-on-transient-UNKNOWN primitive, so bind it too (else `this.
-  // retryTransientPolicyStateRead is not a function`). Collapse its backoff so
+  // #1404 — probeIsCurated now resolves the tri-state through the ONE canonical
+  // policy operation `resolvePublishAccessPolicyState` (which internally selects
+  // the read and applies the bounded retry), so bind it (else `this.
+  // resolvePublishAccessPolicyState is not a function`). Collapse its backoff so
   // the unknown-throw cases in this file don't add real delay.
-  agentLike.retryTransientPolicyStateRead = function (this: any, read: any, opCtx: any, opts: any) {
-    return (DKGAgent.prototype as any).retryTransientPolicyStateRead.call(
-      this, read, opCtx, { ...opts, backoffMs: () => 0 },
+  agentLike.resolvePublishAccessPolicyState = function (this: any, cgId: any, opCtx: any, opts: any) {
+    return (DKGAgent.prototype as any).resolvePublishAccessPolicyState.call(
+      this, cgId, opCtx, { ...opts, backoffMs: () => 0 },
     );
   };
   return agentLike;

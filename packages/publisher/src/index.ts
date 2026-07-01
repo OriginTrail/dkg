@@ -61,6 +61,7 @@ export {
 } from './workspace-agent-recipients.js';
 export {
   ACKCollector,
+  createProductionACKCollector,
   DEFAULT_REQUIRED_ACKS,
   DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
   type ACKCollectorDeps,

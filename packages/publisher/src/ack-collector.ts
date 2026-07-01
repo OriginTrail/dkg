@@ -1159,3 +1159,29 @@ export class ACKCollector {
     return true;
   }
 }
+
+/**
+ * The SINGLE production construction boundary for ACK collection. It always
+ * enables the core-peer readiness gate ({@link DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS})
+ * so a publish that fires while the last core peer is still connecting/identifying
+ * doesn't fail `quorum impossible` a moment too early — the dominant intermittent-
+ * publish failure on small/NAT'd chains like Base.
+ *
+ * Every production caller — the daemon publish + update ACK providers
+ * (`dkg-agent.ts`) and the CLI publisher runner (`publisher-runner.ts`) — routes
+ * through here instead of hand-copying `corePeerReadinessTimeoutMs` into a bare
+ * `new ACKCollector(...)`, so the readiness opt-in cannot be silently forgotten
+ * when a new production call site is added (a bare constructor would compile but
+ * silently revert to the legacy one-shot snapshot). The deps type OMITS
+ * `corePeerReadinessTimeoutMs` precisely so callers can't accidentally under- or
+ * mis-configure it. Unit tests that want the legacy fail-fast one-shot construct
+ * {@link ACKCollector} directly with `corePeerReadinessTimeoutMs: 0` (or omitted).
+ */
+export function createProductionACKCollector(
+  deps: Omit<ACKCollectorDeps, 'corePeerReadinessTimeoutMs'>,
+): ACKCollector {
+  return new ACKCollector({
+    ...deps,
+    corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
+  });
+}

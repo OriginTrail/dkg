@@ -56,20 +56,26 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
   );
   return {
     ...actual,
-    // Replace the `ACKCollector` class with a tiny capture stand-in.
-    // We don't need its full behaviour for these wiring tests — the
-    // agent only constructs it; the actual `collect()` only runs on
-    // publish, which isn't exercised here.
-    ACKCollector: class CapturingACKCollector {
-      constructor(deps: unknown) {
-        capturedAckCollectorDeps.push(deps);
-      }
-      // Required for the agent's outer closure shape — never called
-      // in this file, but TypeScript's structural matching expects
-      // the surface to exist.
-      async collect(): Promise<never> {
-        throw new Error('CapturingACKCollector.collect should not be invoked in wiring tests');
-      }
+    // #1404: production ACK collectors are built through the centralized
+    // `createProductionACKCollector` factory (which injects the readiness-gate
+    // timeout — see `createProductionACKCollector`'s own coverage in
+    // `v10-ack-edge-cases.test.ts`). Intercept the FACTORY, not `ACKCollector`,
+    // so we capture (a) the exact deps the agent hands the production boundary
+    // and (b) PROOF that both providers actually route through that boundary — a
+    // bare `new ACKCollector(...)` that skipped the readiness opt-in would leave
+    // `capturedAckCollectorDeps` empty and fail the "routes through factory"
+    // assertions below. We don't need real collector behaviour here — the agent
+    // only constructs it; `collect()/collectUpdate()` run on publish, not wired.
+    createProductionACKCollector: (deps: unknown) => {
+      capturedAckCollectorDeps.push(deps);
+      return {
+        async collect(): Promise<never> {
+          throw new Error('capture stub collect() should not be invoked in wiring tests');
+        },
+        async collectUpdate(): Promise<never> {
+          throw new Error('capture stub collectUpdate() should not be invoked in wiring tests');
+        },
+      };
     },
   };
 });
@@ -98,6 +104,7 @@ interface ACKCollectorDepsCapture {
  */
 interface ProviderInternals {
   createV10ACKProvider(cgId: string): unknown;
+  createV10UpdateACKProvider(cgId: string): unknown;
   router: unknown;
   gossip: unknown;
   chain: MockChainAdapter & {
@@ -232,5 +239,68 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       42n,
     );
     expect(verdict).toBe(false);
+  });
+
+  // #1404 — the readiness gate only protects production if the provider wiring
+  // actually opts in. These pin that BOTH the daemon publish provider and the
+  // daemon UPDATE provider construct their collector through the centralized
+  // `createProductionACKCollector` factory (which injects
+  // `DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS` — proven separately in
+  // `v10-ack-edge-cases.test.ts`). If either provider regressed to a bare
+  // `new ACKCollector(...)`, it would silently keep the legacy one-shot snapshot
+  // and `capturedAckCollectorDeps` would stay empty here — a red test, not false
+  // confidence.
+  it('createV10ACKProvider constructs its collector through the centralized production factory (readiness opt-in cannot be skipped)', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+
+    boot.internals.createV10ACKProvider('test-cg');
+
+    expect(capturedAckCollectorDeps).toHaveLength(1);
+    // The production boundary owns the readiness timeout, so the agent must NOT
+    // pass its own (that would re-introduce the hand-copied constant this
+    // centralization removed); it hands the factory the transport + verifier deps
+    // and the factory injects the gate.
+    const deps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture & {
+      corePeerReadinessTimeoutMs?: number;
+      getConnectedCorePeers?: () => string[];
+    };
+    expect(deps.getConnectedCorePeers).toBeTypeOf('function');
+    expect(deps.corePeerReadinessTimeoutMs).toBeUndefined();
+  });
+
+  it('createV10UpdateACKProvider ALSO constructs its collector through the centralized production factory (readiness opt-in cannot be skipped)', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+
+    const provider = boot.internals.createV10UpdateACKProvider('test-cg');
+
+    // Provider must be produced (guards satisfied by MockChainAdapter) AND it
+    // must have gone through the factory.
+    expect(provider).toBeTypeOf('function');
+    expect(capturedAckCollectorDeps).toHaveLength(1);
+    const deps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    // The update provider wires the same structured verifier + rpc-error
+    // translation as the publish provider.
+    expect(deps.verifyIdentityDetailed).toBeTypeOf('function');
+  });
+
+  it('createV10UpdateACKProvider translates a thrown chain verifier into {valid: false, reason: "rpc-error"} (same contract as publish)', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+
+    internals.chain.verifyACKIdentityDetailed = async (): Promise<VerifyACKIdentityResult> => {
+      throw new Error('synthetic RPC outage on update path — filter expired');
+    };
+
+    internals.createV10UpdateACKProvider('test-cg');
+
+    const deps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    const verdict = await deps.verifyIdentityDetailed!(
+      '0xabCDeF0123456789abcDef0123456789AbCdef01',
+      42n,
+    );
+    expect(verdict).toEqual({ valid: false, reason: 'rpc-error' });
   });
 });

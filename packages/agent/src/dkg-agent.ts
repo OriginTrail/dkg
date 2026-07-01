@@ -89,7 +89,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
+  createProductionACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -118,7 +118,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   DEFAULT_REQUIRED_ACKS,
-  DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -1478,7 +1477,7 @@ export class DKGAgent extends DKGAgentBase {
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
-    const collector = new ACKCollector({
+    const collector = createProductionACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
@@ -1495,9 +1494,6 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
-      // Give core peers a brief window to finish connecting/identifying before
-      // the one-shot quorum snapshot — see DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS.
-      corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1665,7 +1661,7 @@ export class DKGAgent extends DKGAgentBase {
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
-    const collector = new ACKCollector({
+    const collector = createProductionACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
@@ -1677,9 +1673,6 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
-      // Give core peers a brief window to finish connecting/identifying before
-      // the one-shot quorum snapshot — see DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS.
-      corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

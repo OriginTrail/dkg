@@ -2947,26 +2947,21 @@ export class PublishMethods extends DKGAgentBase {
       // resolver already does the live-on-chain proof, identity binding, and
       // bounded reads; a thrown RPC rejection is caught below and also
       // fails closed.
-      // Resolve the SHARED tri-state policy through the resolver-level bounded
-      // retry primitive ({@link retryTransientPolicyStateRead}) so publish does
-      // NOT fork its own retry behavior — it just supplies WHICH read to retry
-      // (raw on-chain slot vs the local-mapping resolver). The retry turns a
-      // transient 'unknown' (a single CHAIN_POLICY_READ_TIMEOUT_MS miss on a slow
-      // chain RPC — the dominant "LU-5: access-policy is unknown" cause on Base)
-      // into a CONFIRMED 0/1 when the CG's policy IS live; genuine unavailability
-      // still ends 'unknown'/throws, and the catch below fails closed (never
-      // downgrade to plaintext on a guess). Confirmed 0/1/'unregistered' returns
-      // immediately — zero extra reads on the healthy hot path.
-      const resolvePolicyState = async (): Promise<0 | 1 | 'unregistered' | 'unknown'> => {
-        if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
-          const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), ctx);
-          return policy === 0 || policy === 1 ? policy : 'unknown';
-        }
-        return this.resolveOnChainAccessPolicyState(cgId, ctx);
-      };
+      // Resolve the SHARED tri-state policy through the ONE canonical policy
+      // operation ({@link resolvePublishAccessPolicyState}) so publish does NOT
+      // fork its own read-selection OR retry behavior — it just states WHICH slot
+      // it wants (raw on-chain slot vs the local-mapping resolver). That operation
+      // owns the bounded transient-UNKNOWN retry, which turns a transient 'unknown'
+      // (a single CHAIN_POLICY_READ_TIMEOUT_MS miss on a slow chain RPC — the
+      // dominant "LU-5: access-policy is unknown" cause on Base) into a CONFIRMED
+      // 0/1 when the CG's policy IS live; genuine unavailability still ends
+      // 'unknown'/throws, and the catch below fails closed (never downgrade to
+      // plaintext on a guess). Confirmed 0/1/'unregistered' returns immediately —
+      // zero extra reads on the healthy hot path.
       let policyState: 0 | 1 | 'unregistered' | 'unknown';
       try {
-        policyState = await this.retryTransientPolicyStateRead(resolvePolicyState, ctx, {
+        policyState = await this.resolvePublishAccessPolicyState(cgId, ctx, {
+          rawOnChainSlot: opts?.rawOnChainSlot,
           logLabel: `${logPrefix}: chain access-policy for ${cgId}`,
         });
       } catch (err) {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ACKCollector, DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { ACKCollector, createProductionACKCollector, DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -240,6 +240,31 @@ describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
 describe('ACKCollector core-peer readiness gate (#1404)', () => {
   it('exports a positive production readiness timeout (providers wire this on)', () => {
     expect(DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('createProductionACKCollector ENABLES the readiness gate (waits+proceeds, not a legacy one-shot)', async () => {
+    // The factory is the SINGLE production construction boundary (daemon publish
+    // + update providers, CLI publisher runner all route through it). It must
+    // inject DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS so a bare one-shot snapshot
+    // can never reach production. Below quorum on the first snapshots, reaching 3
+    // mid-wait: a factory-built collector rides the wait and PROCEEDS; a fail-fast
+    // one-shot (i.e. the gate NOT injected) would reject 'quorum impossible' here.
+    const snapshots = [
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1', 'peer-2'],
+    ];
+    let call = 0;
+    const collector = createProductionACKCollector({
+      gossipPublish: noop(),
+      sendP2P: buildSendP2P(),
+      getConnectedCorePeers: () => snapshots[Math.min(call++, snapshots.length - 1)],
+      sleep: async () => {}, // collapse the injected wait — sleep drives the budget
+      log: noop(),
+    });
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);          // proceeded past the gate
+    expect(call).toBeGreaterThanOrEqual(3);       // it polled until quorum formed
   });
 
   it('gate DISABLED (no timeout): one-shot fail-fast, exactly one snapshot, no polling', async () => {
