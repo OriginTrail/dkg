@@ -540,6 +540,15 @@
   flex-wrap: wrap;
   margin-bottom: 12px;
 }
+.v10-pca-section-head > div:first-child {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.v10-pca-section-head > .v10-pca-overview-cta-group {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  margin-left: auto;
+}
 .v10-pca-section-title {
   margin: 0;
   font-size: 14px;
@@ -1095,8 +1104,9 @@
   margin-top: 16px;
 }
 @media (max-width: 720px) {
-  .v10-pca-overview-owner-actions {
-    justify-content: flex-start;
+  .v10-pca-section-head > .v10-pca-overview-cta-group {
+    justify-content: flex-end;
+    margin-left: auto;
   }
   .v10-pca-get-added-body .v10-pca-detail-form {
     grid-template-columns: 1fr;

@@ -73,6 +73,12 @@ describe('V10 CSS layout selectors', () => {
     expect(appRule).toContain('overflow: hidden;');
   });
 
+  it('keeps PCA section actions right-aligned when section headers wrap', () => {
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*div:first-child\s*\{[\s\S]*?flex:\s*1 1 320px/);
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*\.v10-pca-overview-cta-group\s*\{[\s\S]*?margin-left:\s*auto/);
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*\.v10-pca-overview-cta-group\s*\{[\s\S]*?justify-content:\s*flex-end/);
+  });
+
   it('includes .v10-panel-left and .v10-panel-right selectors', () => {
     expect(css).toMatch(/\.v10-panel-left\s*\{/);
     expect(css).toMatch(/\.v10-panel-right\s*\{/);
