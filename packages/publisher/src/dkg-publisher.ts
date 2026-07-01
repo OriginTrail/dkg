@@ -164,6 +164,26 @@ export interface DKGPublisherConfig {
   provenanceEvents?: boolean;
 }
 
+/**
+ * The optional V10 ACK-collection capability surface a chain adapter may expose.
+ * Every method is optional — a V9-only / NoChainAdapter simply lacks them, and
+ * {@link DKGPublisher.getV10ACKChainCapabilities} returns the same object either
+ * way. This is the DELIBERATE, typed contract the CLI publisher's ACK provider
+ * consumes, so it never reaches through an `unknown` cast into the private
+ * `chain` field (which would silently break if the internal storage changed).
+ */
+export interface V10ACKChainCapabilities {
+  isV10Ready?: () => boolean;
+  verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+  verifyACKIdentityDetailed?: (
+    recoveredAddress: string,
+    claimedIdentityId: bigint,
+  ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
+  getMinimumRequiredSignatures?: () => Promise<number>;
+  getEvmChainId?: () => Promise<bigint>;
+  getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
+}
+
 export interface WorkspaceSenderKeyEncryptInput {
   contextGraphId: string;
   plaintext: Uint8Array;
@@ -880,6 +900,19 @@ export class DKGPublisher implements Publisher {
     return this.chain.chainId !== 'none' &&
       typeof this.chain.isV10Ready === 'function' &&
       this.chain.isV10Ready();
+  }
+
+  /**
+   * Expose the chain adapter's optional V10 ACK-collection capabilities as a
+   * typed {@link V10ACKChainCapabilities} contract. This is the single, owner-
+   * side narrowing of the private `chain` field (the base `ChainAdapter` type
+   * doesn't declare these V10 methods), so consumers — notably the CLI publisher
+   * ACK provider (`cli/src/ack-provider.ts`) — get a stable typed boundary
+   * instead of casting through `unknown` into private storage. If the internal
+   * chain storage ever changes, this method updates alongside it.
+   */
+  getV10ACKChainCapabilities(): V10ACKChainCapabilities {
+    return this.chain as unknown as V10ACKChainCapabilities;
   }
 
   private async refreshChainV10Readiness(): Promise<boolean> {

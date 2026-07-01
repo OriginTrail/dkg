@@ -35,22 +35,14 @@ export function createV10ACKProviderForPublisher(
   transport?: ACKTransportFactory,
 ): PublishOptions['v10ACKProvider'] | undefined {
   if (!transport) return undefined;
-  const chain = (publisher as unknown as {
-    chain?: {
-      isV10Ready?: () => boolean;
-      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
-      verifyACKIdentityDetailed?: (
-        recoveredAddress: string,
-        claimedIdentityId: bigint,
-      ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
-      getMinimumRequiredSignatures?: () => Promise<number>;
-      getEvmChainId?: () => Promise<bigint>;
-      getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
-    };
-  }).chain;
+  // Typed capability boundary (#1404): ask the publisher for its V10 ACK chain
+  // capabilities rather than casting through `unknown` into its private `chain`
+  // field. If DKGPublisher ever changes how it stores the adapter, the owner-side
+  // accessor updates with it and this stays a compile-checked contract.
+  const chain = publisher.getV10ACKChainCapabilities();
   // `isV10Ready()` is the authoritative capability gate — rejects
   // NoChainAdapter (returns false) and unresolved EVM adapters.
-  if (!chain?.isV10Ready?.()) return undefined;
+  if (!chain.isV10Ready?.()) return undefined;
   if (typeof chain.verifyACKIdentity !== 'function') return undefined;
   // The H5 prefix requires both a numeric chain id AND the deployed KAV10
   // address. Without them the collector cannot build a digest that matches

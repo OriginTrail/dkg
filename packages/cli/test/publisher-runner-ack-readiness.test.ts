@@ -43,16 +43,17 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
 // Import AFTER the mock is registered so the CLI module binds the mocked factory.
 const { createV10ACKProviderForPublisher } = await import('../src/ack-provider.js');
 
-/** Minimal publisher whose `chain` satisfies every V10 capability guard. */
+/** Minimal publisher whose V10 ACK capability accessor satisfies every guard. */
 function fakeV10Publisher(): DKGPublisher {
+  const capabilities = {
+    isV10Ready: () => true,
+    verifyACKIdentity: async () => true,
+    verifyACKIdentityDetailed: async () => ({ valid: true as const }),
+    getEvmChainId: async () => 8453n,
+    getKnowledgeAssetsLifecycleAddress: async () => `0x${'00'.repeat(20)}`,
+  };
   return {
-    chain: {
-      isV10Ready: () => true,
-      verifyACKIdentity: async () => true,
-      verifyACKIdentityDetailed: async () => ({ valid: true as const }),
-      getEvmChainId: async () => 8453n,
-      getKnowledgeAssetsLifecycleAddress: async () => `0x${'00'.repeat(20)}`,
-    },
+    getV10ACKChainCapabilities: () => capabilities,
   } as unknown as DKGPublisher;
 }
 

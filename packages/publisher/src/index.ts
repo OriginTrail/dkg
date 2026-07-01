@@ -45,6 +45,7 @@ export {
   CuratorUnconfirmedError,
   CuratorRejectedError,
   type DKGPublisherConfig,
+  type V10ACKChainCapabilities,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
