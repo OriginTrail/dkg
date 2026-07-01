@@ -198,12 +198,8 @@ export class ACKCollector {
   private async getQuorumEligibleCorePeersOrThrow(
     required: number,
     log: (msg: string) => void,
-    initialPeers?: string[],
   ): Promise<string[]> {
-    // Reuse the caller's synchronous snapshot when supplied (the healthy-path
-    // fast read) so the below-quorum path still takes exactly ONE snapshot,
-    // identical to the legacy one-shot; only the bounded wait re-reads.
-    let peers = initialPeers ?? this.deps.getConnectedCorePeers();
+    let peers = this.deps.getConnectedCorePeers();
     const timeoutMs = this.deps.corePeerReadinessTimeoutMs ?? 0;
     if (timeoutMs > 0 && peers.length < required) {
       const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -475,16 +471,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    // Synchronous fast-path when the pool is ALREADY at quorum: keep main's
-    // pre-#1404 timing (a plain `getConnectedCorePeers()` read) so we don't add
-    // an await-microtask on the healthy hot path — that boundary can perturb the
-    // tightly-timed finalization-gossip ordering downstream on fast runners (see
-    // e2e-finalization). Only pay the async cost when a readiness wait or a
-    // below-quorum throw is actually required; the shared owner handles both.
-    let corePeers = this.deps.getConnectedCorePeers();
-    if (corePeers.length < REQUIRED_ACKS) {
-      corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log, corePeers);
-    }
+    const corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log);
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     const catalogRoot = params.catalogCommitment?.catalogRoot
@@ -611,16 +598,7 @@ export class ACKCollector {
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    // Synchronous fast-path when the pool is ALREADY at quorum: keep main's
-    // pre-#1404 timing (a plain `getConnectedCorePeers()` read) so we don't add
-    // an await-microtask on the healthy hot path — that boundary can perturb the
-    // tightly-timed finalization-gossip ordering downstream on fast runners (see
-    // e2e-finalization). Only pay the async cost when a readiness wait or a
-    // below-quorum throw is actually required; the shared owner handles both.
-    let corePeers = this.deps.getConnectedCorePeers();
-    if (corePeers.length < REQUIRED_ACKS) {
-      corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log, corePeers);
-    }
+    const corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log);
     log(`[ACKCollector] Requesting UPDATE ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     // 13-field UPDATE ACK digest — byte-identical to what the peer signs

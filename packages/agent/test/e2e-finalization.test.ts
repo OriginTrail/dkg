@@ -298,14 +298,17 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(bWorkspace.bindings[0]['name']).toBe('"Finalization Chain Draft"');
   }, 25000);
 
-  // retry: this real-two-agent gossip promotion is timing-sensitive on the CI
-  // Linux runner — B can briefly observe the finalized triple via BOTH on-connect
-  // sync AND the finalization broadcast before de-dup settles, so the canonical
-  // view momentarily holds 2 bindings for the same entity ("expected 2 to be 1").
-  // It passes reliably locally and is independent of the #1404 publish changes:
-  // the ACK readiness gate and the policy retry NEVER fire in this test (verified
-  // 0 activations in the CI logs). A bounded retry rides out the transient race.
-  it('A enshrines on-chain; B receives finalization and promotes to canonical', { timeout: 60_000, retry: 3 }, async (ctx) => {
+  // This real-two-agent gossip promotion is timing-sensitive on the CI Linux
+  // runner: B can briefly observe the finalized triple via BOTH on-connect sync
+  // AND the finalization broadcast, so its canonical view momentarily holds 2
+  // bindings for the same entity before de-dup collapses them. The poll below
+  // therefore waits for the view to SETTLE to exactly one binding rather than
+  // asserting on the first non-empty read (which used to catch the transient 2
+  // and fail "expected 2 to be 1" — the pre-existing flake this test hit on both
+  // main and #1404). A never-settling duplicate still fails, so a real dedup bug
+  // is not masked. Independent of the #1404 publish changes: the ACK readiness
+  // gate and the policy retry NEVER fire in this test (0 activations in CI logs).
+  it('A enshrines on-chain; B receives finalization and promotes to canonical', { timeout: 60_000 }, async (ctx) => {
     if (skipSuite) { ctx.skip(); return; }
     const [nodeA, nodeB] = agents;
 
@@ -327,7 +330,11 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(aData.bindings.length).toBe(1);
     expect(aData.bindings[0]['name']).toBe('"Finalization Chain Draft"');
 
-    // Poll until B promotes the data to its canonical graph
+    // Poll until B's canonical view SETTLES to exactly one binding. Breaking on
+    // the first non-empty read races the de-dup: B can momentarily expose the
+    // same entity twice (on-connect sync + finalization broadcast) before the
+    // duplicate collapses. Waiting for `=== 1` rides out that transient; a
+    // duplicate that never collapses still fails the assertion below.
     const deadline = Date.now() + 15000;
     let bData: any;
     while (Date.now() < deadline) {
@@ -335,7 +342,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
         `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
         CONTEXT_GRAPH,
       );
-      if (bData.bindings.length > 0) break;
+      if (bData.bindings.length === 1) break;
       await sleep(500);
     }
 
