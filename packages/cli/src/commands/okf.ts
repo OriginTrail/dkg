@@ -430,7 +430,18 @@ export function registerOkfCommand(program: Command): void {
               stages?: Record<string, unknown>;
               done?: string[]; // legacy format -> treat as reached 'written'
             };
-            const sameTarget = prev.contextGraphId === contextGraphId && prev.subGraphName === subGraphName;
+            const sameContextGraph = prev.contextGraphId === contextGraphId;
+            const hasPerConceptProgress = (prev.mode === undefined || prev.mode === 'per-concept') &&
+              ((prev.stages && typeof prev.stages === 'object') || Array.isArray(prev.done));
+            if (sameContextGraph && subGraphName && prev.subGraphName === undefined && hasPerConceptProgress) {
+              console.error(
+                `Refusing to resume OKF manifest "${manifestPath}": it does not record subGraphName, ` +
+                  `but this import targets sub-graph "${subGraphName}". Use --replace to rebuild this ` +
+                  `target intentionally, or pass a target-specific --manifest path.`,
+              );
+              process.exit(OKF_EXIT_CODES.CLIENT_ERROR);
+            }
+            const sameTarget = sameContextGraph && prev.subGraphName === subGraphName;
             if (sameTarget && prev.mode !== undefined && prev.mode !== 'per-concept') {
               console.error('  warning: ignoring incompatible OKF manifest; starting per-concept lifecycle import.');
             } else if (sameTarget) {

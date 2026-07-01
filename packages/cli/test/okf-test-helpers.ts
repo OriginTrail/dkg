@@ -31,6 +31,13 @@ export interface StubResult {
 
 export type StubHandler = (req: IncomingMessage, body: string) => StubResult;
 
+export interface WrittenQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
+}
+
 export async function ensureOkfCliBuilt(): Promise<void> {
   if (!existsSync(CLI_ENTRY)) {
     await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
@@ -174,6 +181,16 @@ export function knowledgeAssetWriteBodies(calls: StubCall[], name: string): Reco
   return calls
     .filter((c) => c.method === 'POST' && callPath(c) === `/api/knowledge-assets/${name}/wm/write`)
     .map(bodyOf);
+}
+
+export function writtenQuadsFor(calls: StubCall[], name: string): WrittenQuad[] {
+  return knowledgeAssetWriteBodies(calls, name)
+    .flatMap((body) => Array.isArray(body.quads) ? body.quads as WrittenQuad[] : []);
+}
+
+export function subjectBelongsToOkfConcept(subject: string, conceptId: string): boolean {
+  const root = `urn:okf:${conceptId}`;
+  return subject === root || subject.startsWith(`${root}/`);
 }
 
 export async function manifestFor(bundle: string): Promise<Record<string, unknown>> {

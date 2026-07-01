@@ -17,7 +17,9 @@ import {
   parseJsonTail,
   runCli,
   startStub,
+  subjectBelongsToOkfConcept,
   type StubHandler,
+  writtenQuadsFor,
 } from './okf-test-helpers';
 
 // Focused private OKF lifecycle coverage: per-concept import, private CG
@@ -69,6 +71,12 @@ describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
     const writeBodies = ['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(stub.calls, name));
     expect(writeBodies).toHaveLength(2);
     expect(writeBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    const aQuads = writtenQuadsFor(stub.calls, 'a');
+    const bQuads = writtenQuadsFor(stub.calls, 'b');
+    expect(aQuads.every((q) => subjectBelongsToOkfConcept(q.subject, 'a'))).toBe(true);
+    expect(bQuads.every((q) => subjectBelongsToOkfConcept(q.subject, 'b'))).toBe(true);
+    expect(aQuads.length + bQuads.length).toBe(out.triplesWritten);
+    expect(aQuads.length + bQuads.length).toBe(out.triples);
     expect(paths.filter((p) => p.endsWith('/wm/finalize'))).toHaveLength(2);
     expect(paths.filter((p) => p.endsWith('/swm/share'))).toHaveLength(2);
     expect(paths.some((p) => /private-bulk/.test(p))).toBe(false);
@@ -233,7 +241,7 @@ describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
     expect(manifest.assetName).toBeUndefined();
   });
 
-  it('--private ignores root manifest stages when importing a sub-graph target', async () => {
+  it('--private refuses ambiguous legacy/root manifests when importing a sub-graph target', async () => {
     clear();
     const bundle = await makeBundle();
     await writeFile(
@@ -253,13 +261,15 @@ describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
       ['okf', 'import', bundle, '--context-graph-id', 'cg-sg-isolated', '--sub-graph-name', 'team', '--private', '--create-context-graph'],
       env(),
     );
-    expect(r.exitCode).toBe(0);
-    const createBodies = knowledgeAssetCreateBodies(stub.calls);
-    expect(createBodies.map((b) => b.name).sort()).toEqual(['a', 'b']);
-    expect(createBodies.every((b) => b.subGraphName === 'team')).toBe(true);
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr).toContain('does not record subGraphName');
+    expect(stub.calls.some((c) => {
+      const path = callPath(c);
+      return c.method === 'POST' && (path === '/api/knowledge-assets' || path.startsWith('/api/knowledge-assets/'));
+    })).toBe(false);
     const manifest = await manifestFor(bundle);
-    expect(manifest.subGraphName).toBe('team');
     expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
+    expect(manifest.subGraphName).toBeUndefined();
   });
 
   it('--private uses chunked lifecycle for concepts over the write chunk contract', async () => {
@@ -366,6 +376,52 @@ describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
     expect(paths).toContain('POST /api/knowledge-assets/bulk/swm/share');
     manifest = await manifestFor(bundle);
     expect(manifest.stages).toEqual({ bulk: 'swm' });
+  });
+
+  it('--private continues draft replay when discard reports no draft', async () => {
+    clear();
+    const bundle = await makeBundle();
+    await writeFile(
+      join(bundle, '.okf-import-manifest.json'),
+      JSON.stringify(
+        {
+          contextGraphId: 'cg-priv-discard-404',
+          mode: 'per-concept',
+          stages: { a: 'draft' },
+        },
+        null,
+        2,
+      ),
+    );
+    stub.setHandler((req, raw) => {
+      const url = new URL(`http://127.0.0.1${req.url}`);
+      if (req.method === 'POST' && url.pathname === '/api/knowledge-assets/a/wm/discard') {
+        return { status: 404, body: { error: 'no draft' } };
+      }
+      return okfDaemonHandler(createdCGs)(req, raw);
+    });
+
+    const r = await runCli(
+      ['okf', 'import', bundle, '--context-graph-id', 'cg-priv-discard-404', '--private', '--create-context-graph'],
+      env(),
+    );
+    expect(r.exitCode).toBe(0);
+    const out = parseJsonTail(r.stdout);
+    expect(out.assetsCreated).toBe(2);
+    expect(out.assetsShared).toBe(2);
+
+    const paths = callPaths(stub.calls);
+    const discardIndex = paths.indexOf('POST /api/knowledge-assets/a/wm/discard');
+    const createIndex = paths.indexOf('POST /api/knowledge-assets');
+    expect(discardIndex).toBeGreaterThanOrEqual(0);
+    expect(discardIndex).toBeLessThan(createIndex);
+    expect(knowledgeAssetCreateBodies(stub.calls).map((b) => b.name).sort()).toEqual(['a', 'b']);
+    expect(knowledgeAssetWriteBodies(stub.calls, 'a')).toHaveLength(1);
+    expect(knowledgeAssetWriteBodies(stub.calls, 'b')).toHaveLength(1);
+    const manifest = await manifestFor(bundle);
+    expect(manifest.stages).toEqual({ a: 'swm', b: 'swm' });
+
+    stub.setHandler(okfDaemonHandler(createdCGs));
   });
 
   it('--private recursively splits oversized lifecycle write chunks on 413', async () => {

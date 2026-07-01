@@ -14,7 +14,9 @@ import {
   parseJsonTail,
   runCli,
   startStub,
+  subjectBelongsToOkfConcept,
   type StubHandler,
+  writtenQuadsFor,
 } from './okf-test-helpers';
 
 // CLI subcommand tests for `dkg okf {import,export}` against a tiny in-process
@@ -82,6 +84,12 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     const writeBodies = ['a', 'b'].flatMap((name) => knowledgeAssetWriteBodies(stub.calls, name));
     expect(writeBodies).toHaveLength(2);
     expect(writeBodies.every((b) => Array.isArray(b.quads) && b.quads.length > 0)).toBe(true);
+    const aQuads = writtenQuadsFor(stub.calls, 'a');
+    const bQuads = writtenQuadsFor(stub.calls, 'b');
+    expect(aQuads.every((q) => subjectBelongsToOkfConcept(q.subject, 'a'))).toBe(true);
+    expect(bQuads.every((q) => subjectBelongsToOkfConcept(q.subject, 'b'))).toBe(true);
+    expect(aQuads.length + bQuads.length).toBe(out.triplesWritten);
+    expect(aQuads.length + bQuads.length).toBe(out.triples);
     expect(paths.some((p) => p.endsWith('/wm/discard'))).toBe(false);
     // No sealing/sharing in a plain WM import.
     expect(paths.some((p) => p.endsWith('/wm/finalize'))).toBe(false);
