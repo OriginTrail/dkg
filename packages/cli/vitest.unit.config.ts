@@ -71,6 +71,7 @@ export default defineConfig({
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/assertion-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
+          'test/okf-private-lifecycle.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.
