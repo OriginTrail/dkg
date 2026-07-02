@@ -120,7 +120,7 @@ Restart the node. Local logging (SQLite + daemon.log) is unaffected; this only a
 - **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panel is volume-by-level.
 - **Fleet overview:** `https://polaris.xtrmstrngth.com/d/dkg-fleet-logs` → active-node count, log volume per node, errors per node, recent fleet-wide errors (filter by `Environment`).
 
-Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node-operator self-serve guide (any operator, their own backend): `../OPERATOR-GUIDE.md`.
+Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node-operator self-serve guide (any operator, their own backend): `tools/log-collection-poc/OPERATOR-GUIDE.md`.
 
 ---
 
@@ -129,4 +129,4 @@ Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node
 - **Labels kept low-cardinality** on purpose: `service_name`, `service_instance_id` (node), `deployment_environment` (network), `dkg_node_role`. `operation_id` etc. stay inside the JSON line — filter with `| json | dkg_operation_id="..."`.
 - **Don't add `operation_id`/`peer_id` as Loki labels** — high cardinality will hurt Loki 2.5.0.
 - If you ever upgrade Loki to ≥3.0, you can drop Alloy's `| json | line_format` step in the dashboard and push OTLP straight to Loki's `/otlp` endpoint.
-- Local validation stack (do not deploy): `docker-compose.sim.yml` (Loki 2.5.0 + Alloy) + `../send-sample-logs.mjs`.
+- Local validation stack (do not deploy): `docker-compose.sim.yml` (Loki 2.5.0 + Alloy) + `tools/log-collection-poc/send-sample-logs.mjs`.
