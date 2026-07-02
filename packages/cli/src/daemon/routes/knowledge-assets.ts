@@ -75,7 +75,7 @@ import {
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
-import { MAX_UINT72, MAX_UINT72_DECIMAL } from "../../protocol-limits.js";
+import { MAX_UINT72_DECIMAL, parseUint72Decimal } from "../../protocol-limits.js";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -530,6 +530,21 @@ function publishIntegerString(
   return v;
 }
 
+function publishUint72IdentityId(value: unknown, field: string, res: RequestContext["res"]): bigint | null {
+  const v = publishIntegerString(value, field, res, { positive: false });
+  if (v === null) return null;
+  const parsed = parseUint72Decimal(v);
+  if (!parsed.ok) {
+    if (parsed.reason === "range") {
+      jsonResponse(res, 400, { error: `"${field}" must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)` });
+      return null;
+    }
+    jsonResponse(res, 400, { error: `"${field}" must be a non-negative integer (string or number)` });
+    return null;
+  }
+  return parsed.value;
+}
+
 // Validate + normalize the finalized-publish options BEFORE they reach
 // `publishFromFinalizedAssertion` (PR #971). Without this, malformed epochs /
 // identity overrides / flags flowed straight through and surfaced as opaque
@@ -548,14 +563,9 @@ function resolveFinalizedPublishOptions(
 
   let resolvedPublisherIdentityOverride: bigint | undefined;
   if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-    const v = publishIntegerString(publisherNodeIdentityIdOverride, "publisherNodeIdentityIdOverride", res, { positive: false });
+    const v = publishUint72IdentityId(publisherNodeIdentityIdOverride, "publisherNodeIdentityIdOverride", res);
     if (v === null) return null;
-    const parsedPublisherIdentityOverride = BigInt(v);
-    if (parsedPublisherIdentityOverride > MAX_UINT72) {
-      jsonResponse(res, 400, { error: `"publisherNodeIdentityIdOverride" must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)` });
-      return null;
-    }
-    resolvedPublisherIdentityOverride = parsedPublisherIdentityOverride;
+    resolvedPublisherIdentityOverride = v;
   }
 
   let resolvedPublishEpochs: number | undefined;
