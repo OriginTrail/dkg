@@ -919,6 +919,47 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(es.body.status).toBe('completed');
     });
 
+    it('replaces stale KA-scoped named graph draft content on same-name import', async () => {
+      const name = `imp-replace-mixed-${Date.now().toString(36)}`;
+      const namedGraph = 'urn:test:graph:stale-import-replace';
+      const createRes = await createKa(LOCAL, name);
+      expect([200, 201]).toContain(createRes.status);
+
+      const writeRes = await write(LOCAL, name, [
+        {
+          subject: 'urn:test:entity:old-default',
+          predicate: 'http://schema.org/name',
+          object: '"Old Default"',
+          graph: '',
+        },
+        {
+          subject: 'urn:test:entity:old-named',
+          predicate: 'http://schema.org/name',
+          object: '"Old Named"',
+          graph: namedGraph,
+        },
+      ]);
+      expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
+
+      const before = await wmQuads(LOCAL, name);
+      expect(before.status, `before query: ${JSON.stringify(before.body)}`).toBe(200);
+      expect(before.body.quads).toEqual(expect.arrayContaining([
+        expect.objectContaining({ subject: 'urn:test:entity:old-named', graph: namedGraph }),
+      ]));
+
+      const res = await postMultipart(daemon, `/api/knowledge-assets/${name}/wm/import-file`, [
+        { name: 'contextGraphId', value: LOCAL },
+        { name: 'file', filename: 'replacement.md', contentType: 'text/markdown', value: '# Replacement\n\nFresh body.\n' },
+      ]);
+      expect(res.status, `import-file: ${JSON.stringify(res.body)}`).toBe(200);
+
+      const after = await wmQuads(LOCAL, name);
+      expect(after.status, `after query: ${JSON.stringify(after.body)}`).toBe(200);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-default')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-named')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.graph === namedGraph)).toBe(false);
+    });
+
     it('returns the import-file-specific 400 when the file part is missing (not JSON-parsed)', async () => {
       const res = await postMultipart(daemon, '/api/knowledge-assets/imp-nofile/wm/import-file', [
         { name: 'contextGraphId', value: LOCAL },

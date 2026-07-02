@@ -2128,8 +2128,9 @@ export class PublishMethods extends DKGAgentBase {
     if (trustedGeneratedCatalogTriples) {
       const cgDid = contextGraphDataUri(contextGraphId);
       // `graph` is a non-empty placeholder only (buildPublicProjection requires
-      // one); assertionWrite re-stamps it with the correct wmGraphUri.
-      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri });
+      // one); normalize it back to the default assertion graph before writing.
+      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri })
+        .map((quad) => ({ ...quad, graph: '' }));
       await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
       quads.push(...catalogQuads);
     }

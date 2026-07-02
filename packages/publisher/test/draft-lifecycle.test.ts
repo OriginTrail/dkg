@@ -196,6 +196,49 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(subjects.has('urn:test:entity:bob')).toBe(true);
   });
 
+  it('preserves named graph metadata for mixed default/named graph writes', async () => {
+    const name = 'mixed-graph-draft';
+    const namedGraph = 'urn:test:graph:named';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:default',
+        predicate: 'http://schema.org/name',
+        object: '"Default Graph"',
+        graph: '',
+      },
+      {
+        subject: 'urn:test:entity:named',
+        predicate: 'http://schema.org/name',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const quads = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: 'urn:test:entity:default',
+        object: '"Default Graph"',
+        graph: '',
+      }),
+      expect.objectContaining({
+        subject: 'urn:test:entity:named',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      }),
+    ]));
+
+    const scopedNamedGraphs = (await store.listGraphs())
+      .filter((graph) => graph.includes('/_named_graph/'));
+    expect(scopedNamedGraphs.length).toBeGreaterThan(0);
+
+    const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
+    expect(promoted.promotedCount).toBe(2);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+    expect((await store.listGraphs()).filter((graph) => graph.includes('/_named_graph/'))).toHaveLength(0);
+  });
+
   it('query returns triples from the assertion only', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
