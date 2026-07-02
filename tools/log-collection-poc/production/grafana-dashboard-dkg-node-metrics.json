@@ -35,26 +35,19 @@
         "current": {}
       },
       {
-        "name": "loki",
-        "type": "datasource",
-        "query": "loki",
-        "label": "Loki",
-        "current": {},
-        "hide": 2
-      },
-      {
         "name": "node",
         "label": "Node",
         "type": "query",
         "datasource": {
-          "type": "loki",
-          "uid": "${loki}"
+          "type": "prometheus",
+          "uid": "${vm}"
         },
-        "query": "label_values(service_instance_id)",
+        "query": "label_values({__name__=~\"dkg_.+\"}, instance)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "allValue": ".+",
+        "allowCustomValue": true,
         "current": {
           "text": [
             "All"

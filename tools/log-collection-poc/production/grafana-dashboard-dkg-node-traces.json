@@ -35,26 +35,23 @@
         "current": {}
       },
       {
-        "name": "loki",
-        "type": "datasource",
-        "query": "loki",
-        "label": "Loki",
-        "current": {},
-        "hide": 2
-      },
-      {
         "name": "node",
         "label": "Node",
         "type": "query",
         "datasource": {
-          "type": "loki",
-          "uid": "${loki}"
+          "type": "tempo",
+          "uid": "${tempo}"
         },
-        "query": "label_values(service_instance_id)",
+        "query": {
+          "refId": "TempoDatasourceVariableQuery",
+          "type": 1,
+          "label": "resource.service.instance.id"
+        },
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "allValue": ".+",
+        "allowCustomValue": true,
         "current": {
           "text": [
             "All"

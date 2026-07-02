@@ -65,8 +65,17 @@ const VM = { type: 'prometheus', uid: '${vm}' };
 const TEMPO = { type: 'tempo', uid: '${tempo}' };
 const dashLinks = [{ type: 'dashboards', tags: ['dkg'], asDropdown: true, title: 'DKG dashboards', includeVars: false, keepTime: true }];
 const lokiVarVisible = { name: 'loki', type: 'datasource', query: 'loki', label: 'Loki', current: {} };
-const lokiVarHidden = { ...lokiVarVisible, hide: 2 };
-const nodeVarMulti = { name: 'node', label: 'Node', type: 'query', datasource: LOKI, query: 'label_values(service_instance_id)', refresh: 2, includeAll: true, multi: true, allValue: '.+', current: { text: ['All'], value: ['$__all'] } };
+// Node-identity discovery model: each dashboard's $node dropdown is sourced
+// from ITS OWN datasource, so the selector reflects exactly the nodes that
+// signal has data for (a node shipping metrics but not logs still appears on
+// the metrics dashboard, and vice versa). allowCustomValue is the escape
+// hatch while a signal has no data yet.
+const NODE_IDENTITY = {
+  logs: { datasource: LOKI, query: 'label_values(service_instance_id)' },
+  metrics: { datasource: VM, query: `label_values({__name__=~"dkg_.+"}, ${PROM_NODE_LABEL})` },
+  traces: { datasource: TEMPO, query: { refId: 'TempoDatasourceVariableQuery', type: 1, label: 'resource.service.instance.id' } },
+};
+const nodeVarMulti = (identity) => ({ name: 'node', label: 'Node', type: 'query', datasource: identity.datasource, query: identity.query, refresh: 2, includeAll: true, multi: true, allValue: '.+', allowCustomValue: true, current: { text: ['All'], value: ['$__all'] } });
 
 // Layout: dashboards are defined as ROWS of sized panels; x/y are computed
 // (x accumulates widths within a row, y advances by the tallest panel of the
@@ -139,7 +148,7 @@ const nodeLogs = {
   uid: 'dkg-node-logs', title: 'DKG Node — Logs', timezone: 'browser', refresh: '30s',
   time: { from: 'now-1h', to: 'now' }, tags: ['dkg', 'logs'], links: dashLinks,
   templating: { list: [ lokiVarVisible,
-    { name: 'node', label: 'Node', type: 'query', datasource: LOKI, query: 'label_values(service_instance_id)', refresh: 2, current: {} },
+    { name: 'node', label: 'Node', type: 'query', datasource: NODE_IDENTITY.logs.datasource, query: NODE_IDENTITY.logs.query, refresh: 2, current: {} },
     { name: 'level', label: 'Level', type: 'custom', query: 'DEBUG,INFO,WARN,ERROR', includeAll: true, multi: true, allValue: '.+', current: { text: ['All'], value: ['$__all'] } },
     { name: 'search', label: 'Filter (regex)', type: 'textbox', query: '', current: { text: '', value: '' } },
   ]},
@@ -162,7 +171,7 @@ const metrics = {
   uid: 'dkg-node-metrics', title: 'DKG Nodes — Metrics', timezone: 'browser', refresh: '1m',
   time: { from: 'now-6h', to: 'now' }, tags: ['dkg', 'metrics'], links: dashLinks,
   description: `OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: ${PROM_NODE_LABEL} (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.`,
-  templating: { list: [ { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} }, lokiVarHidden, nodeVarMulti ] },
+  templating: { list: [ { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} }, nodeVarMulti(NODE_IDENTITY.metrics) ] },
   panels: layout([
     [ TEXT('**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector\'s self-monitoring and works independently of node export.') ],
     [ ROW('Publishing') ],
@@ -228,7 +237,7 @@ const traces = {
   uid: 'dkg-node-traces', title: 'DKG Nodes — Traces', timezone: 'browser', refresh: '1m',
   time: { from: 'now-3h', to: 'now' }, tags: ['dkg', 'traces'], links: dashLinks,
   description: 'Tempo traces from dkg-node (tracer @origintrail-official/dkg). 14 span types: agent.publish, publisher.ack_collect/ack_peer_request, chain.tx_send/tx_submit/tx_wait/eth_call/eth_getLogs, sync.request/response, protocol_router.send…',
-  templating: { list: [ { name: 'tempo', type: 'datasource', query: 'tempo', label: 'Traces DS', hide: 2, current: {} }, lokiVarHidden, nodeVarMulti ] },
+  templating: { list: [ { name: 'tempo', type: 'datasource', query: 'tempo', label: 'Traces DS', hide: 2, current: {} }, nodeVarMulti(NODE_IDENTITY.traces) ] },
   panels: layout([
     [ TEXT('**Requires node trace export.** These panels read Tempo traces from dkg-node; a node ships them when it resolves a traces endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.traces.endpoint`) and the collector routes traces → Tempo. Empty panels mean no node currently exports traces — see RUNBOOK.md for rollout state and enablement steps. One trace per publish / ACK round / chain transaction / sync; click any Trace ID for the full timeline.') ],
     [ TQ(24, 9, 'Recent traces', `{${NODEQ}}`, 50) ],
