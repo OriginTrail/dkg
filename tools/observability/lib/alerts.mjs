@@ -28,7 +28,7 @@ export const buildAlerts = ({ PROM_NODE_LABEL, VM_UID, LOKI_UID }) => {
       expr: 'sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))',
       condition: { op: '>', value: 150 }, forDur: '10m', noData: 'OK',
       summary: 'Node {{ $labels.service_instance_id }} logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues).' },
-    { title: 'RPC credit burn spike (>6000 raw RPC requests/h on a node)', signal: 'metrics',
+    { title: 'RPC credit burn spike (armed — needs nodes on a post-#1409 build)', signal: 'metrics',
       ds: 'loki', windowSec: 3600,
       expr: 'sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))',
       condition: { op: '>', value: 6000 }, forDur: '5m', noData: 'OK',

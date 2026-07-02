@@ -49,7 +49,7 @@ reached`; range+reduce avoids that class of failure entirely.
 | 2 | Fleet blackout — NO node logs reaching Loki | #node-logs | Loki | `< 1` | 5m | Alerting |
 | 3 | Error spike on a node (>10 ERROR / 10m) | #node-logs | Loki | `> 10` | 5m | OK |
 | 4 | Warn spike on a node (>150 WARN / 10m) | #node-logs | Loki | `> 150` | 10m | OK |
-| 5 | RPC credit burn spike (>6000 raw RPC requests/h on a node) | #node-metrics | Loki | `> 6000` | 5m | OK |
+| 5 | RPC credit burn spike (armed — needs nodes on a post-#1409 build) | #node-metrics | Loki | `> 6000` | 5m | OK |
 | 6 | Log pipeline export failing (collector cannot ship to Loki) | #node-metrics | VictoriaMetrics | `> 0` | 10m | OK |
 | 7 | Collector exporter queue near capacity (>80%) | #node-metrics | VictoriaMetrics | `> 0.8` | 10m | OK |
 | 8 | Publish failures on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0.02` | 5m | OK |
@@ -82,7 +82,7 @@ sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severi
 sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))
 ```
 
-5. RPC credit burn spike (>6000 raw RPC requests/h on a node)
+5. RPC credit burn spike (armed — needs nodes on a post-#1409 build)
 
 ```
 sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))

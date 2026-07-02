@@ -403,7 +403,7 @@
       "orgID": 1,
       "folderUID": "dkg-observability",
       "ruleGroup": "dkg-node-telemetry",
-      "title": "RPC credit burn spike (>6000 raw RPC requests/h on a node)",
+      "title": "RPC credit burn spike (armed — needs nodes on a post-#1409 build)",
       "condition": "C",
       "data": [
         {
