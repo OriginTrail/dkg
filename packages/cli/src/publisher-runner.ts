@@ -18,7 +18,6 @@ export interface PublisherRuntime {
 export interface PublisherRuntimeWallet {
   readonly address: string;
   readonly identityId: bigint;
-  readonly publisher: DKGPublisher;
 }
 
 export interface PublisherInspector {
@@ -38,6 +37,10 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
   | Promise<Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'> | undefined>
   | Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>
   | undefined;
+
+interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
+  readonly publisher: DKGPublisher;
+}
 
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
@@ -228,7 +231,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   const eventBus = new TypedEventBus();
-  const wallets: PublisherRuntimeWallet[] = [];
+  const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -342,7 +345,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
-    wallets,
+    wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {

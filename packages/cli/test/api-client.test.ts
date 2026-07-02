@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
+import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
 const originalDkgHome = process.env.DKG_HOME;
@@ -67,6 +68,20 @@ describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
   let tempDir: string;
+
+  it('keeps finalized publish option types importable from api-client', () => {
+    const options: KnowledgeAssetFinalizedPublishOptions = {
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    };
+
+    expect(options).toMatchObject({
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    });
+  });
 
   beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');

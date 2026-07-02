@@ -55,6 +55,8 @@ export function parseHttpFinalizedPublishOptions(raw: unknown): FinalizedPublish
     source.clearSharedMemoryAfter,
     'clearSharedMemoryAfter',
   );
+  if (!clearAfter.ok) return clearAfter;
+  if (!clearSharedMemoryAfter.ok) return clearSharedMemoryAfter;
 
   return parseFinalizedPublishDomainOptions({
     clearSharedMemoryAfter: hasClearAfter ? clearAfter : clearSharedMemoryAfter,

@@ -7,6 +7,8 @@ import {
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
 
+export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
   | { type: 'boolean'; value: boolean }
