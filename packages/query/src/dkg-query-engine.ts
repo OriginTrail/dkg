@@ -6,6 +6,7 @@ import {
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
+  ASSERTION_NAMED_GRAPH_PREFIX,
   isAssertionScopedChildGraph,
   type GetView,
   REMOVED_VIEWS,
@@ -474,6 +475,15 @@ export class DKGQueryEngine implements QueryEngine {
     for (const prefix of resolution.graphPrefixes) {
       const discovered = await this.discoverGraphsByPrefix(prefix);
       allGraphs.push(...discovered);
+    }
+
+    // A by-name WM read is pinned to one assertion root to avoid sibling leaks,
+    // but named-graph draft content is stored under child graphs of that exact
+    // root. Include only the selected assertion's scoped child family.
+    if (view === 'working-memory' && options.assertionName) {
+      for (const rootGraph of resolution.graphs) {
+        allGraphs.push(...(await this.discoverGraphsByPrefix(`${rootGraph}${ASSERTION_NAMED_GRAPH_PREFIX}`)));
+      }
     }
 
     // GH #675 — a view read WITHOUT an explicit subGraphName must also include

@@ -1,4 +1,4 @@
-import { MAX_UINT72_DECIMAL, parseUint72Decimal } from './protocol-limits.js';
+import { MAX_UINT72_DECIMAL, parseUint72Decimal } from '@origintrail-official/dkg-core';
 
 export interface KnowledgeAssetFinalizedPublishOptions {
   clearAfter?: boolean;

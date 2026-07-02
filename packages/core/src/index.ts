@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './constants.js';
 export * from './assertion-scoped-graphs.js';
+export * from './protocol-limits.js';
 export * from './catalog.js';
 export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';

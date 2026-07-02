@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
+import { generateEd25519Keypair, MAX_UINT72_DECIMAL, TypedEventBus } from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
   DKGPublisher,
@@ -42,7 +42,6 @@ import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.j
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
-const MAX_UINT72_DECIMAL = '4722366482869645213695';
 const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
 describe('#1116 share/seal route error mapping (fake agent)', () => {

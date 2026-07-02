@@ -7,11 +7,11 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { MAX_UINT72_DECIMAL } from '@origintrail-official/dkg-core';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
-const MAX_UINT72_DECIMAL = '4722366482869645213695';
 const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
 describe.sequential('assertion CLI smoke', () => {
