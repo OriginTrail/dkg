@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,8 @@ import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, rever
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -248,7 +249,6 @@ describe('publisher wallets', () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const keypair = await generateEd25519Keypair();
     const { rpcUrl, hubAddress } = getSharedContext();
-    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
     let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
 
     await addPublisherWallet(dataDir, wallet.privateKey);
@@ -265,10 +265,9 @@ describe('publisher wallets', () => {
       });
 
       expect(runtime.walletIds).toEqual([wallet.address]);
-      expect(infoSpy.mock.calls.flat().join('\n')).toContain('no-attribution mode');
+      expect(runtime.walletIdentities).toEqual([{ address: wallet.address, identityId: 0n }]);
     } finally {
       await runtime?.stop();
-      infoSpy.mockRestore();
       await store.close();
     }
   });
@@ -296,6 +295,48 @@ describe('publisher wallets', () => {
       });
 
       expect(new Set(runtime.walletIds)).toEqual(new Set([identityfulWallet.address, identitylessWallet.address]));
+      expect(runtime.walletIdentities).toEqual(
+        expect.arrayContaining([
+          { address: identityfulWallet.address, identityId: BigInt(getSharedContext().coreProfileId) },
+          { address: identitylessWallet.address, identityId: 0n },
+        ]),
+      );
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
+  it('reports publisher wallet attribution through the daemon startup logger', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const logs: string[] = [];
+    let runtime: Awaited<ReturnType<typeof startPublisherRuntimeIfEnabled>> | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    try {
+      runtime = await startPublisherRuntimeIfEnabled({
+        dataDir,
+        config: {
+          name: 'test-node',
+          apiPort: 9200,
+          listenPort: 0,
+          nodeRole: 'edge',
+          contextGraphs: [],
+          publisher: { enabled: true },
+        },
+        store,
+        keypair,
+        chainBase: undefined,
+        log: (message) => logs.push(message),
+      });
+
+      expect(runtime?.walletIdentities).toEqual([{ address: wallet.address, identityId: 0n }]);
+      expect(logs.join('\n')).toContain('no-attribution mode');
+      expect(logs.join('\n')).toContain(wallet.address);
     } finally {
       await runtime?.stop();
       await store.close();

@@ -11,7 +11,13 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
+  readonly walletIdentities: readonly PublisherWalletIdentity[];
   readonly stop: () => Promise<void>;
+}
+
+export interface PublisherWalletIdentity {
+  readonly address: string;
+  readonly identityId: bigint;
 }
 
 export interface PublisherInspector {
@@ -70,6 +76,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
+    logPublisherWalletAttribution(runtime.walletIdentities, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
@@ -221,8 +228,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const publishers = new Map<string, DKGPublisher>();
-  const attributedWallets: string[] = [];
-  const noAttributionWallets: string[] = [];
+  const walletIdentities: PublisherWalletIdentity[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -237,11 +243,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    if (identityId === 0n) {
-      noAttributionWallets.push(wallet.address);
-    } else {
-      attributedWallets.push(`${wallet.address} (identityId=${identityId.toString()})`);
-    }
+    walletIdentities.push({ address: wallet.address, identityId });
     publishers.set(
       wallet.address,
       new DKGPublisher({
@@ -253,20 +255,6 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
       }),
-    );
-  }
-
-  if (attributedWallets.length > 0) {
-    const verb = attributedWallets.length === 1 ? 'has' : 'have';
-    console.info(
-      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
-      `${verb} node attribution: ${attributedWallets.join(', ')}`,
-    );
-  }
-  if (noAttributionWallets.length > 0) {
-    console.info(
-      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
-      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
     );
   }
 
@@ -351,6 +339,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
+    walletIdentities,
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
@@ -358,6 +347,32 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       }
     },
   };
+}
+
+function logPublisherWalletAttribution(
+  walletIdentities: readonly PublisherWalletIdentity[],
+  log: (message: string) => void,
+): void {
+  const attributedWallets = walletIdentities
+    .filter((wallet) => wallet.identityId !== 0n)
+    .map((wallet) => `${wallet.address} (identityId=${wallet.identityId.toString()})`);
+  const noAttributionWallets = walletIdentities
+    .filter((wallet) => wallet.identityId === 0n)
+    .map((wallet) => wallet.address);
+
+  if (attributedWallets.length > 0) {
+    const verb = attributedWallets.length === 1 ? 'has' : 'have';
+    log(
+      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
+      `${verb} node attribution: ${attributedWallets.join(', ')}`,
+    );
+  }
+  if (noAttributionWallets.length > 0) {
+    log(
+      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
+      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
+    );
+  }
 }
 
 function createV10ACKProviderForPublisher(
@@ -533,22 +548,6 @@ function createChainRecoveryResolver(
       },
     };
   };
-}
-
-export function parsePositiveMsOption(value: string, optionName: '--poll-interval' | '--error-backoff'): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer in milliseconds`);
-  }
-  return parsed;
-}
-
-export function parsePositiveIntegerOption(value: string, optionName: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer`);
-  }
-  return parsed;
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

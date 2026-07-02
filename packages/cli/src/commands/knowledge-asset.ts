@@ -16,6 +16,7 @@ import {
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
+import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-options.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
@@ -101,15 +102,6 @@ function parseFinalizeAuthorOptions(opts: ActionOpts): {
     ...(preSignedAuthorAttestation ? { preSignedAuthorAttestation } : {}),
     ...(schemeVersion !== undefined ? { schemeVersion } : {}),
   };
-}
-
-function parseOptionalPositiveInteger(raw: unknown, flag: string): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = String(raw).trim();
-  if (!/^[1-9]\d*$/.test(value)) throw new Error(`${flag} must be a positive integer`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new Error(`${flag} must be a positive integer`);
-  return parsed;
 }
 
 function parseShareEntities(opts: ActionOpts): string[] | undefined {

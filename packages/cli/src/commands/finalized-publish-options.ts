@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import type { KnowledgeAssetFinalizedPublishOptions } from '../api-client.js';
+import { parseOptionalNonNegativeBigInt, parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import type { ActionOpts } from '../cli-helpers.js';
 
 export function addFinalizedPublishOptions(command: Command): Command {
@@ -18,20 +19,4 @@ export function parseFinalizedPublishOptions(opts: ActionOpts): KnowledgeAssetFi
     ...(publishEpochs !== undefined ? { publishEpochs } : {}),
     ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
   };
-}
-
-function parseOptionalPositiveInteger(raw: unknown, flag: string): number | undefined {
-  if (raw === undefined) return undefined;
-  const value = String(raw).trim();
-  if (!/^[1-9]\d*$/.test(value)) throw new Error(`${flag} must be a positive integer`);
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw new Error(`${flag} must be a positive integer`);
-  return parsed;
-}
-
-function parseOptionalNonNegativeBigInt(raw: unknown, flag: string): bigint | undefined {
-  if (raw === undefined) return undefined;
-  const value = String(raw).trim();
-  if (!/^\d+$/.test(value)) throw new Error(`${flag} must be a non-negative integer`);
-  return BigInt(value);
 }
