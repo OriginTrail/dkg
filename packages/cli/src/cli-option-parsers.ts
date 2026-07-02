@@ -1,27 +1,6 @@
-import { MAX_UINT72_DECIMAL, parseUint72Decimal } from './protocol-limits.js';
-
 export function parseOptionalPositiveInteger(raw: unknown, flag: string): number | undefined {
   if (raw === undefined) return undefined;
   return parsePositiveIntegerValue(String(raw), flag);
-}
-
-export function parseOptionalNonNegativeBigInt(raw: unknown, flag: string): bigint | undefined {
-  if (raw === undefined) return undefined;
-  const value = String(raw).trim();
-  if (!/^\d+$/.test(value)) throw new Error(`${flag} must be a non-negative integer`);
-  return BigInt(value);
-}
-
-export function parseOptionalUint72BigInt(raw: unknown, flag: string): bigint | undefined {
-  if (raw === undefined) return undefined;
-  const parsed = parseUint72Decimal(String(raw));
-  if (!parsed.ok) {
-    if (parsed.reason === 'range') {
-      throw new Error(`${flag} must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)`);
-    }
-    throw new Error(`${flag} must be a non-negative integer`);
-  }
-  return parsed.value;
 }
 
 export function parsePositiveMsOption(value: string, optionName: '--poll-interval' | '--error-backoff'): number {

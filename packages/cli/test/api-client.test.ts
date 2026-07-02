@@ -858,6 +858,14 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
+  it('knowledgeAssetPublish rejects publisher identity overrides above uint72 before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      publisherNodeIdentityIdOverride: 4722366482869645213696n,
+    })).rejects.toThrow('publisherNodeIdentityIdOverride');
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetPullFrom sends layer + onConflict', async () => {
     const calls = track({ wmDraft: 'open' });
     await client.knowledgeAssetPullFrom('cg', 'f', 'vm', { onConflict: 'replace' });

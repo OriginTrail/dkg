@@ -1,6 +1,9 @@
 import { Command } from 'commander';
-import type { KnowledgeAssetFinalizedPublishOptions } from '../api-client.js';
-import { parseOptionalPositiveInteger, parseOptionalUint72BigInt } from '../cli-option-parsers.js';
+import {
+  formatFinalizedPublishOptionError,
+  type KnowledgeAssetFinalizedPublishOptions,
+  normalizeFinalizedPublishOptions,
+} from '../finalized-publish-options.js';
 import type { ActionOpts } from '../cli-helpers.js';
 
 export function addFinalizedPublishOptions(command: Command): Command {
@@ -10,11 +13,17 @@ export function addFinalizedPublishOptions(command: Command): Command {
 }
 
 export function parseFinalizedPublishOptions(opts: ActionOpts): KnowledgeAssetFinalizedPublishOptions {
-  const publishEpochs = parseOptionalPositiveInteger(opts.publishEpochs, '--publish-epochs');
-  const publisherNodeIdentityIdOverride = parseOptionalUint72BigInt(
-    opts.publisherNodeIdentityId,
-    '--publisher-node-identity-id',
-  );
+  const parsed = normalizeFinalizedPublishOptions({
+    publishEpochs: opts.publishEpochs,
+    publisherNodeIdentityIdOverride: opts.publisherNodeIdentityId,
+  });
+  if (!parsed.ok) {
+    throw new Error(formatFinalizedPublishOptionError(parsed.error, {
+      publishEpochs: '--publish-epochs',
+      publisherNodeIdentityIdOverride: '--publisher-node-identity-id',
+    }, { quoteField: false }));
+  }
+  const { publishEpochs, publisherNodeIdentityIdOverride } = parsed.options;
   return {
     ...(publishEpochs !== undefined ? { publishEpochs } : {}),
     ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
