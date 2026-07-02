@@ -17,11 +17,29 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Strict CLI boundary: one optional positional (outDir) + two value flags.
+// Fail loudly on unknown flags, missing flag values, or flag values that look
+// like flags — a typoed command must not silently render a malformed payload.
+const usage = 'usage: node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>]';
+const opts = { outDir: null, '--vm-uid': null, '--loki-uid': null };
 const args = process.argv.slice(2);
-const flag = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const outDir = args[0] && !args[0].startsWith('--') ? args[0] : path.dirname(fileURLToPath(import.meta.url));
-const VM_UID = flag('--vm-uid', '<VM_DATASOURCE_UID>');
-const LOKI_UID = flag('--loki-uid', 'loki');
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--vm-uid' || a === '--loki-uid') {
+    const v = args[++i];
+    if (v === undefined || v.startsWith('--')) { console.error(`${a} requires a value\n${usage}`); process.exit(1); }
+    opts[a] = v;
+  } else if (a.startsWith('--')) {
+    console.error(`unknown flag ${a}\n${usage}`); process.exit(1);
+  } else if (opts.outDir === null) {
+    opts.outDir = a;
+  } else {
+    console.error(`unexpected extra argument ${a}\n${usage}`); process.exit(1);
+  }
+}
+const outDir = opts.outDir ?? path.dirname(fileURLToPath(import.meta.url));
+const VM_UID = opts['--vm-uid'] ?? '<VM_DATASOURCE_UID>';
+const LOKI_UID = opts['--loki-uid'] ?? 'loki';
 
 // ---------------------------------------------------------------- dashboards
 const LOKI = { type: 'loki', uid: '${loki}' };
