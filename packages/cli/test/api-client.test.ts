@@ -817,6 +817,14 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].opts.method).toBe('POST');
   });
 
+  it('knowledgeAssetShareAsync rejects unsupported skipSeal before HTTP serialization', async () => {
+    const calls = track({ jobId: 'should-not-reach', state: 'queued' });
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      skipSeal: true,
+    } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    expect(calls).toHaveLength(0);
+  });
+
   it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
     const calls = track({ ok: true });
     await expect(client.knowledgeAssetPublish('cg', 'f', {

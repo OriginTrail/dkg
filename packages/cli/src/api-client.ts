@@ -656,8 +656,11 @@ export class ApiClient {
   async knowledgeAssetShareAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; entities?: string[] | 'all'; skipSeal?: boolean },
+    options?: { subGraphName?: string; entities?: string[] | 'all' },
   ): Promise<{ jobId: string; state: 'queued' }> {
+    if ((options as Record<string, unknown> | undefined)?.skipSeal === true) {
+      throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
+    }
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
   }
 
