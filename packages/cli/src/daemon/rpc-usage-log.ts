@@ -46,3 +46,32 @@ export function formatRpcUsageLines(
   }
   return lines;
 }
+
+/** The drain capability the daemon consumes (DKGAgent.drainChainRpcUsage). */
+export interface RpcUsageSource {
+  drainChainRpcUsage?: () => RpcUsageWindowLike | undefined;
+}
+
+/**
+ * Drain the source's RPC-usage window and emit one `rpc_usage` line per method
+ * through `emit`. The COMPLETE daemon emission step (drain → format → emit),
+ * extracted so the lifecycle timer AND the shutdown final-drain share one
+ * unit-tested implementation. Returns the number of lines emitted (0 for a
+ * missing capability or an empty window). Never throws.
+ */
+export function emitRpcUsage(
+  source: RpcUsageSource | undefined,
+  emit: (line: string) => void,
+  windowSeconds: number,
+  chainId?: string,
+): number {
+  try {
+    const usage = source?.drainChainRpcUsage?.();
+    if (!usage || usage.total <= 0) return 0;
+    const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
+    for (const line of lines) emit(line);
+    return lines.length;
+  } catch {
+    return 0; // usage accounting must never break the node
+  }
+}

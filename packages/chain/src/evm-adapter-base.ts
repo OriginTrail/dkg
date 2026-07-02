@@ -633,12 +633,21 @@ export class EVMChainAdapterBase {
     // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
     // exact. `this.chainId` is assigned later in this constructor → live thunk.
     this.rpcUsage = new RpcUsageTracker(() => this.chainId);
+    // Two accounting hooks so the count is billing-EXACT: `_send` counts the
+    // first HTTP attempt of every dispatch, and the FetchRequest retry hook
+    // counts each ADDITIONAL attempt ethers issues below `_send` on 429/5xx
+    // (single-RPC nodes retry up to RPC_REQUEST_MAX_RETRIES times — every one
+    // of those attempts bills at the provider).
+    const recordRetryAttempts = (methods: string[]) => {
+      for (const m of methods) this.rpcUsage.record(m);
+    };
     this.providers = this.rpcUrls.map(
-      (url) => new CountingJsonRpcProvider(boundedRetryFetchRequest(url, perEndpointRetries), undefined, {
-        cacheTimeout: -1,
-        polling: true,
-        batchMaxCount: 1,
-      }, (method) => this.rpcUsage.record(method)),
+      (url) => new CountingJsonRpcProvider(
+        boundedRetryFetchRequest(url, perEndpointRetries, recordRetryAttempts),
+        undefined,
+        { cacheTimeout: -1, polling: true, batchMaxCount: 1 },
+        (method) => this.rpcUsage.record(method),
+      ),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
@@ -2745,11 +2754,11 @@ export class EVMChainAdapterBase {
   /**
    * Drain the raw JSON-RPC request counts accumulated since the previous drain
    * (delta window) — consumed by the daemon's minutely `rpc_usage` telemetry
-   * log line. `_`-prefixed: an EVM-transport internal (the mock adapter has no
-   * RPC transport, so it is intentionally NOT part of the adapter contract —
-   * callers feature-detect it).
+   * log line. Part of the optional `ChainAdapter.drainRpcUsage` capability
+   * (the mock adapter implements it as an always-empty window — it has no RPC
+   * transport).
    */
-  _drainRpcUsage(): RpcUsageWindow {
+  drainRpcUsage(): RpcUsageWindow {
     return this.rpcUsage.drainWindow();
   }
 

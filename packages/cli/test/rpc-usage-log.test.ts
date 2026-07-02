@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatRpcUsageLines } from '../src/daemon/rpc-usage-log.js';
+import { formatRpcUsageLines, emitRpcUsage } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -39,5 +39,38 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
       'weird chain id',
     );
     expect(lines).toEqual(['rpc_usage method=other count=5 window_s=60 chain=unknown']);
+  });
+});
+
+describe('emitRpcUsage — the complete daemon emission step (drain → format → emit)', () => {
+  it('drains the agent source and emits one line per method', () => {
+    const emitted: string[] = [];
+    const agentLike = {
+      drainChainRpcUsage: () => ({ byMethod: { eth_call: 12, eth_getLogs: 3 }, total: 15, lifetimeTotal: 15 }),
+    };
+    const n = emitRpcUsage(agentLike, (l) => emitted.push(l), 60, 'base:8453');
+    expect(n).toBe(2);
+    expect(emitted).toContain('rpc_usage method=eth_call count=12 window_s=60 chain=base:8453');
+    expect(emitted).toContain('rpc_usage method=eth_getLogs count=3 window_s=60 chain=base:8453');
+  });
+
+  it('emits nothing for an empty window, a missing capability, or no source', () => {
+    const emitted: string[] = [];
+    expect(emitRpcUsage({ drainChainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 9 }) }, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitRpcUsage({ drainChainRpcUsage: () => undefined }, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitRpcUsage({}, (l) => emitted.push(l), 60)).toBe(0); // adapter without the capability
+    expect(emitRpcUsage(undefined, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitted).toEqual([]);
+  });
+
+  it('never throws — a throwing drain or emitter is swallowed (accounting must not break the node)', () => {
+    expect(emitRpcUsage({ drainChainRpcUsage: () => { throw new Error('boom'); } }, () => {}, 60)).toBe(0);
+    expect(
+      emitRpcUsage(
+        { drainChainRpcUsage: () => ({ byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 }) },
+        () => { throw new Error('sink down'); },
+        60,
+      ),
+    ).toBe(0);
   });
 });

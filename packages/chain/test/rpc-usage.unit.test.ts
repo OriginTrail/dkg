@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * RPC usage accounting (the provider-billing view) — proven through the REAL
- * transport path: an EVMChainAdapter over a live loopback JSON-RPC server, so
- * every counted request is an actual HTTP JSON-RPC request the node issued.
- * Asserts (a) `dkg.chain.rpc.requests.total` is emitted with EXACTLY the
- * bounded {rpc_method, chain_id} labels, (b) `_drainRpcUsage()` returns the
- * per-method delta window and resets it, (c) unknown methods bound to 'other'.
+ * transport path with the loopback JSON-RPC server as the SOURCE OF TRUTH:
+ * the tracker's counts must EQUAL the raw HTTP JSON-RPC requests the server
+ * actually received, total and per method — including ethers' internal
+ * 429-retry attempts, which happen below JsonRpcProvider._send and each bill
+ * at the provider. Also asserts the OTel counter's bounded {rpc_method,
+ * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { metrics } from '@opentelemetry/api';
@@ -34,7 +35,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
   };
 }
 
-describe('RPC usage accounting — raw request counts through the real transport', () => {
+describe('RPC usage accounting — raw request counts EQUAL the server-received requests', () => {
   let mp: MeterProvider | null = null;
   let exporter: InMemoryMetricExporter;
   const adapters: EVMChainAdapter[] = [];
@@ -66,7 +67,7 @@ describe('RPC usage accounting — raw request counts through the real transport
     rebuildMetrics();
   });
 
-  it('a real read issues raw requests → counter emitted with bounded labels + drain returns the delta', async () => {
+  it('EXACT: tracker total + per-method counts equal what the server received; drain resets', async () => {
     installMeter();
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
@@ -74,24 +75,52 @@ describe('RPC usage accounting — raw request counts through the real transport
     adapters.push(a);
 
     await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
 
-    // (a) The OTel counter saw the raw transport requests.
+    // Source of truth: the server's own per-method request log. The tracker's
+    // window must EQUAL it — no over- or under-counting.
+    const usage = a.drainRpcUsage();
+    expect(usage.total).toBe(rpc.totalHits());
+    expect(usage.total).toBeGreaterThanOrEqual(1); // guard against a 0==0 vacuous pass
+    for (const [method, count] of Object.entries(usage.byMethod)) {
+      expect(rpc.hits(method), `method ${method}`).toBe(count);
+    }
+    // ...and per-method the other way: every server-observed method was counted.
+    // (The harness has no method-list accessor, so probe the ones this read issues.)
+    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
+
+    // OTel counter: bounded labels only.
     const pts = await requestPoints();
     expect(pts.length).toBeGreaterThanOrEqual(1);
     const keys = new Set(pts.flatMap((p) => Object.keys(p)));
-    expect([...keys].sort()).toEqual(['chain_id', 'rpc_method']); // EXACTLY the bounded set
+    expect([...keys].sort()).toEqual(['chain_id', 'rpc_method']);
     expect(pts.some((p) => p.rpc_method === 'eth_chainId' && p.chain_id === 'evm:31337')).toBe(true);
-    for (const bad of ['rpc_url', 'peer_id', 'tx_hash', 'operation_id']) expect(keys.has(bad)).toBe(false);
 
-    // (b) The drain window carries the same requests, then resets.
-    const usage = a._drainRpcUsage();
-    expect(usage.total).toBeGreaterThanOrEqual(1);
-    expect(usage.byMethod['eth_chainId'] ?? 0).toBeGreaterThanOrEqual(1);
-    expect(usage.lifetimeTotal).toBeGreaterThanOrEqual(usage.total);
-    const drained = a._drainRpcUsage();
-    expect(drained.total).toBe(0); // window reset — deltas, not cumulative
-    expect(drained.lifetimeTotal).toBe(usage.lifetimeTotal); // lifetime is monotonic
+    // Drain semantics: deltas, not cumulative; lifetime monotonic.
+    const drained = a.drainRpcUsage();
+    expect(drained.total).toBe(0);
+    expect(drained.lifetimeTotal).toBe(usage.lifetimeTotal);
   });
+
+  it('RETRIES BILL: ethers 429-retry attempts below _send are counted (tracker == server hits)', async () => {
+    installMeter();
+    // Single-RPC adapter → boundedRetryFetchRequest keeps the default retry
+    // budget (5), and a perpetually-throttled method makes ethers issue
+    // 1 + 5 HTTP attempts inside ONE _send dispatch. Every attempt is a
+    // billable provider request and the server sees each one — the tracker
+    // must match exactly (this is the undercount the review flagged).
+    const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).rejects.toBeTruthy(); // perpetual 429 → bounded failure
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBeGreaterThanOrEqual(2); // initial + ≥1 retry actually happened
+    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
+    expect(usage.total).toBe(rpc.totalHits());
+  }, 30_000);
 
   it('bounds unknown methods to "other" for the metric label', () => {
     expect(boundedRpcMethodLabel('eth_getLogs')).toBe('eth_getLogs');
@@ -100,14 +129,16 @@ describe('RPC usage accounting — raw request counts through the real transport
     expect(boundedRpcMethodLabel('weird method !!')).toBe('other');
   });
 
-  it('tracker.record never throws even with a broken meter or odd input', () => {
+  it('tracker.record never throws; window keys stay RAW (log token-safety is the formatter concern)', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     expect(() => t.record('eth_call')).not.toThrow();
-    expect(() => t.record('')).not.toThrow();
-    expect(() => t.record('x'.repeat(500))).not.toThrow();
+    expect(() => t.record('debug_traceTransaction')).not.toThrow(); // raw key preserved in window
+    expect(() => t.record('')).not.toThrow(); // degenerate → 'other'
+    expect(() => t.record('x'.repeat(500))).not.toThrow(); // oversized → 'other'
     const w = t.drainWindow();
-    expect(w.total).toBe(3);
-    // Unsafe method names are sanitized for the window keys too.
-    expect(Object.keys(w.byMethod)).toContain('other');
+    expect(w.total).toBe(4);
+    expect(w.byMethod['eth_call']).toBe(1);
+    expect(w.byMethod['debug_traceTransaction']).toBe(1); // NOT sanitized to 'other'
+    expect(w.byMethod['other']).toBe(2);
   });
 });

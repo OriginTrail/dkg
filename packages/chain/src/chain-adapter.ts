@@ -797,6 +797,16 @@ export interface ChainAdapter {
    */
   deploymentId: string;
 
+  /**
+   * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts
+   * accumulated since the previous drain (a DELTA window — summing drains over
+   * time yields exact request totals, the provider-billing unit). The EVM
+   * adapter counts at its HTTP transport; the mock adapter returns an
+   * always-empty window (it has no RPC transport). Consumed by the daemon's
+   * minutely `rpc_usage` telemetry log line.
+   */
+  drainRpcUsage?(): { byMethod: Record<string, number>; total: number; lifetimeTotal: number };
+
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
   getIdentityId(): Promise<bigint>;

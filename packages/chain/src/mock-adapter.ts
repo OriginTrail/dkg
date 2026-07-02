@@ -125,6 +125,11 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
+  drainRpcUsage(): { byMethod: Record<string, number>; total: number; lifetimeTotal: number } {
+    return { byMethod: {}, total: 0, lifetimeTotal: 0 };
+  }
+
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     const existing = await this.getIdentityId();
     if (existing > 0n) return existing;

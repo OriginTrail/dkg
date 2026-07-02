@@ -93,10 +93,28 @@ export function resolveRpcUrls(rpcUrl: string, rpcUrls?: string[]): string[] {
 export function boundedRetryFetchRequest(
   url: string,
   maxRetries: number = RPC_REQUEST_MAX_RETRIES,
+  // RPC-usage accounting hook: called with the JSON-RPC method name(s) of the
+  // request body each time retryFunc decides to RE-ATTEMPT. Ethers' throttle
+  // retries happen BELOW JsonRpcProvider._send (one _send dispatch can issue
+  // 1 + N HTTP attempts under 429/5xx), and every attempt is a billable
+  // provider request — so exact credit-burn accounting must count them here,
+  // not only at _send. Best-effort: a body that can't be parsed reports
+  // ['other']; the hook must never break the retry path.
+  onRetryAttempt?: (methods: string[]) => void,
 ): FetchRequest {
   const req = new FetchRequest(url);
-  req.retryFunc = async (_req, _response, attempt) => {
+  req.retryFunc = async (attemptReq, _response, attempt) => {
     if (attempt >= maxRetries) return false;
+    if (onRetryAttempt) {
+      try {
+        const body = attemptReq?.body ? JSON.parse(new TextDecoder().decode(attemptReq.body)) : null;
+        const entries = Array.isArray(body) ? body : body ? [body] : [];
+        const methods = entries.map((e: { method?: unknown }) => String(e?.method ?? 'other'));
+        onRetryAttempt(methods.length > 0 ? methods : ['other']);
+      } catch {
+        try { onRetryAttempt(['other']); } catch { /* accounting must never break retries */ }
+      }
+    }
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
     return true;
   };

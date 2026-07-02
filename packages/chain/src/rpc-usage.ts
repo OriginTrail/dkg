@@ -68,11 +68,6 @@ export function boundedRpcMethodLabel(method: string): string {
   return KNOWN_RPC_METHODS.has(method) ? method : 'other';
 }
 
-/** Sanitize a method name for the rpc_usage LOG line (logfmt token safety). */
-function safeLogMethod(method: string): string {
-  return /^[A-Za-z0-9_]{1,64}$/.test(method) ? method : 'other';
-}
-
 export interface RpcUsageWindow {
   /** Raw requests since the previous drain, by (sanitized) method name. */
   byMethod: Record<string, number>;
@@ -97,10 +92,15 @@ export class RpcUsageTracker {
     private readonly chainId: () => string,
   ) {}
 
-  /** Count one raw JSON-RPC request. Called from the provider's send(). */
+  /**
+   * Count one raw JSON-RPC request. Called from the provider's `_send` and the
+   * FetchRequest retry hook. Window keys keep the RAW method name (log-line
+   * token safety is the cli formatter's concern, not the tracker's); only the
+   * METRIC label is bounded to the known set to protect metric cardinality.
+   */
   record(method: string): void {
     try {
-      const key = safeLogMethod(method);
+      const key = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
       this.window.set(key, (this.window.get(key) ?? 0) + 1);
       this.lifetime += 1;
       getMetrics().chainRpcRequestsTotal.add(1, {
