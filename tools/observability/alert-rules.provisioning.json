@@ -75,7 +75,8 @@
       ],
       "group_by": [
         "alertname",
-        "service_instance_id"
+        "service_instance_id",
+        "instance"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -97,8 +98,7 @@
         ]
       ],
       "group_by": [
-        "alertname",
-        "service_instance_id"
+        "alertname"
       ],
       "group_wait": "30s",
       "group_interval": "5m",

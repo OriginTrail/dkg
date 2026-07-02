@@ -81,7 +81,6 @@ export const buildAlerts = ({ PROM_NODE_LABEL, VM_UID, LOKI_UID }) => {
     };
   };
 
-  // GFM table cells: pipes must be \-escaped (the ONLY escape GFM processes
   // Docs rendering is deliberately decoupled from query content: the summary
   // table carries only plain-text fields (no query cells, so GFM table escaping
   // can never constrain which LogQL/PromQL expressions an alert may use), and
@@ -123,10 +122,20 @@ export const buildAlerts = ({ PROM_NODE_LABEL, VM_UID, LOKI_UID }) => {
       name: `DKG node ${sig} (Slack)`, type: 'slack',
       settings: { url: `<SLACK_WEBHOOK_NODE_${sig.toUpperCase()}>` }, disableResolveMessage: false,
     })),
+    // Grouping is signal-aware AND profile-aware: logs alerts label nodes with
+    // service_instance_id (Loki), metrics alerts with the Prometheus profile
+    // label (plus service_instance_id for the Loki-sourced rpc_usage rule),
+    // and the traces rule is a fleet-level aggregate with no node label. A
+    // missing group_by label is treated as empty by Alertmanager, and
+    // alertnames never collide across rules, so the union label set groups
+    // each rule per node correctly.
     policyRoutes: ['logs', 'metrics', 'traces'].map(sig => ({
       receiver: `DKG node ${sig} (Slack)`,
       object_matchers: [['team', '=', 'dkg'], ['signal', '=', sig]],
-      group_by: ['alertname', 'service_instance_id'], group_wait: '30s', group_interval: '5m', repeat_interval: '4h', continue: false,
+      group_by: sig === 'logs' ? ['alertname', 'service_instance_id']
+        : sig === 'metrics' ? ['alertname', ...new Set(['service_instance_id', PROM_NODE_LABEL])]
+        : ['alertname'],
+      group_wait: '30s', group_interval: '5m', repeat_interval: '4h', continue: false,
     })),
     rules: ALERT_SPECS.map(specToRule),
   };
