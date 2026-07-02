@@ -334,11 +334,15 @@ const fenced = (t) => {
   const fence = '`'.repeat(Math.max(3, ...runs.map(r => r.length + 1)));
   return `${fence}\n${t}\n${fence}`;
 };
+// Free-text table cells (titles) get pipe-escaped so a future title
+// containing '|' cannot break the generated table. Queries are exempt from
+// any such constraint — they render as fenced blocks below.
+const mdCell = (t) => String(t).replaceAll('|', '\\|');
 const rulesTableMd = [
   '| # | Alert | Channel | Datasource | Fires when | for | noData |',
   '|---|---|---|---|---|---|---|',
   ...ALERT_SPECS.map((s, i) =>
-    `| ${i + 1} | ${s.title} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
   '',
   '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
   '',
