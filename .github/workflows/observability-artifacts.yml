@@ -5,7 +5,10 @@ name: Observability artifacts
 # generate-observability.mjs (the committed source of truth). This check
 # proves the committed artifacts are exactly what the generator emits — a
 # hand-edited JSON or a generator change without regeneration fails the PR
-# instead of shipping stale production observability config.
+# instead of shipping stale production observability config. A second step
+# smoke-tests the operator-facing render mode (concrete datasource UIDs +
+# node-label profile), so a regression there can't hide behind the
+# committed-defaults check.
 on:
   pull_request:
     paths:
@@ -14,33 +17,47 @@ on:
       - '.github/workflows/observability-artifacts.yml'
   workflow_dispatch:
 
+concurrency:
+  group: observability-artifacts-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Minimum-needed token scope (see ci.yml header for rationale).
 permissions:
   contents: read
 
 jobs:
   check-generated:
+    name: Generated artifacts match generator
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          node-version: 22
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+
       - name: Verify committed artifacts match the generator
         run: node tools/log-collection-poc/production/generate-observability.mjs --check
+
       - name: Smoke-test the operator render mode (concrete UIDs + node-label profile)
         run: |
           set -euo pipefail
           node tools/log-collection-poc/production/generate-observability.mjs /tmp/render \
             --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
           cd /tmp/render
-          # placeholder must be fully substituted
-          ! grep -q 'VM_DATASOURCE_UID' alert-rules.provisioning.json
+          fail() { echo "SMOKE FAIL: $1"; exit 1; }
+          # placeholder must be fully substituted in FIELD VALUES (the _readme
+          # prose legitimately mentions the placeholder by name, so match the
+          # quoted-value form only)
+          if grep -q '"<VM_DATASOURCE_UID>"' alert-rules.provisioning.json; then fail 'placeholder survived --vm-uid render'; fi
           # concrete datasource UIDs must land in the rule payloads
-          grep -q '"datasourceUid": "test-vm-uid"' alert-rules.provisioning.json
-          grep -q '"datasourceUid": "test-loki-uid"' alert-rules.provisioning.json
+          grep -q '"datasourceUid": "test-vm-uid"' alert-rules.provisioning.json || fail 'vm uid missing from rule payloads'
+          grep -q '"datasourceUid": "test-loki-uid"' alert-rules.provisioning.json || fail 'loki uid missing from rule payloads'
           # node-label profile must drive metrics selectors, group-bys and alert exprs
-          ! grep -q '{instance=~' grafana-dashboard-dkg-node-metrics.json
-          grep -q 'service_instance_id=~' grafana-dashboard-dkg-node-metrics.json
-          grep -q 'sum by (service_instance_id) (rate(dkg_publish_total' alert-rules.provisioning.json
+          if grep -q '{instance=~' grafana-dashboard-dkg-node-metrics.json; then fail 'default node label leaked into profiled render'; fi
+          grep -q 'service_instance_id=~' grafana-dashboard-dkg-node-metrics.json || fail 'profiled node label missing from dashboard'
+          grep -q 'sum by (service_instance_id) (rate(dkg_publish_total' alert-rules.provisioning.json || fail 'profile not applied to alert expressions'
           echo "operator render mode OK"
