@@ -1286,6 +1286,59 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(seenOpts[0]).toMatchObject({ agentAddress: tokenAgentAddress });
     });
 
+    it('standalone vm/publish accepts uint72 publisher identity overrides into publish options', async () => {
+      const seenOpts: unknown[] = [];
+
+      await startWith(
+        {},
+        {
+          async publishFromFinalizedAssertion(_cg: string, _name: string, opts: unknown) {
+            seenOpts.push(opts);
+            return { status: 'confirmed', ual: 'did:dkg:test/1/46', kaId: '46' };
+          },
+        },
+      );
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        options: {
+          publisherNodeIdentityIdOverride: '0',
+        },
+      });
+
+      expect(res.status).toBe(200);
+      expect(seenOpts).toHaveLength(1);
+      expect(seenOpts[0]).toMatchObject({
+        publisherNodeIdentityIdOverride: 0n,
+      });
+    });
+
+    it('standalone vm/publish rejects publisher identity overrides above uint72 before publish', async () => {
+      const publishCalls: unknown[] = [];
+
+      await startWith(
+        {},
+        {
+          async publishFromFinalizedAssertion(_cg: string, _name: string, opts: unknown) {
+            publishCalls.push(opts);
+            throw new Error('publish should not be called');
+          },
+        },
+      );
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        options: {
+          publisherNodeIdentityIdOverride: UINT72_OVERFLOW_DECIMAL,
+        },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toContain('publisherNodeIdentityIdOverride');
+      expect(String(res.body.error)).toContain('uint72');
+      expect(publishCalls).toHaveLength(0);
+    });
+
     it('standalone vm/publish rejects partial selection before publish', async () => {
       const publishCalls: unknown[] = [];
 
