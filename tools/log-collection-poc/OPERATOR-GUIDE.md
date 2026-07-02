@@ -61,7 +61,7 @@ Each signal is independent and stays off until it has an endpoint (or set
 traces backend and metrics at a Prometheus/Mimir-backed collector.
 
 ## Viewing
-Point Grafana at your log store and import `production/grafana-dashboard-dkg-node-logs.json`
-(per-node) and/or `production/grafana-dashboard-dkg-fleet-logs.json` (fleet),
+Point Grafana at your log store and import `tools/observability/grafana-dashboard-dkg-node-logs.json`
+(per-node) and/or `tools/observability/grafana-dashboard-dkg-fleet-logs.json` (fleet),
 then pick your node and a time range. If your store is Loki < 3.0, front it with
-Grafana Alloy (see `production/RUNBOOK.md`).
+Grafana Alloy (see `tools/observability/RUNBOOK.md`).
