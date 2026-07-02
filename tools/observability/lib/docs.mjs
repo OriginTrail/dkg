@@ -2,6 +2,8 @@
 // is rendered from this template (rules table interpolated from the alert
 // catalog), so render/--check treat it exactly like the JSON artifacts — no
 // in-place mutation of a pre-existing file, no split source of truth.
+import { alertDatasource } from './alerts.mjs';
+
 // Markdown renderers for the alert specs (documentation concerns only — the
 // Grafana payload derivation lives in alerts.mjs):
 // - the summary table carries only plain-text fields; free-text cells are
@@ -19,7 +21,7 @@ const rulesTable = (specs) => [
   '| # | Alert | Channel | Datasource | Fires when | for | noData |',
   '|---|---|---|---|---|---|---|',
   ...specs.map((s, i) =>
-    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${alertDatasource(s).name} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
   '',
   '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
   '',

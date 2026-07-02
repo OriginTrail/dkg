@@ -2,6 +2,20 @@
 // ALERT_SPECS model plus its ONE derivation: Grafana provisioning payloads.
 // The markdown documentation rendering of the same specs lives in docs.mjs;
 // CLI handling and --check live in ../generate-observability.mjs.
+// The datasource enum for alert specs as an explicit, validated registry —
+// a typoed `ds:` value fails generation loudly instead of silently rendering
+// a Prometheus-shaped rule against the VM UID. docs.mjs shares this registry
+// for display names.
+export const ALERT_DATASOURCES = {
+  loki: { name: 'Loki' },
+  vm: { name: 'VictoriaMetrics' },
+};
+export const alertDatasource = (spec) => {
+  const d = ALERT_DATASOURCES[spec.ds];
+  if (!d) throw new Error(`unknown datasource '${spec.ds}' in alert spec "${spec.title}" — known: ${Object.keys(ALERT_DATASOURCES).join(', ')}`);
+  return d;
+};
+
 export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
   const PROM_NODE_LABEL = nodeProfile.label;
   // Declarative spec layer: each entry below is the SINGLE definition of one
@@ -63,6 +77,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
 
   const EXPR = '__expr__';
   const specToRule = (s) => {
+    alertDatasource(s); // loud failure on a typoed enum before any rendering
     const dsUid = s.ds === 'loki' ? LOKI_UID : VM_UID;
     const queryModel = s.ds === 'loki'
       ? { refId: 'A', expr: s.expr, queryType: 'range', intervalMs: 60000, maxDataPoints: s.maxDataPoints ?? 100, datasource: { type: 'loki', uid: dsUid } }
