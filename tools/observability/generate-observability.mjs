@@ -64,8 +64,8 @@ if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(PROM_NODE_LABEL)) {
 
 
 const { fleet, nodeLogs, metrics, traces } = buildDashboards({ PROM_NODE_LABEL });
-const { alerts, rulesTableMd } = buildAlerts({ PROM_NODE_LABEL, VM_UID, LOKI_UID });
-const docs = buildDocs({ rulesTableMd });
+const { alerts, specs } = buildAlerts({ PROM_NODE_LABEL, VM_UID, LOKI_UID });
+const docs = buildDocs({ specs });
 
 // -------------------------------------------------------- write / --check
 // Everything (JSON artifacts AND docs) renders fully in memory; write mode

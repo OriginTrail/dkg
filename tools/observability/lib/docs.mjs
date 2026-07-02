@@ -2,7 +2,31 @@
 // is rendered from this template (rules table interpolated from the alert
 // catalog), so render/--check treat it exactly like the JSON artifacts — no
 // in-place mutation of a pre-existing file, no split source of truth.
-export const buildDocs = ({ rulesTableMd }) => ({
+// Markdown renderers for the alert specs (documentation concerns only — the
+// Grafana payload derivation lives in alerts.mjs):
+// - the summary table carries only plain-text fields; free-text cells are
+//   pipe-escaped so a future title containing '|' cannot break the table
+// - each query is emitted as its own FENCED code block (fence length adapts
+//   to the longest backtick run), so no valid LogQL/PromQL is constrained by
+//   GFM table escaping
+const fenced = (t) => {
+  const runs = t.match(/`+/g) ?? [];
+  const fence = '`'.repeat(Math.max(3, ...runs.map(r => r.length + 1)));
+  return `${fence}\n${t}\n${fence}`;
+};
+const mdCell = (t) => String(t).replaceAll('|', '\\|');
+const rulesTable = (specs) => [
+  '| # | Alert | Channel | Datasource | Fires when | for | noData |',
+  '|---|---|---|---|---|---|---|',
+  ...specs.map((s, i) =>
+    `| ${i + 1} | ${mdCell(s.title)} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+  '',
+  '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
+  '',
+  ...specs.flatMap((s, i) => [`${i + 1}. ${s.title}`, '', fenced(s.expr), '']),
+].join('\n').replace(/\n+$/, '');
+
+export const buildDocs = ({ specs }) => ({
   'example-alerts.md': `<!-- GENERATED FILE — do not edit. Source: tools/observability/lib/docs.mjs
      (rules table derives from lib/alerts.mjs ALERT_SPECS). Regenerate with:
      node tools/observability/generate-observability.mjs -->
@@ -51,7 +75,7 @@ All queries are **range queries** — on Loki 3.x an *instant* metric query over
 range ≥ a few hours is split internally and dies with \`maximum of series (500)
 reached\`; range+reduce avoids that class of failure entirely.
 
-${rulesTableMd}
+${rulesTable(specs)}
 
 ### Design notes (the "why" behind the table)
 
