@@ -37,6 +37,8 @@
 
 * [Daemon Lifecycle](use-dkg/run-node.md)
 * [Publish & Query](use-dkg/publish-and-query.md)
+* [Knowledge Asset Lifecycle CLI](use-dkg/knowledge-asset-lifecycle.md)
+* [OKF Import, Export, and Verify](use-dkg/okf.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
 * [Relays & Peers](use-dkg/relays-and-peers.md)

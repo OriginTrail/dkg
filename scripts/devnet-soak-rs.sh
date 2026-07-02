@@ -9,7 +9,7 @@
 #     eligible challenge, builds + submits proofs across many proof
 #     periods. We assert each core successfully submits across the
 #     soak window.
-#   - Publishing: a steady workload of `dkg publish` invocations
+#   - Publishing: a steady workload of `dkg ka create --share` + `dkg ka publish`
 #     spreads KCs across two registered context graphs, distributing
 #     publishes round-robin across all 4 core nodes' APIs (so the
 #     publisher path is exercised on every node, not just node 1).
@@ -371,7 +371,7 @@ NEG_TMP=$(mktemp -d -t soak-neg)
 trap 'rm -rf "$NEG_TMP"' RETURN
 echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" <did:dkg:context-graph:does-not-exist-'"$ROUND"'> .' > "$NEG_TMP/neg.nq"
 NEG_RC=0
-DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" publish "does-not-exist-$ROUND" --file "$NEG_TMP/neg.nq" \
+DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" ka create "soak-neg-${ROUND}" --context-graph-id "does-not-exist-$ROUND" --input-file "$NEG_TMP/neg.nq" --share \
   > "$OUT_DIR/neg-publish-bogus-cg.log" 2>&1 || NEG_RC=$?
 if [ "$NEG_RC" -eq 0 ]; then
   log "  WARNING: publish to unregistered CG SUCCEEDED — that should have failed"
@@ -404,6 +404,7 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
   node_idx=${NODES[$((i % ${#NODES[@]}))]}
   uniq="$(date +%s)-${i}-$$"
   subj="urn:soak:r${ROUND}:i${i}:${uniq}"
+  ka_name="soak-${ROUND}-${i}-${uniq}"
   fixture="$TMP/q${i}.nq"
   cat > "$fixture" <<EOF
 <${subj}> <urn:soak:predicate> "value-${i}" <did:dkg:context-graph:${cg}> .
@@ -412,7 +413,8 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
 EOF
   start_s=$(date +%s)
   rc=0
-  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" publish "$cg" --file "$fixture" 2>&1) || rc=$?
+  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka create "$ka_name" --context-graph-id "$cg" --input-file "$fixture" --share 2>&1 \
+    && DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka publish "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
   end_s=$(date +%s)
   status="ok"
   [ "$rc" -ne 0 ] && status="fail"

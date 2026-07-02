@@ -22,7 +22,8 @@
 #      ContextGraphStorage.ContextGraphCreated from the receipt if preview
 #      fails.
 #   3. Writes a single N-Quad into a tmp file under the new CG URI.
-#   4. Invokes the CLI `dkg publish <cgId> --file <tmp>` via DKG_HOME=.devnet/node1.
+#   4. Invokes the CLI KA lifecycle via DKG_HOME=.devnet/node1:
+#      `dkg ka create <name> --input-file <tmp> --share`, then `dkg ka publish`.
 #   5. Tails .devnet/node1/daemon.log for a line matching
 #      "On-chain confirmed: UAL=... batchId=N tx=0x..." (format from
 #      dkg-publisher.ts:1252). Extracts batchId + tx.
@@ -131,13 +132,14 @@ REG_OUT=$(DKG_HOME="$NODE_DIR" node "$CLI_JS" context-graph register "$CG_FQ_ID"
   || fail "context-graph register failed (CG=$CG_FQ_ID)"
 CG_ONCHAIN_ID=$(printf '%s\n' "$REG_OUT" | sed -nE 's/.*On-chain:[[:space:]]+([0-9]+).*/\1/p' | head -n1)
 [ -n "$CG_ONCHAIN_ID" ] || fail "could not parse on-chain id from register output:\n$REG_OUT"
-# The slug is what `dkg publish` and the data-graph URI both consume;
+# The slug is what the KA lifecycle commands and the data-graph URI both consume;
 # CG_ONCHAIN_ID is only used in the post-publish KCS verification at
 # step 6 (kcsAddr.getKnowledgeAssetMetadata takes a numeric KC id,
 # but the publish receipt gives us batchId directly so CG_ONCHAIN_ID is
 # only kept for logging / debug context).
 CG_ID="$CG_FQ_ID"
 log "CG ready: id=$CG_ID on-chain=$CG_ONCHAIN_ID"
+KA_NAME="publish-smoke-$(date +%s)"
 
 # --- 3. Build RDF fixture -----------------------------------------------------
 
@@ -158,9 +160,10 @@ else
   BASELINE_LINES=0
 fi
 
-log "Invoking CLI publish (DKG_HOME=$NODE_DIR)..."
+log "Invoking CLI KA create/share/publish (DKG_HOME=$NODE_DIR, KA=$KA_NAME)..."
 set +e
-DKG_HOME="$NODE_DIR" node "$CLI_JS" publish "$CG_ID" --file "$TMP_RDF"
+DKG_HOME="$NODE_DIR" node "$CLI_JS" ka create "$KA_NAME" --context-graph-id "$CG_ID" --input-file "$TMP_RDF" --share \
+  && DKG_HOME="$NODE_DIR" node "$CLI_JS" ka publish "$KA_NAME" --context-graph-id "$CG_ID"
 PUBLISH_RC=$?
 set -e
 

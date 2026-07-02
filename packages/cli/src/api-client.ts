@@ -31,6 +31,117 @@ export interface KnowledgeAssetFinalizedPublishOptions {
   publisherNodeIdentityIdOverride?: bigint;
 }
 
+export interface KnowledgeAssetWritableQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
+}
+
+export interface KnowledgeAssetCreateOptions {
+  subGraphName?: string;
+  quads?: KnowledgeAssetWritableQuad[];
+  /**
+   * Seal the draft after writing `quads` (default true). `false` keeps an
+   * editable WM draft and never touches the chain. Cannot be combined with
+   * `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
+   */
+  finalize?: boolean;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+  alsoShareSwm?: boolean;
+  alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
+  awaitCuratorAck?: boolean;
+}
+
+export interface KnowledgeAssetCreateResponse {
+  name?: string;
+  assertionUri?: string;
+  status?: string;
+  written?: number;
+  merkleRoot?: string;
+  shareOperationId?: string;
+  swmShared?: boolean;
+  promotedCount?: number;
+  publishReady?: boolean;
+  errors?: KnowledgeAssetLifecycleError[];
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetWriteResponse {
+  written: number;
+}
+
+export interface KnowledgeAssetShareResponse {
+  swmShared: boolean;
+  promotedCount: number;
+  sealed?: boolean;
+  publishReady?: boolean;
+  shareOperationId?: string;
+  errors?: KnowledgeAssetLifecycleError[];
+}
+
+export interface KnowledgeAssetPublishResponse {
+  kaId?: string;
+  ual?: string;
+  txHash?: string;
+  status?: string;
+  error?: string;
+  errors?: KnowledgeAssetLifecycleError[];
+  contextGraphError?: unknown;
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetLifecycleError {
+  phase?: string;
+  code?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetPublishAsyncResponse {
+  jobId: string;
+  status: string;
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  shareOperationId?: string;
+  rootsCount?: number;
+  sealMerkleRoot?: string;
+  intentKey?: string;
+}
+
+export type KnowledgeAssetShareJobState =
+  | 'queued'
+  | 'running'
+  | 'failed'
+  | 'failed_retrying'
+  | 'succeeded';
+
+export interface KnowledgeAssetShareJobView {
+  jobId: string;
+  state: KnowledgeAssetShareJobState;
+  contextGraphId: string;
+  assertionName: string;
+  subGraphName?: string;
+  entities: readonly string[] | 'all';
+  enqueuedAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  entitiesPromoted?: number;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt?: string;
+  lastError?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+  reason?: string;
+}
+
 const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
   'clearAfter',
   'publishEpochs',
@@ -468,22 +579,8 @@ export class ApiClient {
   async createKnowledgeAsset(
     contextGraphId: string,
     name: string,
-    options?: {
-      subGraphName?: string;
-      quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-      /**
-       * Seal the draft after writing `quads` (default true). `false` keeps an
-       * editable WM draft and never touches the chain. Cannot be combined with
-       * `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
-       */
-      finalize?: boolean;
-      authorAgentAddress?: string;
-      preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
-      schemeVersion?: number;
-      alsoShareSwm?: boolean;
-      alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
-    },
-  ): Promise<Record<string, unknown>> {
+    options?: KnowledgeAssetCreateOptions,
+  ): Promise<KnowledgeAssetCreateResponse> {
     assertExclusiveAuthorFields(options ?? {});
     assertCreateFinalizeFieldsHaveQuads(options ?? {});
     const payload: Record<string, unknown> = { contextGraphId, name, ...(options ?? {}) };
@@ -494,8 +591,12 @@ export class ApiClient {
   }
 
   /** GET a KA's lifecycle state by name. */
-  async getKnowledgeAsset(contextGraphId: string, name: string, subGraphName?: string): Promise<Record<string, unknown>> {
-    const qs = new URLSearchParams({ contextGraphId, ...(subGraphName ? { subGraphName } : {}) }).toString();
+  async getKnowledgeAsset(contextGraphId: string, name: string, subGraphName?: string, agentAddress?: string): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams({
+      contextGraphId,
+      ...(subGraphName ? { subGraphName } : {}),
+      ...(agentAddress ? { agentAddress } : {}),
+    }).toString();
     return this.get(`/api/knowledge-assets/${encodeURIComponent(name)}?${qs}`);
   }
 
@@ -503,9 +604,9 @@ export class ApiClient {
   async knowledgeAssetWrite(
     contextGraphId: string,
     name: string,
-    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    quads: KnowledgeAssetWritableQuad[],
     options?: { subGraphName?: string },
-  ): Promise<{ written: number }> {
+  ): Promise<KnowledgeAssetWriteResponse> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`, { contextGraphId, quads, ...(options ?? {}) });
   }
 
@@ -515,6 +616,7 @@ export class ApiClient {
     name: string,
     options?: {
       subGraphName?: string;
+      layer?: 'wm' | 'swm';
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
@@ -546,9 +648,44 @@ export class ApiClient {
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; entities?: string[] | 'all' },
-  ): Promise<{ swmShared: boolean; promotedCount: number; shareOperationId?: string }> {
+    options?: { subGraphName?: string; entities?: string[] | 'all'; awaitCuratorAck?: boolean; skipSeal?: boolean },
+  ): Promise<KnowledgeAssetShareResponse> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+  }
+
+  async knowledgeAssetShareAsync(
+    contextGraphId: string,
+    name: string,
+    options?: { subGraphName?: string; entities?: string[] | 'all'; skipSeal?: boolean },
+  ): Promise<{ jobId: string; state: 'queued' }> {
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+  }
+
+  async knowledgeAssetShareJobs(options?: {
+    contextGraphId?: string;
+    state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
+    limit?: number;
+  }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
+    const params = new URLSearchParams();
+    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
+    if (options?.state) {
+      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
+    }
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    const qs = params.toString();
+    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+  }
+
+  async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
+    return this.get(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async knowledgeAssetCancelShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {
+    return this.del(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async knowledgeAssetRecoverShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
   /** Publish to VM (mint or update on chain; git push origin main). */
@@ -556,7 +693,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<KnowledgeAssetPublishResponse> {
     const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
@@ -569,17 +706,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
-  ): Promise<{
-    jobId: string;
-    status: string;
-    contextGraphId: string;
-    name: string;
-    subGraphName?: string;
-    shareOperationId?: string;
-    rootsCount?: number;
-    sealMerkleRoot?: string;
-    intentKey?: string;
-  }> {
+  ): Promise<KnowledgeAssetPublishAsyncResponse> {
     const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,

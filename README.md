@@ -234,7 +234,7 @@ dkg chat <name>                          # interactive chat with a peer
 # Context graphs (projects)
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
-dkg context-graph invite <id> <peer>     # invite a peer to a context graph
+dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist
 dkg context-graph list                   # list subscribed context graphs
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
@@ -243,15 +243,24 @@ dkg context-graph sign-join <id>         # sign a join-request delegation locall
 dkg context-graph approve-join <id>      # approve a pending join request
 dkg context-graph subscribe <id>         # subscribe to a CG without creating it
 
-# Assertions (Working Memory drafts)
-dkg assertion import-file <name> -f <file> -c <cg>   # import a document into WM
-dkg assertion extraction-status <name> -c <cg>       # check document extraction status
-dkg assertion query <name> -c <cg>                   # read assertion quads from WM
-dkg assertion promote <name> -c <cg>                 # WM → SWM
+# Knowledge Assets: create -> write -> finalize -> share -> publish
+dkg ka create <name> -c <cg> --input-file <rdf-file> --share  # one-shot create/write/finalize/share; no VM publish
+dkg ka import-file <name> -c <cg> --input-file <file>         # import a document into WM through extraction
+dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
+dkg ka finalize <name> -c <cg>                                # seal the WM draft
+dkg ka share <name> -c <cg>                                   # share finalized WM to SWM
+dkg ka publish <name> -c <cg>                                 # sync publish from SWM to VM
+dkg ka publish-async <name> -c <cg>                           # enqueue VM publish from SWM to VM
+dkg ka query <name> -c <cg>                                   # read KA WM quads
+dkg ka history <name> -c <cg>                                 # show lifecycle state/history
+dkg ka pull-from <name> -c <cg> --layer swm                   # seed WM from SWM or VM
+dkg ka discard <name> -c <cg>                                 # discard a WM draft
 
-# Shared memory (team-visible) and publishing
-dkg assertion promote <name> -c <cg>     # share a named KA from WM to SWM
-dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
+# Compatibility aliases
+dkg assertion import-file <name> -f <file> -c <cg>  # compatibility alias for document import
+dkg assertion promote <name> -c <cg>                # compatibility alias for KA share
+
+# Verification and endorsement
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
 
@@ -263,9 +272,10 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher publish-async <cg> <name>  # enqueue a named KA VM publish job
+dkg publisher publish-async <cg> <name>  # operational alias for dkg ka publish-async
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
+# publisher wallets must already have on-chain identities/profiles before they can claim VM publish jobs
 
 # Code & memory indexing
 dkg index [directory]                    # index a code repo into the dev-coordination CG

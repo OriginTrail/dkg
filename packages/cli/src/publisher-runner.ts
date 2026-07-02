@@ -259,7 +259,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
       throw new Error(
         `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-        'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
+        'Provision an on-chain profile/identity for each publisher wallet before enabling the async publisher, or remove it from publisher-wallets.json.',
       );
     }
     const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';

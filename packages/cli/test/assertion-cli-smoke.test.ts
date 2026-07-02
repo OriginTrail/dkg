@@ -281,7 +281,8 @@ describe.sequential('assertion CLI smoke', () => {
     expect(promoted.stdout).toContain('Assertion promoted to shared memory:');
     expect(promoted.stdout).toContain('Triples:        14');
     expect(promoted.stdout).toContain('urn:company:acme');
-    expect(promoted.stdout).toContain('Next:           dkg publisher publish-async research paper');
+    expect(promoted.stdout).toContain('Next:           dkg ka publish-async paper --context-graph-id research');
+    expect(promoted.stdout).toContain('Alias:          dkg publisher publish-async research paper');
 
     const promotedSubgraph = await execFileAsync('node', [
       CLI_ENTRY,
@@ -294,7 +295,8 @@ describe.sequential('assertion CLI smoke', () => {
       'lab',
     ], { env });
 
-    expect(promotedSubgraph.stdout).toContain('Next:           dkg publisher publish-async research paper --sub-graph lab');
+    expect(promotedSubgraph.stdout).toContain('Next:           dkg ka publish-async paper --context-graph-id research --sub-graph-name lab');
+    expect(promotedSubgraph.stdout).toContain('Alias:          dkg publisher publish-async research paper --sub-graph lab');
   }, 60000);
 
   it('does not expose retired shared-memory or raw publisher enqueue commands', async () => {
