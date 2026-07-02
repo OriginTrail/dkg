@@ -30,7 +30,8 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parseNonNegativeBigIntOption, parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-options.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -102,11 +103,6 @@ import {
   runDaemonSupervisor,
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
-
-function parseOptionalPublisherNodeIdentityId(raw: unknown): bigint | undefined {
-  if (raw === undefined) return undefined;
-  return parseNonNegativeBigIntOption(String(raw), '--publisher-node-identity-id');
-}
 
 export function registerPublisherCommand(program: Command): void {
 const publisherCmd = program
@@ -211,24 +207,18 @@ publisherCmd
     }
   });
 
-publisherCmd
+addFinalizedPublishOptions(publisherCmd
   .command('publish-async <context-graph> <name>')
   .description('Enqueue a named knowledge asset VM publish job')
-  .option('--sub-graph <name>', 'Target sub-graph within the context graph')
-  .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
-  .option('--publisher-node-identity-id <id>', 'Publisher node identity id override; use 0 for no-attribution')
+  .option('--sub-graph <name>', 'Target sub-graph within the context graph'))
   .action(async (contextGraph: string, name: string, opts: ActionOpts) => {
     try {
-      const publishEpochs = opts.publishEpochs !== undefined
-        ? parsePositiveIntegerOption(String(opts.publishEpochs), '--publish-epochs')
-        : undefined;
-      const publisherNodeIdentityIdOverride = parseOptionalPublisherNodeIdentityId(opts.publisherNodeIdentityId);
+      const publishOptions = parseFinalizedPublishOptions(opts);
 
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPublishAsync(contextGraph, name, {
         ...(opts.subGraph ? { subGraphName: String(opts.subGraph) } : {}),
-        ...(publishEpochs !== undefined ? { publishEpochs } : {}),
-        ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
+        ...publishOptions,
       });
 
       console.log('Knowledge asset publish job accepted:');

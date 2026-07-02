@@ -311,10 +311,50 @@ describe.sequential('assertion CLI smoke', () => {
     expect(daemonCalls).toEqual([]);
   }, 15000);
 
-  it('enqueues a named KA async VM publish through the publisher CLI', async () => {
+  it('enqueues a named KA async VM publish through the shared CLI publish options', async () => {
     const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
 
-    const published = await execFileAsync('node', [
+    const publishedViaKa = await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--sub-graph-name',
+      'lab',
+      '--publish-epochs',
+      '3',
+      '--publisher-node-identity-id',
+      '7',
+    ], { env });
+
+    expect(publishedViaKa.stdout).toContain('Knowledge asset publish job accepted:');
+    expect(publishedViaKa.stdout).toContain('Job ID:     job-cli-123');
+    expect(publishedViaKa.stdout).toContain('Status:     accepted');
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      subGraphName: 'lab',
+      options: { publishEpochs: 3, publisherNodeIdentityIdOverride: '7' },
+    });
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--publisher-node-identity-id',
+      '0',
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: '0' },
+    });
+
+    const publishedViaAlias = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
       'publish-async',
@@ -328,9 +368,9 @@ describe.sequential('assertion CLI smoke', () => {
       '7',
     ], { env });
 
-    expect(published.stdout).toContain('Knowledge asset publish job accepted:');
-    expect(published.stdout).toContain('Job ID:     job-cli-123');
-    expect(published.stdout).toContain('Status:     accepted');
+    expect(publishedViaAlias.stdout).toContain('Knowledge asset publish job accepted:');
+    expect(publishedViaAlias.stdout).toContain('Job ID:     job-cli-123');
+    expect(publishedViaAlias.stdout).toContain('Status:     accepted');
     expect(JSON.parse(lastPublishAsyncBody)).toEqual({
       contextGraphId: 'research',
       subGraphName: 'lab',

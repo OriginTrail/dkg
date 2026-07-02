@@ -4,7 +4,6 @@ import {
   ApiClient,
   type KnowledgeAssetCreateOptions,
   type KnowledgeAssetCreateResponse,
-  type KnowledgeAssetFinalizedPublishOptions,
   type KnowledgeAssetPublishResponse,
   type KnowledgeAssetShareJobState,
   type KnowledgeAssetShareResponse,
@@ -17,7 +16,7 @@ import {
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
-import { parseNonNegativeBigIntOption } from '../publisher-runner.js';
+import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-options.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -113,23 +112,6 @@ function parseOptionalPositiveInteger(raw: unknown, flag: string): number | unde
   return parsed;
 }
 
-function parseOptionalBigInt(raw: unknown, flag: string): bigint | undefined {
-  if (raw === undefined) return undefined;
-  return parseNonNegativeBigIntOption(String(raw), flag);
-}
-
-function parsePublishOptions(opts: ActionOpts): KnowledgeAssetFinalizedPublishOptions {
-  const publishEpochs = parseOptionalPositiveInteger(opts.publishEpochs, '--publish-epochs');
-  const publisherNodeIdentityIdOverride = parseOptionalBigInt(
-    opts.publisherNodeIdentityId,
-    '--publisher-node-identity-id',
-  );
-  return {
-    ...(publishEpochs !== undefined ? { publishEpochs } : {}),
-    ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
-  };
-}
-
 function parseShareEntities(opts: ActionOpts): string[] | undefined {
   if (!opts.entity || opts.entity.length === 0) return undefined;
   return opts.entity.map(String);
@@ -184,12 +166,6 @@ function addFinalizeAuthorOptions(command: Command): Command {
     .option('--author-agent-address <address>', 'Author agent EVM address for the seal')
     .option('--pre-signed-author-attestation <json-or-path>', 'Pre-signed AuthorAttestation JSON or file')
     .option('--scheme-version <n>', 'Author attestation scheme version');
-}
-
-function addPublishOptions(command: Command): Command {
-  return command
-    .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs')
-    .option('--publisher-node-identity-id <id>', 'Publisher node identity id override');
 }
 
 function publishNextCommand(name: string, contextGraphId: string, opts: ActionOpts): string {
@@ -503,7 +479,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log(`Recovered share job ${result.jobId}; state=${result.state}`);
     }));
 
-  addPublishOptions(addSubGraphOption(addContextGraphOption(
+  addFinalizedPublishOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('publish <name>')
       .description('Publish an already finalized and fully shared Knowledge Asset from SWM to VM')
@@ -514,7 +490,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPublish(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...parsePublishOptions(opts),
+        ...parseFinalizedPublishOptions(opts),
       });
       assertPublishComplete(result, name, contextGraphId);
       if (opts.json) {
@@ -529,7 +505,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (result.status) console.log(`  Status:  ${result.status}`);
     }));
 
-  addPublishOptions(addSubGraphOption(addContextGraphOption(
+  addFinalizedPublishOptions(addSubGraphOption(addContextGraphOption(
     kaCmd
       .command('publish-async <name>')
       .description('Enqueue VM publish for an already finalized and fully shared Knowledge Asset')
@@ -540,7 +516,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPublishAsync(contextGraphId, name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
-        ...parsePublishOptions(opts),
+        ...parseFinalizedPublishOptions(opts),
       });
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));

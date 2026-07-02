@@ -551,14 +551,6 @@ export function parsePositiveIntegerOption(value: string, optionName: string): n
   return parsed;
 }
 
-export function parseNonNegativeBigIntOption(value: string, optionName: string): bigint {
-  const normalized = value.trim();
-  if (!/^\d+$/.test(normalized)) {
-    throw new Error(`${optionName} must be a non-negative integer`);
-  }
-  return BigInt(normalized);
-}
-
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
   if (config.store) {
     const storeConfig = config.store as any;
