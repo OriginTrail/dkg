@@ -65,7 +65,7 @@ async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritab
     subject: quad.subject,
     predicate: quad.predicate,
     object: quad.object,
-    ...(quad.graph ? { graph: quad.graph } : {}),
+    graph: quad.graph ?? '',
   }));
 }
 

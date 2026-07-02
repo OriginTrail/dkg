@@ -38,6 +38,14 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '<urn:company:acme> <http://schema.org/name> "Acme" .\n',
     );
     await writeFile(
+      join(dkgHome, 'mixed-graphs.nq'),
+      [
+        '<urn:company:default> <http://schema.org/name> "Default" .',
+        '<urn:company:named> <http://schema.org/name> "Named" <urn:graph:named> .',
+        '',
+      ].join('\n'),
+    );
+    await writeFile(
       join(dkgHome, 'attestation.json'),
       JSON.stringify(PRE_SIGNED_AUTHOR_ATTESTATION),
     );
@@ -328,7 +336,40 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         subject: 'urn:company:acme',
         predicate: 'http://schema.org/name',
         object: '"Acme"',
+        graph: '',
       }),
+    ]);
+  }, 30000);
+
+  it('preserves named graph metadata when the first parsed quad is default graph', async () => {
+    calls = [];
+    const env = testEnv(dkgHome, smokeApiPort);
+
+    await runCli([
+      'ka',
+      'create',
+      'paper-graphs',
+      '--context-graph-id',
+      'research',
+      '--input-file',
+      join(dkgHome, 'mixed-graphs.nq'),
+      '--no-finalize',
+    ], env);
+
+    const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
+    expect(createCall?.body.quads).toEqual([
+      {
+        subject: 'urn:company:default',
+        predicate: 'http://schema.org/name',
+        object: '"Default"',
+        graph: '',
+      },
+      {
+        subject: 'urn:company:named',
+        predicate: 'http://schema.org/name',
+        object: '"Named"',
+        graph: 'urn:graph:named',
+      },
     ]);
   }, 30000);
 

@@ -1236,6 +1236,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(String(identityRes.body.error)).toContain('publisherNodeIdentityIdOverride');
       expect(createCalls).toHaveLength(0);
 
+      const unsafeNumericIdentityRes = await postRoot({
+        contextGraphId: CG_ID,
+        name: 'atomic-unsafe-numeric-publish-identity',
+        quads: [{
+          subject: 'did:dkg:test:UnsafeNumericPublishIdentity',
+          predicate: 'http://schema.org/name',
+          object: '"Unsafe numeric identity"',
+          graph: '',
+        }],
+        finalize: true,
+        alsoPublishVm: {
+          publisherNodeIdentityIdOverride: Number.MAX_SAFE_INTEGER + 1,
+        },
+      });
+
+      expect(unsafeNumericIdentityRes.status).toBe(400);
+      expect(String(unsafeNumericIdentityRes.body.error)).toContain('publisherNodeIdentityIdOverride');
+      expect(String(unsafeNumericIdentityRes.body.error)).toContain('safe integer');
+      expect(createCalls).toHaveLength(0);
+
       const unsafeIdentityRes = await postRoot({
         contextGraphId: CG_ID,
         name: 'atomic-unsafe-publish-identity',

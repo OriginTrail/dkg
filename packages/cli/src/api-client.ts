@@ -77,17 +77,17 @@ export interface KnowledgeAssetShareResponse {
   errors?: KnowledgeAssetLifecycleError[];
 }
 
-export interface KnowledgeAssetShareOptions {
+export interface KnowledgeAssetShareTargetOptions {
   subGraphName?: string;
   entities?: string[] | 'all';
+}
+
+export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
   awaitCuratorAck?: boolean;
   skipSeal?: boolean;
 }
 
-export type KnowledgeAssetShareAsyncOptions = Omit<
-  KnowledgeAssetShareOptions,
-  'awaitCuratorAck' | 'skipSeal'
->;
+export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
 
 export interface KnowledgeAssetPublishResponse {
   kaId?: string;
