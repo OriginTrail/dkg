@@ -41,6 +41,12 @@ queued unboundedly.
 - **Resource labels:** `service.name=dkg-node`, `service.instance.id=<name>`, `deployment.environment=<network>`, `dkg.node.role`, `dkg.chain` (matches the traces/metrics resource). Loki sanitizes dots to underscores, so these appear as `service_name`, `service_instance_id`, `deployment_environment`, `dkg_node_role`, `dkg_chain`.
 - **Per-record attributes:** `dkg.operation_id`, `dkg.operation_name`, `dkg.source_operation_id`, `dkg.module`, severity, plus `trace_id`/`span_id` when emitted inside a span.
 - **Body:** the log message, with secrets already redacted.
+- **RPC usage lines:** once per minute (only when RPC activity happened) the node
+  emits one `rpc_usage method=<json-rpc method> count=<n> window_s=60 chain=<id>`
+  line per method — the RAW JSON-RPC request count (the unit your RPC provider
+  bills), counted at the transport level. Each line carries the DELTA for its
+  window, so summing them over any range gives the exact request count. This is
+  what powers the Grafana "RPC requests per node / by method" panels.
 
 ## Traces & metrics (optional)
 Logs go through a hand-rolled OTLP/HTTP exporter; **traces and metrics use the

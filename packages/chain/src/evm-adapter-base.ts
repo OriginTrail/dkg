@@ -25,6 +25,7 @@ import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcEr
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import { RpcUsageTracker, CountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -343,6 +344,8 @@ export class EVMChainAdapterBase {
    * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
+  /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
+  protected readonly rpcUsage: RpcUsageTracker;
 
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
@@ -625,12 +628,17 @@ export class EVMChainAdapterBase {
     // single-RPC node keeps the bounded `RPC_REQUEST_MAX_RETRIES` retry (its
     // only resilience; #894) via the default. See `boundedRetryFetchRequest`.
     const perEndpointRetries = this.rpcUrls.length > 1 ? 0 : undefined;
+    // CountingJsonRpcProvider reports every raw JSON-RPC request to the usage
+    // tracker (the PROVIDER-BILLING unit — see rpc-usage.ts). With
+    // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
+    // exact. `this.chainId` is assigned later in this constructor → live thunk.
+    this.rpcUsage = new RpcUsageTracker(() => this.chainId);
     this.providers = this.rpcUrls.map(
-      (url) => new JsonRpcProvider(boundedRetryFetchRequest(url, perEndpointRetries), undefined, {
+      (url) => new CountingJsonRpcProvider(boundedRetryFetchRequest(url, perEndpointRetries), undefined, {
         cacheTimeout: -1,
         polling: true,
         batchMaxCount: 1,
-      }),
+      }, (method) => this.rpcUsage.record(method)),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
@@ -2732,6 +2740,17 @@ export class EVMChainAdapterBase {
 
   getRpcUrls(): string[] {
     return [...this.rpcUrls];
+  }
+
+  /**
+   * Drain the raw JSON-RPC request counts accumulated since the previous drain
+   * (delta window) — consumed by the daemon's minutely `rpc_usage` telemetry
+   * log line. `_`-prefixed: an EVM-transport internal (the mock adapter has no
+   * RPC transport, so it is intentionally NOT part of the adapter contract —
+   * callers feature-detect it).
+   */
+  _drainRpcUsage(): RpcUsageWindow {
+    return this.rpcUsage.drainWindow();
   }
 
   async getContract(name: string): Promise<Contract> {

@@ -137,6 +137,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
+import { formatRpcUsageLines, type RpcUsageWindowLike } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -2430,6 +2431,34 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
+  // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
+  // ~$200 of RPC credits in a day with nothing measuring it). Every minute,
+  // drain the chain adapter's RAW JSON-RPC request counts (the provider-billing
+  // unit, counted at the transport choke-point) and emit one `rpc_usage` logfmt
+  // line per method through the normal Logger → redacted-OTLP → Loki path, so
+  // Grafana charts RPC volume per node and per method. Each line carries the
+  // DELTA for its window → sum_over_time in LogQL is the exact request count.
+  // Feature-detected: only the EVM adapter implements `_drainRpcUsage` (mock /
+  // no-chain adapters have no RPC transport). Never blocks or crashes the node.
+  const RPC_USAGE_WINDOW_S = 60;
+  const rpcUsageLogger = new Logger("chain-rpc");
+  const rpcUsageTimer = setInterval(() => {
+    try {
+      const chainWithUsage = (agent as unknown as {
+        chain?: { _drainRpcUsage?: () => RpcUsageWindowLike };
+      }).chain;
+      const usage = chainWithUsage?._drainRpcUsage?.();
+      if (!usage || usage.total <= 0) return;
+      const ctx = createOperationContext("system");
+      for (const line of formatRpcUsageLines(usage, RPC_USAGE_WINDOW_S, config.chain?.chainId)) {
+        rpcUsageLogger.info(ctx, line);
+      }
+    } catch {
+      /* usage accounting must never break the node */
+    }
+  }, RPC_USAGE_WINDOW_S * 1000);
+  rpcUsageTimer.unref();
+
   const tracker = new OperationTracker(dashDb);
 
   // Track peer connections
@@ -3257,6 +3286,7 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        clearInterval(rpcUsageTimer);
         rateLimiter.destroy();
         metricsCollector.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.

@@ -137,6 +137,12 @@ export interface DkgMetrics {
   ackHandlerTotal: Counter;
   /** rpc_method, outcome={ok|error|timeout}, retryable, chain_id */
   chainRpcTotal: Counter;
+  /** rpc_method (bounded known JSON-RPC set, else 'other'), chain_id — RAW
+   *  transport-level JSON-RPC client requests, i.e. the PROVIDER-BILLING unit.
+   *  Distinct from chainRpcTotal (logical chain operations): one logical op can
+   *  issue several raw requests (populate = estimateGas + getTransactionCount
+   *  + chainId + …), and raw request volume is what burns RPC credits. */
+  chainRpcRequestsTotal: Counter;
   /** ms; rpc_method, chain_id */
   chainRpcDuration: Histogram;
   /** rpc_method, chain_id, reason={exhausted|recovered} */
@@ -164,6 +170,9 @@ function buildMetrics(): DkgMetrics {
     ackVerifyTotal: meter.createCounter('dkg.ack.verify.total', { description: 'ACK identity verification results' }),
     ackHandlerTotal: meter.createCounter('dkg.ack.handler.total', { description: 'Inbound storage-ACK handler outcomes' }),
     chainRpcTotal: meter.createCounter('dkg.chain.rpc.total', { description: 'Chain RPC calls by method/outcome' }),
+    chainRpcRequestsTotal: meter.createCounter('dkg.chain.rpc.requests.total', {
+      description: 'Raw JSON-RPC client requests by method (provider billing unit)',
+    }),
     chainRpcDuration: meter.createHistogram('dkg.chain.rpc.duration', {
       unit: 'ms', description: 'Chain RPC wall-time', advice: { explicitBucketBoundaries: RPC_DURATION_BUCKETS },
     }),

@@ -59,8 +59,8 @@ Restart the node. Local logging (SQLite + daemon.log) is unaffected; this only a
 **Logs vs traces/metrics (different transports, same endpoint host):** logs ship via a hand-rolled **OTLP/HTTP JSON** exporter (the OTel Logs SDK is still "Development"), while **traces and metrics use the stable OTel SDK** OTLP/protobuf exporters. The polaris setup today only has a **logs** backend (Loki via Alloy), so leave `telemetry.traces`/`telemetry.metrics` out (or set `enabled: false`) until a traces backend (Tempo) and metrics backend (Mimir/Prometheus) are provisioned — the `node-config.example.json` shows the full three-signal shape and `config.alloy` has the matching commented routing.
 
 ## Step 4 — view in Grafana
-- **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panel is volume-by-level.
-- **Fleet overview:** `https://polaris.xtrmstrngth.com/d/dkg-fleet-logs` → active-node count, log volume per node, errors per node, recent fleet-wide errors (filter by `Environment`).
+- **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panels are volume-by-level and **RPC requests by method** (which JSON-RPC calls this node makes, and how many — the RPC-credit burn view).
+- **Fleet overview:** `https://polaris.xtrmstrngth.com/d/dkg-fleet-logs` → active-node count, log volume per node, errors per node, recent fleet-wide errors, plus **RPC requests per node** and **RPC requests by method (fleet)** — use these to spot a node burning RPC credits and which method is doing it (filter by `Environment`).
 
 Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node-operator self-serve guide (any operator, their own backend): `../OPERATOR-GUIDE.md`.
 
