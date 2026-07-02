@@ -42,6 +42,8 @@ import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.j
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
+const MAX_UINT72_DECIMAL = '4722366482869645213695';
+const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
 describe('#1116 share/seal route error mapping (fake agent)', () => {
   let server: Server | undefined;
@@ -426,7 +428,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     }
   });
 
-  it('vm/publish-async forwards non-default route options into the immutable intent', async () => {
+  it('vm/publish-async accepts uint72 publisher identity overrides into the immutable intent', async () => {
     const seenResolveOptions: any[] = [];
     const enqueuedIntents: any[] = [];
 
@@ -465,7 +467,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       },
     });
 
-    const res = await post('vm/publish-async', {
+    const zeroRes = await post('vm/publish-async', {
       contextGraphId: CG_ID,
       options: {
         publishEpochs: 2,
@@ -474,8 +476,8 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       },
     });
 
-    expect(res.status).toBe(202);
-    expect(res.body.jobId).toBe('job-options');
+    expect(zeroRes.status).toBe(202);
+    expect(zeroRes.body.jobId).toBe('job-options');
     expect(seenResolveOptions).toHaveLength(1);
     expect(seenResolveOptions[0]).toMatchObject({
       publishEpochs: 2,
@@ -487,6 +489,62 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       clearSharedMemoryAfter: true,
       publisherNodeIdentityIdOverride: '0',
     });
+
+    const maxRes = await post('vm/publish-async', {
+      contextGraphId: CG_ID,
+      options: {
+        publishEpochs: 2,
+        clearSharedMemoryAfter: true,
+        publisherNodeIdentityIdOverride: MAX_UINT72_DECIMAL,
+      },
+    });
+
+    expect(maxRes.status).toBe(202);
+    expect(maxRes.body.jobId).toBe('job-options');
+    expect(seenResolveOptions).toHaveLength(2);
+    expect(seenResolveOptions[1]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: BigInt(MAX_UINT72_DECIMAL),
+    });
+    expect(enqueuedIntents[1]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: MAX_UINT72_DECIMAL,
+    });
+  });
+
+  it('vm/publish-async rejects publisher identity overrides above uint72 before enqueue', async () => {
+    let resolveCalls = 0;
+    let enqueueCalls = 0;
+
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        resolveCalls += 1;
+        throw new Error('resolve should not be called');
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {
+        throw new Error('preflight should not be called');
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', {
+      contextGraphId: CG_ID,
+      options: {
+        publisherNodeIdentityIdOverride: UINT72_OVERFLOW_DECIMAL,
+      },
+    });
+
+    expect(res.status).toBe(400);
+    expect(String(res.body.error)).toContain('publisherNodeIdentityIdOverride');
+    expect(String(res.body.error)).toContain('uint72');
+    expect(resolveCalls).toBe(0);
+    expect(enqueueCalls).toBe(0);
   });
 
   it('vm/publish-async maps incompatible duplicate jobs to 409 with existingJobId', async () => {
@@ -1189,13 +1247,13 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         }],
         finalize: true,
         alsoPublishVm: {
-          publisherNodeIdentityIdOverride: Number.MAX_SAFE_INTEGER + 1,
+          publisherNodeIdentityIdOverride: UINT72_OVERFLOW_DECIMAL,
         },
       });
 
       expect(unsafeIdentityRes.status).toBe(400);
       expect(String(unsafeIdentityRes.body.error)).toContain('publisherNodeIdentityIdOverride');
-      expect(String(unsafeIdentityRes.body.error)).toContain('safe integer');
+      expect(String(unsafeIdentityRes.body.error)).toContain('uint72');
       expect(createCalls).toHaveLength(0);
     });
 

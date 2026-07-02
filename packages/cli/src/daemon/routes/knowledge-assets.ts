@@ -75,6 +75,7 @@ import {
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import { MAX_UINT72, MAX_UINT72_DECIMAL } from "../../protocol-limits.js";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -549,7 +550,12 @@ function resolveFinalizedPublishOptions(
   if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
     const v = publishIntegerString(publisherNodeIdentityIdOverride, "publisherNodeIdentityIdOverride", res, { positive: false });
     if (v === null) return null;
-    resolvedPublisherIdentityOverride = BigInt(v);
+    const parsedPublisherIdentityOverride = BigInt(v);
+    if (parsedPublisherIdentityOverride > MAX_UINT72) {
+      jsonResponse(res, 400, { error: `"publisherNodeIdentityIdOverride" must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)` });
+      return null;
+    }
+    resolvedPublisherIdentityOverride = parsedPublisherIdentityOverride;
   }
 
   let resolvedPublishEpochs: number | undefined;

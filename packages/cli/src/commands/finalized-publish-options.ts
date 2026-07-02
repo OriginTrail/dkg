@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import type { KnowledgeAssetFinalizedPublishOptions } from '../api-client.js';
-import { parseOptionalNonNegativeBigInt, parseOptionalPositiveInteger } from '../cli-option-parsers.js';
+import { parseOptionalPositiveInteger, parseOptionalUint72BigInt } from '../cli-option-parsers.js';
 import type { ActionOpts } from '../cli-helpers.js';
 
 export function addFinalizedPublishOptions(command: Command): Command {
@@ -11,7 +11,7 @@ export function addFinalizedPublishOptions(command: Command): Command {
 
 export function parseFinalizedPublishOptions(opts: ActionOpts): KnowledgeAssetFinalizedPublishOptions {
   const publishEpochs = parseOptionalPositiveInteger(opts.publishEpochs, '--publish-epochs');
-  const publisherNodeIdentityIdOverride = parseOptionalNonNegativeBigInt(
+  const publisherNodeIdentityIdOverride = parseOptionalUint72BigInt(
     opts.publisherNodeIdentityId,
     '--publisher-node-identity-id',
   );

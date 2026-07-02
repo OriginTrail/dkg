@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+const MAX_UINT72_DECIMAL = '4722366482869645213695';
+const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
 describe.sequential('assertion CLI smoke', () => {
   let dkgHome: string;
@@ -354,6 +356,22 @@ describe.sequential('assertion CLI smoke', () => {
       options: { publisherNodeIdentityIdOverride: '0' },
     });
 
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--publisher-node-identity-id',
+      MAX_UINT72_DECIMAL,
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: MAX_UINT72_DECIMAL },
+    });
+
     const publishedViaAlias = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
@@ -390,6 +408,18 @@ describe.sequential('assertion CLI smoke', () => {
     expect(JSON.parse(lastPublishAsyncBody)).toEqual({
       contextGraphId: 'research',
       options: { publisherNodeIdentityIdOverride: '0' },
+    });
+
+    await expect(execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'publish-async',
+      'research',
+      'paper',
+      '--publisher-node-identity-id',
+      UINT72_OVERFLOW_DECIMAL,
+    ], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining(`--publisher-node-identity-id must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)`),
     });
   }, 30000);
 
