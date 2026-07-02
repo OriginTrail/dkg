@@ -2446,7 +2446,11 @@ export async function runDaemonInner(
   const rpcUsageLogger = new Logger("chain-rpc");
   const emitRpcUsageNow = (windowSeconds: number) => {
     const ctx = createOperationContext("system");
-    emitRpcUsage(agent, (line) => rpcUsageLogger.info(ctx, line), windowSeconds, config.chain?.chainId);
+    // EFFECTIVE chain id (chainBase resolves field-level inheritance from the
+    // network config) — `config.chain?.chainId` alone is undefined for operator
+    // configs that override only rpcUrl, which would drop `chain=` from the
+    // rpc_usage log contract.
+    emitRpcUsage(agent, (line) => rpcUsageLogger.info(ctx, line), windowSeconds, chainBase?.chainId ?? config.chain?.chainId);
   };
   const rpcUsageTimer = setInterval(() => emitRpcUsageNow(RPC_USAGE_WINDOW_S), RPC_USAGE_WINDOW_S * 1000);
   rpcUsageTimer.unref();

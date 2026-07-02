@@ -17,9 +17,6 @@
 
 import type { RpcUsageWindow } from '@origintrail-official/dkg-chain';
 
-/** @deprecated alias kept for import stability — the ONE typed contract is chain's RpcUsageWindow. */
-export type RpcUsageWindowLike = RpcUsageWindow;
-
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback;
@@ -31,7 +28,7 @@ function safeToken(value: string, fallback: string): string {
  * nothing rather than a stream of zeros).
  */
 export function formatRpcUsageLines(
-  usage: RpcUsageWindowLike,
+  usage: RpcUsageWindow,
   windowSeconds: number,
   chainId?: string,
 ): string[] {
@@ -47,7 +44,7 @@ export function formatRpcUsageLines(
 
 /** The drain capability the daemon consumes (DKGAgent.drainChainRpcUsage). */
 export interface RpcUsageSource {
-  drainChainRpcUsage?: () => RpcUsageWindowLike | undefined;
+  drainChainRpcUsage?: () => RpcUsageWindow | undefined;
 }
 
 /**

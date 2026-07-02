@@ -30,6 +30,7 @@ import type {
   JsonRpcResult,
 } from 'ethers';
 import { getMetrics } from '@origintrail-official/dkg-core';
+import { boundedRetryFetchRequest } from './evm-adapter-rpc.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -175,4 +176,24 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
     }
     return super._send(payload);
   }
+}
+
+/**
+ * The ONE transport factory for a usage-counted provider: wires BOTH accounting
+ * hooks (the `_send` first-attempt count and the FetchRequest retry-attempt
+ * count) to the same tracker, so a construction site can never pair them
+ * inconsistently — the pairing IS the billing-exactness invariant (first
+ * attempt via `_send` + every ethers-internal retry attempt via the retry
+ * hook). Keeps the adapter constructor free of accounting mechanics.
+ */
+export function createCountingJsonRpcProvider(
+  url: string,
+  maxRetries: number | undefined,
+  tracker: RpcUsageTracker,
+  options: JsonRpcApiProviderOptions,
+): CountingJsonRpcProvider {
+  const fetchRequest = boundedRetryFetchRequest(url, maxRetries, (body) => {
+    for (const method of jsonRpcMethodsFromBody(body)) tracker.record(method);
+  });
+  return new CountingJsonRpcProvider(fetchRequest, undefined, options, (method) => tracker.record(method));
 }

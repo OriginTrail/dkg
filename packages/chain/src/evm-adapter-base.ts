@@ -25,7 +25,7 @@ import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcEr
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
-import { RpcUsageTracker, CountingJsonRpcProvider, jsonRpcMethodsFromBody, type RpcUsageWindow } from './rpc-usage.js';
+import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -633,21 +633,15 @@ export class EVMChainAdapterBase {
     // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
     // exact. `this.chainId` is assigned later in this constructor → live thunk.
     this.rpcUsage = new RpcUsageTracker(() => this.chainId);
-    // Two accounting hooks so the count is billing-EXACT: `_send` counts the
-    // first HTTP attempt of every dispatch, and the FetchRequest retry hook
-    // counts each ADDITIONAL attempt ethers issues below `_send` on 429/5xx
-    // (single-RPC nodes retry up to RPC_REQUEST_MAX_RETRIES times — every one
-    // of those attempts bills at the provider).
-    const recordRetryAttempts = (body: Uint8Array | null | undefined) => {
-      for (const m of jsonRpcMethodsFromBody(body)) this.rpcUsage.record(m);
-    };
+    // One transport factory wires BOTH billing-exact accounting hooks (first
+    // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
+    // see createCountingJsonRpcProvider for the invariant.
     this.providers = this.rpcUrls.map(
-      (url) => new CountingJsonRpcProvider(
-        boundedRetryFetchRequest(url, perEndpointRetries, recordRetryAttempts),
-        undefined,
-        { cacheTimeout: -1, polling: true, batchMaxCount: 1 },
-        (method) => this.rpcUsage.record(method),
-      ),
+      (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
+        cacheTimeout: -1,
+        polling: true,
+        batchMaxCount: 1,
+      }),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
