@@ -137,7 +137,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
-import { emitRpcUsage } from './rpc-usage-log.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -2432,28 +2432,19 @@ export async function runDaemonInner(
   pruneTimer.unref();
 
   // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
-  // ~$200 of RPC credits in a day with nothing measuring it). Every minute,
-  // drain the chain adapter's RAW JSON-RPC request counts (the provider-billing
-  // unit, counted at the transport choke-point incl. ethers' internal retries)
-  // and emit one `rpc_usage` logfmt line per method through the normal Logger →
-  // redacted-OTLP → Loki path, so Grafana charts RPC volume per node and per
-  // method. Each line carries the DELTA for its window → sum_over_time in LogQL
-  // is the exact request count. Goes through the agent's public
-  // `drainChainRpcUsage()` boundary (undefined when the adapter lacks the
-  // capability); the drain→format→emit step lives in `emitRpcUsage`
-  // (rpc-usage-log.ts, unit-tested). Never blocks or crashes the node.
-  const RPC_USAGE_WINDOW_S = 60;
+  // ~$200 of RPC credits in a day with nothing measuring it). The whole
+  // lifecycle (minutely drain→format→emit tick + shutdown final-drain) lives in
+  // startRpcUsageTelemetry (rpc-usage-log.ts, unit-tested); this is wiring only:
+  // the agent's public drainChainRpcUsage() boundary as the source, the Logger →
+  // redacted-OTLP → Loki path as the sink, and the EFFECTIVE chain id (chainBase
+  // resolves field-level inheritance — config.chain?.chainId alone is undefined
+  // for operator configs that override only rpcUrl).
   const rpcUsageLogger = new Logger("chain-rpc");
-  const emitRpcUsageNow = (windowSeconds: number) => {
-    const ctx = createOperationContext("system");
-    // EFFECTIVE chain id (chainBase resolves field-level inheritance from the
-    // network config) — `config.chain?.chainId` alone is undefined for operator
-    // configs that override only rpcUrl, which would drop `chain=` from the
-    // rpc_usage log contract.
-    emitRpcUsage(agent, (line) => rpcUsageLogger.info(ctx, line), windowSeconds, chainBase?.chainId ?? config.chain?.chainId);
-  };
-  const rpcUsageTimer = setInterval(() => emitRpcUsageNow(RPC_USAGE_WINDOW_S), RPC_USAGE_WINDOW_S * 1000);
-  rpcUsageTimer.unref();
+  const rpcUsageTelemetry = startRpcUsageTelemetry({
+    source: agent,
+    emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
+    chainId: chainBase?.chainId ?? config.chain?.chainId,
+  });
 
   const tracker = new OperationTracker(dashDb);
 
@@ -3282,12 +3273,10 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        clearInterval(rpcUsageTimer);
-        // Final best-effort RPC-usage drain BEFORE telemetry stops, so a
-        // partial window (e.g. a publish burst just before a restart) still
-        // reaches Loki instead of dying in memory — keeps the log-derived
-        // request totals exact across process lifecycles.
-        emitRpcUsageNow(RPC_USAGE_WINDOW_S);
+        // Clears the timer AND performs the final best-effort drain (BEFORE
+        // telemetry stops), so a partial window still reaches Loki — keeps
+        // log-derived request totals exact across process lifecycles.
+        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.

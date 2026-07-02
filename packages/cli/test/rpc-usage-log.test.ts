@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { formatRpcUsageLines, emitRpcUsage } from '../src/daemon/rpc-usage-log.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -72,5 +72,49 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
         60,
       ),
     ).toBe(0);
+  });
+});
+
+describe('startRpcUsageTelemetry — the full scheduling lifecycle (timer + shutdown drain)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('ticks every window, emits the drained lines, and stop() drains the partial window then halts', () => {
+    vi.useFakeTimers();
+    const emitted: string[] = [];
+    let next = { byMethod: { eth_call: 5 }, total: 5, lifetimeTotal: 5 };
+    const handle = startRpcUsageTelemetry({
+      source: { drainChainRpcUsage: () => next },
+      emit: (l) => emitted.push(l),
+      chainId: 'base:8453',
+      windowSeconds: 60,
+    });
+
+    expect(emitted).toEqual([]); // nothing before the first tick
+    vi.advanceTimersByTime(60_000);
+    expect(emitted).toEqual(['rpc_usage method=eth_call count=5 window_s=60 chain=base:8453']);
+
+    // Partial window accumulated after the last tick → stop() must drain it.
+    next = { byMethod: { eth_getLogs: 2 }, total: 2, lifetimeTotal: 7 };
+    handle.stop();
+    expect(emitted).toContain('rpc_usage method=eth_getLogs count=2 window_s=60 chain=base:8453');
+
+    // ...and the timer is really gone: no further emissions after stop().
+    const after = emitted.length;
+    next = { byMethod: { eth_call: 9 }, total: 9, lifetimeTotal: 16 };
+    vi.advanceTimersByTime(300_000);
+    expect(emitted.length).toBe(after);
+  });
+
+  it('idle windows emit nothing on tick or stop', () => {
+    vi.useFakeTimers();
+    const emitted: string[] = [];
+    const handle = startRpcUsageTelemetry({
+      source: { drainChainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 3 }) },
+      emit: (l) => emitted.push(l),
+      windowSeconds: 60,
+    });
+    vi.advanceTimersByTime(180_000);
+    handle.stop();
+    expect(emitted).toEqual([]);
   });
 });

@@ -70,3 +70,39 @@ export function emitRpcUsage(
     return 0; // usage accounting must never break the node
   }
 }
+
+/** Handle returned by {@link startRpcUsageTelemetry}. */
+export interface RpcUsageTelemetryHandle {
+  /**
+   * Clear the timer and perform ONE final best-effort drain+emit, so a partial
+   * window (e.g. a publish burst right before a restart) still reaches the log
+   * pipeline instead of dying in memory. Idempotent-safe to call once at
+   * daemon teardown, BEFORE telemetry shuts down.
+   */
+  stop(): void;
+}
+
+/**
+ * The COMPLETE RPC-usage telemetry lifecycle: schedules the minutely
+ * drain→format→emit tick (unref'd — never keeps the process alive) and owns
+ * the shutdown final-drain. `runDaemonInner` just wires source/emit and calls
+ * `stop()` at teardown — no feature scheduling embedded in the daemon monolith.
+ */
+export function startRpcUsageTelemetry(opts: {
+  source: RpcUsageSource;
+  emit: (line: string) => void;
+  chainId?: string;
+  /** Window length in seconds (default 60). */
+  windowSeconds?: number;
+}): RpcUsageTelemetryHandle {
+  const windowSeconds = opts.windowSeconds ?? 60;
+  const tick = () => emitRpcUsage(opts.source, opts.emit, windowSeconds, opts.chainId);
+  const timer = setInterval(tick, windowSeconds * 1000);
+  timer.unref?.();
+  return {
+    stop() {
+      clearInterval(timer);
+      tick(); // final best-effort drain — emitRpcUsage never throws
+    },
+  };
+}
