@@ -33,7 +33,10 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { ServerResponse } from 'node:http';
-import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
+import {
+  resolveRequiredWriteContextGraphId,
+  WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
+} from '../src/daemon/http-utils.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import { OxigraphWorkerStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -92,6 +95,10 @@ function agentHarness(
   ) => resolveProto.probeContextGraphWritePreflight.call(harness, id, opts);
   harness.contextGraphActivePublicOnChainFromRegistry = (id: string) =>
     resolveProto.contextGraphActivePublicOnChainFromRegistry.call(harness, id);
+  // High-level store-outage rescue decision the daemon calls — owns the
+  // on-chain active+public policy semantics (wraps the registry read above).
+  harness.validateWriteTargetDuringStoreOutage = (id: string) =>
+    resolveProto.validateWriteTargetDuringStoreOutage.call(harness, id);
   return harness;
 }
 
@@ -112,7 +119,7 @@ function providerFor(harness: any, rows: Array<Record<string, unknown>> = []) {
         return rows as any;
       },
       probeContextGraphWritePreflight: harness.probeContextGraphWritePreflight,
-      contextGraphActivePublicOnChainFromRegistry: harness.contextGraphActivePublicOnChainFromRegistry,
+      validateWriteTargetDuringStoreOutage: harness.validateWriteTargetDuringStoreOutage,
       contextGraphExists: (id: string) => resolveProto.contextGraphExists.call(harness, id),
       contextGraphHasLocalContent: (id: string) =>
         resolveProto.contextGraphHasLocalContent.call(harness, id),
@@ -362,6 +369,91 @@ describe('resolveRequiredWriteContextGraphId — both-legs-failed rescue (real r
     expect(out.status).toBe(503);
     expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
   });
+
+  it('(GATE) a DEFINITIVE local miss from a HEALTHY exact probe is authoritative — when only the list leg throws, keep the legacy 503 and NEVER run the chain rescue', async () => {
+    // Bug-bot 🔴: the rescue previously ran on EVERY both-legs-failed. But if
+    // the exact probe SUCCEEDED against a healthy store and returned a
+    // definitive local miss (storeAvailable, exists:false, no local content, no
+    // declaration), that probe is AUTHORITATIVE for local existence — the id
+    // genuinely is not here. If only listContextGraphs then throws (a transient
+    // list-path failure), the on-chain rescue must NOT override that definitive
+    // miss and admit an id the store just told us it lacks. So the rescue is
+    // GATED to run only when the exact probe itself was unavailable.
+    //
+    // On-chain state here WOULD say active+public (id 7n), so if the gate were
+    // absent the rescue would wrongly accept. The recorders prove the chain read
+    // is never even consulted.
+    const isActive = recorder(async () => true);
+    const getAccessPolicy = recorder(async () => 0);
+    // Healthy store + empty registry ⇒ the real probe returns a definitive
+    // miss (exists:false, storeAvailable:true). The registry still carries the
+    // onChainId so the rescue COULD resolve it — the gate, not a missing id, is
+    // what keeps it out.
+    const harness = agentHarness(
+      healthyStore,
+      new Map([[CG, { subscribed: false, synced: false, onChainId: '7' }]]),
+      { isContextGraphActiveOnChain: isActive, getContextGraphAccessPolicy: getAccessPolicy },
+    );
+    // A provider whose exact probe uses the HEALTHY harness (definitive miss)
+    // but whose list leg throws a transient failure — the exact scenario the
+    // gate protects: successful probe, failed list.
+    const provider = {
+      listContextGraphs: async () => {
+        throw new Error('list projection transiently unavailable');
+      },
+      probeContextGraphWritePreflight: harness.probeContextGraphWritePreflight,
+      validateWriteTargetDuringStoreOutage: harness.validateWriteTargetDuringStoreOutage,
+      contextGraphExists: (id: string) => resolveProto.contextGraphExists.call(harness, id),
+    };
+    const { res, out } = captureRes();
+    const resolved = await resolveRequiredWriteContextGraphId(provider, CG, res, UNSCOPED);
+    // Fail-closed: legacy 503, NOT an accept.
+    expect(resolved).toBeNull();
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    // A healthy probe means no "exact preflight failed:" prefix — only the list
+    // leg failed, so the message is the bare list error.
+    expect(out.body.error).toBe(
+      'Failed to validate contextGraphId against known context graphs: list projection transiently unavailable',
+    );
+    // THE gate assertion: the chain rescue read was never consulted, because a
+    // definitive healthy miss is authoritative and blocks the rescue entirely.
+    expect(isActive.calls).toEqual([]);
+    expect(getAccessPolicy.calls).toEqual([]);
+  });
+
+  it('(TIMEOUT) a chain rescue that never resolves falls back to the legacy 503 via the bounded timeout', async () => {
+    // Bug-bot 🟡: the 5s Promise.race timeout guards a hung RPC stack. Drive it
+    // with a validateWriteTargetDuringStoreOutage that NEVER settles; an
+    // injected tiny timeout (production default stays 5s) makes the test finish
+    // instantly. The resolver must fall back to the fail-closed 503, exactly as
+    // if the chain read had resolved false.
+    const harness = agentHarness(
+      closedStore,
+      new Map([[CG, { subscribed: true, synced: true, onChainId: '7' }]]),
+      {
+        // Never resolves — simulates an RPC stack hung on connect.
+        isContextGraphActiveOnChain: () => new Promise<boolean>(() => {}),
+        getContextGraphAccessPolicy: async () => 0,
+      },
+    );
+    const { provider } = providerFor(harness);
+    const { res, out } = captureRes();
+    const started = Date.now();
+    const resolved = await resolveRequiredWriteContextGraphId(provider, CG, res, {
+      ...UNSCOPED,
+      // Test-only seam: shrink the rescue timeout so we don't wait 5 real
+      // seconds. Production callers never pass this.
+      chainRescueTimeoutMs: 25,
+    });
+    // Sanity: the injected bound (25ms) is well under the production default,
+    // proving the seam — not real wall-clock luck — ended the race.
+    expect(Date.now() - started).toBeLessThan(WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS);
+    expect(resolved).toBeNull();
+    expect(out.status).toBe(503);
+    expect(out.body).toMatchObject({ code: 'CONTEXT_GRAPH_VALIDATION_UNAVAILABLE' });
+    expect(out.body.error).toMatch(LEGACY_503_ERROR);
+  });
 });
 
 describe('resolveRequiredWriteContextGraphId — healthy-store paths unchanged', () => {
@@ -426,8 +518,8 @@ describe('resolveRequiredWriteContextGraphId — healthy-store paths unchanged',
         { id: CG, uri: `did:dkg:context-graph:${CG}`, subscribed: true, synced: true },
       ] as any,
       probeContextGraphWritePreflight: closedHarness.probeContextGraphWritePreflight,
-      contextGraphActivePublicOnChainFromRegistry:
-        closedHarness.contextGraphActivePublicOnChainFromRegistry,
+      validateWriteTargetDuringStoreOutage:
+        closedHarness.validateWriteTargetDuringStoreOutage,
     };
     const { res, out } = captureRes();
     const resolved = await resolveRequiredWriteContextGraphId(provider, CG, res, UNSCOPED);

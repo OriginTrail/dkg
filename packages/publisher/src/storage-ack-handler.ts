@@ -438,6 +438,167 @@ export class StorageACKHandler {
   }
 
   /**
+   * Centralized "run a store/signer op, or return the transient decline".
+   *
+   * Why this exists (otReviewAgent #1408, storage-ack-handler.ts:649): the
+   * testnet dead-air fix scattered the SAME catch-and-decline pattern across
+   * six store sites and three signer sites in this 1.5k-line handler. Every
+   * copy has to (a) reply with `CORE_TEMPORARILY_UNAVAILABLE`, (b) keep the
+   * raw error off the wire while feeding it to the local hook, and (c) NOT
+   * swallow the `assertSafeIri` malformed-request throws (those must reset
+   * the stream per the decline-vocabulary contract). One inconsistent copy on
+   * a future ACK path silently reintroduces the dead-air bug OR demotes a
+   * malformed-request into a retryable decline. The helpers below are the
+   * ONLY place that pattern lives now; the publish + update handlers call
+   * them and get a discriminated result they must narrow before proceeding.
+   *
+   * CONTRACT — what stays OUTSIDE these wrappers:
+   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI is a
+   *     malformed request (stream reset), NOT a store outage; callers run it
+   *     before invoking the persist helpers so an IRI-injection attempt still
+   *     throws and resets rather than being demoted to a transient decline.
+   *   - `parseSimpleNQuads` / merkle / catalog verification. Only the actual
+   *     `store.*` calls (and `loadSWMQuads`, whose internal `store.query`
+   *     is tagged `StoreUnavailableError`) run inside the wrapper.
+   *
+   * On failure the result carries the pre-encoded `declineTemporarilyUnavailable`
+   * bytes (wire msg 'store unavailable', raw cause only to `onDecline`) so the
+   * wire decline code/message split is byte-identical to the inline try/catch
+   * it replaced.
+   */
+  private async runStoreOpOrDecline<T>(
+    cgId: string,
+    op: () => Promise<T>,
+  ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
+    try {
+      return { ok: true, value: await op() };
+    } catch (err) {
+      return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
+    }
+  }
+
+  /**
+   * REPLACE-persist a verified public `_catalog` into `<cg>/_catalog`:
+   * clear each subject then insert the catalog quads under `catalogGraph`.
+   * Used by BOTH the curated publish and curated update paths (identical
+   * store shape). The caller MUST have already run `assertSafeIri(catalogGraph)`
+   * (malformed-request → reset stays outside the store-op wrapper).
+   */
+  private async persistCatalogOrDecline(
+    cgId: string,
+    catalogGraph: string,
+    parsedCatalog: Quad[],
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
+      for (const subject of catalogSubjects) {
+        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+      }
+      await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+    });
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
+   * Persist merkle-verified inline quads to a scoped staging graph before the
+   * ACK is signed (crash-safety durability invariant: an on-chain KC implies
+   * at least one core stored the data, so a failed persist MUST decline rather
+   * than sign anyway). `dropGraph` (idempotent replace) then `insert`.
+   */
+  private async persistStagingOrDecline(
+    cgId: string,
+    stagingGraphUri: string,
+    parsed: Quad[],
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      await this.store.dropGraph(stagingGraphUri);
+      const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
+      await this.store.insert(graphedQuads);
+    });
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
+   * Load SWM quads for the recompute, translating a store outage into the
+   * transient decline. `loadSWMQuads` tags ONLY its internal `store.query`
+   * throws as `StoreUnavailableError`; its `assertSafeIri` guards throw
+   * ordinary errors that this helper re-raises so a malformed-request still
+   * resets the stream (never demoted to a retryable decline).
+   */
+  private async loadSWMOrDecline(
+    cgId: string,
+    graphUri: string,
+    rootEntities: string[],
+  ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
+    try {
+      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities) };
+    } catch (err) {
+      if (err instanceof StoreUnavailableError) {
+        return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Run the signer-registration gate, centralizing the three-way outcome the
+   * publish + update handlers all need:
+   *   - `{ ok: true }`            → signer confirmed (or no hook wired): SIGN.
+   *   - `{ ok: false, decline }`  → a THROWN lookup (degraded RPC) is transient
+   *     → `CORE_TEMPORARILY_UNAVAILABLE`; a `registered === false` verdict is
+   *     permanent → `SIGNER_NOT_REGISTERED`. Both fail closed (never sign).
+   *
+   * The `verdictWireMessage` is the per-path `SIGNER_NOT_REGISTERED` wire text
+   * (publish vs curated-publish vs update differ), passed through verbatim so
+   * the existing wire bytes / test greps stay intact. The lookup-throw wire
+   * message ('signer registration lookup unavailable') is identical across all
+   * paths, so it lives here.
+   */
+  private async checkSignerRegistrationOrDecline(
+    cgId: string,
+    verdictWireMessage: string,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    if (!this.config.isSignerRegistered) return { ok: true };
+    let signerRegistered: boolean;
+    try {
+      signerRegistered = await this.config.isSignerRegistered();
+    } catch (err) {
+      try {
+        await this.config.onSignerRegistrationLookupFailed?.(err);
+      } catch {
+        // Keep ACK availability independent from logging/callback failures.
+      }
+      // Dead-air fix: `isSignerRegistered` is a LIVE chain read on every
+      // inbound ACK — one degraded shared RPC used to make this throw on
+      // EVERY request on EVERY core, and the resulting stream resets dead-
+      // aired the whole network. A thrown LOOKUP is transient, so decline in
+      // band; the definitive `registered === false` verdict below keeps its
+      // SIGNER_NOT_REGISTERED decline. Either way we never sign without a
+      // confirmed registration (fail-closed holds).
+      return {
+        ok: false,
+        decline: this.declineTemporarilyUnavailable(cgId, 'signer registration lookup unavailable', err),
+      };
+    }
+    if (signerRegistered === false) {
+      try {
+        await this.config.onSignerUnregistered?.();
+      } catch {
+        // Keep the signing refusal deterministic even if protocol cleanup fails.
+      }
+      // Decline rather than throw: the operator can rotate / re-register a key
+      // without restarting publishers, and the publisher should deselect this
+      // core for THIS request and move on rather than retry-and-time-out
+      // against a known-rejecting signer.
+      return {
+        ok: false,
+        decline: this.encodeDecline(cgId, STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED, verdictWireMessage),
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
    * Protocol stream handler for `/dkg/10.0.1/storage-ack`.
    * Receives PublishIntent, returns StorageACK.
    *
@@ -642,23 +803,15 @@ export class StorageACKHandler {
       // Root verified — persist the public catalog to `<cg>/_catalog` so this
       // core can serve it (the §7 facet open-serve) and the prover can later
       // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
-      // `assertSafeIri` stays OUTSIDE the try below: an unsafe graph IRI is a
-      // malformed-request condition (stream reset), not a store outage.
+      // `assertSafeIri` stays OUTSIDE the persist helper below: an unsafe graph
+      // IRI is a malformed-request condition (stream reset), not a store outage.
+      // A failing store (worker restarting, 'store is closed') instead returns
+      // the transient decline so the publisher retries once the store recovers
+      // rather than bucketing us as no_response after a stream reset.
       const catalogGraph = contextGraphCatalogUri(cgId);
       assertSafeIri(catalogGraph);
-      try {
-        const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-        for (const subject of catalogSubjects) {
-          await this.store.deleteByPattern({ graph: catalogGraph, subject });
-        }
-        await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
-      } catch (err) {
-        // Dead-air fix: a failing store (worker restarting, 'store is
-        // closed') used to throw out of the handler → stream reset with no
-        // reply. Reply with the transient decline so the publisher retries
-        // once the store recovers instead of bucketing us as no_response.
-        return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
-      }
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -708,32 +861,11 @@ export class StorageACKHandler {
         false,
       );
 
-      if (this.config.isSignerRegistered) {
-        let signerRegistered: boolean | undefined;
-        try {
-          signerRegistered = await this.config.isSignerRegistered();
-        } catch (err) {
-          try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-          // Dead-air fix: a THROWN lookup (degraded RPC) is transient —
-          // decline in band instead of resetting the stream, so the
-          // publisher retries once the RPC recovers. Still refuses to
-          // sign (fail-closed); only the failure surface changed. The
-          // `registered === false` verdict below keeps its own decline.
-          return this.declineTemporarilyUnavailable(
-            cgId,
-            'signer registration lookup unavailable',
-            err,
-          );
-        }
-        if (signerRegistered === false) {
-          try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-            'curated StorageACK signer is not confirmed on-chain as an operational wallet',
-          );
-        }
-      }
+      const curatedSignerGate = await this.checkSignerRegistrationOrDecline(
+        cgId,
+        'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+      );
+      if (!curatedSignerGate.ok) return curatedSignerGate.decline;
 
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
@@ -831,20 +963,14 @@ export class StorageACKHandler {
       // Root verified — persist to a scoped staging graph so the data is
       // durable before we sign the ACK (crash safety: on-chain KC implies
       // at least one core node stored the data). The staging graph is keyed
-      // by merkle root prefix and cleaned up during finalization.
+      // by merkle root prefix and cleaned up during finalization. A store
+      // outage during the apply (closed / restarting worker) returns the
+      // transient decline instead of resetting the stream — the durability
+      // invariant is why we CANNOT sign anyway, so the publisher re-sends
+      // once the store worker is back rather than bucketing us as no_response.
       const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      try {
-        await this.store.dropGraph(stagingGraphUri);
-        const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
-        await this.store.insert(graphedQuads);
-      } catch (err) {
-        // Dead-air fix: the staging apply hitting a closed / restarting
-        // store used to throw → stream reset → publisher saw no_response
-        // after 3 transport retries. The durability invariant above is why
-        // we CANNOT just sign anyway — so decline transiently and let the
-        // publisher re-send once the store worker is back.
-        return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
-      }
+      const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed);
+      if (!persistedStaging.ok) return persistedStaging.decline;
       swmQuads = parsed;
 
       // Schedule cleanup: remove staging graph after 10 minutes.
@@ -863,17 +989,12 @@ export class StorageACKHandler {
       //
       // Dead-air fix: the SWM CONSTRUCT itself failing (store worker down)
       // is the same #541 shape one level deeper — it used to throw out of
-      // the handler and reset the stream. `loadSWMQuads` tags store-op
-      // failures (and ONLY those — its assertSafeIri malformed-request
-      // throws pass through untouched) so we can decline transiently.
-      try {
-        swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
-      } catch (err) {
-        if (err instanceof StoreUnavailableError) {
-          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
-        }
-        throw err;
-      }
+      // the handler and reset the stream. `loadSWMOrDecline` translates a
+      // store-op failure (and ONLY that — assertSafeIri malformed-request
+      // throws still propagate + reset) into the transient decline.
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, intent.rootEntities);
+      if (!loadedSWM.ok) return loadedSWM.decline;
+      swmQuads = loadedSWM.quads;
 
       if (swmQuads.length === 0) {
         return this.encodeDecline(
@@ -1032,47 +1153,11 @@ export class StorageACKHandler {
       BigInt(intent.catalogLeafCount ?? 0),
       false,
     );
-    if (this.config.isSignerRegistered) {
-      let signerRegistered: boolean | undefined;
-      try {
-        signerRegistered = await this.config.isSignerRegistered();
-      } catch (err) {
-        try {
-          await this.config.onSignerRegistrationLookupFailed?.(err);
-        } catch {
-          // Keep ACK availability independent from logging/callback failures.
-        }
-        // Dead-air fix: `isSignerRegistered` is a LIVE chain read on every
-        // inbound ACK — one degraded shared RPC used to make this throw on
-        // EVERY request on EVERY core, and the resulting stream resets
-        // dead-aired the whole network (the testnet 21-attempts-all-
-        // no_response incident). A thrown LOOKUP is transient, so decline
-        // in band; the definitive `registered === false` verdict below
-        // keeps its existing SIGNER_NOT_REGISTERED decline. Either way we
-        // never sign without a confirmed registration (fail-closed holds).
-        return this.declineTemporarilyUnavailable(
-          cgId,
-          'signer registration lookup unavailable',
-          err,
-        );
-      }
-      if (signerRegistered === false) {
-        try {
-          await this.config.onSignerUnregistered?.();
-        } catch {
-          // Keep the signing refusal deterministic even if protocol cleanup fails.
-        }
-        // Decline rather than throw: the operator can rotate / re-register
-        // a key without restarting publishers, and the publisher should
-        // deselect this core for THIS request and move on rather than
-        // retry-and-time-out against a known-rejecting signer.
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-          'StorageACK signer is not confirmed on-chain as an operational wallet',
-        );
-      }
-    }
+    const signerGate = await this.checkSignerRegistrationOrDecline(
+      cgId,
+      'StorageACK signer is not confirmed on-chain as an operational wallet',
+    );
+    if (!signerGate.ok) return signerGate.decline;
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
@@ -1269,23 +1354,14 @@ export class StorageACKHandler {
         }
         // Root verified — REPLACE-persist the updated public catalog to
         // `<cg>/_catalog` so this core serves + later proves the rotated root.
-        // `assertSafeIri` stays OUTSIDE the try: an unsafe IRI is malformed-
-        // request territory (stream reset), not a store outage.
+        // `assertSafeIri` stays OUTSIDE the persist helper: an unsafe IRI is
+        // malformed-request territory (stream reset), not a store outage. A
+        // store outage during the persist returns the same transient decline
+        // as the publish handler's catalog persist (shared helper).
         const catalogGraph = contextGraphCatalogUri(cgId);
         assertSafeIri(catalogGraph);
-        try {
-          const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-          for (const subject of catalogSubjects) {
-            await this.store.deleteByPattern({ graph: catalogGraph, subject });
-          }
-          await this.store.insert(
-            parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
-          );
-        } catch (err) {
-          // Dead-air fix — same transient store-outage decline as the
-          // publish handler's catalog persist; see declineTemporarilyUnavailable.
-          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
-        }
+        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog);
+        if (!persistedCatalog.ok) return persistedCatalog.decline;
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
@@ -1320,19 +1396,14 @@ export class StorageACKHandler {
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory
       // remap / SWM-resolution path). Reuse the publish branch's SWM
-      // CONSTRUCT + recompute + typed-decline shape — including the
-      // dead-air fix: a store-op failure inside loadSWMQuads becomes a
-      // transient decline instead of a stream reset (malformed-request
-      // assertSafeIri throws still pass through and reset).
-      let swmQuads: Quad[];
-      try {
-        swmQuads = await this.loadSWMQuads(swmGraphUri, []);
-      } catch (err) {
-        if (err instanceof StoreUnavailableError) {
-          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
-        }
-        throw err;
-      }
+      // CONSTRUCT + recompute + typed-decline shape via the shared
+      // `loadSWMOrDecline` helper — including the dead-air fix: a store-op
+      // failure inside loadSWMQuads becomes a transient decline instead of a
+      // stream reset (malformed-request assertSafeIri throws still propagate
+      // + reset).
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, []);
+      if (!loadedSWM.ok) return loadedSWM.decline;
+      const swmQuads = loadedSWM.quads;
       if (swmQuads.length === 0) {
         return this.encodeDecline(
           cgId,
@@ -1444,30 +1515,11 @@ export class StorageACKHandler {
       BigInt(intent.newCatalogLeafCount ?? 0),
     );
 
-    if (this.config.isSignerRegistered) {
-      let signerRegistered: boolean | undefined;
-      try {
-        signerRegistered = await this.config.isSignerRegistered();
-      } catch (err) {
-        try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-        // Dead-air fix: thrown lookup (degraded RPC) → transient in-band
-        // decline instead of a stream reset; still never signs unconfirmed
-        // (fail-closed). Mirrors the publish handler's lookup branch.
-        return this.declineTemporarilyUnavailable(
-          cgId,
-          'signer registration lookup unavailable',
-          err,
-        );
-      }
-      if (signerRegistered === false) {
-        try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-          'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
-        );
-      }
-    }
+    const updateSignerGate = await this.checkSignerRegistrationOrDecline(
+      cgId,
+      'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+    );
+    if (!updateSignerGate.ok) return updateSignerGate.decline;
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),

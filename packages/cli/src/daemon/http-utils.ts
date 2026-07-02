@@ -719,6 +719,11 @@ function exactProbeIsLocallyWritable(
   probe: ContextGraphWritePreflightProbe,
   requireLocalWritable: boolean,
 ): boolean {
+  // Typed boundary: never trust store-derived facts when the store was down.
+  // (`exists !== true` below already blocks a bare `undefined`, but gating on
+  // the required discriminant makes the "only-when-available" contract
+  // explicit and future-proofs the predicate against new fact reads.)
+  if (!probe.storeAvailable) return false;
   // Store-derived probe facts are tri-state (`undefined` = the store read
   // failed); only an explicit `true` counts as positive evidence here.
   if (probe.exists !== true) return false;
@@ -742,7 +747,11 @@ function exactProbeIsAuthoritativeBearerDeny(
   probe: ContextGraphWritePreflightProbe,
   callerAgentAddress: string | null,
 ): boolean {
+  // An authoritative deny requires trustworthy store-derived facts
+  // (declaration + private policy + caller-not-authorized). With the store
+  // down these are UNKNOWN, so refuse to synthesize a deny from them.
   return (
+    probe.storeAvailable &&
     !!callerAgentAddress &&
     probe.exists === true &&
     probe.declarationFound === true &&
@@ -752,7 +761,17 @@ function exactProbeIsAuthoritativeBearerDeny(
 }
 
 function exactProbeIsStaleSubscription(probe: ContextGraphWritePreflightProbe): boolean {
-  return hasAnySyncedSubscription(probe) && !probe.exists && !probe.hasLocalContent;
+  // `!probe.exists` / `!probe.hasLocalContent` are truthy for UNKNOWN
+  // (`undefined`) facts too, so this must only run against an AVAILABLE
+  // store — otherwise a store outage would masquerade as a stale
+  // subscription and reject a live write. The required `storeAvailable`
+  // discriminant enforces that at the boundary.
+  return (
+    probe.storeAvailable &&
+    hasAnySyncedSubscription(probe) &&
+    !probe.exists &&
+    !probe.hasLocalContent
+  );
 }
 
 function rejectUnknownContextGraph(
@@ -773,8 +792,11 @@ function rejectUnknownContextGraph(
 const writePreflightRescueLog = new Logger('daemon-http');
 
 /** Bound for the last-resort on-chain rescue eth_call, so an RPC stack that
- *  hangs on connect cannot stall a write route that is already degraded. */
-const WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS = 5_000;
+ *  hangs on connect cannot stall a write route that is already degraded.
+ *  Exported so tests can drive the timeout branch without waiting the full
+ *  production window; production callers never pass an override so the
+ *  default behaviour is unchanged. */
+export const WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS = 5_000;
 
 /**
  * Track B (write-preflight resilience) — last-resort write-target acceptance
@@ -782,43 +804,46 @@ const WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS = 5_000;
  * listContextGraphs), i.e. the local store is unavailable and the daemon would
  * otherwise 503 every write until it recovers.
  *
- * Accept ONLY on a single piece of store-free evidence: the agent proves — via
- * the in-memory registry onChainId + a bounded eth_call pair — that the
- * candidate is an ACTIVE, PUBLIC context graph on-chain
- * (`contextGraphActivePublicOnChainFromRegistry`: `isContextGraphActiveOnChain`
- * AND `getContextGraphAccessPolicy === 0`).
+ * The store-free accept DECISION lives behind the agent/preflight boundary:
+ * this helper delegates to the agent's high-level
+ * `validateWriteTargetDuringStoreOutage`, which OWNS the on-chain access-policy
+ * semantics (registry onChainId + `isContextGraphActiveOnChain` + public
+ * `getContextGraphAccessPolicy`). The daemon only bounds that call with a
+ * timeout and emits the WARN log — it never assembles chain-policy meaning
+ * itself.
  *
- * Why not the in-memory subscription alone: an active subscription proves the
- * node HOSTS/tracks the CG, but carries NO access-policy and NO per-caller
- * authorization. The healthy write-preflight denies an authenticated-but-
- * unauthorized caller of a PRIVATE CG (`exactProbeIsAuthoritativeBearerDeny`,
- * accessPolicy `private`); that verdict comes from the local `_meta` allowlist,
- * which is exactly what's unavailable while the store is down. Accepting a
- * subscribed PRIVATE CG here would silently convert that DENY into an accept
- * for any authenticated caller. So we require positive proof the CG is PUBLIC —
- * where the preflight applies no per-caller deny — and refuse everything else.
+ * Why the agent requires positive PUBLIC proof (not just an in-memory
+ * subscription): an active subscription proves the node HOSTS/tracks the CG,
+ * but carries NO access-policy and NO per-caller authorization. The healthy
+ * write-preflight denies an authenticated-but-unauthorized caller of a PRIVATE
+ * CG (`exactProbeIsAuthoritativeBearerDeny`, accessPolicy `private`); that
+ * verdict comes from the local `_meta` allowlist, which is exactly what's
+ * unavailable while the store is down. Accepting a subscribed PRIVATE CG here
+ * would silently convert that DENY into an accept for any authenticated caller.
  *
  * Anything short of that proof — chain says not-active/non-public, throws, times
  * out, or the adapter lacks a read — keeps today's fail-closed 503 verbatim.
- * This never converts an existing DENY into an accept: it runs only on the
- * both-legs-THREW branch, only ever admits an id the registry ALREADY tracks
- * (never a raw unknown candidate → shadow-CG fail-closed holds), and only when
- * that id is provably public (no per-caller preflight deny exists to convert).
+ * This never converts an existing DENY into an accept: it runs only when the
+ * exact probe was UNAVAILABLE (threw or degraded) AND the list leg threw, only
+ * ever admits an id the registry ALREADY tracks (never a raw unknown candidate
+ * → shadow-CG fail-closed holds), and only when that id is provably public (no
+ * per-caller preflight deny exists to convert).
  */
 async function rescueWriteTargetWithoutStore(
   agent: {
-    contextGraphActivePublicOnChainFromRegistry?: (contextGraphId: string) => Promise<boolean>;
+    validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
   },
   candidateId: string,
   unavailableMessage: string,
+  timeoutMs: number = WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
 ): Promise<boolean> {
-  if (typeof agent.contextGraphActivePublicOnChainFromRegistry !== 'function') return false;
+  if (typeof agent.validateWriteTargetDuringStoreOutage !== 'function') return false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const activePublic = await Promise.race([
-      agent.contextGraphActivePublicOnChainFromRegistry(candidateId),
+      agent.validateWriteTargetDuringStoreOutage(candidateId),
       new Promise<false>((resolveTimeout) => {
-        timer = setTimeout(() => resolveTimeout(false), WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS);
+        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
         // Allow the process to exit even if the chain promise never settles.
         timer.unref?.();
       }),
@@ -855,7 +880,13 @@ export async function resolveRequiredWriteContextGraphId(
       contextGraphId: string,
       opts?: { callerAgentAddress?: string | null },
     ) => Promise<ContextGraphWritePreflightProbe>;
-    contextGraphActivePublicOnChainFromRegistry?: (contextGraphId: string) => Promise<boolean>;
+    /**
+     * High-level store-outage rescue decision (owns the on-chain
+     * active+public policy semantics). The daemon calls ONLY this method for
+     * the both-legs-failed rescue — it never assembles chain-policy meaning
+     * locally.
+     */
+    validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -863,6 +894,12 @@ export async function resolveRequiredWriteContextGraphId(
     callerAgentAddress?: string | null;
     requireLocalWritable?: boolean;
     allowLocalExactFallback?: boolean;
+    /**
+     * Test-only seam: override the store-outage rescue eth_call timeout so the
+     * timeout branch can be exercised without waiting the full production
+     * window. Production callers never pass this, so the default is unchanged.
+     */
+    chainRescueTimeoutMs?: number;
   } = {},
 ): Promise<string | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -884,6 +921,13 @@ export async function resolveRequiredWriteContextGraphId(
   const isBareCandidateId = !candidateId.includes("/");
   let deferredExactProbeReject = false;
   let exactProbeErrorMessage: string | null = null;
+  // Track B (rescue gating): the store-free on-chain rescue may run ONLY when
+  // the exact probe could NOT authoritatively answer local existence — i.e. it
+  // THREW or degraded (`storeUnavailable`). A probe that SUCCEEDED with a
+  // definitive local miss is authoritative: if only the list leg then throws,
+  // we must keep the fail-closed 503 and NEVER let the chain rescue override
+  // that definitive miss. This flag is the gate.
+  let exactProbeUnavailable = false;
   if (agent.probeContextGraphWritePreflight) {
     try {
       const probe = await agent.probeContextGraphWritePreflight(candidateId, {
@@ -898,6 +942,7 @@ export async function resolveRequiredWriteContextGraphId(
         // (on-chain active+public proof) from the id alone, so the probe object
         // itself is not needed past this point.
         exactProbeErrorMessage = probe.storeErrorMessage ?? 'local store unavailable';
+        exactProbeUnavailable = true;
       }
       if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
         return candidateId;
@@ -928,6 +973,11 @@ export async function resolveRequiredWriteContextGraphId(
       }
     } catch (err) {
       exactProbeErrorMessage = err instanceof Error ? err.message : String(err);
+      // The exact probe could not answer local existence at all — the store
+      // was down (or the read otherwise broke). This is the ONLY case (with a
+      // degraded probe) where the both-legs-failed rescue may run: there is no
+      // authoritative local-miss verdict to override.
+      exactProbeUnavailable = true;
       // Fall back to the composite list path. If that is also unavailable,
       // the caller receives the bounded validation-unavailable response below.
     }
@@ -943,11 +993,25 @@ export async function resolveRequiredWriteContextGraphId(
     const message = exactProbeErrorMessage
       ? `exact preflight failed: ${exactProbeErrorMessage}; list validation failed: ${listMessage}`
       : listMessage;
-    // BOTH legs failed — the store is unavailable (or both reads broke some
-    // other way). Before surfacing the 503, try the store-free rescue: accept
-    // only on positive on-chain proof the id the daemon already tracks is an
-    // active PUBLIC context graph. Everything else keeps the legacy 503 verbatim.
-    if (await rescueWriteTargetWithoutStore(agent, candidateId, message)) {
+    // BOTH legs failed. Before surfacing the 503, try the store-free rescue —
+    // but ONLY when the exact probe itself was UNAVAILABLE (it threw or
+    // degraded to `storeUnavailable`). If the exact probe SUCCEEDED with a
+    // definitive local miss and only the list leg threw, that probe is
+    // authoritative for local existence: the on-chain rescue must NOT override
+    // it. Accepting there would let an id that the store definitively lacks
+    // slip through on chain state alone. So gate on `exactProbeUnavailable`.
+    // When it runs, the rescue accepts only on positive on-chain proof the id
+    // the daemon already tracks is an active PUBLIC context graph; everything
+    // else keeps the legacy 503 verbatim.
+    if (
+      exactProbeUnavailable &&
+      (await rescueWriteTargetWithoutStore(
+        agent,
+        candidateId,
+        message,
+        opts.chainRescueTimeoutMs,
+      ))
+    ) {
       return candidateId;
     }
     return contextGraphValidationUnavailable(res, message);

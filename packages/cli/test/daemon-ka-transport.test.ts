@@ -46,7 +46,11 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
 
 // A write-preflight probe that fast-accepts a public, locally-writable CG, so
 // resolveRequiredWriteContextGraphId returns the id without listContextGraphs.
+// `storeAvailable: true` is the required store-availability discriminant — a
+// healthy store answered every read, so its facts below are definitive and the
+// fast-accept predicate trusts them.
 const ACCEPT_PROBE = {
+  storeAvailable: true,
   exists: true,
   hasLocalContent: true,
   declarationFound: true,

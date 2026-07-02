@@ -108,6 +108,34 @@ export interface OxigraphWorkerTimeoutError extends Error {
   timeoutMs: number;
 }
 
+/**
+ * Explicit worker POLICY state, replacing the old cluster of interdependent
+ * booleans/promises that all had to agree. `respawnGaveUp` folds into the
+ * 'gave_up' state and the new terminal 'in_memory_lost' state; `workerExited`
+ * stays as a separate lower-level FACT (it is orthogonal — see the field
+ * comment), and `closePromise`/`respawnPromise`/`consecutiveRespawnFailures`
+ * still carry their own orthogonal data. A single discriminated field makes the
+ * invalid states that used to be representable — e.g. "gave up" AND "live", or
+ * an in-memory store silently marked healthy after a crash — impossible to
+ * construct, and it gives every read a single, obvious source of truth. The
+ * state graph is:
+ *
+ *   live ──unexpected exit, persisted──▶ respawning ──spawned──▶ live
+ *   live ──unexpected exit, in-memory──▶ in_memory_lost   (terminal — finding 1)
+ *   respawning ──crash-loop bound hit──▶ gave_up          (terminal)
+ *   live | respawning ──close()────────▶ closing ──drained──▶ closed (terminal)
+ *
+ * `respawning` is the only state in which the current worker thread is dead but
+ * a replacement is on the way, so parked ops wait it out (see callAfterRespawn).
+ * Every other non-`live` state means "no usable worker" and fails ops fast.
+ */
+type WorkerLifecycle = 'live' | 'respawning' | 'closing' | 'closed' | 'gave_up' | 'in_memory_lost';
+
+/** Terminal states: the store will never serve another op and never respawns. */
+const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
+  'closed', 'gave_up', 'in_memory_lost',
+]);
+
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
@@ -121,7 +149,29 @@ export class OxigraphWorkerStore implements TripleStore {
   private readonly workerPath: string;
   /** Persistence file handed to every spawned worker (undefined = in-memory). */
   private readonly persistPath: string | undefined;
-  /** Set once the CURRENT worker thread has exited (graceful close, crash, or kill). */
+  /**
+   * Single source of truth for the store's high-level POLICY state (see
+   * WorkerLifecycle). It subsumes the former `respawnGaveUp` boolean (⇔ state
+   * === 'gave_up') and adds the terminal 'in_memory_lost' state that finding-1
+   * needs, so the give-up/close/data-lost verdicts can never disagree the way
+   * an ad-hoc cluster of interdependent booleans could. Set to 'live' the
+   * moment spawnWorker() arms a fresh thread; only ever moves along the
+   * documented transitions (enforced by setLifecycle's terminal guard).
+   *
+   * `workerExited` below stays as a separate, lower-level FACT ("the current
+   * thread has exited") because it is genuinely orthogonal to policy: during a
+   * graceful close() the state is 'closing' while the thread is still alive and
+   * mid-flush, then the thread exits — same policy state, different fact. The
+   * old soup was the *interdependence* of workerExited + respawnGaveUp +
+   * respawnPromise + closePromise all having to agree; folding the policy half
+   * into one discriminated field removes that.
+   *
+   * The initializer is a pre-construction placeholder only: the constructor
+   * always calls spawnWorker() (which assigns 'live' directly, bypassing the
+   * setLifecycle terminal guard), so no op ever observes this 'closed' value.
+   */
+  private lifecycle: WorkerLifecycle = 'closed';
+  /** Set once the CURRENT worker thread has exited (graceful close, crash, or kill); cleared by spawnWorker(). */
   private workerExited = false;
   /** Memoized close so repeat/concurrent close() calls share one teardown. */
   private closePromise: Promise<void> | null = null;
@@ -129,7 +179,8 @@ export class OxigraphWorkerStore implements TripleStore {
    * In-flight replacement of a crashed worker. While set, NEW ops park on it
    * (see callWithTimeout) instead of failing, so a request that races the
    * respawn sees a slightly slower success rather than a spurious error.
-   * Null whenever a live worker is armed.
+   * Null whenever a live worker is armed. Tracked separately from `lifecycle`
+   * because ops need the actual promise to await, not just the 'respawning' tag.
    */
   private respawnPromise: Promise<void> | null = null;
   /**
@@ -138,12 +189,6 @@ export class OxigraphWorkerStore implements TripleStore {
    * tier and the MAX_CONSECUTIVE_RESPAWNS give-up bound.
    */
   private consecutiveRespawnFailures = 0;
-  /**
-   * Latched once respawn gives up on a crash loop: from then on the store
-   * behaves exactly like a closed store (today's fail-fast), except the error
-   * carries operator guidance instead of a plain "closed".
-   */
-  private respawnGaveUp = false;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
@@ -189,6 +234,32 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   /**
+   * The single writer for `this.lifecycle`. A typed setter (rather than raw
+   * field assignment scattered across the class) gives us one place to assert
+   * the invariant that matters: a TERMINAL state is a dead end. Without this
+   * guard a latent bug — a stray respawn resurrecting a `gave_up` store, or a
+   * crash handler firing after `close()` — could silently re-open a store the
+   * operator was told is gone, which is exactly the class of "healthy-looking
+   * but wrong" state finding 1 is about. If we ever try to leave a terminal
+   * state we throw loudly instead.
+   */
+  private setLifecycle(next: WorkerLifecycle): void {
+    if (this.lifecycle === next) return;
+    if (TERMINAL.has(this.lifecycle)) {
+      throw new Error(
+        `oxigraph-worker: illegal lifecycle transition ${this.lifecycle} → ${next} ` +
+          '(terminal states are permanent) — this is a bug in the respawn supervisor.',
+      );
+    }
+    this.lifecycle = next;
+  }
+
+  /** True once an operator-initiated close() has begun (closing or closed). */
+  private get isClosing(): boolean {
+    return this.lifecycle === 'closing' || this.lifecycle === 'closed';
+  }
+
+  /**
    * Create the worker thread and arm its lifecycle handlers. Shared by the
    * constructor and by respawn() so a replacement worker is wired IDENTICALLY
    * to the original — same impl path, same workerData, same handlers — and the
@@ -204,6 +275,15 @@ export class OxigraphWorkerStore implements TripleStore {
     });
     this.worker = worker;
     this.workerExited = false;
+    // Arming a fresh thread IS the transition into 'live'. This is the one
+    // writer that may enter 'live' from the initial placeholder or from
+    // 'respawning', so it assigns the field directly rather than going through
+    // setLifecycle() (whose terminal guard would reject the constructor's very
+    // first spawn out of the placeholder value). close() and the respawn
+    // supervisor are the only other writers and they never race this: a spawn
+    // only happens either in the constructor or from within respawn(), which
+    // bails the moment a close() is seen.
+    this.lifecycle = 'live';
     worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
@@ -230,30 +310,52 @@ export class OxigraphWorkerStore implements TripleStore {
     // unbounded `close()` safe: if a second close (or any op) is still queued
     // when terminate() kills the thread, it rejects here rather than hanging.
     //
-    // Two very different exits land here:
-    //   • intentional — close() ran (closePromise is set). Stay closed.
-    //   • unexpected — the thread died on its own. ERR_WORKER_OUT_OF_MEMORY,
-    //     for example, kills ONLY the worker thread, not the process, so the
-    //     daemon would otherwise keep serving with a permanently dead store.
-    //     The store is disk-persisted, so a fresh worker on the same path
-    //     reopens the exact committed state — respawn instead of latching.
+    // Three very different exits land here (branch on lifecycle + persistPath):
+    //   • intentional — close() ran (state is 'closing'). Stay closed; close()
+    //     owns the final transition to 'closed'.
+    //   • unexpected, disk-persisted — the thread died on its own.
+    //     ERR_WORKER_OUT_OF_MEMORY, for example, kills ONLY the worker thread,
+    //     not the process, so the daemon would otherwise keep serving with a
+    //     permanently dead store. The committed state is on disk, so a fresh
+    //     worker on the same path reopens it — go 'respawning' and recover.
+    //   • unexpected, IN-MEMORY — there is no disk to reload from, so a fresh
+    //     worker would come up EMPTY and look perfectly healthy while every
+    //     row written before the crash is silently gone (confirmed live: data
+    //     vanished). That is unrecoverable, so we FAIL CLOSED into the terminal
+    //     'in_memory_lost' state instead of respawning an empty store — every
+    //     later op then rejects with a clear data-loss error (see postToWorker)
+    //     rather than returning wrong-but-plausible results.
     worker.on('exit', (code) => {
       if (this.worker !== worker) return;
       this.workerExited = true;
-      const intentional = this.closePromise !== null;
+      const intentional = this.isClosing;
+      // Distinguish the two unexpected exits up front so the log and the
+      // lifecycle transition below agree on what just happened.
+      const inMemoryLost = !intentional && this.persistPath === undefined;
       if (intentional) {
         console.info(`[oxigraph-worker] worker exited (code ${code}) — initiated by close()`);
+      } else if (inMemoryLost) {
+        console.error(
+          `[oxigraph-worker] worker exited UNEXPECTEDLY (code ${code}) — nobody called close(). ` +
+            'FATAL: this store is IN-MEMORY (no persistPath), so its entire contents were lost with the ' +
+            'worker thread and CANNOT be recovered. Failing the store closed instead of silently continuing ' +
+            'with an empty store — every store-backed request will now fail fast. Use a disk-persisted store ' +
+            '(store.path) if the workload must survive a worker crash.',
+        );
       } else {
         console.error(
           `[oxigraph-worker] worker exited UNEXPECTEDLY (code ${code}) — nobody called close(). ` +
-            (this.persistPath
-              ? 'The store is disk-persisted; respawning a fresh worker on the same path.'
-              : 'WARNING: this store is IN-MEMORY (no persistPath), so its contents are lost; respawning an EMPTY store.'),
+            'The store is disk-persisted; respawning a fresh worker on the same path.',
         );
       }
       if (this.pending.size > 0) {
         const err = intentional
           ? new Error('oxigraph-worker: worker exited before the operation completed (store closed)')
+          : inMemoryLost
+          ? new Error(
+              `oxigraph-worker: the IN-MEMORY worker exited unexpectedly (code ${code}) before the operation ` +
+                'completed and its data was lost — an in-memory store cannot be recovered from a worker crash.',
+            )
           : new Error(
               `oxigraph-worker restarted — retry: the worker exited unexpectedly (code ${code}) before the ` +
                 'operation completed, so its outcome is unknown; a replacement worker is being spawned.',
@@ -261,13 +363,24 @@ export class OxigraphWorkerStore implements TripleStore {
         for (const [, p] of this.pending) p.reject(err);
         this.pending.clear();
       }
-      if (!intentional) this.scheduleRespawn();
+      // Route the state transition. close() already moved us to 'closing' and
+      // owns the final hop to 'closed', so the intentional case touches nothing.
+      if (inMemoryLost) {
+        this.setLifecycle('in_memory_lost');
+      } else if (!intentional) {
+        this.scheduleRespawn();
+      }
     });
   }
 
   /** Arm (at most one) background respawn; the policy lives in respawn(). */
   private scheduleRespawn(): void {
-    if (this.respawnPromise || this.respawnGaveUp) return;
+    // Never resurrect a store that has already given up, been closed, or lost
+    // its in-memory data, and never stack a second supervisor on an in-flight
+    // one. This is only ever reached from the exit handler's disk-persisted
+    // unexpected-exit branch, so we're normally transitioning out of 'live'.
+    if (this.respawnPromise || TERMINAL.has(this.lifecycle)) return;
+    this.setLifecycle('respawning');
     // respawn() never rejects (every failure path is caught and looped or
     // latched), so this promise can't become an unhandled rejection while no
     // op happens to be parked on it.
@@ -287,10 +400,11 @@ export class OxigraphWorkerStore implements TripleStore {
   private async respawn(): Promise<void> {
     while (true) {
       // close() raced the respawn — honour it. An operator-initiated close
-      // must never be resurrected by the supervisor.
-      if (this.closePromise) return;
+      // must never be resurrected by the supervisor. (close() flips lifecycle
+      // to 'closing' atomically before awaiting, so isClosing is the signal.)
+      if (this.isClosing) return;
       if (this.consecutiveRespawnFailures >= MAX_CONSECUTIVE_RESPAWNS) {
-        this.respawnGaveUp = true;
+        this.setLifecycle('gave_up');
         console.error(
           `[oxigraph-worker] FATAL: the worker died ${MAX_CONSECUTIVE_RESPAWNS} times in a row without ` +
             'serving a single successful operation — giving up on respawn and latching the store closed. ' +
@@ -309,7 +423,7 @@ export class OxigraphWorkerStore implements TripleStore {
         );
         await sleep(delayMs);
         // Re-check: close() may have arrived during the backoff sleep.
-        if (this.closePromise) return;
+        if (this.isClosing) return;
       }
       try {
         this.spawnWorker();
@@ -382,13 +496,27 @@ export class OxigraphWorkerStore implements TripleStore {
   ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      // The worker is gone (closed, or crashed with respawn given up) — a
-      // posted message would never be answered, so fail fast instead of
-      // registering a pending entry that can only ever hang.
+      // The worker is gone (closed, crashed with respawn given up, or an
+      // in-memory store whose data was lost) — a posted message would never be
+      // answered, so fail fast instead of registering a pending entry that can
+      // only ever hang. The lifecycle picks the RIGHT diagnostic:
+      //   • in_memory_lost — the data is unrecoverable; say so plainly instead
+      //     of pretending the store merely "closed" (finding 1: never let an
+      //     in-memory crash look like a clean close or an empty-but-healthy store).
+      //   • gave_up — closed + the crash-loop guidance.
+      //   • otherwise — a plain operator close.
       if (this.workerExited) {
+        if (this.lifecycle === 'in_memory_lost') {
+          reject(new Error(
+            `oxigraph-worker: cannot run "${method}" — the IN-MEMORY store's worker crashed and its data was ` +
+              'lost. An in-memory store cannot be recovered from a worker crash; every request now fails ' +
+              'fast. Use a disk-persisted store (store.path) or restart the node to start from empty.',
+          ));
+          return;
+        }
         reject(new Error(
           `oxigraph-worker: cannot run "${method}" — the store is closed.` +
-            (this.respawnGaveUp
+            (this.lifecycle === 'gave_up'
               ? ' (The worker crashed repeatedly and automatic respawn gave up — restart the node and ' +
                 'investigate the [oxigraph-worker] crash logs.)'
               : ''),
@@ -483,15 +611,30 @@ export class OxigraphWorkerStore implements TripleStore {
     // we issue exactly one close RPC. (A second unbounded close RPC would be
     // orphaned when terminate() kills the worker after the first resolves, and
     // — without the exit handler — would hang forever.)
-    if (!this.closePromise) this.closePromise = this.doClose();
+    //
+    // Flip the lifecycle to 'closing' FIRST (before awaiting anything), unless
+    // the store already reached a terminal state on its own (gave_up /
+    // in_memory_lost, or an even earlier close). Doing it synchronously here is
+    // what lets an in-flight respawn see the close and bail (respawn() checks
+    // isClosing) and what makes the worker's 'exit' handler treat this exit as
+    // intentional. A store that already latched terminal is simply reaped below
+    // — its state is permanent, so we must NOT try to move it to 'closing'.
+    if (!this.closePromise) {
+      if (!TERMINAL.has(this.lifecycle)) this.setLifecycle('closing');
+      this.closePromise = this.doClose();
+    }
     return this.closePromise;
   }
 
   private async doClose(): Promise<void> {
-    // Worker already gone (crash/kill) — there's nothing to flush; just make
-    // sure the thread is reaped. Keeps close() idempotent and non-throwing.
+    // Worker already gone (crash/kill, respawn give-up, or in-memory loss) —
+    // there's nothing to flush; just make sure the thread is reaped. Keeps
+    // close() idempotent and non-throwing. Only settle into the terminal
+    // 'closed' state when we're not already in a *different* terminal state
+    // (gave_up / in_memory_lost stay as-is so their diagnostics survive).
     if (this.workerExited) {
       try { await this.worker.terminate(); } catch { /* already terminated */ }
+      if (!TERMINAL.has(this.lifecycle)) this.setLifecycle('closed');
       return;
     }
     // `close` runs the worker's FINAL synchronous flush (insert() only schedules
@@ -505,6 +648,10 @@ export class OxigraphWorkerStore implements TripleStore {
       await this.callWithTimeout<void>(0, undefined, 'close');
     } finally {
       await this.worker.terminate();
+      // The 'exit' handler above left us in 'closing' (intentional exit). Land
+      // the terminal transition here so a post-close op fails fast (workerExited
+      // is now set, and the guard reads 'closed' for the plain message).
+      if (!TERMINAL.has(this.lifecycle)) this.setLifecycle('closed');
     }
   }
 }

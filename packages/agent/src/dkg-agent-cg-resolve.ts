@@ -774,6 +774,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
     const inMemorySubscription = this.subscribedContextGraphs.get(contextGraphId);
     return {
+      // Required typed boundary: `storeAvailable` is the inverse of
+      // `storeUnavailable`, emitted unconditionally so consumers cannot read
+      // any store-derived fact below without first establishing the store was
+      // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
+      // for the 503-diagnostics path (unchanged wire behaviour).
+      storeAvailable: !storeUnavailable,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription
@@ -846,6 +852,34 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // Sequential + short-circuit: don't pay the policy read if it isn't active.
     if ((await isActive.call(this.chain, numericId)) !== true) return false;
     return (await getAccessPolicy.call(this.chain, numericId)) === 0;
+  }
+
+  /**
+   * Track B (write-preflight resilience) — HIGH-LEVEL rescue decision the
+   * daemon calls when BOTH write-preflight legs failed (store down). This is
+   * the one method the HTTP utility layer invokes: it OWNS the chain-policy
+   * semantics (registry onChainId → `isContextGraphActiveOnChain` → public
+   * `getContextGraphAccessPolicy`) so the daemon never has to assemble on-chain
+   * access-policy meaning locally. Returns `true` ONLY on positive proof the
+   * candidate is an ACTIVE, PUBLIC context graph the registry ALREADY tracks;
+   * everything else — no registry entry, not-active, non-public, missing
+   * adapter — resolves `false` and the daemon keeps its fail-closed 503.
+   *
+   * Why PUBLIC is mandatory (security): with the store down the daemon cannot
+   * evaluate a private CG's per-caller authorization (that verdict comes from
+   * the local `_meta` allowlist, exactly what's unavailable). The healthy
+   * write-preflight denies an authenticated-but-unauthorized caller of a
+   * PRIVATE CG; admitting a private id here would silently convert that DENY
+   * into an accept. A PUBLIC CG has no such per-caller preflight deny, so a
+   * proven-public id can never convert an existing deny.
+   *
+   * The bounded eth_call timeout is enforced by the caller (the daemon wraps
+   * this in a `Promise.race`), so a hung RPC stack cannot stall a degraded
+   * write route. RPC errors propagate (the caller treats a throw as "no
+   * rescue" and keeps its validation-unavailable response).
+   */
+  async validateWriteTargetDuringStoreOutage(this: DKGAgent, candidateId: string): Promise<boolean> {
+    return this.contextGraphActivePublicOnChainFromRegistry(candidateId);
   }
 
   /**

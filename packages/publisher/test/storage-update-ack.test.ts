@@ -17,13 +17,38 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+/**
+ * Wrap a REAL OxigraphStore so only the named ops throw the classic mid-
+ * worker-restart oxigraph failure ('store is closed'); everything else keeps
+ * hitting the live store. Mirrors `storeWithFailingOps` in
+ * storage-ack-core-unavailable.test.ts — the curated-catalog UPDATE store-
+ * failure regression below drives the real persist path (parse → verify →
+ * deleteByPattern → insert) up to the armed failure.
+ */
+function storeWithFailingOps(
+  base: OxigraphStore,
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern')[],
+): TripleStore {
+  return new Proxy(base as unknown as TripleStore, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && (failingOps as readonly string[]).includes(prop)) {
+        return async () => {
+          throw new Error('store is closed');
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
@@ -218,6 +243,52 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       const handler = makeHandler(ethers.Wallet.createRandom());
       const ack = decodeStorageACK(await handler.updateHandler(buildIntent(), fakePeerId));
       expect(isStorageACKDecline(ack)).toBe(false);
+    });
+
+    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Dead-air regression (otReviewAgent #1408:650): a curated UPDATE with a
+      // VALID rotated catalog root whose `<cg>/_catalog` REPLACE (deleteByPattern)
+      // hits a closed store used to throw out of the handler → stream reset →
+      // publisher no_response. It must instead reply with the transient decline.
+      const onDecline = vi.fn();
+      const store = storeWithFailingOps(new OxigraphStore(), ['deleteByPattern']);
+      const handler = new StorageACKHandler(
+        store as any,
+        makeConfig(ethers.Wallet.createRandom(), 42n, { onDecline }),
+        new TypedEventBus() as any,
+      );
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(ack)).toBe(true);
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(ack.declineMessage).toBe('store unavailable');
+      // No signed ACK rides a decline — the signature fields stay empty.
+      const r = ack.coreNodeSignatureR instanceof Uint8Array
+        ? ack.coreNodeSignatureR : new Uint8Array(ack.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+      // Wire hygiene: raw store error stays OFF the wire, but reaches the hook.
+      expect(ack.declineMessage).not.toContain('store is closed');
+      expect(onDecline).toHaveBeenCalledOnce();
+      expect(onDecline.mock.calls[0]?.[0]).toMatchObject({
+        code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+        contextGraphId,
+        message: expect.stringContaining('store is closed'),
+      });
+    });
+
+    it('curated catalog persist / insert throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Same durability invariant, second store call: deletes succeed but the
+      // catalog INSERT hits the closed store. Still a transient decline.
+      const store = storeWithFailingOps(new OxigraphStore(), ['insert']);
+      const handler = makeHandler(ethers.Wallet.createRandom(), store as any);
+      const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(ack)).toBe(true);
+      expect(ack.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(ack.declineMessage).toBe('store unavailable');
+      const r = ack.coreNodeSignatureR instanceof Uint8Array
+        ? ack.coreNodeSignatureR : new Uint8Array(ack.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
     });
   });
 

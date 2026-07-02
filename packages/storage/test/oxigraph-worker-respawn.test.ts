@@ -34,15 +34,20 @@ function makeStore(persistPath?: string, opts?: { operationTimeoutMs?: number })
 
 // The recovery machinery is intentionally private (nothing outside the
 // adapter should steer it), so the tests reach in through one typed seam
-// instead of scattering `as any` casts around.
+// instead of scattering `as any` casts around. `lifecycle` is the explicit
+// state field the respawn/close/in-memory-loss logic keys off (see the
+// WorkerLifecycle model in the adapter); asserting on it pins the state model.
+type WorkerLifecycle = 'live' | 'respawning' | 'closing' | 'closed' | 'gave_up' | 'in_memory_lost';
 function internals(store: OxigraphWorkerStore): {
   worker: Worker;
+  lifecycle: WorkerLifecycle;
   closePromise: Promise<void> | null;
   respawnPromise: Promise<void> | null;
   consecutiveRespawnFailures: number;
 } {
   return store as unknown as {
     worker: Worker;
+    lifecycle: WorkerLifecycle;
     closePromise: Promise<void> | null;
     respawnPromise: Promise<void> | null;
     consecutiveRespawnFailures: number;
@@ -104,6 +109,9 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // Reads see the persisted data again — the exact op that used to fail
       // forever with "the store is closed".
       expect(await store.countQuads('urn:test:g')).toBe(10);
+      // A disk-persisted store recovers fully: the state model is back to 'live'
+      // (this is the branch finding 1 deliberately keeps auto-respawning).
+      expect(internals(store).lifecycle).toBe('live');
       // And writes work too: the store is fully live, not read-only.
       await store.insert(quads(5, 'urn:test:g2'));
       expect(await store.countQuads('urn:test:g2')).toBe(5);
@@ -206,6 +214,9 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       expect(err.message).toMatch(/respawn gave up/);
       // No further respawns get armed by later traffic.
       expect(internals(store).respawnPromise).toBeNull();
+      // The give-up verdict is now the single, explicit terminal state — no
+      // cluster of booleans that could disagree with the fail-fast error above.
+      expect(internals(store).lifecycle).toBe('gave_up');
     } finally {
       // close() on a latched store must still resolve (idempotent teardown).
       await expect(store.close()).resolves.toBeUndefined();
@@ -228,4 +239,72 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     await new Promise((r) => setTimeout(r, 1_500));
     await expect(store.countQuads('urn:test:g')).rejects.toThrow(/store is closed/);
   }, 15_000);
+});
+
+// Finding 1 (🔴): an IN-MEMORY store (constructed with NO persistPath) has no
+// disk to reload from, so respawning after an unexpected worker exit would come
+// up EMPTY yet look perfectly healthy — every row written before the crash
+// silently gone (confirmed live: pre-crash data vanished). The fix is to FAIL
+// CLOSED on such a store instead of respawning: the worker's data is
+// unrecoverable, so subsequent ops must reject with a clear data-loss error,
+// never return a wrong-but-plausible empty result. These tests use the REAL
+// worker thread (no mocks) exactly like the persistent-store suite above,
+// killing it via terminate() to raise the same 'exit'-without-close signal an
+// OOM kill would.
+describe('OxigraphWorkerStore in-memory fail-closed on unexpected worker exit', () => {
+  it('fails closed with a data-loss error after an in-memory worker crash — never a silent empty result', async () => {
+    // No persistPath → in-memory store. This is the exact shape that silently
+    // lost data before the fix.
+    const store = makeStore(undefined);
+    try {
+      await store.insert(quads(7));
+      // Sanity: the data really is there before the crash.
+      expect(await store.countQuads('urn:test:g')).toBe(7);
+
+      const before = internals(store).worker;
+      await killWorker(store);
+
+      // The store must NOT respawn (no disk to recover from) — it latches into
+      // the terminal in_memory_lost state and never arms a replacement worker.
+      expect(internals(store).lifecycle).toBe('in_memory_lost');
+      expect(internals(store).respawnPromise).toBeNull();
+      expect(internals(store).worker).toBe(before); // no fresh (empty) thread
+
+      // The regression this guards: a read here used to RESOLVE with 0 (an
+      // empty respawned store), reporting SUCCESS while all 7 rows were gone.
+      // `.then(() => null, e => e)` captures a resolve as null and a reject as
+      // the error, so a truthy `err` proves the read rejected rather than
+      // silently returning the wrong count.
+      const err: any = await store.countQuads('urn:test:g').then(() => null, (e) => e);
+      expect(err).toBeTruthy();
+      expect(err.message).toMatch(/IN-MEMORY store's worker crashed/);
+      expect(err.message).toMatch(/data was lost|cannot be recovered/);
+
+      // Writes fail closed the same way — the store is unusable, not read-only.
+      await expect(store.insert(quads(1))).rejects.toThrow(/IN-MEMORY store's worker crashed/);
+    } finally {
+      // close() on a data-lost store must still resolve (idempotent teardown)
+      // and must not resurrect it.
+      await expect(store.close()).resolves.toBeUndefined();
+    }
+  });
+
+  it('the in_memory_lost state is terminal — later traffic never arms a respawn', async () => {
+    const store = makeStore(undefined);
+    try {
+      await store.insert(quads(3));
+      await killWorker(store);
+      expect(internals(store).lifecycle).toBe('in_memory_lost');
+
+      // Hammer it with a few more ops: each must fail fast, and none may flip
+      // the store back to 'respawning'/'live' (the terminal-state guarantee).
+      for (let i = 0; i < 3; i += 1) {
+        await expect(store.countQuads('urn:test:g')).rejects.toThrow(/cannot be recovered/);
+        expect(internals(store).lifecycle).toBe('in_memory_lost');
+        expect(internals(store).respawnPromise).toBeNull();
+      }
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
 });
