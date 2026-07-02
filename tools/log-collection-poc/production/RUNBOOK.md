@@ -1,4 +1,52 @@
-# Production runbook — DKG node logs → existing Grafana (polaris)
+# Production runbook — DKG node observability
+
+## ⭐ Current production (since 2026-07-02): dedicated observability server
+
+Devops moved production ingest off polaris to a dedicated server running the
+full three-signal stack — **OTel Collector → Loki 3.x (native OTLP) + Tempo +
+VictoriaMetrics → Grafana**. The mainnet fleet ships logs there today; nodes
+send OTLP straight to the collector (no Alloy bridge needed on this stack).
+
+**Dashboards** (folder "DKG V10 Node Observability", JSONs in this directory,
+import via `POST /api/dashboards/db {dashboard, folderUid, overwrite:true}`):
+
+| uid | file | needs |
+|---|---|---|
+| `dkg-fleet-logs` | `grafana-dashboard-dkg-fleet-logs.json` | logs (live) |
+| `dkg-node-logs` | `grafana-dashboard-dkg-node-logs.json` | logs (live) |
+| `dkg-node-metrics` | `grafana-dashboard-dkg-node-metrics.json` | node metrics endpoint + collector→VictoriaMetrics route (collector self-monitoring row is live already) |
+| `dkg-node-traces` | `grafana-dashboard-dkg-node-traces.json` | node traces endpoint + collector→Tempo route |
+
+Datasources are template variables (`loki` / `vm` / `tempo`) — the dashboards
+bind to whatever datasources exist on import. Alerting (9 rules, 3 Slack
+channels): `example-alerts.md`.
+
+**Query shapes differ from the polaris/Alloy stack — do not mix them up:**
+- The log **line is the plain message body** (native OTLP ingest). There is
+  **no** `| json | line_format "{{.body}}"` step.
+- Severity is **structured metadata**: filter with `| severity_text=`ERROR``
+  (values DEBUG/INFO/WARN/ERROR) or `detected_level`. There is no `level` label.
+- Other metadata available per line: `dkg_module`, `dkg_operation_id`,
+  `dkg_peer_id`, `dkg_chain`, `dkg_node_role` — filter the same way.
+- `rpc_usage` accounting lines parse directly:
+  `|= `rpc_usage` | logfmt | method != `` | unwrap count`.
+- **Loki 3 gotcha:** *instant* metric queries over ranges ≥ a few hours are
+  split internally and fail with `maximum of series (500) reached` even at tiny
+  stream counts. Use **range queries** + a Grafana reduce (`sum`/`last`) for
+  totals; keep instant queries to short fixed windows (e.g. `[10m]`).
+
+**To light up metrics + traces** (node side, per node): set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318` (one env var fans
+out to `/v1/traces` + `/v1/metrics` + `/v1/logs`) or set
+`telemetry.metrics.endpoint` / `telemetry.traces.endpoint` in config, restart
+the daemon. Collector side: add otlp-receiver pipelines routing metrics →
+VictoriaMetrics and traces → Tempo (enable Tempo's metrics-generator/spanmetrics
+for the traces alert). There is deliberately no default endpoint — a node with
+only a logs endpoint runs traces/metrics as silent no-ops.
+
+---
+
+## Legacy: polaris setup (Loki 2.5.0 behind Alloy)
 
 Goal: in Grafana, pick a node and see its logs for the last X hours.
 

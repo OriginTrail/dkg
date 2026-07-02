@@ -1,0 +1,226 @@
+{
+  "uid": "dkg-node-traces",
+  "title": "DKG Nodes — Traces",
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "tags": [
+    "dkg",
+    "traces"
+  ],
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "dkg"
+      ],
+      "asDropdown": true,
+      "title": "DKG dashboards",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "description": "Tempo traces from dkg-node (tracer @origintrail-official/dkg). 14 span types: agent.publish, publisher.ack_collect/ack_peer_request, chain.tx_send/tx_submit/tx_wait/eth_call/eth_getLogs, sync.request/response, protocol_router.send…",
+  "templating": {
+    "list": [
+      {
+        "name": "tempo",
+        "type": "datasource",
+        "query": "tempo",
+        "label": "Traces DS",
+        "hide": 2,
+        "current": {}
+      },
+      {
+        "name": "loki",
+        "type": "datasource",
+        "query": "loki",
+        "label": "Loki",
+        "current": {},
+        "hide": 2
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "${loki}"
+        },
+        "query": "label_values(service_instance_id)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Node traces are not flowing yet.** Nodes currently export **logs only** — each node also needs a traces endpoint: env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` **or** config `telemetry.traces.endpoint`, then a daemon restart; the collector must route traces → Tempo. Once flowing you get one trace per publish / ACK round / chain transaction / sync — click any Trace ID to open the full timeline."
+      },
+      "transparent": true
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
+      "title": "Recent traces",
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"dkg-node\" && resource.service.instance.id=~\"${node:regex}\"}",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
+      "title": "Errored operations",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"dkg-node\" && resource.service.instance.id=~\"${node:regex}\" && status=error}",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
+      "title": "Slow publishes (>5s)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"dkg-node\" && resource.service.instance.id=~\"${node:regex}\" && name=\"agent.publish\" && duration>5s}",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
+      "title": "Slow chain ops (>2s)",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"dkg-node\" && resource.service.instance.id=~\"${node:regex}\" && name=~\"chain\\\\..*\" && duration>2s}",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ]
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
+      "title": "ACK collection rounds",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "${tempo}"
+          },
+          "refId": "A",
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"dkg-node\" && resource.service.instance.id=~\"${node:regex}\" && name=\"publisher.ack_collect\"}",
+          "limit": 50,
+          "tableType": "traces",
+          "filters": []
+        }
+      ]
+    }
+  ]
+}
