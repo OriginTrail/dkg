@@ -10,6 +10,8 @@ on:
   pull_request:
     paths:
       - 'tools/log-collection-poc/production/**'
+      # the gate must also verify itself when the gate changes
+      - '.github/workflows/observability-artifacts.yml'
   workflow_dispatch:
 
 permissions:
@@ -26,3 +28,19 @@ jobs:
           node-version: 22
       - name: Verify committed artifacts match the generator
         run: node tools/log-collection-poc/production/generate-observability.mjs --check
+      - name: Smoke-test the operator render mode (concrete UIDs + node-label profile)
+        run: |
+          set -euo pipefail
+          node tools/log-collection-poc/production/generate-observability.mjs /tmp/render \
+            --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
+          cd /tmp/render
+          # placeholder must be fully substituted
+          ! grep -q 'VM_DATASOURCE_UID' alert-rules.provisioning.json
+          # concrete datasource UIDs must land in the rule payloads
+          grep -q '"datasourceUid": "test-vm-uid"' alert-rules.provisioning.json
+          grep -q '"datasourceUid": "test-loki-uid"' alert-rules.provisioning.json
+          # node-label profile must drive metrics selectors, group-bys and alert exprs
+          ! grep -q '{instance=~' grafana-dashboard-dkg-node-metrics.json
+          grep -q 'service_instance_id=~' grafana-dashboard-dkg-node-metrics.json
+          grep -q 'sum by (service_instance_id) (rate(dkg_publish_total' alert-rules.provisioning.json
+          echo "operator render mode OK"
