@@ -75,6 +75,24 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
   });
 });
 
+describe('emitRpcUsage ← DKGAgent.drainChainRpcUsage — the REAL daemon boundary end-to-end', () => {
+  it('adapter window → real agent delegation → rpc_usage lines', async () => {
+    // The exact wiring the daemon uses: the source is a DKGAgent whose
+    // drainChainRpcUsage (REAL inherited method, prototype-invoked with a
+    // chain-bearing `this`) delegates to the adapter capability. A broken
+    // delegation would emit zero lines here and fail this test — closing the
+    // gap where chain-side and formatter tests both pass but the daemon signal
+    // is silently dead.
+    const { DKGAgent } = await import('@origintrail-official/dkg-agent');
+    const chain = { drainRpcUsage: () => ({ byMethod: { eth_call: 11 }, total: 11, lifetimeTotal: 11 }) };
+    const agentLike = { drainChainRpcUsage: () => DKGAgent.prototype.drainChainRpcUsage.call({ chain } as never) };
+    const emitted: string[] = [];
+    const n = emitRpcUsage(agentLike, (l) => emitted.push(l), 60, 'base:8453');
+    expect(n).toBe(1);
+    expect(emitted).toEqual(['rpc_usage method=eth_call count=11 window_s=60 chain=base:8453']);
+  });
+});
+
 describe('startRpcUsageTelemetry — the full scheduling lifecycle (timer + shutdown drain)', () => {
   afterEach(() => vi.useRealTimers());
 
