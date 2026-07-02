@@ -23,7 +23,7 @@
       "keepTime": true
     }
   ],
-  "description": "OTel metrics from dkg-node (meter @origintrail-official/dkg). Node selector matches both instance and service_instance_id label mappings; simplify once the collector mapping is known.",
+  "description": "OTel metrics from dkg-node (meter @origintrail-official/dkg). Node filter uses the canonical OTLP mapping (instance = service.instance.id, used by both VictoriaMetrics native OTLP ingest and prometheusremotewrite). If the collector is configured with resource_to_telemetry_conversion instead, swap instance= for service_instance_id= in the panel queries.",
   "templating": {
     "list": [
       {
@@ -119,7 +119,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (outcome) (rate(dkg_publish_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_publish_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{outcome}}"
         }
       ]
@@ -150,7 +150,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
           "legendFormat": "p95"
         },
         {
@@ -159,7 +159,7 @@
             "uid": "${vm}"
           },
           "refId": "B",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
           "legendFormat": "p50"
         }
       ]
@@ -190,7 +190,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (outcome) (rate(dkg_ack_quorum_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_ack_quorum_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{outcome}}"
         }
       ]
@@ -221,7 +221,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (result) (rate(dkg_ack_peer_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (result) (rate(dkg_ack_peer_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{result}}"
         }
       ]
@@ -252,7 +252,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (decline_code) (rate(dkg_ack_peer_total{result=\"decline\", instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (decline_code) (rate(dkg_ack_peer_total{result=\"decline\", instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "sent-to-us: {{decline_code}}"
         },
         {
@@ -261,7 +261,7 @@
             "uid": "${vm}"
           },
           "refId": "B",
-          "expr": "sum by (outcome) (rate(dkg_ack_handler_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_ack_handler_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "handler: {{outcome}}"
         }
       ]
@@ -303,7 +303,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{rpc_method}}"
         }
       ]
@@ -334,7 +334,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{instance}}{{service_instance_id}}"
         }
       ]
@@ -365,7 +365,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{rpc_method}} {{outcome}}"
         }
       ]
@@ -396,7 +396,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~\"dkg_chain_rpc_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~\"dkg_chain_rpc_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
           "legendFormat": "{{rpc_method}}"
         }
       ]
@@ -427,7 +427,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{instance}}{{service_instance_id}}"
         }
       ]
@@ -469,7 +469,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (outcome) (rate(dkg_sync_request_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_sync_request_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "request: {{outcome}}"
         },
         {
@@ -478,7 +478,7 @@
             "uid": "${vm}"
           },
           "refId": "B",
-          "expr": "sum by (outcome) (rate(dkg_sync_response_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_sync_response_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "response: {{outcome}}"
         }
       ]
@@ -509,7 +509,7 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (outcome) (rate(dkg_protocol_router_send_total{instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval]))",
+          "expr": "sum by (outcome) (rate(dkg_protocol_router_send_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
           "legendFormat": "send: {{outcome}}"
         },
         {
@@ -518,7 +518,7 @@
             "uid": "${vm}"
           },
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le, protocol_id) (rate({__name__=~\"dkg_protocol_router_send_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}|\", service_instance_id=~\"${node:regex}|\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, protocol_id) (rate({__name__=~\"dkg_protocol_router_send_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
           "legendFormat": "p95 {{protocol_id}}"
         }
       ]

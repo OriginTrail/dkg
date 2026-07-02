@@ -14,12 +14,12 @@ import via `POST /api/dashboards/db {dashboard, folderUid, overwrite:true}`):
 |---|---|---|
 | `dkg-fleet-logs` | `grafana-dashboard-dkg-fleet-logs.json` | logs (live) |
 | `dkg-node-logs` | `grafana-dashboard-dkg-node-logs.json` | logs (live) |
-| `dkg-node-metrics` | `grafana-dashboard-dkg-node-metrics.json` | node metrics endpoint + collector→VictoriaMetrics route (collector self-monitoring row is live already) |
+| `dkg-node-metrics` | `grafana-dashboard-dkg-node-metrics.json` | node metrics endpoint + collector→VictoriaMetrics route (collector self-monitoring row is live already; the two raw-RPC panels additionally need nodes on a post-PR-#1409 build, which ships `dkg.chain.rpc.requests.total`) |
 | `dkg-node-traces` | `grafana-dashboard-dkg-node-traces.json` | node traces endpoint + collector→Tempo route |
 
 Datasources are template variables (`loki` / `vm` / `tempo`) — the dashboards
-bind to whatever datasources exist on import. Alerting (9 rules, 3 Slack
-channels): `example-alerts.md`.
+bind to whatever datasources exist on import. Alerting (10 rules, 3 Slack
+channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.json`).
 
 **Query shapes differ from the polaris/Alloy stack — do not mix them up:**
 - The log **line is the plain message body** (native OTLP ingest). There is

@@ -24,7 +24,12 @@ The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace
 OriginTrail) — manage/rotate them at *api.slack.com/apps → DKG Grafana Alerts →
 Incoming Webhooks*.
 
-## The 9 rules (folder "DKG V10 Node Observability", group `dkg-node-telemetry`)
+## The 10 rules (folder "DKG V10 Node Observability", group `dkg-node-telemetry`)
+
+> **Machine-importable copy:** `alert-rules.provisioning.json` in this directory
+> holds the exact provisioning-API payloads (rules, contact-point templates with
+> placeholder webhooks, policy routes). This section is the human explanation;
+> that file is the source for recreation.
 
 All queries are **range queries** — on Loki 3.x an *instant* metric query over a
 range ≥ a few hours is split internally and dies with `maximum of series (500)
@@ -32,31 +37,37 @@ reached`; range+reduce avoids that class of failure entirely.
 
 ### → #node-logs (live today, datasource: Loki)
 
-1. **Node silent — was reporting in last 24h, quiet 15m**
-   - A (range, last 24h, 30m steps): `count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[1h])))` → reduce **max** = B
-   - D (range, last 15m): `count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))` → reduce **last** = E
-   - C (math): `$B - $E > 0`, for `10m`, **noData = Alerting** (a total pipeline
-     blackout must page too). Adapts as the fleet grows — no hardcoded node count.
-2. **Error spike** — `sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))` → last `> 10`, for 5m, noData OK.
-3. **Warn spike** — same with `WARN`, `> 150`, for 10m, noData OK.
+1. **Node silent (per node) — seen in last 3h, quiet 15m**
+   - A (range): `count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))` → reduce **last** = B
+   - C (math): `$B > 0`, for `5m`, noData OK (empty result = every known node reporting = healthy).
+   - Keeps **node identity**: the `unless` returns one series per silent node, so
+     the alert names the node and is immune to churn (a new node joining cannot
+     mask another node dying — a count-vs-count comparison would miss that).
+2. **Fleet blackout — no node logs at all in 15m**
+   - A (range): `count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))` → last `< 1`, for 5m, **noData = Alerting**.
+   - Complements rule 1: the per-node `unless` form cannot fire when *both* sides
+     are empty, so total-outage detection lives here (pipeline down, Loki down,
+     or genuinely zero nodes).
+3. **Error spike** — `sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))` → last `> 10`, for 5m, noData OK.
+4. **Warn spike** — same with `WARN`, `> 150`, for 10m, noData OK.
 
 ### → #node-metrics
 
-4. **RPC credit burn spike** (Loki, from the `rpc_usage` log lines): `sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))` → last `> 6000`/h, for 5m, noData OK. *Needs nodes on a post-#1409 build.*
-5. **Log pipeline export failing** (VictoriaMetrics, live): `sum(rate(otelcol_exporter_send_failed_log_records[10m])) > 0`, for 10m.
-6. **Collector queue near capacity** (VictoriaMetrics, live): `max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity) > 0.8`, for 10m.
-7. **Publish failures per node** *(armed — silent until nodes export OTel metrics)*: `sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed|error"}[15m])) > 0.02`, noData OK.
-8. **Chain RPC failover exhausted per node** *(armed)*: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total[15m])) > 0`, noData OK.
+5. **RPC credit burn spike** (Loki, from the `rpc_usage` log lines): `sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))` → last `> 6000`/h, for 5m, noData OK. *Needs nodes on a post-#1409 build.*
+6. **Log pipeline export failing** (VictoriaMetrics, live): `sum(rate(otelcol_exporter_send_failed_log_records[10m])) > 0`, for 10m.
+7. **Collector queue near capacity** (VictoriaMetrics, live): `max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity) > 0.8`, for 10m.
+8. **Publish failures per node** *(armed — silent until nodes export OTel metrics)*: `sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed|error"}[15m])) > 0.02`, noData OK.
+9. **Chain RPC failover exhausted per node** *(armed)*: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total[15m])) > 0`, noData OK.
 
 ### → #node-traces
 
-9. **Errored spans rate** *(armed — needs traces flowing + Tempo
+10. **Errored spans rate** *(armed — needs traces flowing + Tempo
    metrics-generator/spanmetrics writing to VictoriaMetrics)*:
    `sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m])) > 0.05`, noData OK.
 
 "Armed" rules evaluate healthy with **noDataState=OK** — zero noise now, they
 fire automatically once the signal exists. If the eventual spanmetrics label
-names differ, adjust rule 9's matchers.
+names differ, adjust rule 10's matchers.
 
 ## Re-provisioning from scratch (API recipe)
 

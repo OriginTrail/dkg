@@ -1,0 +1,844 @@
+{
+  "_readme": [
+    "Secret-free mirror of the alerting on the DKG observability Grafana.",
+    "Import with an admin session and header X-Disable-Provenance: true (keeps everything UI-editable):",
+    "  1. For each entry in contactPoints: POST /api/v1/provisioning/contact-points  (fill url from your password manager first)",
+    "  2. GET /api/v1/provisioning/policies, APPEND policyRoutes to .routes, PUT the tree back (a PUT replaces the WHOLE tree - never PUT without GET+append)",
+    "  3. For each entry in rules: POST /api/v1/provisioning/alert-rules",
+    "Datasource UIDs: loki = the Loki datasource, P4169E866C3094E38 = VictoriaMetrics (prometheus type) - adjust if your instance differs."
+  ],
+  "contactPoints": [
+    {
+      "name": "DKG node logs (Slack)",
+      "type": "slack",
+      "settings": {
+        "url": "<SLACK_WEBHOOK_NODE_LOGS>"
+      },
+      "disableResolveMessage": false
+    },
+    {
+      "name": "DKG node metrics (Slack)",
+      "type": "slack",
+      "settings": {
+        "url": "<SLACK_WEBHOOK_NODE_METRICS>"
+      },
+      "disableResolveMessage": false
+    },
+    {
+      "name": "DKG node traces (Slack)",
+      "type": "slack",
+      "settings": {
+        "url": "<SLACK_WEBHOOK_NODE_TRACES>"
+      },
+      "disableResolveMessage": false
+    }
+  ],
+  "policyRoutes": [
+    {
+      "receiver": "DKG node logs (Slack)",
+      "object_matchers": [
+        [
+          "team",
+          "=",
+          "dkg"
+        ],
+        [
+          "signal",
+          "=",
+          "logs"
+        ]
+      ],
+      "group_by": [
+        "alertname",
+        "service_instance_id"
+      ],
+      "group_wait": "30s",
+      "group_interval": "5m",
+      "repeat_interval": "4h",
+      "continue": false
+    },
+    {
+      "receiver": "DKG node metrics (Slack)",
+      "object_matchers": [
+        [
+          "team",
+          "=",
+          "dkg"
+        ],
+        [
+          "signal",
+          "=",
+          "metrics"
+        ]
+      ],
+      "group_by": [
+        "alertname",
+        "service_instance_id"
+      ],
+      "group_wait": "30s",
+      "group_interval": "5m",
+      "repeat_interval": "4h",
+      "continue": false
+    },
+    {
+      "receiver": "DKG node traces (Slack)",
+      "object_matchers": [
+        [
+          "team",
+          "=",
+          "dkg"
+        ],
+        [
+          "signal",
+          "=",
+          "traces"
+        ]
+      ],
+      "group_by": [
+        "alertname",
+        "service_instance_id"
+      ],
+      "group_wait": "30s",
+      "group_interval": "5m",
+      "repeat_interval": "4h",
+      "continue": false
+    }
+  ],
+  "rules": [
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Node silent — seen in last 3h, quiet 15m (per node)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "count by (service_instance_id) (count_over_time({service_name=\"dkg-node\"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name=\"dkg-node\"}[15m]))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 50,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "logs"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.service_instance_id }} was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Fleet blackout — NO node logs reaching Loki",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "count(sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\"}[15m])))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 50,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B < 1",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "Alerting",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "logs"
+      },
+      "annotations": {
+        "summary": "Zero nodes have shipped any logs in 15m — the whole fleet or the ingest pipeline (collector/Loki) is down."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Error spike on a node (>10 ERROR / 10m)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\"} | severity_text=`ERROR` [10m]))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 10",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "logs"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.service_instance_id }} logged {{ $values.B }} ERRORs in 10m."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Warn spike on a node (>150 WARN / 10m)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\"} | severity_text=`WARN` [10m]))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 150",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "10m",
+      "labels": {
+        "team": "dkg",
+        "signal": "logs"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.service_instance_id }} logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues)."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "RPC credit burn spike (>6000 raw RPC requests/h on a node)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 3600,
+            "to": 0
+          },
+          "datasourceUid": "loki",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (service_instance_id) (sum_over_time({service_name=\"dkg-node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))",
+            "queryType": "range",
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "loki",
+              "uid": "loki"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 6000",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "metrics"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.service_instance_id }} made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Log pipeline export failing (collector cannot ship to Loki)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "P4169E866C3094E38",
+          "model": {
+            "refId": "A",
+            "expr": "sum(rate(otelcol_exporter_send_failed_log_records[10m]))",
+            "range": true,
+            "instant": false,
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "P4169E866C3094E38"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "10m",
+      "labels": {
+        "team": "dkg",
+        "signal": "metrics"
+      },
+      "annotations": {
+        "summary": "The otel collector is failing to export log records ({{ $values.B }}/s) — logs are being dropped or queued."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Collector exporter queue near capacity (>80%)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "P4169E866C3094E38",
+          "model": {
+            "refId": "A",
+            "expr": "max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)",
+            "range": true,
+            "instant": false,
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "P4169E866C3094E38"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0.8",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "10m",
+      "labels": {
+        "team": "dkg",
+        "signal": "metrics"
+      },
+      "annotations": {
+        "summary": "Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent."
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Publish failures on a node (armed — needs node metrics enabled)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "P4169E866C3094E38",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~\"failed|error\"}[15m]))",
+            "range": true,
+            "instant": false,
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "P4169E866C3094E38"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0.02",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "metrics"
+      },
+      "annotations": {
+        "summary": "Node {{ $labels.instance }}{{ $labels.service_instance_id }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)"
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Chain RPC failover exhausted on a node (armed — needs node metrics enabled)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "P4169E866C3094E38",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total[15m]))",
+            "range": true,
+            "instant": false,
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "P4169E866C3094E38"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "metrics"
+      },
+      "annotations": {
+        "summary": "ALL configured RPC endpoints failed for node {{ $labels.instance }}{{ $labels.service_instance_id }} — chain connectivity is down for it. (Silent until nodes export OTel metrics.)"
+      }
+    },
+    {
+      "orgID": 1,
+      "folderUID": "dkg-observability",
+      "ruleGroup": "dkg-node-telemetry",
+      "title": "Errored spans rate (armed — needs traces + spanmetrics enabled)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "P4169E866C3094E38",
+          "model": {
+            "refId": "A",
+            "expr": "sum(rate(traces_spanmetrics_calls_total{status_code=\"STATUS_CODE_ERROR\"}[15m]))",
+            "range": true,
+            "instant": false,
+            "intervalMs": 60000,
+            "maxDataPoints": 100,
+            "datasource": {
+              "type": "prometheus",
+              "uid": "P4169E866C3094E38"
+            }
+          }
+        },
+        {
+          "refId": "B",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "B",
+            "type": "reduce",
+            "expression": "A",
+            "reducer": "last",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        },
+        {
+          "refId": "C",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "math",
+            "expression": "$B > 0.05",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            }
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "5m",
+      "labels": {
+        "team": "dkg",
+        "signal": "traces"
+      },
+      "annotations": {
+        "summary": "DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)"
+      }
+    }
+  ]
+}
