@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parseNonNegativeBigIntOption, parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -103,6 +103,11 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
+function parseOptionalPublisherNodeIdentityId(raw: unknown): bigint | undefined {
+  if (raw === undefined) return undefined;
+  return parseNonNegativeBigIntOption(String(raw), '--publisher-node-identity-id');
+}
+
 export function registerPublisherCommand(program: Command): void {
 const publisherCmd = program
   .command('publisher')
@@ -123,6 +128,8 @@ publisherWalletCmd
       console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
       console.log(`  Wallets: ${result.wallets.length}`);
       console.log(`  Address: ${result.wallets[result.wallets.length - 1]?.address}`);
+      console.log('  Funding: add native gas for transactions; register as a PCA agent or fund TRAC for direct spend.');
+      console.log('  Identity: optional; attach a node identity only when publisher-node attribution is desired.');
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -209,16 +216,19 @@ publisherCmd
   .description('Enqueue a named knowledge asset VM publish job')
   .option('--sub-graph <name>', 'Target sub-graph within the context graph')
   .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
+  .option('--publisher-node-identity-id <id>', 'Publisher node identity id override; use 0 for no-attribution')
   .action(async (contextGraph: string, name: string, opts: ActionOpts) => {
     try {
       const publishEpochs = opts.publishEpochs !== undefined
         ? parsePositiveIntegerOption(String(opts.publishEpochs), '--publish-epochs')
         : undefined;
+      const publisherNodeIdentityIdOverride = parseOptionalPublisherNodeIdentityId(opts.publisherNodeIdentityId);
 
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPublishAsync(contextGraph, name, {
         ...(opts.subGraph ? { subGraphName: String(opts.subGraph) } : {}),
         ...(publishEpochs !== undefined ? { publishEpochs } : {}),
+        ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
       });
 
       console.log('Knowledge asset publish job accepted:');

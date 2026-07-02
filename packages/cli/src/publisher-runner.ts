@@ -221,7 +221,8 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const publishers = new Map<string, DKGPublisher>();
-  const invalidWallets: string[] = [];
+  const attributedWallets: string[] = [];
+  const noAttributionWallets: string[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -236,9 +237,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    if (args.chainBase && identityId === 0n) {
-      invalidWallets.push(wallet.address);
-      continue;
+    if (identityId === 0n) {
+      noAttributionWallets.push(wallet.address);
+    } else {
+      attributedWallets.push(`${wallet.address} (identityId=${identityId.toString()})`);
     }
     publishers.set(
       wallet.address,
@@ -254,18 +256,17 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     );
   }
 
-  if (invalidWallets.length > 0) {
-    if (publishers.size === 0) {
-      const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
-      throw new Error(
-        `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-        'Provision an on-chain profile/identity for each publisher wallet before enabling the async publisher, or remove it from publisher-wallets.json.',
-      );
-    }
-    const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';
-    console.warn(
-      `[publisher] Skipping ${invalidWallets.length} ${noun} missing on-chain identity: ${invalidWallets.join(', ')}. ` +
-      `Continuing with ${publishers.size} valid wallet(s).`,
+  if (attributedWallets.length > 0) {
+    const verb = attributedWallets.length === 1 ? 'has' : 'have';
+    console.info(
+      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
+      `${verb} node attribution: ${attributedWallets.join(', ')}`,
+    );
+  }
+  if (noAttributionWallets.length > 0) {
+    console.info(
+      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
+      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
     );
   }
 
@@ -548,6 +549,14 @@ export function parsePositiveIntegerOption(value: string, optionName: string): n
     throw new Error(`${optionName} must be a positive integer`);
   }
   return parsed;
+}
+
+export function parseNonNegativeBigIntOption(value: string, optionName: string): bigint {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error(`${optionName} must be a non-negative integer`);
+  }
+  return BigInt(normalized);
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

@@ -14,7 +14,7 @@ Use this page for the current CLI/API surface. For the economics model, see [Con
 ## Create a PCA
 
 ```bash
-dkg pca create --tokens 100000
+dkg pca create --tokens 100000 --primary-node <identityId>
 ```
 
 The daemon EOA becomes the owner of the PCA NFT. Owner-gated write operations must be run from the node whose EOA owns that NFT.
@@ -25,7 +25,9 @@ The daemon EOA becomes the owner of the PCA NFT. Owner-gated write operations mu
 dkg pca register-agent <accountId> <agentAddress>
 ```
 
-The agent address must be a valid non-zero EVM address. The daemon verifies registration with an on-chain read after the transaction lands when the adapter supports it.
+The agent address must be a valid non-zero EVM address. Register the transaction-signing wallet address that will publish with the PCA. The daemon verifies registration with an on-chain read after the transaction lands when the adapter supports it.
+
+The agent wallet still needs native gas, but it does not need an on-chain node identity. Node identity is only publisher-node attribution; PCA payment eligibility comes from PCA agent registration.
 
 ## Deregister a Publishing Agent
 

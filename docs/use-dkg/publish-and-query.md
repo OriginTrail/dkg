@@ -41,7 +41,7 @@ Use `dkg ka create notes -c "$CG" --input-file ./notes.ttl --share` when the loc
 
 Use `dkg ka share notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
 
-Use `dkg ka publish-async notes -c "$CG"` to enqueue the Verifiable Memory publish after the KA has been finalized and fully shared to SWM. `dkg publisher publish-async "$CG" notes` remains an operational alias for the same async VM publish route.
+Use `dkg ka publish-async notes -c "$CG"` to enqueue the Verifiable Memory publish after the KA has been finalized and fully shared to SWM. `dkg publisher publish-async "$CG" notes` remains an operational alias for the same async VM publish route. See [Async Publisher Wallets](async-publisher-wallets.md) for funding and optional attribution identity setup.
 
 ## Agent shape
 

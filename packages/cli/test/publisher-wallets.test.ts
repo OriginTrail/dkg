@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
 import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -242,6 +242,66 @@ describe('publisher wallets', () => {
     await store.close();
   });
 
+  it('bootstraps publisher runtime with an identityless publisher wallet on a reachable chain', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+    await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
+
+    try {
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+      });
+
+      expect(runtime.walletIds).toEqual([wallet.address]);
+      expect(infoSpy.mock.calls.flat().join('\n')).toContain('no-attribution mode');
+    } finally {
+      await runtime?.stop();
+      infoSpy.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('does not skip identityless wallets in a mixed publisher wallet pool', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const identityfulWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const identitylessWallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+
+    await addPublisherWallet(dataDir, identityfulWallet.privateKey);
+    await addPublisherWallet(dataDir, identitylessWallet.privateKey);
+
+    try {
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+      });
+
+      expect(new Set(runtime.walletIds)).toEqual(new Set([identityfulWallet.address, identitylessWallet.address]));
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
   it('skips daemon-integrated publisher startup with a warning when no wallets exist', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const store = await createTripleStore({ backend: 'oxigraph' });
@@ -270,7 +330,7 @@ describe('publisher wallets', () => {
     await store.close();
   });
 
-  it('fails fast when a publisher wallet has no on-chain identity (requires live chain)', async () => {
+  it('keeps chain RPC failures hard during publisher wallet identity resolution', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const wallet = ethers.Wallet.createRandom();
     const store = await createTripleStore({ backend: 'oxigraph' });

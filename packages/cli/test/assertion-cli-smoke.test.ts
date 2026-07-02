@@ -324,6 +324,8 @@ describe.sequential('assertion CLI smoke', () => {
       'lab',
       '--publish-epochs',
       '3',
+      '--publisher-node-identity-id',
+      '7',
     ], { env });
 
     expect(published.stdout).toContain('Knowledge asset publish job accepted:');
@@ -332,7 +334,22 @@ describe.sequential('assertion CLI smoke', () => {
     expect(JSON.parse(lastPublishAsyncBody)).toEqual({
       contextGraphId: 'research',
       subGraphName: 'lab',
-      options: { publishEpochs: 3 },
+      options: { publishEpochs: 3, publisherNodeIdentityIdOverride: '7' },
+    });
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'publish-async',
+      'research',
+      'paper',
+      '--publisher-node-identity-id',
+      '0',
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: '0' },
     });
   }, 30000);
 

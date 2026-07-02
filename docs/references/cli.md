@@ -45,7 +45,7 @@ dkg ka share <name> -c <cg> [--entity <uri...>]               # WM -> SWM
 dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
 dkg ka share-jobs [--context-graph-id <cg>]                   # list async share jobs
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish
-dkg ka publish-async <name> -c <cg>                           # enqueue SWM -> VM publish
+dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue SWM -> VM publish
 dkg ka pull-from <name> -c <cg> --layer swm|vm                # seed WM from SWM or VM
 dkg ka discard <name> -c <cg>                                 # discard WM draft
 dkg ka query <name> -c <cg>                                   # read WM quads
@@ -67,10 +67,10 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher publish-async <cg> <name>  # operational alias for dkg ka publish-async
+dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
-# publisher wallets must already have on-chain identities/profiles before they can claim VM publish jobs
+# publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
 dkg index [directory]                    # index a code repo into the dev-coordination CG

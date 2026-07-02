@@ -17,6 +17,7 @@ import {
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
+import { parseNonNegativeBigIntOption } from '../publisher-runner.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -114,9 +115,7 @@ function parseOptionalPositiveInteger(raw: unknown, flag: string): number | unde
 
 function parseOptionalBigInt(raw: unknown, flag: string): bigint | undefined {
   if (raw === undefined) return undefined;
-  const value = String(raw).trim();
-  if (!/^\d+$/.test(value)) throw new Error(`${flag} must be a non-negative integer`);
-  return BigInt(value);
+  return parseNonNegativeBigIntOption(String(raw), flag);
 }
 
 function parsePublishOptions(opts: ActionOpts): KnowledgeAssetFinalizedPublishOptions {
