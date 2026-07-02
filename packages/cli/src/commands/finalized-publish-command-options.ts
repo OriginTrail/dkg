@@ -23,9 +23,5 @@ export function parseFinalizedPublishOptions(opts: ActionOpts): KnowledgeAssetFi
       publisherNodeIdentityIdOverride: '--publisher-node-identity-id',
     }, { quoteField: false }));
   }
-  const { publishEpochs, publisherNodeIdentityIdOverride } = parsed.options;
-  return {
-    ...(publishEpochs !== undefined ? { publishEpochs } : {}),
-    ...(publisherNodeIdentityIdOverride !== undefined ? { publisherNodeIdentityIdOverride } : {}),
-  };
+  return parsed.options;
 }

@@ -17,7 +17,7 @@ import {
   type ActionOpts,
 } from '../cli-helpers.js';
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
-import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-options.js';
+import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',

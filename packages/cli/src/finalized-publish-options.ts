@@ -20,8 +20,8 @@ export type FinalizedPublishOptionParseError =
   | { kind: 'uint72'; field: string }
   | { kind: 'boolean'; field: string };
 
-export type FinalizedPublishOptionParseResult =
-  | { ok: true; options: NormalizedFinalizedPublishOptions }
+export type FinalizedPublishOptionParseResult<TOptions> =
+  | { ok: true; options: TOptions }
   | { ok: false; error: FinalizedPublishOptionParseError };
 
 const SDK_FINALIZED_PUBLISH_OPTION_KEYS = new Set([
@@ -35,40 +35,57 @@ const MAX_PUBLISH_EPOCHS = 0xffffffff;
 export function parseCliFinalizedPublishOptions(raw: {
   publishEpochs?: unknown;
   publisherNodeIdentityId?: unknown;
-}): FinalizedPublishOptionParseResult {
-  return parseFinalizedPublishDomainOptions({
-    publishEpochs: parsePublishEpochs(raw.publishEpochs, 'publishEpochs'),
-    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
-      raw.publisherNodeIdentityId,
-      'publisherNodeIdentityIdOverride',
-    ),
-  });
+}): FinalizedPublishOptionParseResult<KnowledgeAssetFinalizedPublishOptions> {
+  const publishEpochs = parsePublishEpochs(raw.publishEpochs, 'publishEpochs');
+  if (!publishEpochs.ok) return publishEpochs;
+  const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
+    raw.publisherNodeIdentityId,
+    'publisherNodeIdentityIdOverride',
+  );
+  if (!publisherNodeIdentityIdOverride.ok) return publisherNodeIdentityIdOverride;
+
+  return {
+    ok: true,
+    options: {
+      ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(publisherNodeIdentityIdOverride.value !== undefined
+        ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
+        : {}),
+    },
+  };
 }
 
-export function parseHttpFinalizedPublishOptions(raw: unknown): FinalizedPublishOptionParseResult {
+export function parseHttpFinalizedPublishOptions(
+  raw: unknown,
+): FinalizedPublishOptionParseResult<NormalizedFinalizedPublishOptions> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, options: {} };
   const source = raw as Record<string, unknown>;
-  const hasClearAfter = source.clearAfter !== undefined;
   const hasPublishEpochs = source.publishEpochs !== undefined;
-  const clearAfter = parseClearSharedMemoryAfter(source.clearAfter, 'clearAfter');
-  const clearSharedMemoryAfter = parseClearSharedMemoryAfter(
-    source.clearSharedMemoryAfter,
-    'clearSharedMemoryAfter',
-  );
-  if (!clearAfter.ok) return clearAfter;
+  const clearSharedMemoryAfter = parseHttpClearMemoryAliases(source);
   if (!clearSharedMemoryAfter.ok) return clearSharedMemoryAfter;
+  const publishEpochs = parsePublishEpochs(
+    source.publishEpochs ?? source.epochs,
+    hasPublishEpochs ? 'publishEpochs' : 'epochs',
+  );
+  if (!publishEpochs.ok) return publishEpochs;
+  const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
+    source.publisherNodeIdentityIdOverride,
+    'publisherNodeIdentityIdOverride',
+  );
+  if (!publisherNodeIdentityIdOverride.ok) return publisherNodeIdentityIdOverride;
 
-  return parseFinalizedPublishDomainOptions({
-    clearSharedMemoryAfter: hasClearAfter ? clearAfter : clearSharedMemoryAfter,
-    publishEpochs: parsePublishEpochs(
-      source.publishEpochs ?? source.epochs,
-      hasPublishEpochs ? 'publishEpochs' : 'epochs',
-    ),
-    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
-      source.publisherNodeIdentityIdOverride,
-      'publisherNodeIdentityIdOverride',
-    ),
-  });
+  return {
+    ok: true,
+    options: {
+      ...(clearSharedMemoryAfter.value !== undefined
+        ? { clearSharedMemoryAfter: clearSharedMemoryAfter.value }
+        : {}),
+      ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(publisherNodeIdentityIdOverride.value !== undefined
+        ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
+        : {}),
+    },
+  };
 }
 
 export function finalizedPublishOptionsPayload(
@@ -85,28 +102,40 @@ export function finalizedPublishOptionsPayload(
   if (!normalized.ok) {
     throw new Error(formatFinalizedPublishOptionError(normalized.error));
   }
-  return finalizedPublishDomainPayload(normalized.options);
+  return finalizedPublishSdkPayload(normalized.options);
 }
 
 function parseSdkFinalizedPublishOptions(
   options: KnowledgeAssetFinalizedPublishOptions,
-): FinalizedPublishOptionParseResult {
-  return parseFinalizedPublishDomainOptions({
-    clearSharedMemoryAfter: parseClearSharedMemoryAfter(options.clearAfter, 'clearAfter'),
-    publishEpochs: parsePublishEpochs(options.publishEpochs, 'publishEpochs'),
-    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
-      options.publisherNodeIdentityIdOverride,
-      'publisherNodeIdentityIdOverride',
-    ),
-  });
+): FinalizedPublishOptionParseResult<KnowledgeAssetFinalizedPublishOptions> {
+  const clearAfter = parseClearSharedMemoryAfter(options.clearAfter, 'clearAfter');
+  if (!clearAfter.ok) return clearAfter;
+  const publishEpochs = parsePublishEpochs(options.publishEpochs, 'publishEpochs');
+  if (!publishEpochs.ok) return publishEpochs;
+  const publisherNodeIdentityIdOverride = parsePublishUint72IdentityId(
+    options.publisherNodeIdentityIdOverride,
+    'publisherNodeIdentityIdOverride',
+  );
+  if (!publisherNodeIdentityIdOverride.ok) return publisherNodeIdentityIdOverride;
+
+  return {
+    ok: true,
+    options: {
+      ...(clearAfter.value !== undefined ? { clearAfter: clearAfter.value } : {}),
+      ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(publisherNodeIdentityIdOverride.value !== undefined
+        ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
+        : {}),
+    },
+  };
 }
 
-function finalizedPublishDomainPayload(
-  options: NormalizedFinalizedPublishOptions,
+function finalizedPublishSdkPayload(
+  options: KnowledgeAssetFinalizedPublishOptions,
 ): Record<string, unknown> | undefined {
   const payload: Record<string, unknown> = {};
-  if (options.clearSharedMemoryAfter !== undefined) {
-    payload.clearSharedMemoryAfter = options.clearSharedMemoryAfter;
+  if (options.clearAfter !== undefined) {
+    payload.clearSharedMemoryAfter = options.clearAfter;
   }
   if (options.publishEpochs !== undefined) {
     payload.publishEpochs = options.publishEpochs;
@@ -115,30 +144,6 @@ function finalizedPublishDomainPayload(
     payload.publisherNodeIdentityIdOverride = options.publisherNodeIdentityIdOverride.toString();
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
-}
-
-function parseFinalizedPublishDomainOptions(input: {
-  clearSharedMemoryAfter?: FinalizedPublishParsedOption<boolean>;
-  publishEpochs?: FinalizedPublishParsedOption<number>;
-  publisherNodeIdentityIdOverride?: FinalizedPublishParsedOption<bigint>;
-}): FinalizedPublishOptionParseResult {
-  const clearSharedMemoryAfter = input.clearSharedMemoryAfter ?? okValue(undefined);
-  if (!clearSharedMemoryAfter.ok) return clearSharedMemoryAfter;
-  const publishEpochs = input.publishEpochs ?? okValue(undefined);
-  if (!publishEpochs.ok) return publishEpochs;
-  const publisherNodeIdentityIdOverride = input.publisherNodeIdentityIdOverride ?? okValue(undefined);
-  if (!publisherNodeIdentityIdOverride.ok) return publisherNodeIdentityIdOverride;
-
-  return {
-    ok: true,
-    options: {
-      ...(clearSharedMemoryAfter.value !== undefined ? { clearSharedMemoryAfter: clearSharedMemoryAfter.value } : {}),
-      ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
-      ...(publisherNodeIdentityIdOverride.value !== undefined
-        ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
-        : {}),
-    },
-  };
 }
 
 export function formatFinalizedPublishOptionError(
@@ -206,6 +211,19 @@ function parseClearSharedMemoryAfter(
     return { ok: false, error: { kind: 'boolean', field } };
   }
   return okValue(value);
+}
+
+function parseHttpClearMemoryAliases(
+  source: Record<string, unknown>,
+): FinalizedPublishParsedOption<boolean> {
+  const clearAfter = parseClearSharedMemoryAfter(source.clearAfter, 'clearAfter');
+  if (!clearAfter.ok) return clearAfter;
+  const clearSharedMemoryAfter = parseClearSharedMemoryAfter(
+    source.clearSharedMemoryAfter,
+    'clearSharedMemoryAfter',
+  );
+  if (!clearSharedMemoryAfter.ok) return clearSharedMemoryAfter;
+  return source.clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
 }
 
 function parsePublishEpochs(
