@@ -43,7 +43,7 @@ import {
   contextGraphMetaUri,
   assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
-import { autoPartition, findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { autoPartition, findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris, assertionScopedGraphUri } from '@origintrail-official/dkg-publisher';
 import { FileStore } from '../src/file-store.js';
 import type { ExtractionStatusRecord } from '../src/extraction-status.js';
 import { parseBoundary, parseMultipart } from '../src/http/multipart.js';
@@ -107,6 +107,7 @@ interface MockAgent {
      * assertion.discard mock to purge the data graph in one call.
      */
     dropGraph: (graphUri: string) => Promise<void>;
+    listGraphsByPrefix: (prefix: string) => Promise<string[]>;
     /**
      * Minimal SPARQL query mock that supports exactly one shape: the
      * `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <g> { ?s ?p ?o } }` pattern
@@ -272,6 +273,9 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
             insertedQuads.splice(i, 1);
           }
         }
+      },
+      async listGraphsByPrefix(prefix: string): Promise<string[]> {
+        return Array.from(new Set(insertedQuads.map(q => q.graph).filter(graph => graph.startsWith(prefix)))).sort();
       },
       async query(sparql: string): Promise<{ type: 'quads'; quads: CapturedQuad[] } | { type: 'bindings'; bindings: Array<Record<string, string>> } | { type: 'boolean'; value: boolean }> {
         // Round 13 Bug 38: failure injection for stage-context tests.
@@ -448,6 +452,6 @@ function buildMultipart(parts: Array<
 }
 
 export { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, randomUUID };
-export { ExtractionPipelineRegistry, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, autoPartition, findReservedSubjectPrefix, isSkolemizedUri, FileStore, parseBoundary, parseMultipart, extractFromMarkdown };
+export { ExtractionPipelineRegistry, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, autoPartition, findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris, assertionScopedGraphUri, FileStore, parseBoundary, parseMultipart, extractFromMarkdown };
 export { makeMockAgent, getDataGraphQuads, ImportFileRouteError, buildImportFileResponse, normalizeDetectedContentType, BOUNDARY, CRLF, buildMultipart };
 export type { ExtractionPipeline, ExtractionInput, ConverterOutput, ExtractionStatusRecord, CapturedQuad, MockAgent, MockAgentOptions, ImportFileResult };

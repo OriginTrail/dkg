@@ -16,6 +16,7 @@ import {
 import {
   DKGPublisher,
   AssertionNotPersistedError,
+  assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
 } from '../src/index.js';
@@ -237,6 +238,35 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(promoted.promotedCount).toBe(2);
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
     expect((await store.listGraphs()).filter((graph) => graph.includes('/_named_graph/'))).toHaveLength(0);
+  });
+
+  it('discard removes KA-scoped named graph draft content', async () => {
+    const name = 'named-graph-discard';
+    const namedGraph = 'urn:test:graph:discard-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:named-discard',
+        predicate: 'http://schema.org/name',
+        object: '"Discard Me"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, name);
+    const scopedNamedGraph = assertionScopedGraphUri(wmGraph, namedGraph);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:named-discard',
+        graph: namedGraph,
+      }),
+    ]);
+    expect(await store.listGraphs()).toContain(scopedNamedGraph);
+
+    await publisher.assertionDiscard(CG_ID, name, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+    expect(await store.listGraphs()).not.toContain(scopedNamedGraph);
   });
 
   it('query returns triples from the assertion only', async () => {

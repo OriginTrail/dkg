@@ -1,4 +1,4 @@
-import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, parseMultipart, findReservedSubjectPrefix, isSkolemizedUri, FileStore, ExtractionPipelineRegistry, extractFromMarkdown, randomUUID, buildImportFileResponse, normalizeDetectedContentType, ImportFileRouteError, type CapturedQuad, type MockAgent, type ImportFileResult, type ExtractionStatusRecord } from './import-file-test-helpers';
+import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, parseMultipart, findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris, FileStore, ExtractionPipelineRegistry, extractFromMarkdown, randomUUID, buildImportFileResponse, normalizeDetectedContentType, ImportFileRouteError, type CapturedQuad, type MockAgent, type ImportFileResult, type ExtractionStatusRecord } from './import-file-test-helpers';
 import { inferContentTypeFromFilename } from '../src/daemon/manifest.js';
 
 
@@ -609,6 +609,7 @@ export async function runImportFileOrchestration(params: {
     // snapshot is scoped to `<assertionUri> ?p ?o` within the CG root
     // `_meta` graph — we only rollback rows keyed by THIS assertion.
     let dataSnapshot: CapturedQuad[] = [];
+    let dataGraphs = [assertionGraph];
     let metaSnapshot: CapturedQuad[] = [];
     try {
       const dataResult = await agent.store.query(
@@ -616,6 +617,15 @@ export async function runImportFileOrchestration(params: {
       );
       if (dataResult.type === 'quads') {
         dataSnapshot = dataResult.quads.map(q => ({ ...q, graph: assertionGraph }));
+      }
+      dataGraphs = await listAssertionScopedGraphUris(agent.store as any, assertionGraph, 'always');
+      for (const graph of dataGraphs.filter(candidate => candidate !== assertionGraph)) {
+        const childResult = await agent.store.query(
+          `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+        );
+        if (childResult.type === 'quads') {
+          dataSnapshot.push(...childResult.quads.map(q => ({ ...q, graph })));
+        }
       }
     } catch (err: any) {
       // Round 13 Bug 38: mark the error so the outer catch preserves
@@ -650,17 +660,27 @@ export async function runImportFileOrchestration(params: {
     //  - insert succeeds → no rollback
     let metaCleanupSucceeded = false;
     let dataDropSucceeded = false;
+    const droppedDataGraphs = new Set<string>();
     try {
       await agent.store.deleteByPattern({ subject: assertionUri, graph: metaGraph });
       metaCleanupSucceeded = true;
-      await agent.store.dropGraph(assertionGraph);
-      dataDropSucceeded = true;
+      const dataGraphsToDrop = [...dataGraphs].sort((a, b) => {
+        if (a === assertionGraph) return 1;
+        if (b === assertionGraph) return -1;
+        return a.localeCompare(b);
+      });
+      for (const graph of dataGraphsToDrop) {
+        await agent.store.dropGraph(graph);
+        droppedDataGraphs.add(graph);
+      }
+      dataDropSucceeded = droppedDataGraphs.size > 0;
       await agent.store.insert([...dataGraphQuads, ...metaQuads]);
     } catch (writeErr: any) {
       const rollbackErrors: string[] = [];
-      if (dataDropSucceeded && dataSnapshot.length > 0) {
+      const droppedDataSnapshot = dataSnapshot.filter(q => droppedDataGraphs.has(q.graph));
+      if (dataDropSucceeded && droppedDataSnapshot.length > 0) {
         try {
-          await agent.store.insert(dataSnapshot);
+          await agent.store.insert(droppedDataSnapshot);
         } catch (dataRollbackErr: any) {
           rollbackErrors.push(`data rollback failed: ${dataRollbackErr?.message ?? dataRollbackErr}`);
         }

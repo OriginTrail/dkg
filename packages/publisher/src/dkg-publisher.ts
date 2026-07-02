@@ -3466,6 +3466,10 @@ export class DKGPublisher implements Publisher {
       // Descriptive SWM graph names are valid local/mock update scopes.
     }
     const localOnlyUpdate = this.chain.chainId === 'none';
+    const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
+    const attributionIdentityId: bigint = hasAttributionOverride
+      ? options.publisherNodeIdentityIdOverride!
+      : this.publisherNodeIdentityId;
     let resolvedPublisherAddress: string | undefined;
     if (localOnlyUpdate) {
       resolvedPublisherAddress = this.publisherAddress;
@@ -4047,6 +4051,7 @@ export class DKGPublisher implements Publisher {
             // then derives newTokenAmount itself as before.
             boundNewTokenAmount: boundUpdateTokenAmount,
             publisherAddress,
+            publisherNodeIdentityId: attributionIdentityId,
             v10Origin: true,
             authorAddress: effectiveAuthorAddress,
             authorR: updateSeal.signature.r,

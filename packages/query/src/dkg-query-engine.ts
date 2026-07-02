@@ -6,6 +6,7 @@ import {
   contextGraphSubGraphUri, contextGraphMetaUri, contextGraphSharedMemoryMetaUri, assertionLifecycleUri,
   contextGraphSubGraphMetaUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri,
   assertSafeIri, escapeSparqlLiteral, validateSubGraphName,
+  isAssertionScopedChildGraph,
   type GetView,
   REMOVED_VIEWS,
   TrustLevel,
@@ -17,8 +18,6 @@ import {
   detectSparqlQueryForm,
 } from './sparql-guard.js';
 import { stripLiteralsAndComments } from './sparql-utils.js';
-
-const ASSERTION_NAMED_GRAPH_SEGMENT = '/_named_graph/';
 
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
@@ -1021,7 +1020,7 @@ function isRegisteredAssertionGraphOrScopedChild(
 ): boolean {
   if (registeredAssertionGraphs.has(graph)) return true;
   for (const registeredGraph of registeredAssertionGraphs) {
-    if (graph.startsWith(`${registeredGraph}${ASSERTION_NAMED_GRAPH_SEGMENT}`)) {
+    if (isAssertionScopedChildGraph(graph, registeredGraph)) {
       return true;
     }
   }
