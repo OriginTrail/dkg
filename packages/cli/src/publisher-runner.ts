@@ -11,13 +11,14 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
-  readonly walletIdentities: readonly PublisherWalletIdentity[];
+  readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
 }
 
-export interface PublisherWalletIdentity {
+export interface PublisherRuntimeWallet {
   readonly address: string;
   readonly identityId: bigint;
+  readonly publisher: DKGPublisher;
 }
 
 export interface PublisherInspector {
@@ -76,7 +77,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
-    logPublisherWalletAttribution(runtime.walletIdentities, args.log);
+    logPublisherWalletAttribution(runtime.wallets, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
@@ -227,8 +228,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   const eventBus = new TypedEventBus();
-  const publishers = new Map<string, DKGPublisher>();
-  const walletIdentities: PublisherWalletIdentity[] = [];
+  const wallets: PublisherRuntimeWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -243,10 +243,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    walletIdentities.push({ address: wallet.address, identityId });
-    publishers.set(
-      wallet.address,
-      new DKGPublisher({
+    wallets.push({
+      address: wallet.address,
+      identityId,
+      publisher: new DKGPublisher({
         store: args.store,
         chain,
         eventBus,
@@ -255,9 +255,12 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
       }),
-    );
+    });
   }
 
+  const publishers = new Map<string, DKGPublisher>(
+    wallets.map((wallet) => [wallet.address, wallet.publisher]),
+  );
   const hasChainRecovery = [...publishers.values()].some((p) => {
     const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
     return typeof chain?.resolvePublishByTxHash === 'function';
@@ -339,7 +342,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
-    walletIdentities,
+    wallets,
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
@@ -350,13 +353,13 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 }
 
 function logPublisherWalletAttribution(
-  walletIdentities: readonly PublisherWalletIdentity[],
+  wallets: readonly PublisherRuntimeWallet[],
   log: (message: string) => void,
 ): void {
-  const attributedWallets = walletIdentities
+  const attributedWallets = wallets
     .filter((wallet) => wallet.identityId !== 0n)
     .map((wallet) => `${wallet.address} (identityId=${wallet.identityId.toString()})`);
-  const noAttributionWallets = walletIdentities
+  const noAttributionWallets = wallets
     .filter((wallet) => wallet.identityId === 0n)
     .map((wallet) => wallet.address);
 

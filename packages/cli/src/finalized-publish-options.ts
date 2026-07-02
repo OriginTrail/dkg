@@ -36,11 +36,12 @@ export function parseCliFinalizedPublishOptions(raw: {
   publishEpochs?: unknown;
   publisherNodeIdentityId?: unknown;
 }): FinalizedPublishOptionParseResult {
-  return parseFinalizedPublishDomainInput({
-    publishEpochs: raw.publishEpochs,
-    publishEpochsField: 'publishEpochs',
-    publisherNodeIdentityIdOverride: raw.publisherNodeIdentityId,
-    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  return parseFinalizedPublishDomainOptions({
+    publishEpochs: parsePublishEpochs(raw.publishEpochs, 'publishEpochs'),
+    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
+      raw.publisherNodeIdentityId,
+      'publisherNodeIdentityIdOverride',
+    ),
   });
 }
 
@@ -49,14 +50,22 @@ export function parseHttpFinalizedPublishOptions(raw: unknown): FinalizedPublish
   const source = raw as Record<string, unknown>;
   const hasClearAfter = source.clearAfter !== undefined;
   const hasPublishEpochs = source.publishEpochs !== undefined;
+  const clearAfter = parseClearSharedMemoryAfter(source.clearAfter, 'clearAfter');
+  const clearSharedMemoryAfter = parseClearSharedMemoryAfter(
+    source.clearSharedMemoryAfter,
+    'clearSharedMemoryAfter',
+  );
 
-  return parseFinalizedPublishDomainInput({
-    clearSharedMemoryAfter: hasClearAfter ? source.clearAfter : source.clearSharedMemoryAfter,
-    clearField: hasClearAfter ? 'clearAfter' : 'clearSharedMemoryAfter',
-    publishEpochs: source.publishEpochs ?? source.epochs,
-    publishEpochsField: hasPublishEpochs ? 'publishEpochs' : 'epochs',
-    publisherNodeIdentityIdOverride: source.publisherNodeIdentityIdOverride,
-    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  return parseFinalizedPublishDomainOptions({
+    clearSharedMemoryAfter: hasClearAfter ? clearAfter : clearSharedMemoryAfter,
+    publishEpochs: parsePublishEpochs(
+      source.publishEpochs ?? source.epochs,
+      hasPublishEpochs ? 'publishEpochs' : 'epochs',
+    ),
+    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
+      source.publisherNodeIdentityIdOverride,
+      'publisherNodeIdentityIdOverride',
+    ),
   });
 }
 
@@ -80,13 +89,13 @@ export function finalizedPublishOptionsPayload(
 function parseSdkFinalizedPublishOptions(
   options: KnowledgeAssetFinalizedPublishOptions,
 ): FinalizedPublishOptionParseResult {
-  return parseFinalizedPublishDomainInput({
-    clearSharedMemoryAfter: options.clearAfter,
-    clearField: 'clearAfter',
-    publishEpochs: options.publishEpochs,
-    publishEpochsField: 'publishEpochs',
-    publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride,
-    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  return parseFinalizedPublishDomainOptions({
+    clearSharedMemoryAfter: parseClearSharedMemoryAfter(options.clearAfter, 'clearAfter'),
+    publishEpochs: parsePublishEpochs(options.publishEpochs, 'publishEpochs'),
+    publisherNodeIdentityIdOverride: parsePublishUint72IdentityId(
+      options.publisherNodeIdentityIdOverride,
+      'publisherNodeIdentityIdOverride',
+    ),
   });
 }
 
@@ -106,57 +115,25 @@ function finalizedPublishDomainPayload(
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
-function parseFinalizedPublishDomainInput(input: {
-  clearSharedMemoryAfter?: unknown;
-  clearField?: string;
-  publishEpochs?: unknown;
-  publishEpochsField?: string;
-  publisherNodeIdentityIdOverride?: unknown;
-  publisherNodeIdentityIdOverrideField?: string;
+function parseFinalizedPublishDomainOptions(input: {
+  clearSharedMemoryAfter?: FinalizedPublishParsedOption<boolean>;
+  publishEpochs?: FinalizedPublishParsedOption<number>;
+  publisherNodeIdentityIdOverride?: FinalizedPublishParsedOption<bigint>;
 }): FinalizedPublishOptionParseResult {
-  const {
-    clearSharedMemoryAfter,
-    publisherNodeIdentityIdOverride,
-    publisherNodeIdentityIdOverrideField = 'publisherNodeIdentityIdOverride',
-  } = input;
-  const clearField = input.clearField ?? 'clearSharedMemoryAfter';
-  const publishEpochsField = input.publishEpochsField ?? 'publishEpochs';
-
-  let resolvedPublisherIdentityOverride: bigint | undefined;
-  if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-    const parsed = parsePublishUint72IdentityId(
-      publisherNodeIdentityIdOverride,
-      publisherNodeIdentityIdOverrideField,
-    );
-    if (!parsed.ok) return parsed;
-    resolvedPublisherIdentityOverride = parsed.value;
-  }
-
-  let resolvedPublishEpochs: number | undefined;
-  if (input.publishEpochs !== undefined && input.publishEpochs !== null) {
-    const v = publishIntegerString(input.publishEpochs, publishEpochsField, true);
-    if (!v.ok) return v;
-    const n = Number(v.value);
-    if (!Number.isSafeInteger(n)) {
-      return { ok: false, error: { kind: 'number-too-large', field: publishEpochsField } };
-    }
-    if (n > MAX_PUBLISH_EPOCHS) {
-      return { ok: false, error: { kind: 'max', field: publishEpochsField, max: MAX_PUBLISH_EPOCHS } };
-    }
-    resolvedPublishEpochs = n;
-  }
-
-  if (clearSharedMemoryAfter !== undefined && typeof clearSharedMemoryAfter !== 'boolean') {
-    return { ok: false, error: { kind: 'boolean', field: clearField } };
-  }
+  const clearSharedMemoryAfter = input.clearSharedMemoryAfter ?? okValue(undefined);
+  if (!clearSharedMemoryAfter.ok) return clearSharedMemoryAfter;
+  const publishEpochs = input.publishEpochs ?? okValue(undefined);
+  if (!publishEpochs.ok) return publishEpochs;
+  const publisherNodeIdentityIdOverride = input.publisherNodeIdentityIdOverride ?? okValue(undefined);
+  if (!publisherNodeIdentityIdOverride.ok) return publisherNodeIdentityIdOverride;
 
   return {
     ok: true,
     options: {
-      ...(clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter } : {}),
-      ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
-      ...(resolvedPublisherIdentityOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
+      ...(clearSharedMemoryAfter.value !== undefined ? { clearSharedMemoryAfter: clearSharedMemoryAfter.value } : {}),
+      ...(publishEpochs.value !== undefined ? { publishEpochs: publishEpochs.value } : {}),
+      ...(publisherNodeIdentityIdOverride.value !== undefined
+        ? { publisherNodeIdentityIdOverride: publisherNodeIdentityIdOverride.value }
         : {}),
     },
   };
@@ -210,10 +187,47 @@ function publishIntegerString(
   return { ok: true, value: v };
 }
 
+type FinalizedPublishParsedOption<T> =
+  | { ok: true; value: T | undefined }
+  | { ok: false; error: FinalizedPublishOptionParseError };
+
+function okValue<T>(value: T | undefined): FinalizedPublishParsedOption<T> {
+  return { ok: true, value };
+}
+
+function parseClearSharedMemoryAfter(
+  value: unknown,
+  field: string,
+): FinalizedPublishParsedOption<boolean> {
+  if (value === undefined) return okValue(undefined);
+  if (typeof value !== 'boolean') {
+    return { ok: false, error: { kind: 'boolean', field } };
+  }
+  return okValue(value);
+}
+
+function parsePublishEpochs(
+  value: unknown,
+  field: string,
+): FinalizedPublishParsedOption<number> {
+  if (value === undefined || value === null) return okValue(undefined);
+  const v = publishIntegerString(value, field, true);
+  if (!v.ok) return v;
+  const n = Number(v.value);
+  if (!Number.isSafeInteger(n)) {
+    return { ok: false, error: { kind: 'number-too-large', field } };
+  }
+  if (n > MAX_PUBLISH_EPOCHS) {
+    return { ok: false, error: { kind: 'max', field, max: MAX_PUBLISH_EPOCHS } };
+  }
+  return okValue(n);
+}
+
 function parsePublishUint72IdentityId(
   value: unknown,
   field: string,
-): { ok: true; value: bigint } | { ok: false; error: FinalizedPublishOptionParseError } {
+): FinalizedPublishParsedOption<bigint> {
+  if (value === undefined || value === null) return okValue(undefined);
   const v = publishIntegerString(value, field, false);
   if (!v.ok) return v;
   const parsed = parseUint72Decimal(v.value);
@@ -223,5 +237,5 @@ function parsePublishUint72IdentityId(
       error: { kind: parsed.reason === 'range' ? 'uint72' : 'integer', field, positive: false },
     };
   }
-  return { ok: true, value: parsed.value };
+  return okValue(parsed.value);
 }

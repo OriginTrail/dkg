@@ -11,7 +11,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
+import { parseOptionalPositiveInteger, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -265,7 +265,7 @@ describe('publisher wallets', () => {
       });
 
       expect(runtime.walletIds).toEqual([wallet.address]);
-      expect(runtime.walletIdentities).toEqual([{ address: wallet.address, identityId: 0n }]);
+      expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
     } finally {
       await runtime?.stop();
       await store.close();
@@ -295,10 +295,10 @@ describe('publisher wallets', () => {
       });
 
       expect(new Set(runtime.walletIds)).toEqual(new Set([identityfulWallet.address, identitylessWallet.address]));
-      expect(runtime.walletIdentities).toEqual(
+      expect(runtime.wallets).toEqual(
         expect.arrayContaining([
-          { address: identityfulWallet.address, identityId: BigInt(getSharedContext().coreProfileId) },
-          { address: identitylessWallet.address, identityId: 0n },
+          expect.objectContaining({ address: identityfulWallet.address, identityId: BigInt(getSharedContext().coreProfileId) }),
+          expect.objectContaining({ address: identitylessWallet.address, identityId: 0n }),
         ]),
       );
     } finally {
@@ -334,7 +334,7 @@ describe('publisher wallets', () => {
         log: (message) => logs.push(message),
       });
 
-      expect(runtime?.walletIdentities).toEqual([{ address: wallet.address, identityId: 0n }]);
+      expect(runtime?.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
       expect(logs.join('\n')).toContain('no-attribution mode');
       expect(logs.join('\n')).toContain(wallet.address);
     } finally {
@@ -396,7 +396,14 @@ describe('publisher wallets', () => {
 
   it('validates positive millisecond CLI options', () => {
     expect(parsePositiveMsOption('1000', '--poll-interval')).toBe(1000);
+    expect(parsePositiveMsOption(' 1000 ', '--poll-interval')).toBe(1000);
     expect(() => parsePositiveMsOption('0', '--poll-interval')).toThrow(
+      '--poll-interval must be a positive integer in milliseconds',
+    );
+    expect(() => parsePositiveMsOption('10ms', '--poll-interval')).toThrow(
+      '--poll-interval must be a positive integer in milliseconds',
+    );
+    expect(() => parsePositiveMsOption('9007199254740992', '--poll-interval')).toThrow(
       '--poll-interval must be a positive integer in milliseconds',
     );
     expect(() => parsePositiveMsOption('nan', '--error-backoff')).toThrow(
@@ -406,8 +413,26 @@ describe('publisher wallets', () => {
 
   it('validates positive integer CLI options', () => {
     expect(parsePositiveIntegerOption('10', '--max-retries')).toBe(10);
+    expect(parsePositiveIntegerOption(' 10 ', '--max-retries')).toBe(10);
     expect(() => parsePositiveIntegerOption('0', '--max-retries')).toThrow(
       '--max-retries must be a positive integer',
+    );
+    expect(() => parsePositiveIntegerOption('1.5', '--max-retries')).toThrow(
+      '--max-retries must be a positive integer',
+    );
+    expect(() => parsePositiveIntegerOption('9007199254740992', '--max-retries')).toThrow(
+      '--max-retries must be a positive integer',
+    );
+  });
+
+  it('validates optional positive integer CLI options', () => {
+    expect(parseOptionalPositiveInteger(undefined, '--limit')).toBeUndefined();
+    expect(parseOptionalPositiveInteger(' 25 ', '--limit')).toBe(25);
+    expect(() => parseOptionalPositiveInteger('10items', '--limit')).toThrow(
+      '--limit must be a positive integer',
+    );
+    expect(() => parseOptionalPositiveInteger('9007199254740992', '--limit')).toThrow(
+      '--limit must be a positive integer',
     );
   });
 

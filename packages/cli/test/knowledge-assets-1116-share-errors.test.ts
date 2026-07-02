@@ -1339,6 +1339,33 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(publishCalls).toHaveLength(0);
     });
 
+    it('standalone vm/publish rejects malformed conflicting clear-memory aliases before publish', async () => {
+      const publishCalls: unknown[] = [];
+
+      await startWith(
+        {},
+        {
+          async publishFromFinalizedAssertion(_cg: string, _name: string, opts: unknown) {
+            publishCalls.push(opts);
+            throw new Error('publish should not be called');
+          },
+        },
+      );
+
+      const res = await post('vm/publish', {
+        contextGraphId: CG_ID,
+        options: {
+          clearAfter: false,
+          clearSharedMemoryAfter: 'true',
+        },
+      });
+
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toContain('clearSharedMemoryAfter');
+      expect(String(res.body.error)).toContain('boolean');
+      expect(publishCalls).toHaveLength(0);
+    });
+
     it('standalone vm/publish rejects partial selection before publish', async () => {
       const publishCalls: unknown[] = [];
 
