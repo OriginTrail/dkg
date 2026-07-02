@@ -17,6 +17,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Start, stop, and inspect the daemon | [Daemon Lifecycle](run-node.md) |
 | Write, publish, and query knowledge | [Publish and Query](publish-and-query.md) |
 | Drive named Knowledge Asset lifecycle commands | [Knowledge Asset Lifecycle CLI](knowledge-asset-lifecycle.md) |
+| Configure async publisher wallets | [Async Publisher Wallets](async-publisher-wallets.md) |
 | Import, export, and verify OKF bundles | [OKF Import, Export, and Verify](okf.md) |
 | Fund testnet wallets | [Funding](funding.md) |
 | Manage Publishing Conviction Accounts | [Publishing Conviction](publishing-conviction.md) |

@@ -179,6 +179,24 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(calls).toEqual([[ethers.parseEther('100'), BigInt(big)]]);
   });
 
+  it('POST /api/pca with primaryNode above uint72 returns 400 and does not call facade', async () => {
+    let called = false;
+    const agent = {
+      createPublishingConvictionAccount: async () => {
+        called = true;
+        return { accountId: 9n, hash: '0x', blockNumber: 1, success: true };
+      },
+    };
+    const { res, done } = runCtx('POST', '/api/pca', agent, {
+      tokens: '100',
+      primaryNode: '4722366482869645213696',
+    });
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/uint72/);
+    expect(called).toBe(false);
+  });
+
   it('POST /api/pca/:id/agent registers an agent → 200 with txHash', async () => {
     let registered: { id: bigint; agent: string } | null = null;
     const addr = '0x' + '1'.repeat(40);

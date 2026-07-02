@@ -42,7 +42,7 @@ dkg ka publish notes -c my-project
 
 Use `dkg ka publish-async notes -c my-project` for an async VM publish job. `dkg publisher publish-async my-project notes` remains an operational alias.
 
-Async VM publish requires the async publisher to be enabled and backed by publisher wallets that already have on-chain identities/profiles. If the daemon reports a publisher wallet with no on-chain identity, provision that wallet before enabling the async publisher or remove it from `publisher-wallets.json`.
+Async VM publish requires the async publisher to be enabled and backed by publisher wallets with native gas plus PCA registration or TRAC for direct spend. Publisher wallet node identity is optional attribution: if the wallet resolves to identity `0`, the publish runs in no-attribution mode. Use `--publisher-node-identity-id 0` to force no-attribution for one publish. See [Async Publisher Wallets](async-publisher-wallets.md).
 
 ## Command Reference
 
@@ -60,7 +60,7 @@ Async VM publish requires the async publisher to be enabled and backed by publis
 | `dkg ka cancel-share-job <job-id>` | Cancel a queued/retrying share job |
 | `dkg ka recover-share-job <job-id>` | Recover a failed share job |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish finalized, fully shared SWM to VM |
-| `dkg ka publish-async <name> -c <cg>` | Enqueue VM publish |
+| `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish |
 | `dkg ka pull-from <name> -c <cg> --layer swm|vm` | Seed WM from SWM or VM |
 | `dkg ka discard <name> -c <cg>` | Discard a WM draft |
 | `dkg ka query <name> -c <cg>` | Read WM quads |

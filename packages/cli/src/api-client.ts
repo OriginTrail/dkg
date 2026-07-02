@@ -2,6 +2,12 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
+import {
+  finalizedPublishOptionsPayload,
+  type KnowledgeAssetFinalizedPublishOptions,
+} from './finalized-publish-options.js';
+
+export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
@@ -18,17 +24,6 @@ export interface PreSignedAuthorAttestationPayload {
    */
   reservedKaId: string;
   signature: { r: string; vs: string };
-}
-
-export interface KnowledgeAssetFinalizedPublishOptions {
-  /**
-   * SDK-friendly spelling for the finalized publish cleanup flag. The
-   * knowledge-assets daemon route forwards `clearSharedMemoryAfter` to
-   * `publishFromFinalizedAssertion`, so the client translates before POST.
-   */
-  clearAfter?: boolean;
-  publishEpochs?: number;
-  publisherNodeIdentityIdOverride?: bigint;
 }
 
 export interface KnowledgeAssetWritableQuad {
@@ -140,32 +135,6 @@ export interface KnowledgeAssetShareJobView {
     retryable: boolean;
   };
   reason?: string;
-}
-
-const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
-  'clearAfter',
-  'publishEpochs',
-  'publisherNodeIdentityIdOverride',
-]);
-
-function finalizedPublishOptionsPayload(
-  options?: KnowledgeAssetFinalizedPublishOptions,
-  allowedExtraKeys: readonly string[] = [],
-): Record<string, unknown> | undefined {
-  if (!options) return undefined;
-  const unsupportedKeys = Object.keys(options).filter(
-    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
-  );
-  if (unsupportedKeys.length > 0) {
-    throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
-  }
-  const payload: Record<string, unknown> = {};
-  if (options.clearAfter !== undefined) payload.clearSharedMemoryAfter = options.clearAfter;
-  if (options.publishEpochs !== undefined) payload.publishEpochs = options.publishEpochs;
-  if (options.publisherNodeIdentityIdOverride !== undefined) {
-    payload.publisherNodeIdentityIdOverride = options.publisherNodeIdentityIdOverride.toString();
-  }
-  return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
 function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, unknown> {
@@ -697,10 +666,11 @@ export class ApiClient {
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -710,10 +680,11 @@ export class ApiClient {
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }

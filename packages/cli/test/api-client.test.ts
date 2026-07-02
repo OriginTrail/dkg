@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
+import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
 const originalDkgHome = process.env.DKG_HOME;
@@ -67,6 +68,20 @@ describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
   let tempDir: string;
+
+  it('keeps finalized publish option types importable from api-client', () => {
+    const options: KnowledgeAssetFinalizedPublishOptions = {
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    };
+
+    expect(options).toMatchObject({
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    });
+  });
 
   beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
@@ -692,6 +707,17 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls).toHaveLength(0);
   });
 
+  it('createKnowledgeAsset rejects daemon-only alsoPublishVm aliases before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: { epochs: 3 },
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): epochs');
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: { clearSharedMemoryAfter: true },
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): clearSharedMemoryAfter');
+    expect(calls).toHaveLength(0);
+  });
+
   it('createKnowledgeAsset rejects array alsoPublishVm before HTTP serialization', async () => {
     const calls = track({ ok: true });
     await expect(client.createKnowledgeAsset('cg', 'f', {
@@ -766,7 +792,8 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       publisherNodeIdentityIdOverride: 123n,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+    const publishBody = JSON.parse(calls[0].opts.body as string);
+    expect(publishBody).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
       options: {
@@ -775,6 +802,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+    expect(publishBody.options).not.toHaveProperty('subGraphName');
 
     calls = track({ jobId: 'job-1', status: 'accepted' });
     await client.knowledgeAssetPublishAsync('cg', 'f', {
@@ -784,7 +812,8 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       publisherNodeIdentityIdOverride: 123n,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish-async`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+    const publishAsyncBody = JSON.parse(calls[0].opts.body as string);
+    expect(publishAsyncBody).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
       options: {
@@ -793,6 +822,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+    expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
   });
 
   it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
@@ -855,6 +885,25 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await expect(client.knowledgeAssetPublish('cg', 'f', {
       publishEpoch: 3,
     } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetPublish rejects daemon-only option aliases before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      epochs: 3,
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): epochs');
+    await expect(client.knowledgeAssetPublishAsync('cg', 'f', {
+      clearSharedMemoryAfter: true,
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): clearSharedMemoryAfter');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetPublish rejects publisher identity overrides above uint72 before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      publisherNodeIdentityIdOverride: 4722366482869645213696n,
+    })).rejects.toThrow('publisherNodeIdentityIdOverride');
     expect(calls).toHaveLength(0);
   });
 

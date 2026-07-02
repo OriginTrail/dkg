@@ -75,6 +75,11 @@ import {
 import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import {
+  formatFinalizedPublishOptionError,
+  parseHttpFinalizedPublishOptions,
+  type NormalizedFinalizedPublishOptions,
+} from "../../finalized-publish-options.js";
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -450,10 +455,6 @@ async function resolveFinalizeStorageLane(
   }
 }
 
-// uint32 epoch ceiling (matches sibling routes memory.ts / publisher.ts). Not an
-// id encoder — the on-chain endEpoch is a uint40 but the publish API caps at uint32.
-const MAX_PUBLISH_EPOCHS = 0xffffffff;
-
 // PR #972 — classify a finalized-publish result into an HTTP status. On this
 // SYNCHRONOUS route a non-confirmed publish is a failure, not a normal in-flight
 // state ("no silent tentative downgrade"):
@@ -506,29 +507,6 @@ function validateFinalizedAssertionPublishShape(
   return true;
 }
 
-function publishIntegerString(
-  value: unknown,
-  field: string,
-  res: RequestContext["res"],
-  opts: { positive: boolean },
-): string | null {
-  if (typeof value !== "string" && typeof value !== "number") {
-    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}integer (string or number)` });
-    return null;
-  }
-  if (typeof value === "number" && (!Number.isSafeInteger(value) || (opts.positive ? value <= 0 : value < 0))) {
-    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}safe integer (string or number)` });
-    return null;
-  }
-  const v = typeof value === "string" ? value.trim() : String(value);
-  const pattern = opts.positive ? /^[1-9]\d*$/ : /^\d+$/;
-  if (!pattern.test(v)) {
-    jsonResponse(res, 400, { error: `"${field}" must be a ${opts.positive ? "positive " : "non-negative "}integer (string or number)` });
-    return null;
-  }
-  return v;
-}
-
 // Validate + normalize the finalized-publish options BEFORE they reach
 // `publishFromFinalizedAssertion` (PR #971). Without this, malformed epochs /
 // identity overrides / flags flowed straight through and surfaced as opaque
@@ -537,59 +515,20 @@ function publishIntegerString(
 function resolveFinalizedPublishOptions(
   ctx: RequestContext,
   raw: unknown,
-): Record<string, unknown> | null {
+): NormalizedFinalizedPublishOptions | null {
   const { res } = ctx;
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-  const source = raw as Record<string, unknown>;
-  const { clearAfter, clearSharedMemoryAfter, publisherNodeIdentityIdOverride } = source;
-  const rawPublishEpochs = source.publishEpochs ?? source.epochs;
-  const publishEpochsField = source.publishEpochs !== undefined ? "publishEpochs" : "epochs";
-
-  let resolvedPublisherIdentityOverride: bigint | undefined;
-  if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-    const v = publishIntegerString(publisherNodeIdentityIdOverride, "publisherNodeIdentityIdOverride", res, { positive: false });
-    if (v === null) return null;
-    resolvedPublisherIdentityOverride = BigInt(v);
-  }
-
-  let resolvedPublishEpochs: number | undefined;
-  if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
-    const v = publishIntegerString(rawPublishEpochs, publishEpochsField, res, { positive: true });
-    if (v === null) return null;
-    const n = Number(v);
-    if (!Number.isSafeInteger(n)) {
-      jsonResponse(res, 400, { error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer` });
-      return null;
-    }
-    if (n > MAX_PUBLISH_EPOCHS) {
-      jsonResponse(res, 400, { error: `"${publishEpochsField}" must be less than or equal to ${MAX_PUBLISH_EPOCHS}` });
-      return null;
-    }
-    resolvedPublishEpochs = n;
-  }
-
-  if (clearAfter !== undefined && typeof clearAfter !== "boolean") {
-    jsonResponse(res, 400, { error: '"clearAfter" must be a boolean when supplied' });
+  const parsed = parseHttpFinalizedPublishOptions(raw);
+  if (!parsed.ok) {
+    jsonResponse(res, 400, { error: formatFinalizedPublishOptionError(parsed.error) });
     return null;
   }
-  if (clearSharedMemoryAfter !== undefined && typeof clearSharedMemoryAfter !== "boolean") {
-    jsonResponse(res, 400, { error: '"clearSharedMemoryAfter" must be a boolean when supplied' });
-    return null;
-  }
-  const clearValue = clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
-  return {
-    ...(clearValue !== undefined ? { clearSharedMemoryAfter: clearValue } : {}),
-    ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
-    ...(resolvedPublisherIdentityOverride !== undefined
-      ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
-      : {}),
-  };
+  return parsed.options;
 }
 
 function resolveInlineVmPublishOptions(
   ctx: RequestContext,
   source: Record<string, unknown>,
-): Record<string, unknown> | null {
+): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
   return resolveFinalizedPublishOptions(ctx, source);
 }
@@ -597,7 +536,7 @@ function resolveInlineVmPublishOptions(
 function resolveStandaloneVmPublishOptions(
   ctx: RequestContext,
   source: Record<string, unknown>,
-): Record<string, unknown> | null {
+): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
   const raw = source.options;
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
@@ -1376,11 +1315,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       try {
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
         if (opts === null) return;
-        const publishOptions = opts as {
-          publishEpochs?: number;
-          clearSharedMemoryAfter?: boolean;
-          publisherNodeIdentityIdOverride?: bigint;
-        };
+        const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),

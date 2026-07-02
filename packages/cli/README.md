@@ -260,7 +260,7 @@ modes auto-renewal can't recover from:
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
 | `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
-| `dkg ka publish-async <name> -c <cg>` | Enqueue VM publish for an already finalized and fully shared KA |
+| `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
 | `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
 | `dkg ka discard <name> -c <cg>` | Discard a WM draft |
 | `dkg ka query <name> -c <cg>` | Read KA WM quads |
@@ -284,7 +284,7 @@ modes auto-renewal can't recover from:
 
 Run `dkg <command> --help` for per-command options.
 
-Async publisher wallets must already have on-chain identities/profiles before they can claim VM publish jobs. Fund and provision those wallets before enabling async publish, or remove unprovisioned wallets from `publisher-wallets.json`.
+Async publisher wallets need valid keys and native gas. Register the wallet as a PCA agent or fund TRAC for direct spend before expecting jobs to publish successfully. An on-chain node identity is optional publisher-node attribution; identity `0` is valid no-attribution mode. See [Async Publisher Wallets](../../docs/use-dkg/async-publisher-wallets.md).
 
 ## Source Workers
 

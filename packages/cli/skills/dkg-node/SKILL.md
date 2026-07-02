@@ -781,16 +781,17 @@ CLI equivalents:
 ```bash
 dkg ka publish-async <name> -c <context-graph-id>
 dkg publisher publish-async <context-graph-id> <name>   # operational alias
+dkg publisher publish-async <context-graph-id> <name> --publisher-node-identity-id 0
 dkg publisher jobs
 dkg publisher job <job-id>
 dkg publisher stats
 ```
 
-Async publisher wallets must already have on-chain identities/profiles before they can claim VM publish jobs. If startup reports an unprovisioned publisher wallet, provision that wallet or remove it from `publisher-wallets.json` before retrying.
+Async publisher wallets need native gas plus PCA agent registration or TRAC for direct spend. They do not need on-chain identities/profiles to claim VM publish jobs. Identity `0` is valid no-attribution mode; a non-zero identity is optional publisher-node attribution only. Separate publisher wallets are not automatically attached to the node's Core identity; use `POST /api/operational-wallets` only when attribution to that node identity is desired. See `docs/use-dkg/async-publisher-wallets.md`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`. Returns `202 { jobId, status: "accepted" }`. |
+| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`; `options.publisherNodeIdentityIdOverride: "0"` forces no-attribution. Returns `202 { jobId, status: "accepted" }`. |
 | `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
 | `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
 | `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs. Named lifecycle publish jobs return no raw payload. |
