@@ -325,7 +325,13 @@ describe('StorageACKHandler', () => {
     expect(decoded.declineMessage).toContain('not confirmed on-chain');
   });
 
-  it('refuses to sign when signer registration lookup fails', async () => {
+  it('declines (CORE_TEMPORARILY_UNAVAILABLE) when signer registration lookup fails — still refuses to sign', async () => {
+    // Testnet dead-air fix: a THROWN lookup used to escape the handler,
+    // which ProtocolRouter surfaced as a bare stream reset — the publisher
+    // retried 3× and bucketed the peer as `no_response`. It now replies
+    // with a transient in-band decline (fail-closed still holds: no ACK is
+    // ever signed without a confirmed registration). The definitive
+    // `registered === false` verdict keeps SIGNER_NOT_REGISTERED above.
     const lookupFailed = vi.fn();
     const unregistered = vi.fn();
     const handler = await createHandler(swmQuads, {
@@ -346,9 +352,13 @@ describe('StorageACKHandler', () => {
       merkleLeafCount: swmMerkleLeafCount,
     });
 
-    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
-      'StorageACK signer registration lookup failed; refusing to sign',
-    );
+    const response = await handler.handler(intent, fakePeerId);
+    const decoded = decodeStorageACK(response);
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toContain('signer registration lookup unavailable');
+    // The raw RPC error stays off the wire — it only reaches the local hook.
+    expect(decoded.declineMessage).not.toContain('rpc unavailable');
     expect(lookupFailed).toHaveBeenCalledOnce();
     expect(unregistered).not.toHaveBeenCalled();
   });

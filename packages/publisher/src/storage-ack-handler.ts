@@ -60,6 +60,105 @@ function summarizeDeclineEntities(entities: readonly string[]): string {
     : visible.join(', ');
 }
 
+/**
+ * Module-private marker for "a triple-store operation failed mid-ACK".
+ * `loadSWMQuads` raises this ONLY around its `store.query` calls so the
+ * handler's catch sites can tell a peer-local store outage (→ transient
+ * `CORE_TEMPORARILY_UNAVAILABLE` decline) apart from the
+ * `assertSafeIri` malformed-request throws inside the same function,
+ * which MUST keep resetting the stream per the decline-vocabulary
+ * contract in `packages/core/src/proto/storage-ack.ts` ("malformed-
+ * request errors are NOT declines"). A blanket try/catch around the
+ * whole `loadSWMQuads` call would demote an IRI-injection attempt into
+ * a retryable decline and hand the publisher 6 pointless retries.
+ */
+class StoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'StoreUnavailableError';
+    if (cause instanceof Error && cause.stack) this.stack = cause.stack;
+  }
+}
+
+/**
+ * Default freshness window for {@link withSignerRegistrationCache}: a
+ * signer-registration verdict is served from cache (no chain read) for
+ * this long after the last successful lookup. Registration changes are
+ * operator-driven and rare, so 30s of staleness is a safe trade for not
+ * issuing one live RPC per inbound StorageACK request.
+ */
+export const SIGNER_REGISTRATION_CACHE_TTL_MS = 30_000;
+/**
+ * Default serve-stale window for {@link withSignerRegistrationCache}:
+ * when the live lookup THROWS, a previously-successful verdict this
+ * recent is served instead of propagating the error. Generous on
+ * purpose — a degraded shared RPC should not stop an otherwise-healthy
+ * core from ACKing for minutes at a time.
+ */
+export const SIGNER_REGISTRATION_STALE_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Wrap a live signer-registration lookup (`StorageACKHandlerConfig.
+ * isSignerRegistered`) with a tiny TTL cache + serve-stale-on-error.
+ *
+ * Why this exists (testnet storage-ACK dead-air incident): the agent
+ * wires `isSignerRegistered` straight to `chain.
+ * isOperationalWalletRegistered` — a LIVE, UNCACHED chain read executed
+ * on EVERY inbound StorageACK request, on EVERY core. When the shared
+ * RPC degrades, every ACK on every core fails its signer lookup
+ * simultaneously and the whole network stops ACKing at once. Caching
+ * the last good verdict bounds the blast radius of an RPC blip to at
+ * most one decline per core per stale window.
+ *
+ * Semantics:
+ *   - within `ttlMs` of the last SUCCESSFUL lookup: cached verdict,
+ *     zero chain reads (both `true` and `false` are cached — a
+ *     known-unregistered signer should not hammer the RPC either);
+ *   - lookup THROWS + a cached verdict newer than `staleWindowMs`
+ *     exists: serve the stale verdict (`onServedStale` fires so the
+ *     caller can log it at DEBUG);
+ *   - lookup THROWS + no usable cache: rethrow — the handler turns
+ *     that into a transient `CORE_TEMPORARILY_UNAVAILABLE` decline.
+ *
+ * Deliberately dependency-free closure state (no timers, no cross-
+ * package cache util) so the agent can wire it inline. `now` is an
+ * injection seam for tests only.
+ */
+export function withSignerRegistrationCache(
+  lookup: () => Promise<boolean>,
+  options: {
+    ttlMs?: number;
+    staleWindowMs?: number;
+    /** Called when a lookup error was absorbed by serving a stale verdict. */
+    onServedStale?: (err: unknown, staleValue: boolean) => void;
+    /** Test seam — defaults to `Date.now`. */
+    now?: () => number;
+  } = {},
+): () => Promise<boolean> {
+  const ttlMs = options.ttlMs ?? SIGNER_REGISTRATION_CACHE_TTL_MS;
+  const staleWindowMs = options.staleWindowMs ?? SIGNER_REGISTRATION_STALE_WINDOW_MS;
+  const now = options.now ?? Date.now;
+  let cached: { value: boolean; at: number } | undefined;
+  return async () => {
+    if (cached && now() - cached.at < ttlMs) return cached.value;
+    try {
+      const value = await lookup();
+      cached = { value, at: now() };
+      return value;
+    } catch (err) {
+      if (cached && now() - cached.at < staleWindowMs) {
+        try {
+          options.onServedStale?.(err, cached.value);
+        } catch {
+          // Observability must never change the probe's answer.
+        }
+        return cached.value;
+      }
+      throw err;
+    }
+  };
+}
+
 export interface StorageACKHandlerConfig {
   nodeRole: 'core' | 'edge';
   nodeIdentityId: bigint;
@@ -278,12 +377,18 @@ export class StorageACKHandler {
     cgId: string,
     code: StorageACKDeclineCode,
     message: string,
+    // `hookMessage` (optional) feeds ONLY the local `onDecline` log hook
+    // while `message` rides the wire. Used by the transient-unavailable
+    // path so the operator's WARN line carries the real store/RPC error
+    // but the remote publisher only sees a short sanitized reason —
+    // internal error strings (paths, worker state) stay off the network.
+    options: { hookMessage?: string } = {},
   ): Uint8Array {
     if (this.config.onDecline) {
       const details = {
         code,
         contextGraphId: compactDeclineText(cgId, MAX_DECLINE_LOG_CG_ID_CHARS),
-        message: compactDeclineText(message, MAX_DECLINE_LOG_MESSAGE_CHARS),
+        message: compactDeclineText(options.hookMessage ?? message, MAX_DECLINE_LOG_MESSAGE_CHARS),
       };
       try {
         void Promise.resolve(this.config.onDecline(details)).catch(() => undefined);
@@ -300,6 +405,36 @@ export class StorageACKHandler {
       declineCode: code,
       declineMessage: message,
     });
+  }
+
+  /**
+   * Transient peer-local failure → `CORE_TEMPORARILY_UNAVAILABLE`
+   * decline (testnet dead-air fix). Before this, a thrown store op or
+   * signer-lookup error escaped the handler and ProtocolRouter aborted
+   * the inbound stream with NO reply — the publisher burned its 3
+   * transport retries and recorded the peer as `no_response` (live
+   * incident: 7 cores dialled, 21 attempts, ALL `no_response`,
+   * 0 declines). An in-band transient decline instead (a) tells the
+   * publisher WHY, and (b) keeps this core in the quorum pool on the
+   * transient retry cadence — the store worker / RPC usually recovers
+   * within seconds.
+   *
+   * `wireMessage` must be SHORT + generic (it goes to an untrusted
+   * remote peer); the raw `cause` message only reaches the local
+   * `onDecline` WARN hook.
+   */
+  private declineTemporarilyUnavailable(
+    cgId: string,
+    wireMessage: string,
+    cause: unknown,
+  ): Uint8Array {
+    const causeMsg = cause instanceof Error ? cause.message : String(cause);
+    return this.encodeDecline(
+      cgId,
+      STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+      wireMessage,
+      { hookMessage: `${wireMessage}: ${causeMsg}` },
+    );
   }
 
   /**
@@ -507,13 +642,23 @@ export class StorageACKHandler {
       // Root verified — persist the public catalog to `<cg>/_catalog` so this
       // core can serve it (the §7 facet open-serve) and the prover can later
       // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
+      // `assertSafeIri` stays OUTSIDE the try below: an unsafe graph IRI is a
+      // malformed-request condition (stream reset), not a store outage.
       const catalogGraph = contextGraphCatalogUri(cgId);
       assertSafeIri(catalogGraph);
-      const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-      for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+      try {
+        const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
+        for (const subject of catalogSubjects) {
+          await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        }
+        await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+      } catch (err) {
+        // Dead-air fix: a failing store (worker restarting, 'store is
+        // closed') used to throw out of the handler → stream reset with no
+        // reply. Reply with the transient decline so the publisher retries
+        // once the store recovers instead of bucketing us as no_response.
+        return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
       }
-      await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -569,7 +714,16 @@ export class StorageACKHandler {
           signerRegistered = await this.config.isSignerRegistered();
         } catch (err) {
           try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-          throw new Error('curated StorageACK signer registration lookup failed; refusing to sign');
+          // Dead-air fix: a THROWN lookup (degraded RPC) is transient —
+          // decline in band instead of resetting the stream, so the
+          // publisher retries once the RPC recovers. Still refuses to
+          // sign (fail-closed); only the failure surface changed. The
+          // `registered === false` verdict below keeps its own decline.
+          return this.declineTemporarilyUnavailable(
+            cgId,
+            'signer registration lookup unavailable',
+            err,
+          );
         }
         if (signerRegistered === false) {
           try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
@@ -679,9 +833,18 @@ export class StorageACKHandler {
       // at least one core node stored the data). The staging graph is keyed
       // by merkle root prefix and cleaned up during finalization.
       const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      await this.store.dropGraph(stagingGraphUri);
-      const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads);
+      try {
+        await this.store.dropGraph(stagingGraphUri);
+        const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
+        await this.store.insert(graphedQuads);
+      } catch (err) {
+        // Dead-air fix: the staging apply hitting a closed / restarting
+        // store used to throw → stream reset → publisher saw no_response
+        // after 3 transport retries. The durability invariant above is why
+        // we CANNOT just sign anyway — so decline transiently and let the
+        // publisher re-send once the store worker is back.
+        return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
+      }
       swmQuads = parsed;
 
       // Schedule cleanup: remove staging graph after 10 minutes.
@@ -697,7 +860,20 @@ export class StorageACKHandler {
       // another core. Returning a typed decline instead of throwing keeps
       // the libp2p stream alive so the publisher sees the reason in band
       // rather than as an opaque stream reset (the #541 failure mode).
-      swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+      //
+      // Dead-air fix: the SWM CONSTRUCT itself failing (store worker down)
+      // is the same #541 shape one level deeper — it used to throw out of
+      // the handler and reset the stream. `loadSWMQuads` tags store-op
+      // failures (and ONLY those — its assertSafeIri malformed-request
+      // throws pass through untouched) so we can decline transiently.
+      try {
+        swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+      } catch (err) {
+        if (err instanceof StoreUnavailableError) {
+          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
+        }
+        throw err;
+      }
 
       if (swmQuads.length === 0) {
         return this.encodeDecline(
@@ -866,7 +1042,19 @@ export class StorageACKHandler {
         } catch {
           // Keep ACK availability independent from logging/callback failures.
         }
-        throw new Error('StorageACK signer registration lookup failed; refusing to sign');
+        // Dead-air fix: `isSignerRegistered` is a LIVE chain read on every
+        // inbound ACK — one degraded shared RPC used to make this throw on
+        // EVERY request on EVERY core, and the resulting stream resets
+        // dead-aired the whole network (the testnet 21-attempts-all-
+        // no_response incident). A thrown LOOKUP is transient, so decline
+        // in band; the definitive `registered === false` verdict below
+        // keeps its existing SIGNER_NOT_REGISTERED decline. Either way we
+        // never sign without a confirmed registration (fail-closed holds).
+        return this.declineTemporarilyUnavailable(
+          cgId,
+          'signer registration lookup unavailable',
+          err,
+        );
       }
       if (signerRegistered === false) {
         try {
@@ -1081,15 +1269,23 @@ export class StorageACKHandler {
         }
         // Root verified — REPLACE-persist the updated public catalog to
         // `<cg>/_catalog` so this core serves + later proves the rotated root.
+        // `assertSafeIri` stays OUTSIDE the try: an unsafe IRI is malformed-
+        // request territory (stream reset), not a store outage.
         const catalogGraph = contextGraphCatalogUri(cgId);
         assertSafeIri(catalogGraph);
-        const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-        for (const subject of catalogSubjects) {
-          await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        try {
+          const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
+          for (const subject of catalogSubjects) {
+            await this.store.deleteByPattern({ graph: catalogGraph, subject });
+          }
+          await this.store.insert(
+            parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
+          );
+        } catch (err) {
+          // Dead-air fix — same transient store-outage decline as the
+          // publish handler's catalog persist; see declineTemporarilyUnavailable.
+          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
         }
-        await this.store.insert(
-          parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
-        );
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
@@ -1124,8 +1320,19 @@ export class StorageACKHandler {
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory
       // remap / SWM-resolution path). Reuse the publish branch's SWM
-      // CONSTRUCT + recompute + typed-decline shape.
-      const swmQuads = await this.loadSWMQuads(swmGraphUri, []);
+      // CONSTRUCT + recompute + typed-decline shape — including the
+      // dead-air fix: a store-op failure inside loadSWMQuads becomes a
+      // transient decline instead of a stream reset (malformed-request
+      // assertSafeIri throws still pass through and reset).
+      let swmQuads: Quad[];
+      try {
+        swmQuads = await this.loadSWMQuads(swmGraphUri, []);
+      } catch (err) {
+        if (err instanceof StoreUnavailableError) {
+          return this.declineTemporarilyUnavailable(cgId, 'store unavailable', err);
+        }
+        throw err;
+      }
       if (swmQuads.length === 0) {
         return this.encodeDecline(
           cgId,
@@ -1243,7 +1450,14 @@ export class StorageACKHandler {
         signerRegistered = await this.config.isSignerRegistered();
       } catch (err) {
         try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-        throw new Error('UpdateStorageACK signer registration lookup failed; refusing to sign');
+        // Dead-air fix: thrown lookup (degraded RPC) → transient in-band
+        // decline instead of a stream reset; still never signs unconfirmed
+        // (fail-closed). Mirrors the publish handler's lookup branch.
+        return this.declineTemporarilyUnavailable(
+          cgId,
+          'signer registration lookup unavailable',
+          err,
+        );
       }
       if (signerRegistered === false) {
         try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
@@ -1286,7 +1500,7 @@ export class StorageACKHandler {
       // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
       // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.store.query(sparql);
+      const result = await this.queryStoreOrUnavailable(sparql);
       return result.type === 'quads' ? result.quads : [];
     }
 
@@ -1295,12 +1509,28 @@ export class StorageACKHandler {
       assertSafeIri(entity);
       const genidPrefix = `${entity}/.well-known/genid/`;
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.store.query(sparql);
+      const result = await this.queryStoreOrUnavailable(sparql);
       if (result.type === 'quads') {
         allQuads.push(...result.quads);
       }
     }
     return allQuads;
+  }
+
+  /**
+   * `store.query` with store-outage tagging: a throw here means the
+   * triple store itself is unhealthy (worker mid-restart, 'store is
+   * closed'), which the ACK handlers translate into the transient
+   * `CORE_TEMPORARILY_UNAVAILABLE` decline. Kept as a separate wrapper
+   * so ONLY the store op is tagged — the `assertSafeIri` guards in
+   * {@link loadSWMQuads} above stay ordinary malformed-request throws.
+   */
+  private async queryStoreOrUnavailable(sparql: string): ReturnType<TripleStore['query']> {
+    try {
+      return await this.store.query(sparql);
+    } catch (err) {
+      throw new StoreUnavailableError(err);
+    }
   }
 }
 

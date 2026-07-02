@@ -14,6 +14,8 @@ import {
   isSafeIri,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
+  Logger,
+  createOperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import type { DKGAgent, ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
@@ -717,11 +719,13 @@ function exactProbeIsLocallyWritable(
   probe: ContextGraphWritePreflightProbe,
   requireLocalWritable: boolean,
 ): boolean {
-  if (!probe.exists) return false;
+  // Store-derived probe facts are tri-state (`undefined` = the store read
+  // failed); only an explicit `true` counts as positive evidence here.
+  if (probe.exists !== true) return false;
   if (!requireLocalWritable) {
-    return hasActiveSyncedSubscription(probe) || probe.hasLocalContent || probe.declarationFound;
+    return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || probe.declarationFound === true;
   }
-  return hasActiveSyncedSubscription(probe) || (probe.hasLocalContent && probe.exists);
+  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true;
 }
 
 function exactProbeCanFastAccept(
@@ -740,8 +744,8 @@ function exactProbeIsAuthoritativeBearerDeny(
 ): boolean {
   return (
     !!callerAgentAddress &&
-    probe.exists &&
-    probe.declarationFound &&
+    probe.exists === true &&
+    probe.declarationFound === true &&
     probe.accessPolicy === "private" &&
     probe.callerAuthorized === false
   );
@@ -766,6 +770,73 @@ function rejectUnknownContextGraph(
   return null;
 }
 
+const writePreflightRescueLog = new Logger('daemon-http');
+
+/** Bound for the last-resort on-chain rescue eth_call, so an RPC stack that
+ *  hangs on connect cannot stall a write route that is already degraded. */
+const WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS = 5_000;
+
+/**
+ * Track B (write-preflight resilience) — last-resort write-target acceptance
+ * when BOTH validation legs failed (the exact preflight probe AND
+ * listContextGraphs), i.e. the local store is unavailable and the daemon would
+ * otherwise 503 every write until it recovers.
+ *
+ * Accept ONLY on a single piece of store-free evidence: the agent proves — via
+ * the in-memory registry onChainId + a bounded eth_call pair — that the
+ * candidate is an ACTIVE, PUBLIC context graph on-chain
+ * (`contextGraphActivePublicOnChainFromRegistry`: `isContextGraphActiveOnChain`
+ * AND `getContextGraphAccessPolicy === 0`).
+ *
+ * Why not the in-memory subscription alone: an active subscription proves the
+ * node HOSTS/tracks the CG, but carries NO access-policy and NO per-caller
+ * authorization. The healthy write-preflight denies an authenticated-but-
+ * unauthorized caller of a PRIVATE CG (`exactProbeIsAuthoritativeBearerDeny`,
+ * accessPolicy `private`); that verdict comes from the local `_meta` allowlist,
+ * which is exactly what's unavailable while the store is down. Accepting a
+ * subscribed PRIVATE CG here would silently convert that DENY into an accept
+ * for any authenticated caller. So we require positive proof the CG is PUBLIC —
+ * where the preflight applies no per-caller deny — and refuse everything else.
+ *
+ * Anything short of that proof — chain says not-active/non-public, throws, times
+ * out, or the adapter lacks a read — keeps today's fail-closed 503 verbatim.
+ * This never converts an existing DENY into an accept: it runs only on the
+ * both-legs-THREW branch, only ever admits an id the registry ALREADY tracks
+ * (never a raw unknown candidate → shadow-CG fail-closed holds), and only when
+ * that id is provably public (no per-caller preflight deny exists to convert).
+ */
+async function rescueWriteTargetWithoutStore(
+  agent: {
+    contextGraphActivePublicOnChainFromRegistry?: (contextGraphId: string) => Promise<boolean>;
+  },
+  candidateId: string,
+  unavailableMessage: string,
+): Promise<boolean> {
+  if (typeof agent.contextGraphActivePublicOnChainFromRegistry !== 'function') return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const activePublic = await Promise.race([
+      agent.contextGraphActivePublicOnChainFromRegistry(candidateId),
+      new Promise<false>((resolveTimeout) => {
+        timer = setTimeout(() => resolveTimeout(false), WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS);
+        // Allow the process to exit even if the chain promise never settles.
+        timer.unref?.();
+      }),
+    ]);
+    if (activePublic !== true) return false;
+  } catch {
+    // RPC failure / contract absent — keep the fail-closed 503.
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  writePreflightRescueLog.warn(
+    createOperationContext('resolve'),
+    `write preflight: accepting context graph "${candidateId}" via positive on-chain proof it is an active PUBLIC context graph — local store unavailable (${unavailableMessage})`,
+  );
+  return true;
+}
+
 /**
  * Resolve a write target to a known, canonical context graph id.
  *
@@ -784,6 +855,7 @@ export async function resolveRequiredWriteContextGraphId(
       contextGraphId: string,
       opts?: { callerAgentAddress?: string | null },
     ) => Promise<ContextGraphWritePreflightProbe>;
+    contextGraphActivePublicOnChainFromRegistry?: (contextGraphId: string) => Promise<boolean>;
   },
   contextGraphId: unknown,
   res: ServerResponse,
@@ -817,21 +889,41 @@ export async function resolveRequiredWriteContextGraphId(
       const probe = await agent.probeContextGraphWritePreflight(candidateId, {
         callerAgentAddress,
       });
+      if (probe.storeUnavailable === true) {
+        // Track B: the probe survived a store failure and degraded its
+        // store-derived fields to UNKNOWN instead of throwing. Carry the
+        // original store error so the both-legs-failed 503 below keeps its
+        // legacy "exact preflight failed: X; list validation failed: Y" shape.
+        // The store-free rescue that runs there re-derives its own evidence
+        // (on-chain active+public proof) from the id alone, so the probe object
+        // itself is not needed past this point.
+        exactProbeErrorMessage = probe.storeErrorMessage ?? 'local store unavailable';
+      }
       if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
         return candidateId;
       }
-      if (exactProbeIsStaleSubscription(probe)) {
-        if (isBareCandidateId) {
-          deferredExactProbeReject = true;
-        } else {
-          return rejectUnknownContextGraph(res, raw);
+      // Deny-ish probe interpretations require trustworthy store-derived
+      // evidence. When the store was unavailable, `exists` /
+      // `hasLocalContent` are UNKNOWN (undefined), not false — deciding
+      // "stale subscription" or "authoritative deny" from unknowns would
+      // convert a store outage into a 400. Leave the verdict to the list
+      // leg (or the rescue path if that leg fails too), matching the
+      // pre-resilience behavior where a store failure threw past both
+      // checks.
+      if (probe.storeUnavailable !== true) {
+        if (exactProbeIsStaleSubscription(probe)) {
+          if (isBareCandidateId) {
+            deferredExactProbeReject = true;
+          } else {
+            return rejectUnknownContextGraph(res, raw);
+          }
         }
-      }
-      if (exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)) {
-        if (isBareCandidateId) {
-          deferredExactProbeReject = true;
-        } else {
-          return rejectUnknownContextGraph(res, raw);
+        if (exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)) {
+          if (isBareCandidateId) {
+            deferredExactProbeReject = true;
+          } else {
+            return rejectUnknownContextGraph(res, raw);
+          }
         }
       }
     } catch (err) {
@@ -851,6 +943,13 @@ export async function resolveRequiredWriteContextGraphId(
     const message = exactProbeErrorMessage
       ? `exact preflight failed: ${exactProbeErrorMessage}; list validation failed: ${listMessage}`
       : listMessage;
+    // BOTH legs failed — the store is unavailable (or both reads broke some
+    // other way). Before surfacing the 503, try the store-free rescue: accept
+    // only on positive on-chain proof the id the daemon already tracks is an
+    // active PUBLIC context graph. Everything else keeps the legacy 503 verbatim.
+    if (await rescueWriteTargetWithoutStore(agent, candidateId, message)) {
+      return candidateId;
+    }
     return contextGraphValidationUnavailable(res, message);
   }
 

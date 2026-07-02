@@ -108,6 +108,23 @@ export const STORAGE_ACK_DECLINE_CODES = {
    * republish with a `byteSize` that reflects the real content.
    */
   BYTESIZE_UNDERCLAIM: 'BYTESIZE_UNDERCLAIM',
+  /**
+   * The core hit a peer-LOCAL, transient infrastructure failure while
+   * servicing an otherwise well-formed request: its triple store errored
+   * mid-read/write (e.g. an oxigraph worker mid-restart throwing
+   * `store is closed`) or its live signer-registration chain lookup threw
+   * (a degraded shared RPC). Introduced after the testnet storage-ACK
+   * dead-air incident: every such failure previously THREW out of the
+   * handler, which ProtocolRouter's inbound wrapper surfaces as a bare
+   * stream abort with NO reply — the publisher burned its 3 transport
+   * retries and bucketed the peer as `no_response` (7 cores dialled,
+   * 21 send attempts, ALL `no_response`, 0 declines — zero diagnostic
+   * signal). Transient — the store worker recovers / the RPC comes back,
+   * so the publisher retries on the normal transient-decline cadence.
+   * Old publishers that pre-date this code treat it as a terminal decline
+   * WITH a reason, which is still strictly better than dead air.
+   */
+  CORE_TEMPORARILY_UNAVAILABLE: 'CORE_TEMPORARILY_UNAVAILABLE',
 } as const;
 
 export type StorageACKDeclineCode =
@@ -133,6 +150,12 @@ export const TRANSIENT_STORAGE_ACK_DECLINE_CODES: ReadonlySet<string> = new Set<
   // transient: the publisher's commitment is wrong, no amount of
   // waiting fixes it.
   STORAGE_ACK_DECLINE_CODES.MISSING_CIPHERTEXT_CHUNKS,
+  // Dead-air fix: a store/RPC blip on the core clears when the local
+  // oxigraph worker or the shared RPC recovers — the same "wait a few
+  // seconds and re-ask" cadence as SWM catch-up. Marking it transient
+  // keeps a briefly-degraded core in the quorum pool instead of
+  // deselecting it on the first blip.
+  STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
 ]);
 
 /** True iff `code` names a decline the publisher should retry rather than treat as permanent. */

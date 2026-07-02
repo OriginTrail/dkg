@@ -99,7 +99,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
+  ACKCollector, StorageACKHandler, withSignerRegistrationCache,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -1151,15 +1151,41 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   return null;
                 }
               },
-              isSignerRegistered: async () => {
-                const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
-                if (typeof isOperationalWalletRegistered !== 'function') return false;
-                return isOperationalWalletRegistered.call(
-                  this.chain,
-                  onChainIdentityId,
-                  ackSignerWallet.address,
-                );
-              },
+              // Testnet dead-air fix: `isOperationalWalletRegistered` is a
+              // LIVE chain read the handler runs on EVERY inbound StorageACK.
+              // With the raw wiring, one degraded shared RPC made the lookup
+              // throw on every ACK on every core simultaneously — the whole
+              // network stopped ACKing at once (the 21-attempts-all-
+              // no_response incident). The cache wrapper serves the last
+              // good verdict for 30s (no RPC per ACK in steady state) and
+              // keeps serving it up to 5 min through an RPC outage;
+              // registration changes are operator-driven and rare, so that
+              // staleness window is safe. Both verdicts are cached — a
+              // known-unregistered signer shouldn't hammer the RPC either.
+              // The closure state lives (and dies) with this handler
+              // registration attempt, so a signer failover / re-register
+              // always starts from a fresh cache.
+              isSignerRegistered: withSignerRegistrationCache(
+                async () => {
+                  const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
+                  if (typeof isOperationalWalletRegistered !== 'function') return false;
+                  return isOperationalWalletRegistered.call(
+                    this.chain,
+                    onChainIdentityId,
+                    ackSignerWallet.address,
+                  );
+                },
+                {
+                  onServedStale: (err, staleValue) => {
+                    this.log.debug?.(
+                      attemptCtx,
+                      `V10 StorageACK signer registration lookup failed; serving cached ` +
+                      `verdict=${staleValue} for ${ackSignerWallet.address}: ` +
+                      `${err instanceof Error ? err.message : String(err)}`,
+                    );
+                  },
+                },
+              ),
               onSignerUnregistered: () => {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;

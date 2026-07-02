@@ -34,6 +34,34 @@ import { registerTripleStoreAdapter } from '../triple-store.js';
  */
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
 
+/**
+ * Backoff (ms) before each consecutive respawn attempt after an UNEXPECTED
+ * worker exit: the first attempt is immediate (a one-off OOM/crash should
+ * recover with zero visible downtime), then 1s / 5s / 30s, capped at the last
+ * tier. The cap keeps a persistently-crashing worker (corrupt state, chronic
+ * OOM on load) from melting the node in a hot spawn/crash loop while still
+ * retrying often enough that a transient cause self-heals.
+ */
+const RESPAWN_BACKOFF_MS = [0, 1_000, 5_000, 30_000];
+
+/**
+ * Give-up bound: after this many CONSECUTIVE respawned workers die without
+ * serving a single successful op, stop respawning and latch the store closed
+ * (the pre-recovery behaviour) with fatal operator guidance. The counter
+ * resets on the first successful reply from a worker (see the message handler
+ * in spawnWorker), so occasional crashes days apart never accumulate here —
+ * only a genuine crash loop trips it.
+ */
+const MAX_CONSECUTIVE_RESPAWNS = 5;
+
+/** Unref'd sleep — a respawn backoff timer must not keep the process alive on its own. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    if (typeof t.unref === 'function') t.unref();
+  });
+}
+
 export interface OxigraphWorkerStoreOptions {
   /**
    * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
@@ -83,14 +111,39 @@ export interface OxigraphWorkerTimeoutError extends Error {
 export class OxigraphWorkerStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
 
-  private worker: Worker;
+  // Assigned by spawnWorker(), which the constructor always calls — hence the
+  // definite-assignment assertion instead of an initializer.
+  private worker!: Worker;
   private nextId = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private readonly operationTimeoutMs: number;
-  /** Set once the worker thread has exited (graceful close, crash, or kill). */
+  /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
+  private readonly workerPath: string;
+  /** Persistence file handed to every spawned worker (undefined = in-memory). */
+  private readonly persistPath: string | undefined;
+  /** Set once the CURRENT worker thread has exited (graceful close, crash, or kill). */
   private workerExited = false;
   /** Memoized close so repeat/concurrent close() calls share one teardown. */
   private closePromise: Promise<void> | null = null;
+  /**
+   * In-flight replacement of a crashed worker. While set, NEW ops park on it
+   * (see callWithTimeout) instead of failing, so a request that races the
+   * respawn sees a slightly slower success rather than a spurious error.
+   * Null whenever a live worker is armed.
+   */
+  private respawnPromise: Promise<void> | null = null;
+  /**
+   * How many respawned workers in a row died without answering a single op
+   * successfully. Reset to 0 by the first successful reply; feeds the backoff
+   * tier and the MAX_CONSECUTIVE_RESPAWNS give-up bound.
+   */
+  private consecutiveRespawnFailures = 0;
+  /**
+   * Latched once respawn gives up on a crash loop: from then on the store
+   * behaves exactly like a closed store (today's fail-fast), except the error
+   * carries operator guidance instead of a plain "closed".
+   */
+  private respawnGaveUp = false;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
@@ -130,17 +183,45 @@ export class OxigraphWorkerStore implements TripleStore {
           `before using this adapter.`,
       );
     }
-    this.worker = new Worker(workerPath, {
-      workerData: { persistPath },
+    this.workerPath = workerPath;
+    this.persistPath = persistPath;
+    this.spawnWorker();
+  }
+
+  /**
+   * Create the worker thread and arm its lifecycle handlers. Shared by the
+   * constructor and by respawn() so a replacement worker is wired IDENTICALLY
+   * to the original — same impl path, same workerData, same handlers — and the
+   * OxigraphWorkerStore object keeps its identity, so every alias held across
+   * the daemon (routes, publisher, gossip ingest) transparently talks to the
+   * new thread. Each handler captures the worker it was armed for and no-ops
+   * if `this.worker` has since moved on, so a stale event from an
+   * already-replaced thread can never clobber the live one's state.
+   */
+  private spawnWorker(): void {
+    const worker = new Worker(this.workerPath, {
+      workerData: { persistPath: this.persistPath },
     });
-    this.worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
+    this.worker = worker;
+    this.workerExited = false;
+    worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
+      if (this.worker !== worker) return;
+      // Any successful reply proves this worker is healthy, which ends the
+      // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
+      if (!msg.error) this.consecutiveRespawnFailures = 0;
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
       if (msg.error) p.reject(new Error(msg.error));
       else p.resolve(msg.result);
     });
-    this.worker.on('error', (err) => {
+    worker.on('error', (err) => {
+      if (this.worker !== worker) return;
+      // Loud by design. 'error' means the worker thread threw an uncaught
+      // exception (an 'exit' event follows). This used to be silent, which is
+      // how a testnet node served HTTP for DAYS with a dead store — green
+      // /api/status, 503 on every write — and nothing in the logs said why.
+      console.error('[oxigraph-worker] worker thread error (thread is going down):', err);
       for (const [, p] of this.pending) p.reject(err);
       this.pending.clear();
     });
@@ -148,14 +229,99 @@ export class OxigraphWorkerStore implements TripleStore {
     // (reject) instead of leaving callers hung forever — this is what makes the
     // unbounded `close()` safe: if a second close (or any op) is still queued
     // when terminate() kills the thread, it rejects here rather than hanging.
-    this.worker.on('exit', () => {
+    //
+    // Two very different exits land here:
+    //   • intentional — close() ran (closePromise is set). Stay closed.
+    //   • unexpected — the thread died on its own. ERR_WORKER_OUT_OF_MEMORY,
+    //     for example, kills ONLY the worker thread, not the process, so the
+    //     daemon would otherwise keep serving with a permanently dead store.
+    //     The store is disk-persisted, so a fresh worker on the same path
+    //     reopens the exact committed state — respawn instead of latching.
+    worker.on('exit', (code) => {
+      if (this.worker !== worker) return;
       this.workerExited = true;
+      const intentional = this.closePromise !== null;
+      if (intentional) {
+        console.info(`[oxigraph-worker] worker exited (code ${code}) — initiated by close()`);
+      } else {
+        console.error(
+          `[oxigraph-worker] worker exited UNEXPECTEDLY (code ${code}) — nobody called close(). ` +
+            (this.persistPath
+              ? 'The store is disk-persisted; respawning a fresh worker on the same path.'
+              : 'WARNING: this store is IN-MEMORY (no persistPath), so its contents are lost; respawning an EMPTY store.'),
+        );
+      }
       if (this.pending.size > 0) {
-        const err = new Error('oxigraph-worker: worker exited before the operation completed (store closed)');
+        const err = intentional
+          ? new Error('oxigraph-worker: worker exited before the operation completed (store closed)')
+          : new Error(
+              `oxigraph-worker restarted — retry: the worker exited unexpectedly (code ${code}) before the ` +
+                'operation completed, so its outcome is unknown; a replacement worker is being spawned.',
+            );
         for (const [, p] of this.pending) p.reject(err);
         this.pending.clear();
       }
+      if (!intentional) this.scheduleRespawn();
     });
+  }
+
+  /** Arm (at most one) background respawn; the policy lives in respawn(). */
+  private scheduleRespawn(): void {
+    if (this.respawnPromise || this.respawnGaveUp) return;
+    // respawn() never rejects (every failure path is caught and looped or
+    // latched), so this promise can't become an unhandled rejection while no
+    // op happens to be parked on it.
+    this.respawnPromise = this.respawn().finally(() => {
+      this.respawnPromise = null;
+    });
+  }
+
+  /**
+   * Replace a crashed worker with a fresh one: immediate first attempt, then
+   * capped backoff (RESPAWN_BACKOFF_MS) between consecutive attempts, giving
+   * up for good after MAX_CONSECUTIVE_RESPAWNS workers in a row die without
+   * serving a single successful op. Giving up latches the store closed —
+   * exactly the pre-recovery behaviour — but with a FATAL log telling the
+   * operator what happened and where to look, instead of the old silence.
+   */
+  private async respawn(): Promise<void> {
+    while (true) {
+      // close() raced the respawn — honour it. An operator-initiated close
+      // must never be resurrected by the supervisor.
+      if (this.closePromise) return;
+      if (this.consecutiveRespawnFailures >= MAX_CONSECUTIVE_RESPAWNS) {
+        this.respawnGaveUp = true;
+        console.error(
+          `[oxigraph-worker] FATAL: the worker died ${MAX_CONSECUTIVE_RESPAWNS} times in a row without ` +
+            'serving a single successful operation — giving up on respawn and latching the store closed. ' +
+            'Every store-backed request will now fail fast. Investigate the crash cause (worker OOM → raise ' +
+            'memory or move to an external SPARQL backend via store.backend "sparql-http" / "blazegraph"; ' +
+            'corrupt persist file → see the quarantine log) and restart the node.',
+        );
+        return;
+      }
+      const attempt = this.consecutiveRespawnFailures;
+      this.consecutiveRespawnFailures += 1;
+      const delayMs = RESPAWN_BACKOFF_MS[Math.min(attempt, RESPAWN_BACKOFF_MS.length - 1)];
+      if (delayMs > 0) {
+        console.error(
+          `[oxigraph-worker] respawn attempt ${attempt + 1}/${MAX_CONSECUTIVE_RESPAWNS} in ${delayMs}ms…`,
+        );
+        await sleep(delayMs);
+        // Re-check: close() may have arrived during the backoff sleep.
+        if (this.closePromise) return;
+      }
+      try {
+        this.spawnWorker();
+        console.info(`[oxigraph-worker] respawned worker (attempt ${attempt + 1}/${MAX_CONSECUTIVE_RESPAWNS})`);
+        return;
+      } catch (err) {
+        // new Worker() itself can throw (e.g. the impl file vanished at
+        // runtime). Treat it exactly like a worker that died instantly and
+        // loop into the next backoff tier.
+        console.error('[oxigraph-worker] respawn attempt failed to start a worker:', err);
+      }
+    }
   }
 
   private call<T>(method: string, ...args: unknown[]): Promise<T> {
@@ -166,13 +332,16 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 
   /**
-   * Post one op to the worker and await its reply, bounding the caller's wait by
-   * `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on timeout or
-   * caller abort we reject and drop the pending entry, but the single-threaded worker is STILL
-   * running the op — the late reply is then ignored (the message handler no-ops
-   * on a missing id) rather than double-settling this promise. Only read-only
-   * ops are ever given a non-zero timeout (see `call`), so a fired timeout is
-   * always a determinate, side-effect-free failure.
+   * Post one op to the (live) worker and await its reply, bounding the caller's
+   * wait by `timeoutMs` (0 = wait indefinitely). The bound is per-CALLER: on
+   * timeout or caller abort we reject and drop the pending entry, but the
+   * single-threaded worker is STILL running the op — the late reply is then
+   * ignored (the message handler no-ops on a missing id) rather than
+   * double-settling this promise. Only read-only ops are ever given a non-zero
+   * timeout (see `call`), so a fired timeout is always a determinate,
+   * side-effect-free failure. If a crashed worker is being replaced, the op
+   * first parks on the respawn (the timeout starts only once it is actually
+   * posted — backoff is capped well below the default read bound anyway).
    */
   private callWithTimeout<T>(
     timeoutMs: number,
@@ -180,12 +349,50 @@ export class OxigraphWorkerStore implements TripleStore {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
+    // A crashed worker may be mid-replacement right now. Park the op on the
+    // respawn instead of failing it: the store is disk-persisted and about to
+    // come back, so the caller sees a slightly slower success rather than a
+    // spurious "store is closed" for a condition the store is already fixing.
+    if (this.respawnPromise) return this.callAfterRespawn<T>(timeoutMs, signal, method, args);
+    return this.postToWorker<T>(timeoutMs, signal, method, args);
+  }
+
+  /**
+   * Wait out the in-flight respawn(s), then post as normal. A loop rather
+   * than a single await because the replacement worker can itself die before
+   * this op gets posted, arming a new respawnPromise. If the respawn gave up,
+   * postToWorker's workerExited guard turns this into the fail-fast closed
+   * error (with the crash-loop guidance appended).
+   */
+  private async callAfterRespawn<T>(
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    method: string,
+    args: unknown[],
+  ): Promise<T> {
+    while (this.respawnPromise) await this.respawnPromise;
+    return this.postToWorker<T>(timeoutMs, signal, method, args);
+  }
+
+  private postToWorker<T>(
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    method: string,
+    args: unknown[],
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
-      // The worker is gone — a posted message would never be answered, so fail
-      // fast instead of registering a pending entry that can only ever hang.
+      // The worker is gone (closed, or crashed with respawn given up) — a
+      // posted message would never be answered, so fail fast instead of
+      // registering a pending entry that can only ever hang.
       if (this.workerExited) {
-        reject(new Error(`oxigraph-worker: cannot run "${method}" — the store is closed.`));
+        reject(new Error(
+          `oxigraph-worker: cannot run "${method}" — the store is closed.` +
+            (this.respawnGaveUp
+              ? ' (The worker crashed repeatedly and automatic respawn gave up — restart the node and ' +
+                'investigate the [oxigraph-worker] crash logs.)'
+              : ''),
+        ));
         return;
       }
       if (signal?.aborted) {

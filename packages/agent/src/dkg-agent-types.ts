@@ -699,14 +699,32 @@ export interface ContextGraphSubscriptionRehydrationStatus {
 }
 
 export interface ContextGraphWritePreflightProbe {
-  exists: boolean;
-  hasLocalContent: boolean;
+  /**
+   * Store-derived facts are tri-state: `true`/`false` when the local store
+   * answered, `undefined` when the backing read failed (see
+   * `storeUnavailable`). An unavailable store must never be misread as a
+   * definitive "does not exist" deny, so failed reads report UNKNOWN
+   * rather than `false`.
+   */
+  exists?: boolean;
+  hasLocalContent?: boolean;
   inMemorySubscription?: Pick<ContextGraphSub, 'subscribed' | 'synced'>;
   persistedSubscription?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'synced'>;
-  declarationFound: boolean;
+  declarationFound?: boolean;
   accessPolicy?: 'public' | 'private';
   curator?: string;
   callerAuthorized?: boolean;
+  /**
+   * True when at least one local-store read failed (slow-store abort
+   * timeout, "the store is closed" after an Oxigraph worker crash, …).
+   * The probe still carries the zero-I/O in-memory subscription snapshot
+   * above, so the daemon's write preflight can rescue an id it ALREADY
+   * tracks instead of 503ing every write until the store recovers. The
+   * store-derived fields whose reads failed are left `undefined`.
+   */
+  storeUnavailable?: boolean;
+  /** First store-read failure message, retained for 503 diagnostics. */
+  storeErrorMessage?: string;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
