@@ -26,6 +26,7 @@ import type {
   NodePublishingConvictionAccount,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
+import type { RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -126,7 +127,7 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
-  drainRpcUsage(): { byMethod: Record<string, number>; total: number; lifetimeTotal: number } {
+  drainRpcUsage(): RpcUsageWindow {
     return { byMethod: {}, total: 0, lifetimeTotal: 0 };
   }
 

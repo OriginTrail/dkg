@@ -1,4 +1,5 @@
 import type { ethers } from 'ethers';
+import type { RpcUsageWindow } from './rpc-usage.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -805,7 +806,7 @@ export interface ChainAdapter {
    * always-empty window (it has no RPC transport). Consumed by the daemon's
    * minutely `rpc_usage` telemetry log line.
    */
-  drainRpcUsage?(): { byMethod: Record<string, number>; total: number; lifetimeTotal: number };
+  drainRpcUsage?(): RpcUsageWindow;
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;

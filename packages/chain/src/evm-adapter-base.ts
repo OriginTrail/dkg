@@ -25,7 +25,7 @@ import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcEr
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
-import { RpcUsageTracker, CountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
+import { RpcUsageTracker, CountingJsonRpcProvider, jsonRpcMethodsFromBody, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -638,8 +638,8 @@ export class EVMChainAdapterBase {
     // counts each ADDITIONAL attempt ethers issues below `_send` on 429/5xx
     // (single-RPC nodes retry up to RPC_REQUEST_MAX_RETRIES times — every one
     // of those attempts bills at the provider).
-    const recordRetryAttempts = (methods: string[]) => {
-      for (const m of methods) this.rpcUsage.record(m);
+    const recordRetryAttempts = (body: Uint8Array | null | undefined) => {
+      for (const m of jsonRpcMethodsFromBody(body)) this.rpcUsage.record(m);
     };
     this.providers = this.rpcUrls.map(
       (url) => new CountingJsonRpcProvider(

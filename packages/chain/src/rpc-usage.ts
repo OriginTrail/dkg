@@ -68,6 +68,24 @@ export function boundedRpcMethodLabel(method: string): string {
   return KNOWN_RPC_METHODS.has(method) ? method : 'other';
 }
 
+/**
+ * Extract the JSON-RPC method name(s) from an encoded request body (single
+ * payload or batch). Usage-accounting policy owned HERE, not by the transport
+ * retry code — the retry hook just forwards the body. Best-effort: anything
+ * unparseable yields ['other'] so a retry attempt is never lost from the count.
+ */
+export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): string[] {
+  try {
+    if (!body || body.length === 0) return ['other'];
+    const parsed = JSON.parse(new TextDecoder().decode(body));
+    const entries = Array.isArray(parsed) ? parsed : [parsed];
+    const methods = entries.map((e: { method?: unknown }) => String(e?.method ?? 'other'));
+    return methods.length > 0 ? methods : ['other'];
+  } catch {
+    return ['other'];
+  }
+}
+
 export interface RpcUsageWindow {
   /** Raw requests since the previous drain, by (sanitized) method name. */
   byMethod: Record<string, number>;

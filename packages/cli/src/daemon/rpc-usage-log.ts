@@ -15,12 +15,10 @@
  * depend on is unit-testable.
  */
 
-/** Matches RpcUsageWindow from @origintrail-official/dkg-chain (feature-detected, so structural). */
-export interface RpcUsageWindowLike {
-  byMethod: Record<string, number>;
-  total: number;
-  lifetimeTotal: number;
-}
+import type { RpcUsageWindow } from '@origintrail-official/dkg-chain';
+
+/** @deprecated alias kept for import stability — the ONE typed contract is chain's RpcUsageWindow. */
+export type RpcUsageWindowLike = RpcUsageWindow;
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {

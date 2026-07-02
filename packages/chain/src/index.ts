@@ -1,4 +1,8 @@
 export * from './chain-adapter.js';
+// RPC-usage accounting: the ONE typed window contract (consumed by the
+// ChainAdapter.drainRpcUsage capability, the agent boundary, and the daemon's
+// rpc_usage log emission) + the body→methods parser shared with the retry hook.
+export { jsonRpcMethodsFromBody, boundedRpcMethodLabel, type RpcUsageWindow } from './rpc-usage.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export {
   EVMChainAdapter,
