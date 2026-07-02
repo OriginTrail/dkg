@@ -36,13 +36,23 @@ channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.j
   totals; keep instant queries to short fixed windows (e.g. `[10m]`).
 
 **To light up metrics + traces** (node side, per node): set
-`OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318` (one env var fans
-out to `/v1/traces` + `/v1/metrics` + `/v1/logs`) or set
-`telemetry.metrics.endpoint` / `telemetry.traces.endpoint` in config, restart
-the daemon. Collector side: add otlp-receiver pipelines routing metrics →
-VictoriaMetrics and traces → Tempo (enable Tempo's metrics-generator/spanmetrics
-for the traces alert). There is deliberately no default endpoint — a node with
-only a logs endpoint runs traces/metrics as silent no-ops.
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318` (one env var
+resolves the endpoints for all three signals: `/v1/traces` + `/v1/metrics` +
+`/v1/logs`) or set `telemetry.metrics.endpoint` / `telemetry.traces.endpoint`
+in config, restart the daemon. Collector side: add otlp-receiver pipelines
+routing metrics → VictoriaMetrics and traces → Tempo (enable Tempo's
+metrics-generator/spanmetrics for the traces alert). There is deliberately no
+default endpoint — a node with only a logs endpoint runs traces/metrics as
+silent no-ops.
+
+> **⚠️ The env var alone does NOT switch logs to OTLP.** It only resolves
+> endpoints; the log exporter *mode* is a separate switch, and an unset
+> `telemetry.logs.exporter` still defaults to the **legacy syslog** path. A
+> fresh node needs `telemetry.enabled: true` **and**
+> `telemetry.logs.exporter: "otlp"` for logs to reach the collector — traces
+> and metrics have no such mode switch and follow the resolved endpoint
+> directly. (The fleet's current nodes already ship logs, so they have this
+> set; this matters when provisioning new nodes from a template.)
 
 ---
 
