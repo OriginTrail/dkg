@@ -18,6 +18,8 @@ import {
 } from './sparql-guard.js';
 import { stripLiteralsAndComments } from './sparql-utils.js';
 
+const ASSERTION_NAMED_GRAPH_SEGMENT = '/_named_graph/';
+
 /**
  * Result of resolving a V10 GET view to concrete graph targets.
  */
@@ -995,7 +997,7 @@ function isScopedContentGraph(
   if (!subGraphName) {
     if (tail.startsWith('_shared_memory/')) return true;
     if (tail.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(tail);
-    if (tail.startsWith('_working_memory/')) return registeredAssertionGraphs.has(graph);
+    if (tail.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
   }
 
   const slash = tail.indexOf('/');
@@ -1009,7 +1011,20 @@ function isScopedContentGraph(
   if (!remaining) return true;
   if (remaining.startsWith('_shared_memory/')) return true;
   if (remaining.startsWith('_verifiable_memory/')) return !isMetadataGraphTail(remaining);
-  if (remaining.startsWith('_working_memory/')) return registeredAssertionGraphs.has(graph);
+  if (remaining.startsWith('_working_memory/')) return isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs);
+  return false;
+}
+
+function isRegisteredAssertionGraphOrScopedChild(
+  graph: string,
+  registeredAssertionGraphs: Set<string>,
+): boolean {
+  if (registeredAssertionGraphs.has(graph)) return true;
+  for (const registeredGraph of registeredAssertionGraphs) {
+    if (graph.startsWith(`${registeredGraph}${ASSERTION_NAMED_GRAPH_SEGMENT}`)) {
+      return true;
+    }
+  }
   return false;
 }
 
