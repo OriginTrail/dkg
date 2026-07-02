@@ -99,7 +99,7 @@ const metrics = {
   description: 'OTel metrics from dkg-node (meter @origintrail-official/dkg). Node filter uses the canonical OTLP mapping (instance = service.instance.id, used by both VictoriaMetrics native OTLP ingest and prometheusremotewrite). If the collector is configured with resource_to_telemetry_conversion instead, swap instance= for service_instance_id= in the panel queries.',
   templating: { list: [ { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} }, lokiVarHidden, nodeVarMulti ] },
   panels: [
-    TEXT('**Node metrics are not flowing yet.** Nodes currently export **logs only** — each node also needs a metrics endpoint: env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` (enables metrics+traces+logs in one) **or** config `telemetry.metrics.endpoint`, then a daemon restart; the collector must route metrics → VictoriaMetrics. The **Pipeline health** row at the bottom is live already (collector self-monitoring). Panels light up automatically once metrics arrive (30s export interval).', {h:3,w:24,x:0,y:0}),
+    TEXT('**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector\'s self-monitoring and works independently of node export.', {h:3,w:24,x:0,y:0}),
     ROW('Publishing', 3),
     TS(VM, 'Publish rate by outcome', [{ expr: `sum by (outcome) (rate(dkg_publish_total{${SEL}}${R}))`, legend: '{{outcome}}' }], {h:8,w:12,x:0,y:4}, 'ops'),
     TS(VM, 'Publish duration p50/p95', [
@@ -117,7 +117,7 @@ const metrics = {
     TS(VM, 'Raw RPC requests per node', [{ expr: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: '{{instance}}{{service_instance_id}}' }], {h:8,w:12,x:12,y:21}, 'reqps'),
     TS(VM, 'Logical chain ops by method/outcome', [{ expr: `sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{${SEL}}${R}))`, legend: '{{rpc_method}} {{outcome}}' }], {h:8,w:8,x:0,y:29}, 'ops'),
     TS(VM, 'Chain RPC p95 latency by method', [{ expr: `histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~"dkg_chain_rpc_duration(_milliseconds)?_bucket", ${SEL}}${R})))`, legend: '{{rpc_method}}' }], {h:8,w:8,x:8,y:29}, 'ms'),
-    TS(VM, 'RPC endpoint failover exhaustion', [{ expr: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{${SEL}}${R}))`, legend: '{{instance}}{{service_instance_id}}' }], {h:8,w:8,x:16,y:29}, 'ops'),
+    TS(VM, 'RPC endpoint failover exhaustion', [{ expr: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason="exhausted", ${SEL}}${R}))`, legend: '{{instance}}{{service_instance_id}}' }], {h:8,w:8,x:16,y:29}, 'ops'),
     ROW('P2P / Sync', 37),
     TS(VM, 'Sync requests & responses by outcome', [
       { expr: `sum by (outcome) (rate(dkg_sync_request_total{${SEL}}${R}))`, legend: 'request: {{outcome}}' },
@@ -153,7 +153,7 @@ const traces = {
   description: 'Tempo traces from dkg-node (tracer @origintrail-official/dkg). 14 span types: agent.publish, publisher.ack_collect/ack_peer_request, chain.tx_send/tx_submit/tx_wait/eth_call/eth_getLogs, sync.request/response, protocol_router.send…',
   templating: { list: [ { name: 'tempo', type: 'datasource', query: 'tempo', label: 'Traces DS', hide: 2, current: {} }, lokiVarHidden, nodeVarMulti ] },
   panels: [
-    TEXT('**Node traces are not flowing yet.** Nodes currently export **logs only** — each node also needs a traces endpoint: env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` **or** config `telemetry.traces.endpoint`, then a daemon restart; the collector must route traces → Tempo. Once flowing you get one trace per publish / ACK round / chain transaction / sync — click any Trace ID to open the full timeline.', {h:3,w:24,x:0,y:0}),
+    TEXT('**Requires node trace export.** These panels read Tempo traces from dkg-node; a node ships them when it resolves a traces endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.traces.endpoint`) and the collector routes traces → Tempo. Empty panels mean no node currently exports traces — see RUNBOOK.md for rollout state and enablement steps. One trace per publish / ACK round / chain transaction / sync; click any Trace ID for the full timeline.', {h:3,w:24,x:0,y:0}),
     TQ('Recent traces', `{${NODEQ}}`, {h:9,w:24,x:0,y:3}, 50),
     TQ('Errored operations', `{${NODEQ} && status=error}`, {h:9,w:12,x:0,y:12}, 50),
     TQ('Slow publishes (>5s)', `{${NODEQ} && name="agent.publish" && duration>5s}`, {h:9,w:12,x:12,y:12}, 50),
@@ -163,24 +163,98 @@ const traces = {
 };
 
 // -------------------------------------------------------------- alert rules
+// Declarative spec layer: each entry below is the SINGLE definition of one
+// alert. The Grafana provisioning payload (data blocks, condition, labels) AND
+// the markdown summary table in example-alerts.md are both derived from it —
+// change a threshold here and both stay in sync by regenerating.
+const ALERT_SPECS = [
+  { title: 'Node silent — seen in last 3h, quiet 15m (per node)', signal: 'logs',
+    ds: 'loki', windowSec: 600, maxDataPoints: 50,
+    expr: 'count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))',
+    condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
+    summary: 'Node {{ $labels.service_instance_id }} was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving.' },
+  { title: 'Fleet blackout — NO node logs reaching Loki', signal: 'logs',
+    ds: 'loki', windowSec: 600, maxDataPoints: 50,
+    expr: 'count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))',
+    condition: { op: '<', value: 1 }, forDur: '5m', noData: 'Alerting',
+    summary: 'Zero nodes have shipped any logs in 15m — the whole fleet or the ingest pipeline (collector/Loki) is down.' },
+  { title: 'Error spike on a node (>10 ERROR / 10m)', signal: 'logs',
+    ds: 'loki', windowSec: 600,
+    expr: 'sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))',
+    condition: { op: '>', value: 10 }, forDur: '5m', noData: 'OK',
+    summary: 'Node {{ $labels.service_instance_id }} logged {{ $values.B }} ERRORs in 10m.' },
+  { title: 'Warn spike on a node (>150 WARN / 10m)', signal: 'logs',
+    ds: 'loki', windowSec: 600,
+    expr: 'sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))',
+    condition: { op: '>', value: 150 }, forDur: '10m', noData: 'OK',
+    summary: 'Node {{ $labels.service_instance_id }} logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues).' },
+  { title: 'RPC credit burn spike (>6000 raw RPC requests/h on a node)', signal: 'metrics',
+    ds: 'loki', windowSec: 3600,
+    expr: 'sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))',
+    condition: { op: '>', value: 6000 }, forDur: '5m', noData: 'OK',
+    summary: 'Node {{ $labels.service_instance_id }} made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build.' },
+  { title: 'Log pipeline export failing (collector cannot ship to Loki)', signal: 'metrics',
+    ds: 'vm', windowSec: 900,
+    expr: 'sum(rate(otelcol_exporter_send_failed_log_records[10m]))',
+    condition: { op: '>', value: 0 }, forDur: '10m', noData: 'OK',
+    summary: 'The otel collector is failing to export log records ({{ $values.B }}/s) — logs are being dropped or queued.' },
+  { title: 'Collector exporter queue near capacity (>80%)', signal: 'metrics',
+    ds: 'vm', windowSec: 900,
+    expr: 'max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)',
+    condition: { op: '>', value: 0.8 }, forDur: '10m', noData: 'OK',
+    summary: 'Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent.' },
+  { title: 'Publish failures on a node (armed — needs node metrics enabled)', signal: 'metrics',
+    ds: 'vm', windowSec: 900,
+    expr: 'sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))',
+    condition: { op: '>', value: 0.02 }, forDur: '5m', noData: 'OK',
+    summary: 'Node {{ $labels.instance }}{{ $labels.service_instance_id }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)' },
+  { title: 'Chain RPC failover exhausted on a node (armed — needs node metrics enabled)', signal: 'metrics',
+    ds: 'vm', windowSec: 900,
+    expr: 'sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))',
+    condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
+    summary: 'ALL configured RPC endpoints failed for node {{ $labels.instance }}{{ $labels.service_instance_id }} — chain connectivity is down for it. (The metric contract also documents reason="recovered"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)' },
+  { title: 'Errored spans rate (armed — needs traces + spanmetrics enabled)', signal: 'traces',
+    ds: 'vm', windowSec: 900,
+    expr: 'sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))',
+    condition: { op: '>', value: 0.05 }, forDur: '5m', noData: 'OK',
+    summary: 'DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)' },
+];
+
 const EXPR = '__expr__';
-const lokiQ = (refId, fromSec, expr, opts = {}) => ({ refId, relativeTimeRange: { from: fromSec, to: 0 }, datasourceUid: LOKI_UID,
-  model: { refId, expr, queryType: 'range', intervalMs: opts.intervalMs ?? 60000, maxDataPoints: opts.maxDataPoints ?? 100, datasource: { type: 'loki', uid: LOKI_UID } } });
-const vmQ = (refId, fromSec, expr) => ({ refId, relativeTimeRange: { from: fromSec, to: 0 }, datasourceUid: VM_UID,
-  model: { refId, expr, range: true, instant: false, intervalMs: 60000, maxDataPoints: 100, datasource: { type: 'prometheus', uid: VM_UID } } });
-const reduce = (refId, input, reducer) => ({ refId, relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
-  model: { refId, type: 'reduce', expression: input, reducer, datasource: { type: '__expr__', uid: EXPR } } });
-const math = (refId, expression) => ({ refId, relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
-  model: { refId, type: 'math', expression, datasource: { type: '__expr__', uid: EXPR } } });
-const rule = (title, data, sig, forDur, noData, summary) => ({
-  orgID: 1, folderUID: 'dkg-observability', ruleGroup: 'dkg-node-telemetry', title,
-  condition: 'C', data, noDataState: noData, execErrState: 'Error', for: forDur,
-  labels: { team: 'dkg', signal: sig }, annotations: { summary },
-});
+const specToRule = (s) => {
+  const dsUid = s.ds === 'loki' ? LOKI_UID : VM_UID;
+  const queryModel = s.ds === 'loki'
+    ? { refId: 'A', expr: s.expr, queryType: 'range', intervalMs: 60000, maxDataPoints: s.maxDataPoints ?? 100, datasource: { type: 'loki', uid: dsUid } }
+    : { refId: 'A', expr: s.expr, range: true, instant: false, intervalMs: 60000, maxDataPoints: 100, datasource: { type: 'prometheus', uid: dsUid } };
+  return {
+    orgID: 1, folderUID: 'dkg-observability', ruleGroup: 'dkg-node-telemetry', title: s.title,
+    condition: 'C',
+    data: [
+      { refId: 'A', relativeTimeRange: { from: s.windowSec, to: 0 }, datasourceUid: dsUid, model: queryModel },
+      { refId: 'B', relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
+        model: { refId: 'B', type: 'reduce', expression: 'A', reducer: 'last', datasource: { type: '__expr__', uid: EXPR } } },
+      { refId: 'C', relativeTimeRange: { from: 0, to: 0 }, datasourceUid: EXPR,
+        model: { refId: 'C', type: 'math', expression: `$B ${s.condition.op} ${s.condition.value}`, datasource: { type: '__expr__', uid: EXPR } } },
+    ],
+    noDataState: s.noData, execErrState: 'Error', for: s.forDur,
+    labels: { team: 'dkg', signal: s.signal }, annotations: { summary: s.summary },
+  };
+};
+
+// GFM table cells: pipes must be \-escaped (works inside code spans per spec),
+// and LogQL's own backticks force double-backtick code-span delimiters.
+const mdCode = (t) => '`` ' + t.replace(/\|/g, '\\|') + ' ``';
+const specToMdRow = (s, i) =>
+  `| ${i + 1} | ${s.title} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | ${mdCode(s.expr)} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`;
+const rulesTableMd = [
+  '| # | Alert | Channel | Datasource | Query (range, reduced with `last`) | Fires when | for | noData |',
+  '|---|---|---|---|---|---|---|---|',
+  ...ALERT_SPECS.map(specToMdRow),
+].join('\n');
 
 const alerts = {
   _readme: [
-    'Secret-free mirror of the alerting on the DKG observability Grafana. GENERATED by generate-observability.mjs - edit that script, not this file.',
+    'Secret-free mirror of the alerting on the DKG observability Grafana. GENERATED by generate-observability.mjs (from ALERT_SPECS) - edit that script, not this file.',
     'The committed artifact keeps <VM_DATASOURCE_UID> as a placeholder (instance-specific UID). Render an importable payload for your instance with:',
     '  node generate-observability.mjs /tmp/render --vm-uid <your-vm-uid> [--loki-uid <your-loki-uid>]',
     'Import with an admin session and header X-Disable-Provenance: true (keeps everything UI-editable):',
@@ -198,50 +272,7 @@ const alerts = {
     object_matchers: [['team', '=', 'dkg'], ['signal', '=', sig]],
     group_by: ['alertname', 'service_instance_id'], group_wait: '30s', group_interval: '5m', repeat_interval: '4h', continue: false,
   })),
-  rules: [
-    rule('Node silent — seen in last 3h, quiet 15m (per node)',
-      [ lokiQ('A', 600, 'count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))', { maxDataPoints: 50 }),
-        reduce('B', 'A', 'last'), math('C', '$B > 0') ],
-      'logs', '5m', 'OK',
-      'Node {{ $labels.service_instance_id }} was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving.'),
-    rule('Fleet blackout — NO node logs reaching Loki',
-      [ lokiQ('A', 600, 'count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))', { maxDataPoints: 50 }),
-        reduce('B', 'A', 'last'), math('C', '$B < 1') ],
-      'logs', '5m', 'Alerting',
-      'Zero nodes have shipped any logs in 15m — the whole fleet or the ingest pipeline (collector/Loki) is down.'),
-    rule('Error spike on a node (>10 ERROR / 10m)',
-      [ lokiQ('A', 600, 'sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 10') ],
-      'logs', '5m', 'OK', 'Node {{ $labels.service_instance_id }} logged {{ $values.B }} ERRORs in 10m.'),
-    rule('Warn spike on a node (>150 WARN / 10m)',
-      [ lokiQ('A', 600, 'sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 150') ],
-      'logs', '10m', 'OK', 'Node {{ $labels.service_instance_id }} logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues).'),
-    rule('RPC credit burn spike (>6000 raw RPC requests/h on a node)',
-      [ lokiQ('A', 3600, 'sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 6000') ],
-      'metrics', '5m', 'OK', 'Node {{ $labels.service_instance_id }} made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build.'),
-    rule('Log pipeline export failing (collector cannot ship to Loki)',
-      [ vmQ('A', 900, 'sum(rate(otelcol_exporter_send_failed_log_records[10m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 0') ],
-      'metrics', '10m', 'OK', 'The otel collector is failing to export log records ({{ $values.B }}/s) — logs are being dropped or queued.'),
-    rule('Collector exporter queue near capacity (>80%)',
-      [ vmQ('A', 900, 'max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)'),
-        reduce('B', 'A', 'last'), math('C', '$B > 0.8') ],
-      'metrics', '10m', 'OK', 'Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent.'),
-    rule('Publish failures on a node (armed — needs node metrics enabled)',
-      [ vmQ('A', 900, 'sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 0.02') ],
-      'metrics', '5m', 'OK', 'Node {{ $labels.instance }}{{ $labels.service_instance_id }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)'),
-    rule('Chain RPC failover exhausted on a node (armed — needs node metrics enabled)',
-      [ vmQ('A', 900, 'sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total[15m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 0') ],
-      'metrics', '5m', 'OK', 'ALL configured RPC endpoints failed for node {{ $labels.instance }}{{ $labels.service_instance_id }} — chain connectivity is down for it. (Silent until nodes export OTel metrics.)'),
-    rule('Errored spans rate (armed — needs traces + spanmetrics enabled)',
-      [ vmQ('A', 900, 'sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))'),
-        reduce('B', 'A', 'last'), math('C', '$B > 0.05') ],
-      'traces', '5m', 'OK', 'DKG operations are producing errored trace spans at {{ $values.B }}/s. (Silent until traces + Tempo metrics-generator are enabled.)'),
-  ],
+  rules: ALERT_SPECS.map(specToRule),
 };
 
 // -------------------------------------------------------------------- write
@@ -256,4 +287,20 @@ fs.mkdirSync(outDir, { recursive: true });
 for (const [file, doc] of files) {
   fs.writeFileSync(path.join(outDir, file), JSON.stringify(doc, null, 2) + '\n');
   console.log('wrote', path.join(outDir, file));
+}
+
+// Inject the derived rules table into example-alerts.md between markers, so
+// the doc's numeric contract can never drift from the payload.
+const mdPath = path.join(outDir, 'example-alerts.md');
+if (fs.existsSync(mdPath)) {
+  const START = '<!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->';
+  const END = '<!-- GENERATED:RULES-TABLE:END -->';
+  const md = fs.readFileSync(mdPath, 'utf8');
+  const si = md.indexOf(START), ei = md.indexOf(END);
+  if (si >= 0 && ei > si) {
+    fs.writeFileSync(mdPath, md.slice(0, si + START.length) + '\n' + rulesTableMd + '\n' + md.slice(ei));
+    console.log('updated rules table in', mdPath);
+  } else {
+    console.warn('markers not found in example-alerts.md — table not injected');
+  }
 }

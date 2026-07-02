@@ -78,7 +78,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Node traces are not flowing yet.** Nodes currently export **logs only** — each node also needs a traces endpoint: env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` **or** config `telemetry.traces.endpoint`, then a daemon restart; the collector must route traces → Tempo. Once flowing you get one trace per publish / ACK round / chain transaction / sync — click any Trace ID to open the full timeline."
+        "content": "**Requires node trace export.** These panels read Tempo traces from dkg-node; a node ships them when it resolves a traces endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.traces.endpoint`) and the collector routes traces → Tempo. Empty panels mean no node currently exports traces — see RUNBOOK.md for rollout state and enablement steps. One trace per publish / ACK round / chain transaction / sync; click any Trace ID for the full timeline."
       },
       "transparent": true
     },
