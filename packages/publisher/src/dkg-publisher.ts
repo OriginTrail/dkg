@@ -25,6 +25,12 @@ import {
 import { validatePublishRequest } from './validation.js';
 import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
+  assertionOriginalGraph,
+  assertionScopedGraphUri,
+  listAssertionScopedGraphUris,
+  listGraphsByPrefix,
+} from './assertion-scoped-graphs.js';
+import {
   generateConfirmedFullMetadata,
   buildDeterministicTokenRows,
   compareRootIris,
@@ -85,7 +91,6 @@ const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
 const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
-const ASSERTION_NAMED_GRAPH_PREFIX = '/_named_graph/';
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {
   const graphs = await listGraphsByPrefix(store, `${rootGraph}/`);
@@ -93,33 +98,6 @@ async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<s
     graphs.unshift(rootGraph);
   }
   return graphs;
-}
-
-async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
-}
-
-function encodeAssertionNamedGraph(graph: string): string {
-  return Buffer.from(graph, 'utf8').toString('base64url');
-}
-
-function decodeAssertionNamedGraph(encoded: string): string {
-  return Buffer.from(encoded, 'base64url').toString('utf8');
-}
-
-function assertionScopedGraphUri(wmGraphUri: string, graph: string | undefined): string {
-  const sourceGraph = graph ?? '';
-  return sourceGraph === ''
-    ? wmGraphUri
-    : `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}${encodeAssertionNamedGraph(sourceGraph)}`;
-}
-
-function assertionOriginalGraph(wmGraphUri: string, scopedGraphUri: string): string {
-  const prefix = `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}`;
-  if (!scopedGraphUri.startsWith(prefix)) return '';
-  return decodeAssertionNamedGraph(scopedGraphUri.slice(prefix.length));
 }
 
 /**
@@ -5162,10 +5140,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async assertionScopedGraphUris(wmGraphUri: string): Promise<string[]> {
-    const namedGraphs = await listGraphsByPrefix(this.store, `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}`);
-    return (await this.store.hasGraph(wmGraphUri))
-      ? [wmGraphUri, ...namedGraphs.sort()]
-      : namedGraphs.sort();
+    return listAssertionScopedGraphUris(this.store, wmGraphUri);
   }
 
   private async assertionScopedQuads(wmGraphUri: string): Promise<Quad[]> {
@@ -5213,7 +5188,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async dropAssertionScopedGraphs(wmGraphUri: string): Promise<void> {
-    for (const graph of await listGraphsByPrefix(this.store, `${wmGraphUri}${ASSERTION_NAMED_GRAPH_PREFIX}`)) {
+    for (const graph of await listAssertionScopedGraphUris(this.store, wmGraphUri, 'named-only')) {
       await this.store.dropGraph(graph);
     }
     await this.store.dropGraph(wmGraphUri);

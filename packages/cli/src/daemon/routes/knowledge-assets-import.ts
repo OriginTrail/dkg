@@ -29,7 +29,7 @@ import {
   isDkgContentHash,
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
-import { findReservedSubjectPrefix, isSkolemizedUri } from "@origintrail-official/dkg-publisher";
+import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
 import type { RequestContext } from "./context.js";
 import {
   jsonResponse,
@@ -73,23 +73,12 @@ import {
 import { SignedRequestRejectedError } from "../../auth.js";
 
 type AssertionArtifactKind = 'source' | 'markdown' | 'original';
-const ASSERTION_NAMED_GRAPH_PREFIX = "/_named_graph/";
 
 type AssertionArtifactResolution = ImportedArtifactResolution & {
   kind: AssertionArtifactKind;
   hash: string;
   contentType: string;
 };
-
-async function listImportDataGraphs(
-  store: { listGraphs?: () => Promise<string[]> },
-  assertionGraph: string,
-): Promise<string[]> {
-  const prefix = `${assertionGraph}${ASSERTION_NAMED_GRAPH_PREFIX}`;
-  if (typeof store.listGraphs !== "function") return [assertionGraph];
-  const graphs = await store.listGraphs();
-  return [assertionGraph, ...graphs.filter((graph) => graph.startsWith(prefix)).sort()];
-}
 
 type AssertionArtifactFetchResult = Awaited<
   ReturnType<NonNullable<RequestContext['agent']['fetchAndVerifyAssertionArtifact']>>
@@ -1977,7 +1966,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
             graph: assertionGraph,
           }));
         }
-        dataGraphs = await listImportDataGraphs(agent.store, assertionGraph);
+        dataGraphs = await listAssertionScopedGraphUris(agent.store, assertionGraph, 'always');
         for (const graph of dataGraphs.filter((candidate) => candidate !== assertionGraph)) {
           const childResult = await agent.store.query(
             `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
