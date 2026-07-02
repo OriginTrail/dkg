@@ -3,12 +3,15 @@ import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
 import { parseOptionalPositiveInteger, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
@@ -266,6 +269,94 @@ describe('publisher wallets', () => {
 
       expect(runtime.walletIds).toEqual([wallet.address]);
       expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
+  it('processes a queued KA VM publish with an identityless publisher wallet', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+    await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share('music-social', [
+      { subject: 'urn:local:/identityless-runtime', predicate: 'http://schema.org/name', object: '"Identityless Runtime"', graph: '' },
+    ], { publisherPeerId: 'peer-identityless' });
+
+    const publisherOverrides: unknown[] = [];
+    const fakeAgent = {
+      getDefaultAgentAddress: () => undefined,
+      async ensureRegisteredForPublish() {
+        throw new Error('identityless queued publish should not need registration recovery');
+      },
+      async publishQueuedKnowledgeAssetVmPublish(request: { sealMerkleRoot: string }, _publishOptions: unknown, opts?: { publisherOverride?: unknown }) {
+        publisherOverrides.push(opts?.publisherOverride);
+        const override = opts?.publisherOverride as { getIdentityId?: () => bigint; publisherAddress?: string } | undefined;
+        expect(override?.getIdentityId?.()).toBe(0n);
+        expect(String(override?.publisherAddress).toLowerCase()).toBe(wallet.address.toLowerCase());
+        return {
+          status: 'tentative' as const,
+          ual: 'did:dkg:test/identityless-runtime',
+          merkleRoot: ethers.getBytes(request.sealMerkleRoot),
+          kaManifest: [],
+        };
+      },
+    };
+
+    try {
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+        knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent as unknown as DKGAgent),
+      });
+
+      expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
+
+      const intent = {
+        contextGraphId: 'music-social',
+        name: 'identityless-runtime',
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:local:/identityless-runtime'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+          authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+          signature: {
+            r: `0x${'34'.repeat(32)}` as `0x${string}`,
+            vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+          },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337' as `${bigint}`,
+        sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        intentKey: `sha256:${'cd'.repeat(32)}`,
+      };
+
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(processed?.status).toBe('finalized');
+      expect(publisherOverrides).toHaveLength(1);
     } finally {
       await runtime?.stop();
       await store.close();
