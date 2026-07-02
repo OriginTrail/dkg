@@ -276,7 +276,7 @@
         "uid": "${vm}"
       },
       "type": "timeseries",
-      "title": "Raw RPC requests by method (billing unit)",
+      "title": "Raw RPC requests by method (billing unit — post-#1409 node builds)",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -307,7 +307,7 @@
         "uid": "${vm}"
       },
       "type": "timeseries",
-      "title": "Raw RPC requests per node",
+      "title": "Raw RPC requests per node (post-#1409 node builds)",
       "gridPos": {
         "h": 8,
         "w": 12,

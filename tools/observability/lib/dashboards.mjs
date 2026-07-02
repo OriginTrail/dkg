@@ -111,7 +111,12 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
 
 const R = '[$__rate_interval]';
 const buildMetricsDashboard = (PROM_NODE_LABEL, NODE_IDENTITY) => {
+  // The node-label profile in ONE place: every profile-sensitive convention a
+  // per-node panel needs (selector, group-by, legend) comes from these three —
+  // a new panel uses them instead of re-splicing PROM_NODE_LABEL by hand.
   const SEL = `${PROM_NODE_LABEL}=~"\${node:regex}"`;
+  const BY_NODE = (inner) => `sum by (${PROM_NODE_LABEL}) (${inner})`;
+  const NODE_LEGEND = `{{${PROM_NODE_LABEL}}}`;
   return {
   uid: 'dkg-node-metrics', title: 'DKG Nodes — Metrics', timezone: 'browser', refresh: '1m',
   time: { from: 'now-6h', to: 'now' }, tags: ['dkg', 'metrics'], links: dashLinks,
@@ -137,13 +142,13 @@ const buildMetricsDashboard = (PROM_NODE_LABEL, NODE_IDENTITY) => {
     ],
     [ ROW('Chain / RPC') ],
     [
-      TS(12, 8, VM, 'Raw RPC requests by method (billing unit)', [{ expr: `sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: '{{rpc_method}}' }], 'reqps'),
-      TS(12, 8, VM, 'Raw RPC requests per node', [{ expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: `{{${PROM_NODE_LABEL}}}` }], 'reqps'),
+      TS(12, 8, VM, 'Raw RPC requests by method (billing unit — post-#1409 node builds)', [{ expr: `sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: '{{rpc_method}}' }], 'reqps'),
+      TS(12, 8, VM, 'Raw RPC requests per node (post-#1409 node builds)', [{ expr: BY_NODE(`rate(dkg_chain_rpc_requests_total{${SEL}}${R})`), legend: NODE_LEGEND }], 'reqps'),
     ],
     [
       TS(8, 8, VM, 'Logical chain ops by method/outcome', [{ expr: `sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{${SEL}}${R}))`, legend: '{{rpc_method}} {{outcome}}' }], 'ops'),
       TS(8, 8, VM, 'Chain RPC p95 latency by method', [{ expr: `histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~"dkg_chain_rpc_duration(_milliseconds)?_bucket", ${SEL}}${R})))`, legend: '{{rpc_method}}' }], 'ms'),
-      TS(8, 8, VM, 'RPC endpoint failover exhaustion', [{ expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_failover_total{reason="exhausted", ${SEL}}${R}))`, legend: `{{${PROM_NODE_LABEL}}}` }], 'ops'),
+      TS(8, 8, VM, 'RPC endpoint failover exhaustion', [{ expr: BY_NODE(`rate(dkg_chain_rpc_failover_total{reason="exhausted", ${SEL}}${R})`), legend: NODE_LEGEND }], 'ops'),
     ],
     [ ROW('P2P / Sync') ],
     [

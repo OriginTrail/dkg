@@ -20,9 +20,8 @@
 
 Routes are appended as children of the root notification policy
 (`group_wait 30s`, `group_interval 5m`, `repeat_interval 4h`). Grouping is
-signal-aware: logs group by `alertname, service_instance_id`; metrics by
-`alertname, service_instance_id, <prom node label>` (covers both the Loki- and
-VictoriaMetrics-sourced rules); traces by `alertname`. Every rule carries labels
+signal-aware: logs group by `alertname, service_instance_id`; metrics group by `alertname, service_instance_id, instance`; traces group by `alertname` (the metrics set covers both the
+Loki- and VictoriaMetrics-sourced rules). Every rule carries labels
 `team=dkg` + `signal=<x>`; add those two labels to any new rule and it routes
 itself.
 

@@ -26,7 +26,15 @@ const rulesTable = (specs) => [
   ...specs.flatMap((s, i) => [`${i + 1}. ${s.title}`, '', fenced(s.expr), '']),
 ].join('\n').replace(/\n+$/, '');
 
-export const buildDocs = ({ specs }) => ({
+const routesTable = (routes) => [
+  '| Slack channel | Contact point | Route matchers |',
+  '|---|---|---|',
+  ...routes.map(r => `| \`${r.channel}\` | \`${r.contactPoint}\` | ${r.matchers.map(([k, , v]) => `\`${k}=${v}\``).join(', ')} |`),
+].join('\n');
+const groupingSentence = (routes) =>
+  routes.map(r => `${r.signal} group by \`${r.groupBy.join(', ')}\``).join('; ');
+
+export const buildDocs = ({ specs, routes }) => ({
   'example-alerts.md': `<!-- GENERATED FILE — do not edit. Source: tools/observability/lib/docs.mjs
      (rules table derives from lib/alerts.mjs ALERT_SPECS). Regenerate with:
      node tools/observability/generate-observability.mjs -->
@@ -41,17 +49,12 @@ export const buildDocs = ({ specs }) => ({
 
 ## Routing model — one Slack channel per signal
 
-| Slack channel | Contact point | Route matchers |
-|---|---|---|
-| \`#node-logs\` | \`DKG node logs (Slack)\` | \`team=dkg\`, \`signal=logs\` |
-| \`#node-metrics\` | \`DKG node metrics (Slack)\` | \`team=dkg\`, \`signal=metrics\` |
-| \`#node-traces\` | \`DKG node traces (Slack)\` | \`team=dkg\`, \`signal=traces\` |
+${routesTable(routes)}
 
 Routes are appended as children of the root notification policy
 (\`group_wait 30s\`, \`group_interval 5m\`, \`repeat_interval 4h\`). Grouping is
-signal-aware: logs group by \`alertname, service_instance_id\`; metrics by
-\`alertname, service_instance_id, <prom node label>\` (covers both the Loki- and
-VictoriaMetrics-sourced rules); traces by \`alertname\`. Every rule carries labels
+signal-aware: ${groupingSentence(routes)} (the metrics set covers both the
+Loki- and VictoriaMetrics-sourced rules). Every rule carries labels
 \`team=dkg\` + \`signal=<x>\`; add those two labels to any new rule and it routes
 itself.
 
