@@ -7,8 +7,8 @@
 #   2. POST /api/context-graph/create  { accessPolicy:1, register:true,
 #                                        allowedAgents:[<node-6-agent>] }
 #      → curated CG registered on-chain by an edge identity-less node.
-#   3. POST /api/shared-memory/write   → encrypted-payload SWM share.
-#   4. POST /api/shared-memory/publish → on-chain publishKnowledgeCollections.
+#   3. POST /api/knowledge-assets   → encrypted-payload SWM share.
+#   4. POST /api/knowledge-assets/<name>/vm/publish → on-chain publishKnowledgeCollections.
 #   5. Assertions:
 #      - response carries status=confirmed AND non-empty txHash
 #      - KnowledgeCollectionStorage.getKnowledgeAssetMetadata(kaId)
@@ -89,7 +89,7 @@ log "Member agent:   $MEMBER_AGENT (node $EDGE_MEMBER_NODE)"
 
 STAMP=$(date +%s)
 # Mirror the UI pattern: prefix the CG id with the creator's agent address.
-# Without the prefix, /api/shared-memory/publish looks up the on-chain id
+# Without the prefix, /api/knowledge-assets/<name>/vm/publish looks up the on-chain id
 # under the prefixed key (the SWM URI builder includes the curator), so a
 # bare id registers fine but can't be published.
 CG_SLUG="lu5-curated-${STAMP}"
@@ -134,7 +134,7 @@ CG_URI="${CG_LOCAL_ID}"
 
 # 3 entities × 2 triples = 6 quads = small enough that we get exactly 3 KAs
 # (one per root entity) when we publish.
-WRITE_RESP=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
+WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
 {
   "contextGraphId": "${CG_URI}",
   "quads": [

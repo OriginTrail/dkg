@@ -1,11 +1,37 @@
-import type { LiftJob, LiftJobBroadcast, LiftJobFinalizationMetadata, LiftJobIncluded, LiftJobInclusionMetadata, LiftJobState, LiftRequest } from './lift-job.js';
+import type {
+  KnowledgeAssetVmPublishRequest,
+  LiftJob,
+  LiftJobBroadcast,
+  LiftJobFinalizationMetadata,
+  LiftJobIncluded,
+  LiftJobInclusionMetadata,
+  LiftJobState,
+  LiftJobValidationMetadata,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
+  RawLiftRequest,
+} from './lift-job.js';
+import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
 import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
+export class AsyncLiftJobConflictError extends Error {
+  readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
+
+  constructor(
+    message: string,
+    readonly existingJobId: string,
+  ) {
+    super(message);
+    this.name = 'AsyncLiftJobConflictError';
+  }
+}
+
 export interface AsyncLiftPublisher {
-  lift(request: LiftRequest): Promise<string>;
+  lift(request: RawLiftRequest): Promise<string>;
+  enqueueKnowledgeAssetVmPublish(request: KnowledgeAssetVmPublishRequest): Promise<string>;
   claimNext(walletId: string): Promise<LiftJob | null>;
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<LiftJob | null>;
@@ -33,6 +59,29 @@ export interface AsyncLiftPublishExecutionInput {
   readonly publishOptions: PublishOptions;
 }
 
+export interface AsyncKnowledgeAssetVmPublishExecutionInput {
+  readonly walletId: string;
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly snapshot: LiftPublishSnapshotRequest;
+  readonly snapshotMetadata: LiftPublishRequestMetadata;
+  readonly validation: LiftJobValidationMetadata;
+  readonly resolved: LiftResolvedPublishSlice;
+  readonly publishOptions: PublishOptions;
+  readonly publisher?: DKGPublisher;
+}
+
+export interface AsyncKnowledgeAssetVmPublishPreflightInput {
+  readonly walletId: string;
+  readonly request: KnowledgeAssetVmPublishRequest;
+  readonly snapshot: LiftPublishSnapshotRequest;
+  readonly snapshotMetadata: LiftPublishRequestMetadata;
+  readonly publisher?: DKGPublisher;
+}
+
+export type AsyncKnowledgeAssetVmPublishPreflightResult =
+  | { readonly action: 'execute' }
+  | { readonly action: 'noop'; readonly reason?: string };
+
 export type AsyncLiftPublisherRecoveryResolver = (
   job: LiftJobBroadcast | LiftJobIncluded,
 ) => Promise<AsyncLiftPublisherRecoveryResult | null>;
@@ -45,6 +94,10 @@ export interface AsyncLiftPublisherConfig {
   idGenerator?: () => string;
   chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   publishExecutor?: (input: AsyncLiftPublishExecutionInput) => Promise<PublishResult>;
+  knowledgeAssetVmPublishExecutor?: (input: AsyncKnowledgeAssetVmPublishExecutionInput) => Promise<PublishResult>;
+  knowledgeAssetVmPublishPreflight?: (
+    input: AsyncKnowledgeAssetVmPublishPreflightInput,
+  ) => Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;
   resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }

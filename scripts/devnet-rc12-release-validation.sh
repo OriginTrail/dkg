@@ -639,21 +639,21 @@ print(json.dumps(q))
 PY
 }
 
-# Single publish: write -> publish; emits a metrics jsonl line.
+# Single publish: create named KA -> share to SWM -> publish; emits a metrics jsonl line.
 publish_one() { # idx node cgid kind
   local idx=$1 node=$2 cgid=$3 kind=$4 port="${NODE_PORT[$((node-1))]}"
-  local E root quads w op sel p st kc
+  local E root name quads w p st kc
   E=$(( RANDOM % (MAX_ENTITIES - MIN_ENTITIES + 1) + MIN_ENTITIES ))
   root="urn:rc12:ka:${RUN_TAG}:${idx}:n${node}"
+  name="rc12-${RUN_TAG}-${idx}-n${node}"
   # Large bodies (up to ~1000 entities * 3 triples) go via a temp file to stay
   # well clear of ARG_MAX in this unattended run.
   local bodyf; bodyf=$(mktemp -t rc12pub.XXXXXX)
-  { printf '{"contextGraphId":"%s","quads":' "$cgid"; gen_quads "$root" "$E"; printf '}'; } > "$bodyf"
+  { printf '{"contextGraphId":"%s","name":"%s","quads":' "$cgid" "$name"; gen_quads "$root" "$E"; printf ',"finalize":true,"alsoShareSwm":true}'; } > "$bodyf"
   w=$(curl -s --max-time 60 -H "$H" -H "Content-Type: application/json" -X POST \
-      "http://127.0.0.1:$port/api/shared-memory/write" --data @"$bodyf")
+      "http://127.0.0.1:$port/api/knowledge-assets" --data @"$bodyf")
   rm -f "$bodyf"
-  op=$(echo "$w" | pyf "d.get('shareOperationId','')")
-  if [ -z "$op" ]; then
+  if [ "$(echo "$w" | pyf "1 if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 0")" != "1" ]; then
     printf '{"idx":"%s","node":%d,"cg":"%s","kind":"%s","entities":%d,"ok":false,"stage":"write","err":%s}\n' \
       "$idx" "$node" "$cgid" "$kind" "$E" "$(python3 -c "import json,sys;print(json.dumps(sys.argv[1][:200]))" "$w")" >> "$METRICS_JSONL"
     return 1
@@ -670,8 +670,8 @@ publish_one() { # idx node cgid kind
   local attempt p st kc
   for attempt in 1 2 3 4 5; do
     p=$(curl -s --max-time 120 -H "$H" -H "Content-Type: application/json" -X POST \
-        "http://127.0.0.1:$port/api/shared-memory/publish" \
-        -d "{\"contextGraphId\":\"$cgid\",\"selection\":{\"rootEntities\":[\"$root\"]},\"clearAfter\":false}")
+        "http://127.0.0.1:$port/api/knowledge-assets/$name/vm/publish" \
+        -d "{\"contextGraphId\":\"$cgid\",\"options\":{\"clearAfter\":false}}")
     st=$(echo "$p" | pyf "d.get('status','')")
     kc=$(echo "$p" | pyf "d.get('kaId','')")
     if [ "$st" = "confirmed" ] || [ "$st" = "finalized" ]; then
@@ -864,12 +864,9 @@ else
 fi
 
 # ── Section A2: canonical assertion lifecycle smoke ─────────────────────────
-# The bulk publish path above uses /api/shared-memory/write directly. The
-# canonical RFC-001 §9.x path is /api/knowledge-assets (create) with finalize+promote
-# (create → write → finalize → promote in one shot), then publish to VM. A
-# regression in assertion finalize/promote could still let the SWM-write path
-# pass, so we exercise the canonical path end-to-end with one KA and gate the
-# release on it.
+# The bulk publish path above uses the named KA lifecycle. Keep one compact
+# lifecycle smoke here as a release gate for create -> finalize -> share ->
+# publish on a single easy-to-debug KA.
 section "A2. ASSERTION LIFECYCLE — canonical create→write→finalize→promote→publish"
 A2_NODE=1
 A2_PORT="${NODE_PORT[$((A2_NODE-1))]}"
@@ -901,13 +898,13 @@ PY
     # forwards it verbatim, so this is what exercises create→finalize→publish
     # end-to-end. clearAfter is harmless for this one-shot path but kept
     # false-explicit for consistency with the bulk path.
-    # /api/shared-memory/publish drives an on-chain tx; the default `post`
+    # /api/knowledge-assets/<name>/vm/publish drives an on-chain tx; the default `post`
     # helper caps curl at 30s which is shorter than a busy devnet's mempool
     # round-trip. Use a dedicated 180s budget (the bulk loop already does
     # this for the same reason — keep the named-assertion fork in line).
     pp=$(curl -s --max-time 180 -H "$H" -H "Content-Type: application/json" -X POST \
-          "http://127.0.0.1:$A2_PORT/api/shared-memory/publish" \
-          -d "{\"contextGraphId\":\"$A2_CG\",\"assertionName\":\"$A2_NAME\",\"clearAfter\":false}")
+          "http://127.0.0.1:$A2_PORT/api/knowledge-assets/$A2_NAME/vm/publish" \
+          -d "{\"contextGraphId\":\"$A2_CG\",\"options\":{\"clearAfter\":false}}")
     pps=$(echo "$pp" | pyf "d.get('status','')")
     case "$pps" in
       confirmed|finalized) pass A2 assertion-publish "VM publish via finalized-assertion fork landed (status=$pps)" ;;

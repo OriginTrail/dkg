@@ -93,7 +93,7 @@ export async function publishKA(
       name: assertionName,
       quads: quadsWithGraph,
       finalize: true,
-      promote: true,
+      alsoShareSwm: true,
     },
   );
   const published = await post<{
@@ -124,15 +124,20 @@ export async function queryNode(
   });
 }
 
-export async function share(
+export async function createSharedKnowledgeAsset(
   nodeId: number,
   contextGraphId: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
 ) {
-  return post<{ shareOperationId: string }>(`${nodeBase(nodeId)}/api/shared-memory/write`, {
+  const name = `netsim-share-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const result = await post<Record<string, unknown>>(`${nodeBase(nodeId)}/api/knowledge-assets`, {
     contextGraphId,
+    name,
     quads,
+    finalize: true,
+    alsoShareSwm: true,
   });
+  return { ...result, name };
 }
 
 export async function sendChat(nodeId: number, to: string, text: string) {

@@ -230,7 +230,7 @@ describe('mapLiftRequestToPublishOptions', () => {
           transitionType: 'CREATE',
         },
       }),
-    ).toThrow('Lift publish mapping requires validation.transitionType to match request.transitionType');
+    ).toThrow('Lift publish mapping requires validation.transitionType to match request metadata transitionType');
   });
 
   it('packages the internal async-to-publish handoff contract', () => {

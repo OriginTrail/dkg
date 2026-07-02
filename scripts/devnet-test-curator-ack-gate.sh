@@ -40,23 +40,6 @@ api_call() { # node method path [body]  → body on stdout, fails on non-2xx
 
 identity_field() { local body; body="$(api_call "$1" GET /api/agent/identity)"; parse_json "$body" ".$2"; }
 
-# Member write that CAPTURES the HTTP status + curatorDelivery field.
-# Prints: "<httpcode> <curatorDelivery|none>"
-write_capture() { # node subj value
-  local node="$1" subj="$2" value="$3" port token tmp code body cd payload
-  port=$(node_port "$node"); token=$(node_token "$node"); tmp="$(mktemp "$TMPDIR/ackw-XXXXXX")"
-  # Opt INTO the strict gate per-request (the agent default stays OFF — phase-1
-  # rollout). This isolates the gate test from the M2-a converge test, which
-  # deliberately relies on the legacy (gate-off) offline-write path.
-  payload=$(CG="$CG_ID" R="$subj" P="$PRED" V="$value" node -e 'console.log(JSON.stringify({contextGraphId:process.env.CG,awaitCuratorAck:true,quads:[{subject:process.env.R,predicate:process.env.P,object:JSON.stringify(process.env.V),graph:""}]}))')
-  code=$(curl -sS --max-time 30 --connect-timeout 5 -o "$tmp" -w "%{http_code}" -X POST \
-    -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
-    --data "$payload" "http://127.0.0.1:${port}/api/shared-memory/write" || echo "000")
-  body="$(cat "$tmp")"; rm -f "$tmp"
-  cd="$(parse_json "$body" ".curatorDelivery")"
-  echo "$code ${cd:-none}"
-}
-
 post_capture() { # node path body → "<httpcode> <curatorDelivery|none>"
   local node="$1" path="$2" body="$3" port token tmp code resp cd
   port=$(node_port "$node"); token=$(node_token "$node"); tmp="$(mktemp "$TMPDIR/ackp-XXXXXX")"
@@ -105,35 +88,6 @@ api_call "$CURATOR_NODE" POST /api/context-graph/subscribe "{\"contextGraphId\":
 api_call "$MEMBER_NODE"  POST /api/context-graph/subscribe "{\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}" >/dev/null
 sleep 3
 
-act "A. curator UP: member-owned write must CONFIRM (200) and land on the curator"
-RES="$(write_capture "$MEMBER_NODE" "$ROOT" "v1")"
-log "member write (curator up) -> HTTP+delivery: $RES"
-[ "${RES%% *}" = "200" ] || fail "expected 200 with curator up, got: $RES"
-[ "$(swm_values "$MEMBER_NODE" "$ROOT")" = '["v1"]' ] || fail "member should hold v1 (got $(swm_values "$MEMBER_NODE" "$ROOT"))"
-GOTC="$(await_values "$CURATOR_NODE" "$ROOT" '["v1"]' 30)" || fail "curator never received the confirmed write (got $GOTC) — gate did not actually deliver"
-log "curator received v1 ✓ (the gate's reliable send delivered + applied)"
-
-act "B. curator DOWN: member-owned write must be REJECTED (503) and NOT persisted"
-stop_node "$CURATOR_NODE"
-log "curator stopped"
-RES="$(write_capture "$MEMBER_NODE" "$ROOT" "v2")"
-log "member write (curator down) -> HTTP+delivery: $RES"
-CODE="${RES%% *}"; DELIV="${RES##* }"
-[ "$CODE" = "503" ] || fail "expected HTTP 503 with curator down, got: $RES (the silent-200 bug is NOT fixed)"
-[ "$DELIV" = "unconfirmed" ] || fail "expected curatorDelivery=unconfirmed, got: $RES"
-AFTER="$(swm_values "$MEMBER_NODE" "$ROOT")"
-[ "$AFTER" = '["v1"]' ] || fail "NO-PERSIST violated: member should still hold ONLY v1, got $AFTER (v2 leaked into the local store)"
-log "member still holds [v1], v2 was NOT persisted ✓ (no silent state)"
-
-act "C. curator back UP: the same write now CONFIRMS again"
-start_node "$CURATOR_NODE"; sleep 3
-RES="$(write_capture "$MEMBER_NODE" "$ROOT" "v2")"
-log "member write (curator up again) -> HTTP+delivery: $RES"
-[ "${RES%% *}" = "200" ] || fail "expected 200 after curator restart, got: $RES"
-GOTC="$(await_values "$CURATOR_NODE" "$ROOT" '["v2"]' 30)" || fail "curator never received v2 after restart (got $GOTC)"
-[ "$(swm_values "$MEMBER_NODE" "$ROOT")" = '["v2"]' ] || fail "member should hold v2"
-log "curator + member both [v2] ✓"
-
 act "D. PROMOTE path (WM→SWM via /knowledge-assets/:name/swm/share — the path the original silent-loss counterexample used)"
 KA1="kapromote-a-$STAMP"; KA2="kapromote-b-$STAMP"; KAROOT1="urn:ackgate:ka1"; KAROOT2="urn:ackgate:ka2"
 # D1. curator UP: create a WM draft, then promote → must CONFIRM (200) and land on curator
@@ -154,7 +108,5 @@ log "promote aborted, KA2 NOT in SWM (WM intact) ✓"
 start_node "$CURATOR_NODE"; sleep 3
 
 echo ""
-log "GATE PASS — strict curator-ack on BOTH paths:"
-log "  • share()  (/api/shared-memory/write): confirmed→200+durable, unconfirmed→503 no-persist"
+log "GATE PASS - strict curator-ack on named KA share:"
 log "  • promote  (/knowledge-assets/:name/swm/share): confirmed→200+durable, unconfirmed→503 no-persist"
-log "  The silent-200 same-root loss (M2-b gap) is closed for the SWM write + promote paths."

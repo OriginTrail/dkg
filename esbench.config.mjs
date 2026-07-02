@@ -11,7 +11,7 @@ export const publishAsyncGetSuite = 'bench/publish-async-get.bench.ts';
 export const publishAsyncGetPages = [
   ['get/read retrieval', 'bench/results/publish-async-get/get-read-retrieval.html'],
   ['synchronous publish with finalization', 'bench/results/publish-async-get/sync-publish-finalization.html'],
-  ['asynchronous publish enqueue and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
+  ['asynchronous VM publish request and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
   ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
   ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
 ];

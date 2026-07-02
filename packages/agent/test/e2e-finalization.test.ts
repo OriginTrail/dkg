@@ -288,7 +288,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     let bWorkspace: any;
     while (Date.now() < deadline) {
       bWorkspace = await nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
+        `SELECT DISTINCT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
         { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
       );
       if (bWorkspace.bindings.length > 0) break;
@@ -330,7 +330,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     // A's data graph should have the enshrined data
     const aData = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
       CONTEXT_GRAPH,
     );
     expect(aData.bindings.length).toBe(1);
@@ -344,7 +344,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     let bData: any;
     while (Date.now() < deadline) {
       bData = await nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
+        `SELECT DISTINCT ?name WHERE { <${ENTITY_1}> <http://schema.org/name> ?name }`,
         CONTEXT_GRAPH,
       );
       if (bData.bindings.length >= 1) break;
@@ -380,7 +380,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     ]);
 
     const ws2 = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?name WHERE { <${ENTITY_2}> <http://schema.org/name> ?name }`,
       { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(ws2.bindings.length).toBe(1);
@@ -411,7 +411,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     ]);
 
     const wsBefore = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
       { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(wsBefore.bindings.length).toBe(1);
@@ -424,7 +424,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
 
     // Workspace should be cleaned
     const wsAfter = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
+      `SELECT DISTINCT ?name WHERE { <${ENTITY_3}> <http://schema.org/name> ?name }`,
       { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
     );
     expect(wsAfter.bindings.length).toBe(0);

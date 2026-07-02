@@ -121,9 +121,12 @@ export {
   type LiftJobChainRecoverableState,
   type LiftJobHex,
   type LiftJobBigInt,
+  type KnowledgeAssetVmPublishRequest,
   type LiftJobTimeoutMetadata,
   type LiftJobFailurePolicy,
   type LiftAuthorityProof,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
   type LiftRequest,
   type LiftRequestAuthorSeal,
   type LiftJobTimestamps,
@@ -169,9 +172,13 @@ export {
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
 export {
+  AsyncLiftJobConflictError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishPreflightInput,
+  type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
@@ -226,6 +233,10 @@ export {
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
+export {
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+} from './async-lift-publisher-utils.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,

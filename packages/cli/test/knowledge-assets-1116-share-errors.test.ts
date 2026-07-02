@@ -18,8 +18,27 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ethers } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { generateEd25519Keypair, TypedEventBus } from '@origintrail-official/dkg-core';
+import {
+  AsyncLiftJobConflictError,
+  DKGPublisher,
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+  resolveLiftWorkspaceSlice,
+  validateLiftPublishPayload,
+} from '@origintrail-official/dkg-publisher';
+import { GraphManager, createTripleStore } from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
+import { addPublisherWallet } from '../src/publisher-wallets.js';
+import { createPublisherRuntimeFromAgent } from '../src/publisher-runner.js';
+import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -41,6 +60,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     assertion: Record<string, unknown>,
     agentOverrides: Record<string, unknown> = {},
     routeOverrides: { requestToken?: string; requestAgentAddress?: string } = {},
+    publisherControl: Record<string, unknown> = {},
   ) {
     const agent = {
       async listContextGraphs() {
@@ -68,7 +88,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
           req,
           res,
           agent,
-          publisherControl: {},
+          publisherControl,
           publisherRuntime: null,
           config: {},
           startedAt: Date.now(),
@@ -296,6 +316,507 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     const res = await post('swm/share', { contextGraphId: CG_ID });
     expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it('vm/publish-async preflights the immutable share snapshot before enqueue', async () => {
+    let enqueueCalls = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'missing-share-op',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: {
+            r: `0x${'34'.repeat(32)}`,
+            vs: `0x${'56'.repeat(32)}`,
+          },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {
+        throw Object.assign(
+          new Error('share snapshot missing; re-share before enqueue'),
+          { code: 'PUBLISH_INTENT_STALE' },
+        );
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
+    expect(String(res.body.error)).toContain('re-share');
+    expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    let enqueueCalls = 0;
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: 'missing-real-share-op',
+      roots: ['urn:test:missing-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ef'.repeat(32)}`,
+    };
+
+    try {
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async () => intent,
+        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
+          const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request as any);
+          const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request as any);
+          try {
+            const resolved = await resolveLiftWorkspaceSlice({
+              store,
+              graphManager: new GraphManager(store),
+              request: snapshot,
+            });
+            validateLiftPublishPayload({ request: snapshot, metadata: snapshotMetadata, resolved });
+          } catch (err) {
+            throw Object.assign(
+              new Error(
+                `Cannot enqueue VM publish for "${ASSERTION_NAME}" because share snapshot ` +
+                  `missing-real-share-op is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
+                  (err instanceof Error ? err.message : String(err)),
+              ),
+              { code: 'PUBLISH_INTENT_STALE' },
+            );
+          }
+        },
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async () => {
+          enqueueCalls += 1;
+          return 'job-should-not-exist';
+        },
+      });
+
+      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
+      expect(String(res.body.error)).toContain('Re-share');
+      expect(enqueueCalls).toBe(0);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('vm/publish-async forwards non-default route options into the immutable intent', async () => {
+    const seenResolveOptions: any[] = [];
+    const enqueuedIntents: any[] = [];
+
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async (_contextGraphId: string, _name: string, opts: any) => {
+        seenResolveOptions.push(opts);
+        return {
+          contextGraphId: CG_ID,
+          name: ASSERTION_NAME,
+          shareOperationId: 'share-with-options',
+          roots: ['urn:test:options-root'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: '0x1111111111111111111111111111111111111111',
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: `sha256:${'bc'.repeat(32)}`,
+          publishEpochs: opts.publishEpochs,
+          clearSharedMemoryAfter: opts.clearSharedMemoryAfter,
+          publisherNodeIdentityIdOverride: opts.publisherNodeIdentityIdOverride?.toString(),
+        };
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+        enqueuedIntents.push(intent);
+        return 'job-options';
+      },
+    });
+
+    const res = await post('vm/publish-async', {
+      contextGraphId: CG_ID,
+      options: {
+        publishEpochs: 2,
+        clearSharedMemoryAfter: true,
+        publisherNodeIdentityIdOverride: '0',
+      },
+    });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-options');
+    expect(seenResolveOptions).toHaveLength(1);
+    expect(seenResolveOptions[0]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: 0n,
+    });
+    expect(enqueuedIntents[0]).toMatchObject({
+      publishEpochs: 2,
+      clearSharedMemoryAfter: true,
+      publisherNodeIdentityIdOverride: '0',
+    });
+  });
+
+  it('vm/publish-async maps incompatible duplicate jobs to 409 with existingJobId', async () => {
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: 'share-conflict',
+      roots: ['urn:test:conflict-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'cf'.repeat(32)}`,
+    };
+
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => intent,
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new AsyncLiftJobConflictError('conflict', 'job-existing');
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      error: 'conflict',
+      existingJobId: 'job-existing',
+    });
+  });
+
+  it('vm/publish-async binds the queued intent to the bearer-token agent namespace', async () => {
+    const token = 'alice-token';
+    const tokenAgentAddress = '0x00000000000000000000000000000000000000a2';
+    const seenResolveOptions: any[] = [];
+    const enqueuedIntents: any[] = [];
+
+    await startWith({}, {
+      resolveAgentByToken: (t?: string) => (t === token ? tokenAgentAddress : undefined),
+      resolveFinalizedAssertionVmPublishIntent: async (_contextGraphId: string, _name: string, opts: any) => {
+        seenResolveOptions.push(opts);
+        return {
+          contextGraphId: CG_ID,
+          name: ASSERTION_NAME,
+          agentAddress: opts.agentAddress,
+          shareOperationId: 'share-token-agent',
+          roots: ['urn:test:token-agent-root'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: tokenAgentAddress,
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: `sha256:${'ca'.repeat(32)}`,
+        };
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async (intent: unknown) => {
+        expect(intent).toMatchObject({ agentAddress: tokenAgentAddress });
+      },
+    }, { requestToken: token, requestAgentAddress: tokenAgentAddress }, {
+      enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+        enqueuedIntents.push(intent);
+        return 'job-token-agent';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+
+    expect(res.status).toBe(202);
+    expect(res.body.jobId).toBe('job-token-agent');
+    expect(seenResolveOptions).toHaveLength(1);
+    expect(seenResolveOptions[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+    expect(enqueuedIntents[0]).toMatchObject({ agentAddress: tokenAgentAddress });
+  });
+
+  it('rejects the retired create promote flag before mutation', async () => {
+    for (const promote of [true, false]) {
+      let mutations = 0;
+      await startWith({
+        create: async () => { mutations += 1; },
+        write: async () => { mutations += 1; },
+        finalize: async () => { mutations += 1; },
+        promote: async () => { mutations += 1; },
+      });
+
+      const res = await postRoot({
+        contextGraphId: CG_ID,
+        name: `legacy-promote-${promote}`,
+        quads: [{ subject: 'urn:test:legacy', predicate: 'http://schema.org/name', object: '"Legacy"' }],
+        finalize: true,
+        promote,
+      });
+
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toContain('promote');
+      expect(mutations).toBe(0);
+
+      await new Promise<void>((resolve, reject) => {
+        server!.close((err) => (err ? reject(err) : resolve()));
+      });
+      server = undefined;
+    }
+  });
+
+  it('vm/publish-async enqueue is processable by createPublisherRuntimeFromAgent', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share(CG_ID, [
+      {
+        subject: 'urn:test:runtime-root',
+        predicate: 'http://schema.org/name',
+        object: '"Runtime Root"',
+        graph: '',
+      },
+    ], { publisherPeerId: 'peer-1' });
+
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      shareOperationId: share.shareOperationId,
+      roots: ['urn:test:runtime-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+    const executorCalls: any[] = [];
+    const preflighted: any[] = [];
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      knowledgeAssetVmPublishExecutor: async (input) => {
+        executorCalls.push(input);
+        return {
+          status: 'tentative',
+          ual: 'did:dkg:local/runtime-route',
+          merkleRoot: ethers.getBytes(input.request.sealMerkleRoot),
+          kaManifest: [],
+        } as any;
+      },
+    });
+
+    try {
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async () => intent,
+        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
+          preflighted.push(request);
+        },
+      }, {}, runtime.publisher as any);
+
+      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(res.status).toBe(202);
+      expect(res.body.status).toBe('accepted');
+      expect(res.body.shareOperationId).toBe(share.shareOperationId);
+      expect(preflighted).toEqual([intent]);
+
+      const processed = await runtime.publisher.processNext(wallet.address);
+      expect(processed?.jobId).toBe(res.body.jobId);
+      expect(processed?.status).toBe('finalized');
+      expect(executorCalls).toHaveLength(1);
+      expect(executorCalls[0].request).toMatchObject({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:test:runtime-root'],
+      });
+      expect(typeof executorCalls[0].publisher.publish).toBe('function');
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
+  });
+
+  it('queued vm/publish-async execution auto-registers once and retries the same job', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-ka-vm-runtime-register-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share(CG_ID, [
+      {
+        subject: 'urn:test:auto-register-root',
+        predicate: 'http://schema.org/name',
+        object: '"Auto Register Root"',
+        graph: '',
+      },
+    ], { publisherPeerId: 'peer-1' });
+
+    const intent = {
+      contextGraphId: CG_ID,
+      name: ASSERTION_NAME,
+      agentAddress: '0x00000000000000000000000000000000000000b2',
+      shareOperationId: share.shareOperationId,
+      roots: ['urn:test:auto-register-root'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+        signature: {
+          r: `0x${'34'.repeat(32)}` as `0x${string}`,
+          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+      intentKey: `sha256:${'ef'.repeat(32)}`,
+    };
+    const calls: string[] = [];
+    const publisherOverrides: unknown[] = [];
+    let publishAttempts = 0;
+    const fakeAgent = {
+      getDefaultAgentAddress: () => '0x00000000000000000000000000000000000000a1',
+      async ensureRegisteredForPublish(_cg: string, opts: Record<string, unknown>) {
+        calls.push(`register:${opts.callerAgentAddress}`);
+      },
+      async publishQueuedKnowledgeAssetVmPublish(request: typeof intent, _publishOptions: unknown, opts: Record<string, unknown>) {
+        publishAttempts += 1;
+        calls.push(`publish#${publishAttempts}`);
+        expect(request.agentAddress).toBe('0x00000000000000000000000000000000000000b2');
+        expect(opts.publisherOverride).toBeDefined();
+        publisherOverrides.push(opts.publisherOverride);
+        if (publishAttempts === 1) {
+          throw Object.assign(
+            new Error(`Context graph "${request.contextGraphId}" is not registered on-chain.`),
+            { code: 'CG_NOT_REGISTERED' },
+          );
+        }
+        return {
+          status: 'confirmed' as const,
+          kaId: 42n,
+          ual: 'did:dkg:test/1/42',
+          merkleRoot: ethers.getBytes(request.sealMerkleRoot),
+          kaManifest: [],
+          onChainResult: {
+            batchId: 42n,
+            startKAId: 42n,
+            endKAId: 42n,
+            txHash: `0x${'ab'.repeat(32)}`,
+            blockNumber: 7,
+            blockTimestamp: 1700000007,
+            publisherAddress: wallet.address,
+          },
+        };
+      },
+    };
+
+    const runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair,
+      chainBase: undefined,
+      pollIntervalMs: 10,
+      errorBackoffMs: 10,
+      knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(fakeAgent as unknown as DKGAgent),
+    });
+
+    try {
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(processed?.status).toBe('finalized');
+      expect(calls).toEqual([
+        'publish#1',
+        'register:0x00000000000000000000000000000000000000b2',
+        'publish#2',
+      ]);
+      expect(publishAttempts).toBe(2);
+      expect(publisherOverrides).toHaveLength(2);
+      expect(publisherOverrides[0]).toBe(publisherOverrides[1]);
+      expect(typeof (publisherOverrides[0] as { publish?: unknown }).publish).toBe('function');
+      expect(String((publisherOverrides[0] as { publisherAddress?: string }).publisherAddress).toLowerCase()).toBe(
+        wallet.address.toLowerCase(),
+      );
+    } finally {
+      await runtime.stop();
+      await store.close();
+    }
   });
 
   // #1116 (round 5, FIX 1): the seal-less SWM reconstruction is reachable via the

@@ -493,7 +493,7 @@ describe('RFC ka-metadata-trim P3.3 — provenanceEvents gate', () => {
     }
   });
 
-  it('promoted: provenanceEvents=false keeps the subject re-stamp + member-entity rows, skips the event', () => {
+  it('promoted: provenanceEvents=false keeps the subject re-stamp + share operation id + member rows, skips the event', () => {
     const meta = {
       contextGraphId: CONTEXT_GRAPH,
       agentAddress: createdMeta.agentAddress,
@@ -506,7 +506,11 @@ describe('RFC ka-metadata-trim P3.3 — provenanceEvents gate', () => {
     };
     const { insert, delete: del } = generateAssertionPromotedMetadata(meta, { provenanceEvents: false });
     expect(insert.find(q => q.subject.includes('/event/'))).toBeUndefined();
-    expect(insert.find(q => q.predicate === `${DKG}shareOperationId`)).toBeUndefined();
+    expect(insert).toContainEqual(expect.objectContaining({
+      subject: assertionLifecycleUri(CONTEXT_GRAPH, createdMeta.agentAddress, 'lite-mode-ka'),
+      predicate: `${DKG}shareOperationId`,
+      object: '"op-1"',
+    }));
     const subjectPreds = insert.map(q => q.predicate);
     expect(subjectPreds).toContain(`${DKG}state`);
     expect(subjectPreds).toContain(`${DKG}memoryLayer`);

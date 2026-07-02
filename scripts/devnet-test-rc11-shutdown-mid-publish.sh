@@ -47,6 +47,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 
@@ -124,7 +127,7 @@ log "Target node $TARGET_NODE current [shutdown-timeout] hit count: $PRE_TIMEOUT
 
 # ---------------------------------------------------------------------------
 # Stage 1: Launch concurrent publishes from the load node. Each publish
-# enqueues SWM triples, calls /api/shared-memory/publish (which drives
+# enqueues SWM triples, calls /api/knowledge-assets/<name>/vm/publish (which drives
 # StorageACK reads against cores 1-4), and returns when ACK collection
 # settles or fails.
 # ---------------------------------------------------------------------------
@@ -140,6 +143,7 @@ for i in $(seq 1 $CONCURRENCY); do
   # publish them. Run in the background, capture stdout for later
   # post-mortem (we don't gate the shutdown test on publish success).
   (
+    export DEVNET_PUBLISH_STATE_FILE="$TMP_OUT_DIR/state-$i.json"
     QUADS=$(node -e "
       const triples = [];
       for (let j = 0; j < 8; j++) {
@@ -155,9 +159,9 @@ for i in $(seq 1 $CONCURRENCY); do
         quads: triples,
       }));
     ")
-    api_call "$LOAD_NODE" POST /api/shared-memory/write "$QUADS" \
+    devnet_create_shared_ka "$LOAD_NODE" "$QUADS" \
       > "$TMP_OUT_DIR/write-$i.json" 2>&1 || true
-    # Codex (#673#discussion_r3302023873): `/api/shared-memory/publish`
+    # Codex (#673#discussion_r3302023873): `/api/knowledge-assets/<name>/vm/publish`
     # accepts `selection: "all"` or a root-entity string array — NOT a
     # SPARQL-shaped object. Pass the 8 generated root entities directly so
     # each background pipeline drives a real StorageACK round trip.
@@ -171,7 +175,7 @@ for i in $(seq 1 $CONCURRENCY); do
         selection: roots,
       }));
     ")
-    PUBLISH_OUT=$(api_call "$LOAD_NODE" POST /api/shared-memory/publish "$ROOT_ENTITIES" 2>&1) || PUBLISH_RC=$? && PUBLISH_RC=${PUBLISH_RC:-0}
+    PUBLISH_OUT=$(devnet_publish_swm_all_roots "$LOAD_NODE" "$CG_ID" false 2>&1) || PUBLISH_RC=$? && PUBLISH_RC=${PUBLISH_RC:-0}
     echo "$PUBLISH_OUT" > "$TMP_OUT_DIR/publish-$i.json"
     if [ "$PUBLISH_RC" -ne 0 ]; then
       echo "[publish-$i] api_call exit=$PUBLISH_RC" >> "$TMP_OUT_DIR/publish-$i.json"

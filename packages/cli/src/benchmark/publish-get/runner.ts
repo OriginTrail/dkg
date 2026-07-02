@@ -57,9 +57,9 @@ async function runIteration(args: {
   const syncContext = reproductionContext(config, iteration, syncPayload, { flow: 'sync' });
 
   const syncPublish = await measureOperation('syncPublish', iteration, warmup, syncContext, config.timeoutMs, now, async () => {
-    // Canonical named-KA publish (create → write → finalize → promote →
-    // publish in one composite). Replaces the removed loose-SWM-write +
-    // selection-fork publish path (the `/api/shared-memory/publish` bridge).
+    // Canonical named-KA publish (create -> write -> finalize -> promote ->
+    // publish in one composite). Replaces the removed loose-SWM selection
+    // publish bridge.
     // The assertion name must be unique per PUBLISHED payload — `runIteration`
     // runs with the same numeric `iteration` for BOTH the warmup and measured
     // phases, so the name includes the phase (mirrors the payload's unique
@@ -103,57 +103,50 @@ async function runIteration(args: {
   }
 
   const asyncPayload = createPayload(config, runId, iteration, 'async', warmup);
+  const asyncName = `benchmark-async-${runId}-${warmup ? 'warmup' : 'measured'}-${iteration}`;
   const asyncBaseContext = reproductionContext(config, iteration, asyncPayload, { flow: 'async' });
-  let shareOperationId: string;
   try {
-    const prepared = await withTimeout(
-      client.sharedMemoryWrite(config.contextGraphId, asyncPayload.quads),
+    await withTimeout(
+      client.createKnowledgeAsset(config.contextGraphId, asyncName, {
+        quads: asyncPayload.quads,
+        finalize: true,
+        alsoShareSwm: true,
+      }),
       config.timeoutMs,
-      'async shared-memory write',
+      'async knowledge-asset create/share',
     );
-    shareOperationId = prepared.shareOperationId ?? '';
-    if (!shareOperationId) throw new Error('Shared-memory write response did not include shareOperationId');
   } catch (error) {
-    operations.push(createFailureRecord('asyncEnqueue', iteration, error, { ...asyncBaseContext, phase: 'sharedMemoryWrite' }, warmup));
-    operations.push(createFailureRecord('asyncCompletion', iteration, new Error('Skipped because async enqueue preparation failed'), {
+    operations.push(createFailureRecord('asyncPublishRequest', iteration, error, { ...asyncBaseContext, phase: 'createKnowledgeAsset', name: asyncName }, warmup));
+    operations.push(createFailureRecord('asyncCompletion', iteration, new Error('Skipped because async publish preparation failed'), {
       ...asyncBaseContext,
-      skippedAfter: 'sharedMemoryWrite',
+      name: asyncName,
+      skippedAfter: 'createKnowledgeAsset',
     }, warmup));
     return;
   }
 
-  const enqueue = await measureOperation('asyncEnqueue', iteration, warmup, {
+  const enqueue = await measureOperation('asyncPublishRequest', iteration, warmup, {
     ...asyncBaseContext,
-    shareOperationId,
+    name: asyncName,
   }, config.timeoutMs, now, async () => {
-    const result = await client.publisherEnqueue({
-      contextGraphId: config.contextGraphId,
-      shareOperationId,
-      roots: [asyncPayload.rootEntity],
-      namespace: config.namespace,
-      scope: config.scope,
-      authorityProofRef: config.authorityProofRef,
-      swmId: 'swm-main',
-      transitionType: 'CREATE',
-      authorityType: 'owner',
-    });
-    if (!result.jobId) throw new Error('Async enqueue response did not include jobId');
+    const result = await client.knowledgeAssetPublishAsync(config.contextGraphId, asyncName);
+    if (!result.jobId) throw new Error('Async publish response did not include jobId');
     return result;
   });
   operations.push(enqueue.timing);
 
   if (!enqueue.ok || !enqueue.value?.jobId) {
-    operations.push(createFailureRecord('asyncCompletion', iteration, new Error('Skipped because asyncEnqueue failed'), {
+    operations.push(createFailureRecord('asyncCompletion', iteration, new Error('Skipped because async publish request failed'), {
       ...asyncBaseContext,
-      shareOperationId,
-      skippedAfter: 'asyncEnqueue',
+      name: asyncName,
+      skippedAfter: 'asyncPublishRequest',
     }, warmup));
     return;
   }
 
   const completion = await measureOperation('asyncCompletion', iteration, warmup, {
     ...asyncBaseContext,
-    shareOperationId,
+    name: asyncName,
     jobId: enqueue.value.jobId,
   }, config.timeoutMs, now, () => waitForAsyncCompletion(config, client, enqueue.value!.jobId!));
   operations.push(completion.timing);

@@ -1188,8 +1188,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   });
 });
 
-describe('context graph write-target validation', () => {
-  it('POST /api/shared-memory/write rejects unknown context graphs instead of creating them lazily', async () => {
+describe('removed shared-memory write route', () => {
+  it('legacy shared-memory write and raw publisher enqueue routes are no longer served', async () => {
     const d = daemon!;
     const contextGraphId = 'lazy-swm-http-' + Math.random().toString(36).slice(2, 8);
     const write = await fetch(urlFor(d, '/api/shared-memory/write'), {
@@ -1207,10 +1207,29 @@ describe('context graph write-target validation', () => {
         ],
       }),
     });
-    expect(write.status).toBe(400);
-    const writeBody = await write.json() as { code?: string; error?: string };
-    expect(writeBody.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
-    expect(writeBody.error).toMatch(/Unknown contextGraphId/);
+    expect(write.status).toBe(404);
+
+    const conditionalWrite = await fetch(urlFor(d, '/api/shared-memory/conditional-write'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ contextGraphId, quads: [], conditions: [] }),
+    });
+    expect(conditionalWrite.status).toBe(404);
+
+    const enqueue = await fetch(urlFor(d, '/api/publisher/enqueue'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        contextGraphId,
+        shareOperationId: 'legacy-op',
+        roots: ['urn:legacy-root'],
+        namespace: 'legacy',
+        scope: 'legacy',
+        transitionType: 'CREATE',
+        authority: { type: 'owner', proofRef: 'proof:legacy' },
+      }),
+    });
+    expect(enqueue.status).toBe(404);
 
     const list = await fetch(urlFor(d, '/api/context-graph/list'), {
       headers: authHeaders(d),
@@ -1219,6 +1238,53 @@ describe('context graph write-target validation', () => {
     const body = await list.json() as { contextGraphs?: Array<Record<string, unknown>> };
     const entry = body.contextGraphs?.find((row) => row.id === contextGraphId);
     expect(entry).toBeUndefined();
+  }, 30_000);
+
+  it('batch rejection reports use the named KA lifecycle route, not the old shared-memory URL', async () => {
+    const d = daemon!;
+    const contextGraphId = 'batch-rejection-' + Math.random().toString(36).slice(2, 8);
+
+    const created = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: contextGraphId, name: contextGraphId }),
+    });
+    expect(created.status).toBeLessThan(300);
+
+    const oldRoute = await fetch(urlFor(d, '/api/shared-memory/report-batch-rejection'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ contextGraphId, verifyResult: { ok: false } }),
+    });
+    expect(oldRoute.status).toBe(404);
+
+    const report = await fetch(urlFor(d, '/api/knowledge-assets/batch-rejections/report'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        contextGraphId,
+        batchId: 'batch-1',
+        verifyResult: {
+          ok: false,
+          expectedRoot: `0x${'11'.repeat(32)}`,
+          actualRoot: `0x${'22'.repeat(32)}`,
+          leafCount: 1,
+          reason: 'test mismatch',
+        },
+      }),
+    });
+    expect(report.status).toBe(200);
+    const body = await report.json() as {
+      gossiped?: boolean;
+      assertionName?: string;
+      shareOperationId?: string;
+      record?: { digest?: string };
+      gossipError?: string;
+    };
+    expect(body.gossiped, JSON.stringify(body)).toBe(true);
+    expect(body.assertionName).toMatch(/^batch-rejection-/);
+    expect(body.shareOperationId).toMatch(/\S/);
+    expect(body.record?.digest).toBeTruthy();
   }, 30_000);
 });
 

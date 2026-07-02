@@ -247,29 +247,8 @@ describe('ApiClient', () => {
       expect(body).toEqual({ to: 'peer1', text: 'hello' });
     });
 
-    it('publish() sends explicit quads to the direct publish route', async () => {
-      const expected = { kaId: 'kc1', status: 'tentative', kas: [] };
-      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: expected });
-      globalThis.fetch = fetch;
-      const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
-      const privateQuads = [{ subject: 'urn:s', predicate: 'urn:secret', object: '"secret"', graph: 'urn:g' }];
-      const result = await client.publish('test-contextGraph', quads, privateQuads, {
-        accessPolicy: 'allowList',
-        allowedPeers: ['12D3peer1'],
-        publishEpochs: 7,
-        publisherNodeIdentityIdOverride: 0n,
-      });
-      expect(result.kaId).toBe('kc1');
-
-      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/knowledge-assets/publish`);
-      const body = JSON.parse(calls[0].opts.body as string);
-      expect(body.contextGraphId).toBe('test-contextGraph');
-      expect(body.quads).toHaveLength(1);
-      expect(body.privateQuads).toHaveLength(1);
-      expect(body.accessPolicy).toBe('allowList');
-      expect(body.allowedPeers).toEqual(['12D3peer1']);
-      expect(body.publishEpochs).toBe(7);
-      expect(body.publisherNodeIdentityIdOverride).toBe('0');
+    it('does not expose the retired direct explicit-quads publish helper', () => {
+      expect((client as any).publish).toBeUndefined();
     });
 
     it('createKnowledgeAsset() forwards finalize:false for a draft-only write', async () => {
@@ -759,6 +738,24 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      subGraphName: 'notes',
+      clearAfter: true,
+      publishEpochs: 12,
+      publisherNodeIdentityIdOverride: 123n,
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish-async`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      options: {
+        clearSharedMemoryAfter: true,
+        publishEpochs: 12,
+        publisherNodeIdentityIdOverride: '123',
+      },
+    });
   });
 
   it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
@@ -813,13 +810,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
       { clearAfter: false, subGraphName: 'sg2' },
     );
-    // 1st call creates (finalize+promote); the sequence ENDS at the per-KA vm/publish route
+    // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       name: 'asset2',
       finalize: true,
-      promote: true,
+      alsoShareSwm: true,
     });
     const last = calls[calls.length - 1];
     expect(last.url).toBe(`${base}/api/knowledge-assets/asset2/vm/publish`);

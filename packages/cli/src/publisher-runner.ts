@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createV10ACKProviderForPublisher, type ACKTransportFactory } from './ack-provider.js';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
@@ -40,6 +40,8 @@ export async function startPublisherRuntimeIfEnabled(args: {
   log: (message: string) => void;
   ackTransportFactory?: () => ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -57,6 +59,8 @@ export async function startPublisherRuntimeIfEnabled(args: {
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
+      knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+      knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
@@ -89,6 +93,8 @@ interface PublisherRuntimeBaseArgs {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -179,6 +185,8 @@ export async function createPublisherRuntimeFromAgent(args: {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -191,6 +199,8 @@ export async function createPublisherRuntimeFromAgent(args: {
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -261,6 +271,24 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishPreflight!({ ...input, publisher });
+        }
+      : undefined,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
+        }
+      : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {

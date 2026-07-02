@@ -196,7 +196,7 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 //      three layers.
 //
 // The V10 named-graph layout we rely on (see `resolveViewGraphs`
-// in `@origintrail-official/dkg-query` and `publishFromSharedMemory`):
+// in `@origintrail-official/dkg-query` and named KA lifecycle publish):
 //
 //   WM  (drafts)    : did:dkg:context-graph:<cg>/<sg>/assertion/<addr>/<name>
 //   SWM (proposed)  : did:dkg:context-graph:<cg>/<sg>/_shared_memory

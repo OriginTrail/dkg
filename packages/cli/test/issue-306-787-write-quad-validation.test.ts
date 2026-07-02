@@ -2,9 +2,7 @@
  * GH #306 / #787 — write routes must reject malformed (string-shaped) quads with
  * an actionable 4xx instead of crashing with a TypeError → HTTP 500.
  *
- *   #787 — POST /api/shared-memory/write with N-Quad *string* quads → was 500
- *          ("Cannot read properties of undefined (reading 'toLowerCase')").
- *          https://github.com/OriginTrail/dkg/issues/787
+ *   #787 — the retired POST /api/shared-memory/write route must stay removed.
  *   #306 — POST /api/knowledge-assets/{name}/wm/write with string quads → was 500
  *          ("Cannot use 'in' operator to search for 'graph' in <s> <p> <o> .").
  *          https://github.com/OriginTrail/dkg/issues/306
@@ -37,31 +35,20 @@ afterAll(async () => {
   await stopLiveDaemon(daemon);
 });
 
-describe('GH #787 — POST /api/shared-memory/write quad-shape validation', () => {
-  it('returns 4xx (not 500) for N-Quad string-shaped quads', async () => {
+describe('GH #787 — retired shared-memory write route', () => {
+  it('returns route-not-found (not 500) for N-Quad string-shaped quads', async () => {
     const { status } = await postJson(daemon!, '/api/shared-memory/write', {
       contextGraphId: CG, quads: ['<http://example.org/s787> <http://example.org/p> "v" .'],
     });
-    expect(status).not.toBe(500);
-    expect(status).toBeGreaterThanOrEqual(400);
-    expect(status).toBeLessThan(500);
+    expect(status).toBe(404);
   });
 
-  it('accepts well-formed object quads (regression: valid SWM write still succeeds)', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
-      contextGraphId: CG, quads: [{ subject: 'urn:wq:s787', predicate: 'http://schema.org/name', object: '"ok787"' }],
-    });
-    expect(status, JSON.stringify(body)).toBe(200);
-  });
-
-  it('returns 400 for oversized RDF literals before SWM write', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
+  it('returns route-not-found for oversized RDF literals instead of serving the retired SWM write', async () => {
+    const { status } = await postJson(daemon!, '/api/shared-memory/write', {
       contextGraphId: CG,
       quads: [{ subject: 'urn:wq:oversized-swm', predicate: 'http://schema.org/text', object: OVERSIZED_LITERAL }],
     });
-    expect(status, JSON.stringify(body)).toBe(400);
-    expect(body.code).toBe('OVERSIZED_RDF_LITERAL');
-    expect(body.actualBytes).toBeGreaterThan(60_000);
+    expect(status).toBe(404);
   });
 });
 
@@ -112,20 +99,20 @@ describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 par
     { subject: s, predicate: 'http://schema.org/name', object: 'hello' }, // bare word: not a literal, not an IRI
   ];
 
-  it('/shared-memory/write rejects a bare-word object with 400', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
+  it('/shared-memory/write stays removed for a bare-word object', async () => {
+    const { status } = await postJson(daemon!, '/api/shared-memory/write', {
       contextGraphId: CG, quads: badObjectQuad('urn:wq:obj1'),
     });
-    expect(status, JSON.stringify(body)).toBe(400);
+    expect(status).toBe(404);
   });
 
-  it('/shared-memory/conditional-write rejects a bare-word object with 400', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/conditional-write', {
+  it('/shared-memory/conditional-write stays removed for a bare-word object', async () => {
+    const { status } = await postJson(daemon!, '/api/shared-memory/conditional-write', {
       contextGraphId: CG,
       quads: badObjectQuad('urn:wq:obj2'),
       conditions: [{ subject: 'urn:wq:obj2', predicate: 'http://schema.org/name', expectedValue: null }],
     });
-    expect(status, JSON.stringify(body)).toBe(400);
+    expect(status).toBe(404);
   });
 
   it('/knowledge-assets/{name}/wm/write rejects a bare-word object with 400', async () => {
@@ -138,7 +125,9 @@ describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 par
   });
 
   it('still accepts an absolute-IRI object (regression)', async () => {
-    const { status, body } = await postJson(daemon!, '/api/shared-memory/write', {
+    const created = await postJson(daemon!, '/api/knowledge-assets', { contextGraphId: CG, name: 'ka-objterm-ok' });
+    expect(created.status, 'KA create precondition').toBeLessThan(300);
+    const { status, body } = await postJson(daemon!, '/api/knowledge-assets/ka-objterm-ok/wm/write', {
       contextGraphId: CG,
       quads: [{ subject: 'urn:wq:obj4', predicate: 'http://schema.org/url', object: 'https://example.org/ok' }],
     });

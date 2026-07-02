@@ -1098,7 +1098,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     return [...subjects];
   }
 
-  // ── ENDORSE ─���────────────────────────────────────────────────────────
+  // ENDORSE
 
 }
 

@@ -1,7 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { verifyBatch, buildBatchRejectionRecord } from '../src/swm/verify-batch.js';
+import {
+  verifyBatch,
+  buildBatchRejectionRecord,
+  batchRejectionAssertionName,
+  batchRejectionRecordToQuads,
+} from '../src/swm/verify-batch.js';
+import {
+  reportBatchRejectionWithLifecycle,
+  type BatchRejectionAgentLaneOptions,
+  type BatchRejectionAuthorLaneOptions,
+} from '../src/swm/batch-rejection-reporter.js';
 
 const Q = (s: string, p: string, o: string, g = ''): Quad => ({
   subject: s,
@@ -166,5 +176,136 @@ describe('buildBatchRejectionRecord', () => {
         rejectedBy: { agentAddress: '0xM' },
       }),
     ).toThrow(/ok verify result/);
+  });
+});
+
+describe('reportBatchRejectionWithLifecycle', () => {
+  const expected = computeFlatKCRootV10(sampleQuads, []);
+  const tampered = [...sampleQuads, Q('urn:lu8/injected', 'http://schema.org/name', '"Mallory"')];
+  const verifyResult = verifyBatch({ quads: tampered, expectedRoot: expected });
+  type BatchRejectionCallOptions = BatchRejectionAgentLaneOptions | BatchRejectionAuthorLaneOptions;
+
+  it('creates, finalizes, and shares the deterministic BatchRejection KA', async () => {
+    const calls: Array<{ method: string; contextGraphId: string; name: string; opts?: BatchRejectionCallOptions; quads?: Quad[] }> = [];
+    const agent = {
+      defaultAgentAddress: '0xDefault',
+      peerId: 'peer-1',
+      assertion: {
+        async create(contextGraphId: string, name: string, opts?: BatchRejectionAgentLaneOptions) {
+          calls.push({ method: 'create', contextGraphId, name, opts });
+        },
+        async write(contextGraphId: string, name: string, quads: Quad[], opts?: BatchRejectionAgentLaneOptions) {
+          calls.push({ method: 'write', contextGraphId, name, opts, quads });
+        },
+        async finalize(contextGraphId: string, name: string, opts?: BatchRejectionAuthorLaneOptions) {
+          calls.push({ method: 'finalize', contextGraphId, name, opts });
+        },
+        async promote(contextGraphId: string, name: string, opts?: BatchRejectionAuthorLaneOptions) {
+          calls.push({ method: 'promote', contextGraphId, name, opts });
+          return { shareOperationId: 'share-op-1', promotedCount: 1 };
+        },
+      },
+    };
+
+    const result = await reportBatchRejectionWithLifecycle(agent, {
+      contextGraphId: 'agent/lu8',
+      batchId: 'batch-7',
+      verifyResult,
+      rejectedBy: { agentAddress: '0xMember', peerId: 'memberPeer' },
+      agentAddress: '0xLane',
+    });
+
+    expect(result.gossiped).toBe(true);
+    expect(result.shareOperationId).toBe('share-op-1');
+    expect(result.promotedCount).toBe(1);
+    expect(result.record.digest).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(result.assertionName).toBe(batchRejectionAssertionName(result.record));
+    expect(calls.map((call) => call.method)).toEqual(['create', 'write', 'finalize', 'promote']);
+    expect(calls.every((call) => call.contextGraphId === 'agent/lu8')).toBe(true);
+    expect(calls.every((call) => call.name === result.assertionName)).toBe(true);
+    expect(calls[0].opts).toEqual({ agentAddress: '0xLane' });
+    expect(calls[2].opts).toEqual({ agentAddress: '0xLane', authorAgentAddress: '0xLane' });
+    expect(calls[3].opts).toEqual({ agentAddress: '0xLane', authorAgentAddress: '0xLane' });
+    expect(calls[1].quads?.some((quad) => quad.object === '"batch-7"')).toBe(true);
+    expect(calls[1].quads?.some((quad) => quad.object === '"0xMember"')).toBe(true);
+  });
+
+  it('escapes user-controlled RDF literals before lifecycle write', async () => {
+    const calls: Array<{ method: string; quads?: Quad[] }> = [];
+    const agent = {
+      peerId: 'peer-1',
+      assertion: {
+        async create() {},
+        async write(_contextGraphId: string, _name: string, quads: Quad[]) {
+          calls.push({ method: 'write', quads });
+        },
+        async finalize() {},
+        async promote() {
+          return { shareOperationId: 'share-op-1', promotedCount: 1 };
+        },
+      },
+    };
+    const adversarialVerifyResult = {
+      ...verifyResult,
+      reason: 'bad "root"\nslash\\tail',
+    } as typeof verifyResult;
+
+    const result = await reportBatchRejectionWithLifecycle(agent, {
+      contextGraphId: 'agent/lu8',
+      batchId: 'batch "7"\nnext\\tail',
+      verifyResult: adversarialVerifyResult,
+      rejectedBy: {
+        agentAddress: '0xMember "quoted"\nnext\\tail',
+        peerId: 'peer "A"\nB\\C',
+      },
+      agentAddress: '0xLane',
+    });
+
+    expect(result.gossiped).toBe(true);
+    const written = calls.find((call) => call.method === 'write')?.quads ?? [];
+    expect(written).toEqual(batchRejectionRecordToQuads(result.record));
+    const objectFor = (predicateSuffix: string) =>
+      written.find((quad) => quad.predicate.endsWith(predicateSuffix))?.object;
+    expect(objectFor('rejectedBatchId')).toBe('"batch \\"7\\"\\nnext\\\\tail"');
+    expect(objectFor('rejectionReason')).toBe('"bad \\"root\\"\\nslash\\\\tail"');
+    expect(objectFor('rejectedByAgent')).toBe('"0xMember \\"quoted\\"\\nnext\\\\tail"');
+    expect(objectFor('rejectedByPeer')).toBe('"peer \\"A\\"\\nB\\\\C"');
+  });
+
+  it('returns the structured rejection record when lifecycle sharing fails', async () => {
+    const calls: string[] = [];
+    const agent = {
+      peerId: 'peer-1',
+      assertion: {
+        async create() {
+          calls.push('create');
+        },
+        async write() {
+          calls.push('write');
+        },
+        async finalize() {
+          calls.push('finalize');
+        },
+        async promote() {
+          calls.push('promote');
+          throw new Error('share failed');
+        },
+      },
+    };
+
+    const result = await reportBatchRejectionWithLifecycle(agent, {
+      contextGraphId: 'agent/lu8',
+      batchId: 'batch-7',
+      verifyResult,
+      rejectedBy: { agentAddress: '0xMember', peerId: 'memberPeer' },
+      agentAddress: '0xLane',
+    });
+
+    expect(calls).toEqual(['create', 'write', 'finalize', 'promote']);
+    expect(result.gossiped).toBe(false);
+    expect(result.gossipError).toContain('share failed');
+    expect(result.record.contextGraphId).toBe('agent/lu8');
+    expect(result.record.rejectedBy).toEqual({ agentAddress: '0xMember', peerId: 'memberPeer' });
+    expect(result.assertionName).toBe(batchRejectionAssertionName(result.record));
   });
 });

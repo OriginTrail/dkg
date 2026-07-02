@@ -34,7 +34,7 @@
  */
 
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { keccak256 } from '@origintrail-official/dkg-core';
+import { escapeDkgRdfLiteral, keccak256 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
@@ -215,4 +215,26 @@ export function buildBatchRejectionRecord(input: {
     reportedAt,
     digest,
   };
+}
+
+export function batchRejectionAssertionName(record: BatchRejectionRecord): string {
+  return `batch-rejection-${String(record.digest).toLowerCase().replace(/^0x/, '').slice(0, 48)}`;
+}
+
+export function batchRejectionRecordToQuads(record: BatchRejectionRecord): Quad[] {
+  const lit = (value: string) => `"${escapeDkgRdfLiteral(value)}"`;
+  const subject = `did:dkg:batch-rejection:${record.digest}`;
+  const NS = 'http://dkg.io/ontology/';
+  return [
+    { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
+    { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
+    { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
+    { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
+    { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
+    { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
+    { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
+    ...(record.batchId !== undefined
+      ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
+      : []),
+  ];
 }

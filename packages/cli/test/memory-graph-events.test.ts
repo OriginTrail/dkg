@@ -1,4 +1,4 @@
-// memory_graph_changed emissions — NO MOCKS, real end-to-end SSE pipeline.
+// memory_graph_changed emissions -- NO MOCKS, real end-to-end SSE pipeline.
 //
 // The mutation routes call `ctx.emitMemoryGraphChanged(event)` after each
 // create / write / finalize / promote / shared-memory write so the node-ui
@@ -8,10 +8,10 @@
 // its captured calls, these tests SUBSCRIBE to the real `/api/events` SSE
 // stream of a real edge daemon (startLiveDaemon vs the shared Hardhat node),
 // drive the real routes over HTTP, and assert on the frames that actually
-// arrive — the real emit pipeline, no fabricated daemon behaviour.
+// arrive -- the real emit pipeline, no fabricated daemon behaviour.
 //
 // Real-daemon facts pinned while writing this (the mock hid all of them):
-//   - finalize (auto-finalize on create-with-quads, and POST …/wm/finalize)
+//   - finalize (auto-finalize on create-with-quads, and POST .../wm/finalize)
 //     binds the author signature to the on-chain CG id, so it 500s unless the
 //     context graph is REGISTERED on-chain first; create / wm/write / swm/share
 //     / shared-memory write / finalize:false all work pre-registration.
@@ -20,7 +20,7 @@
 //   - the `assertion_finalized` frame carries no `counts`; the write/promote
 //     frames carry `counts.triples`.
 //
-// DEVNET-TIER (documented, NOT faked here — needs real core peers):
+// DEVNET-TIER (documented, NOT faked here -- needs real core peers):
 //   - the confirmed selective-publish SWM+VM emission and the publish remap
 //     paths: a confirmed publish mints on-chain + needs StorageACK quorum from
 //     connected core peers, which a single edge daemon cannot reach.
@@ -37,6 +37,7 @@ import {
   startLiveDaemon,
   stopLiveDaemon,
   postJson,
+  getJson,
   openEventStream,
   type LiveDaemon,
   type EventStream,
@@ -44,7 +45,7 @@ import {
 
 const QUADS = [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"v1"' }];
 
-describe('memory_graph_changed — real daemon SSE emissions', () => {
+describe('memory_graph_changed -- real daemon SSE emissions', () => {
   let daemon: LiveDaemon;
   let stream: EventStream;
   let cgCounter = 0;
@@ -98,7 +99,7 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(typeof frame.data.timestamp).toBe('string');
   });
 
-  it('emits an assertion_written refresh after POST …/wm/write', async () => {
+  it('emits an assertion_written refresh after POST .../wm/write', async () => {
     const cg = await freshCg();
     const res = await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
     expect(res.status).toBe(200);
@@ -107,7 +108,7 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(frame.data).toMatchObject({ contextGraphId: cg, layers: ['wm'], operation: 'assertion_written', source: 'api', counts: { triples: 1 } });
   });
 
-  it('auto-finalizes a create-with-quads on a registered CG — writes AND seals, emits assertion_finalized', async () => {
+  it('auto-finalizes a create-with-quads on a registered CG -- writes AND seals, emits assertion_finalized', async () => {
     const cg = await freshCg(true);
     const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: cg, name: 'sealed', quads: QUADS });
     expect(res.status).toBe(201);
@@ -117,7 +118,7 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(frame.data).toMatchObject({ contextGraphId: cg, layers: ['wm'], operation: 'assertion_finalized', source: 'api' });
   });
 
-  it('honors finalize:false — writes quads but does NOT seal (assertion_written, no assertion_finalized)', async () => {
+  it('honors finalize:false -- writes quads but does NOT seal (assertion_written, no assertion_finalized)', async () => {
     const cg = await freshCg();
     const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: cg, name: 'draft', quads: QUADS, finalize: false });
     expect(res.status).toBe(201);
@@ -127,7 +128,7 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(stream.events.some(isFrame(cg, 'assertion_finalized'))).toBe(false);
   });
 
-  it('emits an assertion_finalized refresh on POST …/wm/finalize (registered CG)', async () => {
+  it('emits an assertion_finalized refresh on POST .../wm/finalize (registered CG)', async () => {
     const cg = await freshCg(true);
     await postJson(daemon, '/api/knowledge-assets/draft/wm/write', { contextGraphId: cg, quads: QUADS });
     const res = await postJson(daemon, '/api/knowledge-assets/draft/wm/finalize', { contextGraphId: cg });
@@ -148,31 +149,96 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(frame.data.counts.triples).toBeGreaterThanOrEqual(1);
   });
 
-  it('emits a metadata-only SWM refresh after a shared-memory write (no quads/content in the frame)', async () => {
+  it('does not emit for the removed shared-memory write route', async () => {
     const cg = await freshCg();
-    const sg = await postJson(daemon, '/api/sub-graph/create', { contextGraphId: cg, subGraphName: 'notes' });
-    expect(sg.status).toBe(200);
-    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: cg, subGraphName: 'notes', quads: QUADS });
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ triplesWritten: 1 });
-    const frame = await stream.waitFor(isFrame(cg, 'shared_memory_written'));
-    expect(frame.data).toMatchObject({ contextGraphId: cg, layers: ['swm'], subGraphName: 'notes', operation: 'shared_memory_written', source: 'api', counts: { triples: 1 } });
-    // metadata-only: the SWM payload must never be broadcast on the refresh bus.
-    expect(frame.data).not.toHaveProperty('quads');
-    expect(frame.data).not.toHaveProperty('content');
-  });
-
-  it('does not emit when a shared-memory write fails validation (empty quads → 400)', async () => {
-    const cg = await freshCg();
-    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: cg, quads: [] });
-    expect(res.status).toBe(400);
+    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: cg, quads: QUADS });
+    expect(res.status).toBe(404);
     await expectNoEmit(cg, 'shared_memory_written');
   });
 
-  it('rejects an unsafe shared-memory contextGraphId before the agent acts (and does not emit)', async () => {
-    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: 'bad<id', quads: QUADS });
+  it('writes /api/memory/turn through a named WM knowledge asset when layer is omitted', async () => {
+    const cg = await freshCg();
+    const res = await postJson(daemon, '/api/memory/turn', {
+      contextGraphId: cg,
+      markdown: '# Turn\n\nUser likes lifecycle-backed memory.',
+      sessionUri: 'urn:test:session:memory-turn',
+      turnId: 'memory-turn-route-regression',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      layer: 'wm',
+      sessionUri: 'urn:test:session:memory-turn',
+    });
+    expect(res.body.assertionName).toMatch(/^turn-[0-9a-f]{32}$/);
+    expect(typeof res.body.graph).toBe('string');
+    expect(res.body.graph.length).toBeGreaterThan(0);
+
+    const frame = await stream.waitFor(isFrame(cg, 'memory_turn_written'));
+    expect(frame.data).toMatchObject({
+      contextGraphId: cg,
+      layers: ['wm'],
+      operation: 'memory_turn_written',
+      source: 'memory-turn',
+    });
+
+    const quads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(res.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    expect(quads.status).toBe(200);
+    expect(JSON.stringify(quads.body)).toContain(res.body.turnUri);
+    expect(JSON.stringify(quads.body)).toContain('ConversationTurn');
+
+    const search = await postJson(daemon, '/api/memory/search', {
+      contextGraphId: cg,
+      query: 'lifecycle-backed memory',
+    });
+    expect(search.status).toBe(200);
+    expect(search.body.results.some((hit: any) => hit.entityUri === res.body.turnUri)).toBe(true);
+  });
+
+  it('creates distinct /api/memory/turn KAs for repeated identical markdown when turnId is omitted', async () => {
+    const cg = await freshCg();
+    const payload = {
+      contextGraphId: cg,
+      markdown: '# Turn\n\nRepeated identical markdown.',
+      sessionUri: 'urn:test:session:memory-turn-repeat',
+    };
+
+    const first = await postJson(daemon, '/api/memory/turn', payload);
+    const second = await postJson(daemon, '/api/memory/turn', payload);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.turnId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second.body.turnId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(second.body.turnId).not.toBe(first.body.turnId);
+    expect(second.body.assertionName).not.toBe(first.body.assertionName);
+    expect(second.body.turnUri).not.toBe(first.body.turnUri);
+
+    const firstQuads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(first.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    const secondQuads = await getJson(
+      daemon,
+      `/api/knowledge-assets/${encodeURIComponent(second.body.assertionName)}/wm/quads?contextGraphId=${encodeURIComponent(cg)}`,
+    );
+    expect(firstQuads.status).toBe(200);
+    expect(secondQuads.status).toBe(200);
+    expect(JSON.stringify(firstQuads.body)).toContain(first.body.turnUri);
+    expect(JSON.stringify(secondQuads.body)).toContain(second.body.turnUri);
+  });
+
+  it('rejects /api/memory/turn requests that still target SWM directly', async () => {
+    const cg = await freshCg();
+    const res = await postJson(daemon, '/api/memory/turn', {
+      contextGraphId: cg,
+      markdown: 'Do not write this directly to SWM.',
+      layer: 'swm',
+    });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/Invalid "contextGraphId"/);
+    expect(res.body.error).toMatch(/only supports layer:"wm"/);
   });
 
   it('rejects finalize:false combined with alsoShareSwm before any mutation', async () => {
@@ -197,7 +263,7 @@ describe('memory_graph_changed — real daemon SSE emissions', () => {
     expect(res.body.error).toMatch(/requires explicit `quads`/);
   });
 
-  it('accepts explicit verify-batch quads over the small request limit (≈270 KB, not 413)', async () => {
+  it('accepts explicit verify-batch quads over the small request limit (~270 KB, not 413)', async () => {
     const cg = await freshCg();
     const largeLiteral = `"${'x'.repeat(270 * 1024)}"`;
     const res = await postJson(daemon, '/api/shared-memory/verify-batch', {

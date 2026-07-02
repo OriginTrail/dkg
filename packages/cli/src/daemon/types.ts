@@ -1,9 +1,6 @@
 // daemon/types.ts
 //
 // Pure type/interface declarations used across the daemon sub-modules.
-// Kept intentionally lean — `PublishQuad` / `PublishRequestBody` /
-// `PublishAccessPolicy` deliberately stay in `./http-utils.ts` because
-// the body parser is their only semantic consumer.
 
 import type { CatchupJobResult } from '../catchup-runner.js';
 

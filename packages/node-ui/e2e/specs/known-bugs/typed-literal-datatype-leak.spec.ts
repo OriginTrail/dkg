@@ -61,7 +61,7 @@ test.describe('KNOWN BUG: typed RDF literals leak their datatype suffix in entit
           graph,
         },
       ],
-      promote: false,
+      alsoShareSwm: false,
     });
     expect(seed.ok, `WM seed failed: ${seed.status} ${seed.body}`).toBe(true);
 

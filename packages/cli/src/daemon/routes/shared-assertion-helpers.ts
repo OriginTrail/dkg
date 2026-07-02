@@ -44,7 +44,7 @@ const DEFAULT_MARKDOWN_READ_BYTES = 1024 * 1024;
 /**
  * Build the HTTP-400 body for an on-chain context-graph auto-registration
  * failure that precedes a publish. Shared by `/api/knowledge-assets/:name/vm/publish`
- * (knowledge-assets.ts) and `/api/shared-memory/publish` (memory.ts) so the
+ * and direct KA publish helpers so the
  * funds marker, wording, punctuation trim, and `{ code, error }` shape cannot
  * drift between the two publish routes. On-chain registration is signed by the
  * node's PRIMARY operational wallet (not the funded-wallet-selected publish

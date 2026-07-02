@@ -192,23 +192,23 @@ print(json.dumps(q))
 PY
 }
 
-# Single publish: write -> publish. Echoes the kaId on success, empty on failure.
+# Single publish: create named KA -> share to SWM -> publish. Echoes the kaId on success, empty on failure.
 publish_one() { # idx node root
   local idx=$1 node=$2 root=$3
   local port="${NODE_PORT[$((node-1))]}"
-  local E w op p st kc bodyf attempt
+  local E name w p st kc bodyf attempt
   E=$(( RANDOM % (MAX_ENTITIES - MIN_ENTITIES + 1) + MIN_ENTITIES ))
+  name="rs-${RUN_TAG}-${idx}-n${node}"
   bodyf=$(mktemp -t rspub.XXXXXX)
-  { printf '{"contextGraphId":"%s","quads":' "$CGID"; gen_quads "$root" "$E"; printf '}'; } > "$bodyf"
+  { printf '{"contextGraphId":"%s","name":"%s","quads":' "$CGID" "$name"; gen_quads "$root" "$E"; printf ',"finalize":true,"alsoShareSwm":true}'; } > "$bodyf"
   w=$(curl -s --max-time 60 -H "$H" -H "Content-Type: application/json" -X POST \
-      "http://127.0.0.1:$port/api/shared-memory/write" --data @"$bodyf")
+      "http://127.0.0.1:$port/api/knowledge-assets" --data @"$bodyf")
   rm -f "$bodyf"
-  op=$(echo "$w" | pyf "d.get('shareOperationId','')")
-  [ -z "$op" ] && { echo ""; return 1; }
+  [ "$(echo "$w" | pyf "1 if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 0")" = "1" ] || { echo ""; return 1; }
   for attempt in 1 2 3 4 5; do
     p=$(curl -s --max-time 120 -H "$H" -H "Content-Type: application/json" -X POST \
-        "http://127.0.0.1:$port/api/shared-memory/publish" \
-        -d "{\"contextGraphId\":\"$CGID\",\"selection\":{\"rootEntities\":[\"$root\"]},\"clearAfter\":false}")
+        "http://127.0.0.1:$port/api/knowledge-assets/$name/vm/publish" \
+        -d "{\"contextGraphId\":\"$CGID\",\"options\":{\"clearAfter\":false}}")
     st=$(echo "$p" | pyf "d.get('status','')")
     kc=$(echo "$p" | pyf "d.get('kaId','')")
     if [ "$st" = "confirmed" ] || [ "$st" = "finalized" ]; then echo "$kc"; return 0; fi

@@ -18,13 +18,6 @@ export interface MemoryToolContext {
     },
   ) => Promise<any>;
   /**
-   * Direct SWM write primitive. Retained on the context so callers that
-   * legitimately want Shared Working Memory semantics (e.g. user-initiated
-   * promotion to a project's shared memory) have access to it, but chat-turn
-   * and per-project memory writes use `writeAssertion` instead.
-   */
-  share: (contextGraphId: string, quads: any[], opts?: { localOnly?: boolean; subGraphName?: string }) => Promise<{ shareOperationId: string }>;
-  /**
    * Create a per-agent Working Memory assertion graph. Idempotent: "already
    * exists" is resolved quietly, any other error surfaces.
    */
@@ -40,11 +33,6 @@ export interface MemoryToolContext {
     quads: any[],
     opts?: { subGraphName?: string },
   ) => Promise<{ written: number }>;
-  publishFromSharedMemory: (
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    opts?: { clearSharedMemoryAfter?: boolean },
-  ) => Promise<any>;
   createContextGraph: (opts: { id: string; name: string; description?: string; private?: boolean }) => Promise<void>;
   listContextGraphs: () => Promise<any[]>;
 }
@@ -1523,32 +1511,11 @@ export class ChatMemoryManager {
     sessionId: string,
     opts?: { rootEntities?: string[]; clearSharedMemoryAfter?: boolean },
   ): Promise<SessionPublishResult> {
-    await this.ensureInitialized();
-    const sessionRoots = await this.getSessionRootEntities(sessionId);
-    if (sessionRoots.length === 0) {
-      throw new Error(`No shared memory entities found for session ${sessionId}`);
-    }
-    const sessionRootSet = new Set(sessionRoots);
-    const requestedRoots = (opts?.rootEntities ?? [])
-      .map((r) => String(r).trim())
-      .filter((r) => isSafeIri(r));
-    const rootEntities = requestedRoots.length > 0
-      ? [...new Set(requestedRoots.filter((r) => sessionRootSet.has(r)))]
-      : sessionRoots;
-    if (rootEntities.length === 0) {
-      throw new Error(`Selected root entities are not part of session ${sessionId}`);
-    }
-    const published = await this.publishFromSwm(
-      { rootEntities },
-      { clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false },
+    void opts;
+    throw new Error(
+      `Session publication is not implemented in v1 for session ${sessionId}. ` +
+        'Chat turns live in Working Memory assertions and must be promoted through named knowledge-asset lifecycle routes.',
     );
-    const publication = await this.getSessionPublicationStatus(sessionId);
-    return {
-      ...published,
-      sessionId,
-      rootEntityCount: rootEntities.length,
-      publication,
-    };
   }
 
   // importMemories / parseMemoriesWithLlm / parseMemoriesHeuristic /
@@ -1563,16 +1530,11 @@ export class ChatMemoryManager {
     selection: 'all' | { rootEntities: string[] } = 'all',
     opts?: { clearSharedMemoryAfter?: boolean },
   ): Promise<PublishFromSwmResult> {
-    await this.ensureInitialized();
-    const result = await this.tools.publishFromSharedMemory(this.agentContextGraph, selection, {
-      clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
-    });
-    return {
-      kaId: result?.kaId,
-      ual: result?.ual,
-      status: result?.status ?? 'confirmed',
-      tripleCount: result?.publicQuads?.length ?? 0,
-    };
+    void selection;
+    void opts;
+    throw new Error(
+      'publishFromSwm is retired in v1; use named knowledge-asset lifecycle share/publish routes.',
+    );
   }
 
   private parseNTriples(text: string): Array<{ subject: string; predicate: string; object: string }> {

@@ -24,7 +24,7 @@ test.describe('Conviction NFT (PCA) API', () => {
     }
   });
 
-  test('publish without PCA registration uses standard shared-memory path', async () => {
+  test('publish without PCA registration uses the KA lifecycle path', async () => {
     const { runWmSwmVmPipeline, listContextGraphs } = await import('../../helpers/devnet-publish.js');
     const cgs = await listContextGraphs(1);
     requireDevnetPrecondition(test, cgs.length === 0, 'No CGs');
@@ -34,7 +34,7 @@ test.describe('Conviction NFT (PCA) API', () => {
 });
 
 test.describe('Non-conviction publishing (baseline)', () => {
-  test('shared-memory publish endpoint responds for devnet CG', async () => {
+  test('named KA VM publish responds for devnet CG', async () => {
     const cgsRes = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgsRes.json()) as { contextGraphs: Array<{ id: string }> };
     requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');

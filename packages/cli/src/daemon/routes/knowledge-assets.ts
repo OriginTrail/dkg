@@ -14,17 +14,18 @@
 //   POST /api/knowledge-assets/:name/wm/pull-from    seed draft from SWM/VM  [TODO]
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
+//   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
 //
-// These delegate to the SAME agent lifecycle methods the legacy
-// `/api/assertion/*` + `/api/shared-memory/*` routes use, so behavior is
-// identical; only the URL shape changes. This module is purely ADDITIVE — the
-// legacy routes are untouched (308 redirects from them land in a follow-up).
+// These delegate to the agent lifecycle methods directly. Public content
+// authoring and VM publish must enter through named KA lifecycle routes; retired
+// loose/direct publish surfaces are guarded below with explicit 404s.
 //
 // Identifier note (OT-RFC-43 §10.5.7): for the v10.0 floor the KA is addressed
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
+import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -35,7 +36,6 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  parsePublishRequestBody,
   isWritableQuad,
   validateQuadObjectTerms,
   respondIfReconcileUnavailable,
@@ -46,6 +46,7 @@ import {
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
+  SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity } from "../activity-notification.js";
@@ -71,7 +72,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 
@@ -333,7 +334,7 @@ export function resolveFinalizeOptions(
   if (!authorizeAgentScopedAuthorClaim(res, tokenAgentAddress, resolvedPreSignedAttestation?.address, "preSignedAuthorAttestation.address")) {
     return null;
   }
-  // Token attribution — parity with /api/shared-memory/publish (memory.ts).
+  // Token attribution — parity with lifecycle VM publish.
   // An agent-scoped bearer token attributes authorship to that agent when the
   // body specified neither an explicit `authorAgentAddress` nor a pre-signed
   // attestation. Callers pass `agent.resolveAgentByToken(requestToken)`, which
@@ -379,6 +380,33 @@ function resolveAuthorAgentAddressFromFinalizeOptions(
 
 function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string } {
   return agentAddress ? { agentAddress } : {};
+}
+
+function resolveBatchRejectionReporterIdentity(
+  ctx: Pick<RequestContext, "agent" | "requestAgentAddress">,
+  tokenAgentAddress?: string,
+): { agentAddress: string; peerId?: string } {
+  const agentAddress = tokenAgentAddress || ctx.requestAgentAddress || "unknown";
+  return ctx.agent.peerId ? { agentAddress, peerId: ctx.agent.peerId } : { agentAddress };
+}
+
+function parseExplicitBatchRejectionReporterIdentity(
+  raw: unknown,
+): { agentAddress: string; peerId?: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("rejectedBy must be an object with agentAddress");
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.agentAddress !== "string" || record.agentAddress.trim().length === 0) {
+    throw new Error("rejectedBy.agentAddress must be a non-empty string");
+  }
+  return {
+    agentAddress: record.agentAddress,
+    ...(typeof record.peerId === "string" && record.peerId.trim().length > 0
+      ? { peerId: record.peerId }
+      : {}),
+  };
 }
 
 async function resolveFinalizeStorageLane(
@@ -578,43 +606,8 @@ function resolveStandaloneVmPublishOptions(
   return resolveFinalizedPublishOptions(ctx, raw);
 }
 
-async function verifyDirectPublishOnChainContextGraphId(
-  agent: RequestContext["agent"],
-  contextGraphId: string,
-  onChainContextGraphId: string | undefined,
-  res: RequestContext["res"],
-): Promise<string | undefined | null> {
-  if (onChainContextGraphId === undefined) return undefined;
-  let resolvedOnChainContextGraphId: string | null | undefined;
-  try {
-    resolvedOnChainContextGraphId = await agent.getContextGraphOnChainId(contextGraphId);
-  } catch (err) {
-    jsonResponse(res, 400, {
-      error:
-        `Unable to verify "onChainContextGraphId" for context graph "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-    });
-    return null;
-  }
-  const normalizedResolved = String(resolvedOnChainContextGraphId ?? "").trim();
-  if (!/^[1-9]\d*$/.test(normalizedResolved)) {
-    jsonResponse(res, 400, {
-      error:
-        `"onChainContextGraphId" cannot be supplied for context graph "${contextGraphId}" because no trusted positive on-chain mapping is available`,
-    });
-    return null;
-  }
-  if (BigInt(normalizedResolved) !== BigInt(onChainContextGraphId)) {
-    jsonResponse(res, 400, {
-      error:
-        `"onChainContextGraphId" (${onChainContextGraphId}) does not match the trusted mapping for context graph "${contextGraphId}" (${normalizedResolved})`,
-    });
-    return null;
-  }
-  return normalizedResolved;
-}
-
 export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, agent, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
+  const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";
 
@@ -688,27 +681,25 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     allowLocalExactFallback: !writePreflightCallerAgentAddress,
   };
 
-  // ── POST /api/knowledge-assets/publish — explicit-quads one-shot publish ──
-  //
-  // This is intentionally separate from the assertion/SWM lifecycle routes. If
-  // the caller already has the exact quads to publish, use agent.publish()
-  // directly so the publisher's ACK/direct-payload path owns availability. The
-  // SWM/finalized-assertion methods below remain only for callers that have
-  // explicitly staged or finalized the target content first.
+  // ── POST /api/knowledge-assets/publish — retired direct publish surface ──
   if (method === "POST" && path === `${PREFIX}/publish`) {
-    const rawBody = await readBody(req);
-    const parsed = parsePublishRequestBody(rawBody);
-    if (!parsed.ok) return jsonResponse(res, 400, parsed.body ?? { error: parsed.error });
-    const raw = JSON.parse(rawBody) as Record<string, unknown>;
-    const {
-      contextGraphId,
-      quads,
-      privateQuads,
-      accessPolicy,
-      allowedPeers,
-      subGraphName,
-      onChainContextGraphId,
-    } = parsed.value;
+    return jsonResponse(res, 404, {
+      code: "DIRECT_PUBLISH_ROUTE_REMOVED",
+      error:
+        "POST /api/knowledge-assets/publish has been removed. Publish named knowledge assets via POST /api/knowledge-assets/:name/vm/publish after create, wm/write, wm/finalize, and swm/share.",
+    });
+  }
+
+  // ── POST /api/knowledge-assets/batch-rejections/report ────────────────
+  //
+  // OT-RFC-38 LU-8 - when verifyBatch returns ok=false, the member creates
+  // and shares a named BatchRejection KA so other members can sanity-check and
+  // re-pull from a different host without using a loose shared-memory write.
+  if (method === "POST" && path === `${PREFIX}/batch-rejections/report`) {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body, res);
+    if (!parsed) return;
+    const contextGraphId = parsed.contextGraphId;
     const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
       agent,
       contextGraphId,
@@ -716,70 +707,47 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       writePreflightContextGraphOpts,
     );
     if (!resolvedContextGraphId) return;
-    const publishControls = resolveFinalizedPublishOptions(ctx, raw);
-    if (publishControls === null) return;
-    const {
-      clearSharedMemoryAfter: _ignoredClearSharedMemoryAfter,
-      ...directPublishControls
-    } = publishControls;
-    const verifiedOnChainContextGraphId = await verifyDirectPublishOnChainContextGraphId(
-      agent,
-      resolvedContextGraphId,
-      onChainContextGraphId,
-      res,
+    const verifyResult = parsed.verifyResult;
+    if (!verifyResult || verifyResult.ok !== false) {
+      return jsonResponse(res, 400, {
+        error: "verifyResult.ok must be false; nothing to report on an ok batch",
+      });
+    }
+
+    const derivedRejectedBy = resolveBatchRejectionReporterIdentity(
+      ctx,
+      writePreflightCallerAgentAddress,
     );
-    if (verifiedOnChainContextGraphId === null) return;
+    let explicitRejectedBy: { agentAddress: string; peerId?: string } | undefined;
     try {
-      const pub: any = await agent.publish(resolvedContextGraphId, quads, privateQuads, {
-        accessPolicy,
-        allowedPeers,
-        subGraphName,
-        ...(verifiedOnChainContextGraphId !== undefined
-          ? { onChainContextGraphId: verifiedOnChainContextGraphId }
-          : {}),
-        ...directPublishControls,
+      explicitRejectedBy = parseExplicitBatchRejectionReporterIdentity(parsed.rejectedBy);
+    } catch (err: any) {
+      return jsonResponse(res, 400, {
+        error: err?.message ?? String(err),
       });
-      const { httpStatus, reason } = classifyVmPublish(pub);
-      if (httpStatus === 200) {
-        recordActivityAndNotify(ctx, {
-          contextGraphId: resolvedContextGraphId,
-          kind: "published",
-          actorAgentAddress: requestAgentAddress,
-          subGraphName,
-        });
-      }
-      const chain = pub?.onChainResult;
-      const kaManifest = Array.isArray(pub?.kaManifest) ? pub.kaManifest : [];
-      return jsonResponse(res, httpStatus, {
-        ...pub,
-        mode: "direct",
-        kaId: pub?.kaId != null ? String(pub.kaId) : pub?.kaId,
-        status: pub?.status,
-        kas: kaManifest.map((ka: any) => ({
-          tokenId: String(ka.tokenId),
-          rootEntity: ka.rootEntity,
-        })),
-        ...(chain?.txHash ? { txHash: chain.txHash } : {}),
-        ...(chain?.blockNumber !== undefined ? { blockNumber: chain.blockNumber } : {}),
-        ...(chain?.batchId !== undefined ? { batchId: String(chain.batchId) } : {}),
-        ...(chain?.publisherAddress ? { publisherAddress: chain.publisherAddress } : {}),
-        ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
-        ...(reason ? { error: reason } : {}),
+    }
+    if (
+      explicitRejectedBy &&
+      !isSameAgentAddress(explicitRejectedBy.agentAddress, derivedRejectedBy.agentAddress)
+    ) {
+      return jsonResponse(res, 403, {
+        error: "rejectedBy.agentAddress must match the authenticated rejecting agent",
+        code: "REJECTED_BY_AGENT_MISMATCH",
       });
-    } catch (e: any) {
-      if (isPayloadTooLargeError(e)) {
-        return jsonResponse(res, 413, payloadTooLargeResponseBody(e));
-      }
-      if (e?.code === "OVERSIZED_RDF_LITERAL") {
-        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
-      }
-      // Transient KA-number-floor reconcile failure (rate-limited RPC) -> 503.
-      if (respondIfReconcileUnavailable(res, e)) return;
-      // A transient chain-RPC transport exhaustion on the direct explicit-quads
-      // mint is retryable (503/504), not a hard 500 — parity with /vm/publish
-      // and /api/context-graph/register. Code-keyed, so on-chain reverts stay 500.
-      if (respondIfChainRpcTransportError(res, e)) return;
-      return jsonResponse(res, 500, { error: e?.message ?? String(e) });
+    }
+    const rejectedBy = derivedRejectedBy;
+
+    try {
+      const result = await reportBatchRejectionWithLifecycle(agent, {
+        contextGraphId: resolvedContextGraphId,
+        batchId: parsed.batchId,
+        verifyResult,
+        rejectedBy,
+        ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+      });
+      return jsonResponse(res, 200, result);
+    } catch (err: any) {
+      return jsonResponse(res, 400, { error: err?.message ?? String(err) });
     }
   }
 
@@ -797,14 +765,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       preSignedAuthorAttestation,
       schemeVersion,
       alsoPublishVm,
+      awaitCuratorAck,
     } = parsed;
-    // OT-RFC-43 migration alias: the legacy one-shot publish shape posts
-    // `promote: true` (ApiClient.publishAssertion and network-sim still send
-    // { quads, finalize: true, promote: true }).
-    // Honor it as `alsoShareSwm` so those calls still promote WM→SWM — otherwise
-    // they seal WM but never promote, and a follow-up VM publish runs against an
-    // empty SWM and fails. An explicit `alsoShareSwm` wins when both are supplied.
-    const alsoShareSwm = parsed.alsoShareSwm ?? parsed.promote;
+    // No legacy alias: product callers must name the lifecycle transition.
+    // `alsoShareSwm: true` is the only accepted create-route flag for advancing
+    // a sealed WM assertion into SWM. The async/sync publish preflight relies on
+    // this explicit share step.
+    const alsoShareSwm = parsed.alsoShareSwm;
+    if (parsed.promote !== undefined) {
+      return jsonResponse(res, 400, { error: '"promote" is retired; use "alsoShareSwm" for the WM to SWM lifecycle transition' });
+    }
     if (!name) {
       return jsonResponse(res, 400, { error: 'Missing "name"' });
     }
@@ -829,6 +799,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // `"false"` string must NOT silently promote/publish.
     if (alsoShareSwm !== undefined && typeof alsoShareSwm !== "boolean") {
       return jsonResponse(res, 400, { error: '"alsoShareSwm" must be a boolean when supplied' });
+    }
+    if (awaitCuratorAck !== undefined && typeof awaitCuratorAck !== "boolean") {
+      return jsonResponse(res, 400, { error: '"awaitCuratorAck" must be a boolean when supplied' });
     }
     if (alsoPublishVm !== undefined && typeof alsoPublishVm !== "boolean" && (typeof alsoPublishVm !== "object" || alsoPublishVm === null || Array.isArray(alsoPublishVm))) {
       return jsonResponse(res, 400, { error: '"alsoPublishVm" must be a boolean or an options object when supplied' });
@@ -954,17 +927,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         try {
           // Carry the same resolved author into the share. The asset is already
           // sealed (finalize above), so promote shares the existing seal verbatim
-          // — passing the author keeps the whole atomic flow in one namespace and
-          // covers the seal-on-share path too.
+          // and passing the author keeps the whole atomic flow in one namespace.
           const share = await agent.assertion.promote(resolvedContextGraphId, name, {
             subGraphName,
             ...atomicAuthorLane,
+            awaitCuratorAck,
             ...(resolvedAuthorAgentAddress ? { authorAgentAddress: resolvedAuthorAgentAddress } : {}),
           });
           result.swmShared = true;
           result.promotedCount = share.promotedCount;
           result.sealed = share.sealed;
           result.publishReady = share.publishReady;
+          if (share.shareOperationId) result.shareOperationId = share.shareOperationId;
           // #1116: the one-shot finalizes BEFORE sharing, so a shared asset is
           // normally sealed ("swm-shared"). The unsealed status is only reachable
           // if a future path shares without sealing.
@@ -1322,7 +1296,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
         // #1116: surface the seal outcome. `sealed`/`publishReady` describe THIS
         // share (subset or skipSeal → false by design, not a failure).
-        return jsonResponse(res, 200, { swmShared: true, promotedCount: share.promotedCount, sealed: share.sealed, publishReady: share.publishReady });
+        return jsonResponse(res, 200, {
+          swmShared: true,
+          promotedCount: share.promotedCount,
+          sealed: share.sealed,
+          publishReady: share.publishReady,
+          ...(share.shareOperationId ? { shareOperationId: share.shareOperationId } : {}),
+        });
       } catch (e: any) {
         // #1116 D1: a default full share that can't seal (a residual capability
         // gap, no skipSeal) fails CLOSED with WM preserved — map to a 409 that
@@ -1392,6 +1372,60 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // Publish keeps its own generic-500 catch: on-chain/storage/publisher
     // failures can carry "Invalid"/"Unsafe" text and must NOT be down-classified
     // to 400 (parity with the legacy publish path).
+    if (layer === "vm" && verb === "publish-async") {
+      try {
+        const opts = resolveStandaloneVmPublishOptions(ctx, parsed);
+        if (opts === null) return;
+        const publishOptions = opts as {
+          publishEpochs?: number;
+          clearSharedMemoryAfter?: boolean;
+          publisherNodeIdentityIdOverride?: bigint;
+        };
+        const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
+          ...(subGraphName ? { subGraphName } : {}),
+          ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+          ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
+          ...(publishOptions.clearSharedMemoryAfter !== undefined
+            ? { clearSharedMemoryAfter: publishOptions.clearSharedMemoryAfter }
+            : {}),
+          ...(publishOptions.publisherNodeIdentityIdOverride !== undefined
+            ? { publisherNodeIdentityIdOverride: publishOptions.publisherNodeIdentityIdOverride }
+            : {}),
+        });
+        await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
+        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent);
+        return jsonResponse(res, 202, {
+          jobId,
+          status: "accepted",
+          contextGraphId,
+          name,
+          shareOperationId: intent.shareOperationId,
+          rootsCount: intent.roots.length,
+          sealMerkleRoot: intent.sealMerkleRoot,
+          intentKey: intent.intentKey,
+          ...(subGraphName ? { subGraphName } : {}),
+        });
+      } catch (err: any) {
+        if (err instanceof AsyncLiftJobConflictError) {
+          return jsonResponse(res, 409, {
+            error: err.message,
+            existingJobId: err.existingJobId,
+          });
+        }
+        if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
+          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+        }
+        if (
+          err.message?.includes("required") ||
+          err.message?.includes("Invalid") ||
+          err.message?.includes("must be")
+        ) {
+          return jsonResponse(res, 400, { error: err.message });
+        }
+        throw err;
+      }
+    }
+
     if (layer === "vm" && verb === "publish") {
       // #988: publish keeps its OWN generic-500 catch (NOT the outer
       // respondAssertionError) so on-chain/storage "Invalid"/"Unsafe" text isn't

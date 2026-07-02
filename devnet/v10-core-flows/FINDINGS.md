@@ -20,7 +20,7 @@ Curated snapshot of bugs and observations surfaced by `pnpm test:devnet:v10-core
 
 ### Edge-node publish is "tentative" by design
 
-When an edge node (`nodeRole: "edge"`, no on-chain identity registered) calls `/api/shared-memory/publish`, the daemon:
+When an edge node (`nodeRole: "edge"`, no on-chain identity registered) calls `/api/knowledge-assets/:name/vm/publish`, the daemon:
 
 1. Walks the full assertion lifecycle (create/write/finalize/promote) successfully.
 2. Computes the merkle root over the SWM selection and prepares the publish payload.

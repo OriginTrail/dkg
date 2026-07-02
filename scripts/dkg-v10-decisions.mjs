@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Emits N-Quads for the V10 staking redesign session + decisions, scoped to
 // the dkg-v10-smart-contracts context graph. Writes to stdout; pipe into
-//   dkg shared-memory write <graph> --file - --format nquads
+//   POST /api/knowledge-assets + /wm/write
 // (or to a file).
 //
 // Hand-written rather than converted from Turtle so we control every byte

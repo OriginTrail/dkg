@@ -24,6 +24,9 @@ dkg okf import ./bundle --context-graph-id my-graph --create-context-graph
 # Finalize + share to Shared Working Memory (free, team-visible)
 dkg okf import ./bundle --context-graph-id my-graph --share
 
+# Import into a private invite-only Context Graph; still one KA per concept
+dkg okf import ./bundle --context-graph-id private-graph --private --create-context-graph
+
 # Serialise a Context Graph back into a conformant OKF bundle (clean inverse)
 dkg okf export my-graph ./out
 ```
@@ -31,6 +34,9 @@ dkg okf export my-graph ./out
 Import defaults to **Working Memory** and never publishes to Verifiable Memory.
 `--share` advances to **Shared Working Memory**. On-chain VM promotion (real
 TRAC) is a separate, explicitly-gated operator step — see `DEMO.md`.
+`--private` creates or uses an invite-only Context Graph and keeps the same
+per-concept Knowledge Asset lifecycle, sharing each concept asset to SWM without
+VM promotion.
 
 ## Use it as a library
 

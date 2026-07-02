@@ -19,9 +19,9 @@
  * RC11 / PR-A (Codex review fix on #671): the root content graph
  * `did:dkg:context-graph:{id}` is unioned into VM alongside the
  * `_verifiable_memory/*` prefix — the PR2 first cut dropped it but that
- * broke `/api/shared-memory/publish` → immediate VM query for existing
- * callers. The tentative-VM leak that change was guarding against is
- * now plugged at the publisher (root-graph insert deferred to the
+ * broke immediate VM queries for existing publish callers. The tentative-VM
+ * leak that change was guarding against is now plugged at the publisher
+ * (root-graph insert deferred to the
  * chain-success branch).
  */
 import { describe, expect, it } from 'vitest';

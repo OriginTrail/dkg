@@ -70,7 +70,12 @@ import {
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import {
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncLiftPublisherConfig,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -222,8 +227,6 @@ import {
 } from './shutdown.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
@@ -740,6 +743,49 @@ type StartupGenesisValidation =
   | { ok: false; networkId: string; messages: string[] };
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
+
+type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
+type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
+
+export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
+  return async ({ request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput) => {
+    const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
+      ...(publisher ? { publisherOverride: publisher } : {}),
+    };
+    try {
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    } catch (firstErr: any) {
+      if (
+        firstErr?.code !== "CG_NOT_REGISTERED" &&
+        !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))
+      ) {
+        throw firstErr;
+      }
+      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      await agent.ensureRegisteredForPublish(request.contextGraphId, {
+        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+      });
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    }
+  };
+}
+
+export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): KnowledgeAssetVmPublishPreflight {
+  return async ({ request, publisher }) =>
+    agent.preflightQueuedKnowledgeAssetVmPublishExecution(
+      request,
+      publisher ? { publisherOverride: publisher } : undefined,
+    );
+}
 
 export async function validateStartupGenesis(
   network: StartupGenesisValidationInput | null | undefined,
@@ -1794,6 +1840,8 @@ export async function runDaemonInner(
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
             log,
           });
           publisherRuntime = runtime;
@@ -2643,21 +2691,6 @@ export async function runDaemonInner(
         subGraphName?: string;
       },
     ) => agent.query(sparql, opts),
-    share: (
-      contextGraphId: string,
-      quads: any[],
-      opts?: { localOnly?: boolean; subGraphName?: string },
-    ) => agent.share(contextGraphId, quads, opts).then((result: any) => {
-      emitMemoryGraphChanged({
-        contextGraphId,
-        layers: ["swm"],
-        subGraphName: opts?.subGraphName,
-        operation: "shared_memory_written",
-        source: opts?.localOnly ? "agent_tool_local" : "agent_tool",
-        counts: { triples: quads.length },
-      });
-      return result;
-    }),
     createAssertion: async (
       contextGraphId: string,
       name: string,
@@ -2698,40 +2731,6 @@ export async function runDaemonInner(
         counts: { triples: quads.length },
       });
       return { written: quads.length };
-    },
-    publishFromSharedMemory: (
-      contextGraphId: string,
-      selection: "all" | { rootEntities: string[] },
-      opts?: { clearSharedMemoryAfter?: boolean; subGraphName?: string },
-    ) => {
-      const publishOpts = {
-        ...opts,
-        clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
-      };
-      return agent.publishFromSharedMemory(contextGraphId, selection, publishOpts).then((result: any) => {
-        const clearAfter = publishOpts.clearSharedMemoryAfter;
-        const publishedSwmCleaned = result?.status === "confirmed";
-        const rootCount = Array.isArray(result?.kaManifest)
-          ? result.kaManifest.length
-          : undefined;
-        const publicTripleCount = Array.isArray(result?.publicQuads)
-          ? result.publicQuads.length
-          : undefined;
-        emitMemoryGraphChanged({
-          contextGraphId,
-          layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
-          subGraphName: opts?.subGraphName,
-          operation: "shared_memory_published",
-          source: "agent_tool",
-          clearSharedMemoryAfter: clearAfter,
-          status: typeof result?.status === "string" ? result.status : undefined,
-          counts: {
-            roots: rootCount,
-            triples: publicTripleCount,
-          },
-        });
-        return result;
-      });
     },
     createContextGraph: (opts: {
       id: string;
@@ -3169,8 +3168,8 @@ export async function runDaemonInner(
       // Single top-level error→HTTP mapping (in http-utils.ts
       // respondWithDaemonError): 413 payload-too-large; 400 SyntaxError /
       // reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503/504 for a transient
-      // chain-RPC transport exhaustion (so rethrowing routes like
-      // /api/shared-memory/publish get the retryable status); else 500.
+      // chain-RPC transport exhaustion (so rethrowing lifecycle publish routes
+      // get the retryable status); else 500.
       respondWithDaemonError(res, err);
     }
     // Note: the admission slot is released on the response's `close` event
