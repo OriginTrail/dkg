@@ -13,17 +13,57 @@
 // "stack too deep by 1 slot", a solc-0.8.26 IR-codegen regression at the same source
 // site. Previously the Jenkins pipeline sed-patched hardhat.node.config.ts at build
 // time; this config version-controls that workaround so CI no longer needs the hack.
-import config from './hardhat.node.config';
+import baseConfig from './hardhat.node.config';
 
-// hardhat.node.config exports a single-compiler MultiSolc config; narrow to it so we can
-// override the version/EVM target without disturbing the optimizer/viaIR settings.
-const solc = (config.solidity as { compilers: Array<{ version: string; settings: Record<string, unknown> }> })
-  .compilers[0];
-solc.version = '0.8.24';
-solc.settings = { ...solc.settings, evmVersion: 'cancun' };
+// This file is nothing more than the base config plus TWO devnet overrides
+// (solc 0.8.24 + cancun EVM target for the compiler; cancun hardfork for the
+// in-process chain so the mcopy bytecode also EXECUTES at deploy time). It is
+// COMPOSED from clones -- the imported base config object is never mutated --
+// so loading both configs in one process can never cross-contaminate them.
+//
+// The base config's relevant shape is asserted at load time instead of being
+// silently assumed: if hardhat.node.config ever moves to multiple compilers,
+// an overrides-only `solidity` shape, or drops the in-process hardhat network,
+// this file THROWS with instructions rather than quietly overriding whichever
+// object happens to sit at `compilers[0]`.
+const baseSolidity = baseConfig.solidity as
+  | { compilers?: Array<{ version: string; settings?: Record<string, unknown> }> }
+  | undefined;
+if (!baseSolidity?.compilers || baseSolidity.compilers.length !== 1) {
+  throw new Error(
+    'hardhat.devnet.config.ts expects hardhat.node.config.ts to export exactly ONE solc ' +
+      `compiler (found ${baseSolidity?.compilers?.length ?? 'none'}). The devnet override ` +
+      'retargets that single compiler to solc 0.8.24/cancun -- update this file to mirror ' +
+      'the new base `solidity` shape before booting the devnet.',
+  );
+}
+const [baseCompiler] = baseSolidity.compilers;
 
-// The local Hardhat chain must also EXECUTE the mcopy bytecode at deploy time, so bump
-// the in-process network hardfork from shanghai to cancun (else deploy txs revert).
-(config.networks as { hardhat: { hardfork: string } }).hardhat.hardfork = 'cancun';
+const baseHardhatNetwork = (baseConfig.networks as { hardhat?: Record<string, unknown> } | undefined)
+  ?.hardhat;
+if (!baseHardhatNetwork) {
+  throw new Error(
+    'hardhat.devnet.config.ts expects hardhat.node.config.ts to define `networks.hardhat` ' +
+      '(the in-process devnet chain whose hardfork must be bumped to cancun). Update this ' +
+      'file to mirror the new base `networks` shape before booting the devnet.',
+  );
+}
 
-export default config;
+export default {
+  ...baseConfig,
+  solidity: {
+    ...baseSolidity,
+    compilers: [
+      {
+        ...baseCompiler,
+        version: '0.8.24',
+        // Keep the base optimizer/viaIR settings; only retarget the EVM.
+        settings: { ...baseCompiler.settings, evmVersion: 'cancun' },
+      },
+    ],
+  },
+  networks: {
+    ...baseConfig.networks,
+    hardhat: { ...baseHardhatNetwork, hardfork: 'cancun' },
+  },
+};
