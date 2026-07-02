@@ -78,6 +78,31 @@ function parsePreSignedAuthorAttestation(raw: unknown): PreSignedAuthorAttestati
   }
 }
 
+function parseFinalizeAuthorOptions(opts: ActionOpts): {
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+} {
+  const authorAgentAddress =
+    opts.authorAgentAddress === undefined || opts.authorAgentAddress === ''
+      ? undefined
+      : String(opts.authorAgentAddress);
+  const hasPreSignedAuthorAttestation =
+    opts.preSignedAuthorAttestation !== undefined &&
+    opts.preSignedAuthorAttestation !== null &&
+    opts.preSignedAuthorAttestation !== '';
+  if (authorAgentAddress && hasPreSignedAuthorAttestation) {
+    throw new Error('--author-agent-address and --pre-signed-author-attestation are mutually exclusive');
+  }
+  const schemeVersion = parseOptionalPositiveInteger(opts.schemeVersion, '--scheme-version');
+  const preSignedAuthorAttestation = parsePreSignedAuthorAttestation(opts.preSignedAuthorAttestation);
+  return {
+    ...(authorAgentAddress ? { authorAgentAddress } : {}),
+    ...(preSignedAuthorAttestation ? { preSignedAuthorAttestation } : {}),
+    ...(schemeVersion !== undefined ? { schemeVersion } : {}),
+  };
+}
+
 function parseOptionalPositiveInteger(raw: unknown, flag: string): number | undefined {
   if (raw === undefined) return undefined;
   const value = String(raw).trim();
@@ -260,16 +285,13 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
-      const schemeVersion = parseOptionalPositiveInteger(opts.schemeVersion, '--scheme-version');
-      const preSignedAuthorAttestation = parsePreSignedAuthorAttestation(opts.preSignedAuthorAttestation);
+      const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const createOptions: KnowledgeAssetCreateOptions = {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(quads ? { quads } : {}),
         ...(opts.finalize === false ? { finalize: false } : {}),
-        ...(opts.authorAgentAddress ? { authorAgentAddress: String(opts.authorAgentAddress) } : {}),
-        ...(preSignedAuthorAttestation ? { preSignedAuthorAttestation } : {}),
-        ...(schemeVersion !== undefined ? { schemeVersion } : {}),
+        ...authorOptions,
         ...(opts.share === true ? { alsoShareSwm: true } : {}),
         ...(opts.awaitCuratorAck === true ? { awaitCuratorAck: true } : {}),
       };
@@ -365,15 +387,12 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       if (layer !== undefined && layer !== 'wm' && layer !== 'swm') {
         throw new Error('--layer must be wm or swm');
       }
-      const schemeVersion = parseOptionalPositiveInteger(opts.schemeVersion, '--scheme-version');
-      const preSignedAuthorAttestation = parsePreSignedAuthorAttestation(opts.preSignedAuthorAttestation);
+      const authorOptions = parseFinalizeAuthorOptions(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetFinalize(requiredContextGraphId(opts), name, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
         ...(layer ? { layer } : {}),
-        ...(opts.authorAgentAddress ? { authorAgentAddress: String(opts.authorAgentAddress) } : {}),
-        ...(preSignedAuthorAttestation ? { preSignedAuthorAttestation } : {}),
-        ...(schemeVersion !== undefined ? { schemeVersion } : {}),
+        ...authorOptions,
       });
       console.log('Knowledge asset finalized:');
       console.log(`  Name:         ${name}`);

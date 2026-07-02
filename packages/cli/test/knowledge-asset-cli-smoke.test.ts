@@ -11,6 +11,12 @@ import { fileURLToPath } from 'node:url';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+const AUTHOR_AGENT_ADDRESS = `0x${'11'.repeat(20)}`;
+const PRE_SIGNED_AUTHOR_ATTESTATION = {
+  address: `0x${'22'.repeat(20)}`,
+  reservedKaId: '1948668849774537224271579776955044026207910057309515413017665',
+  signature: { r: `0x${'33'.repeat(32)}`, vs: `0x${'44'.repeat(32)}` },
+};
 
 describe.sequential('knowledge-asset CLI smoke', () => {
   let dkgHome: string;
@@ -30,6 +36,10 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     await writeFile(
       join(dkgHome, 'paper.nt'),
       '<urn:company:acme> <http://schema.org/name> "Acme" .\n',
+    );
+    await writeFile(
+      join(dkgHome, 'attestation.json'),
+      JSON.stringify(PRE_SIGNED_AUTHOR_ATTESTATION),
     );
 
     server = createServer(async (req, res) => {
@@ -381,6 +391,90 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       });
     expect(calls).toEqual([]);
   }, 30000);
+
+  it('maps author attestation flags through CLI parsing and rejects conflicts', async () => {
+    calls = [];
+    const env = testEnv(dkgHome, smokeApiPort);
+    const triples = JSON.stringify([{ subject: 'urn:company:acme', predicate: 'http://schema.org/name', object: '"Acme"' }]);
+
+    await runCli([
+      'ka',
+      'create',
+      'author-inline',
+      '-c',
+      'research',
+      '--triples',
+      triples,
+      '--pre-signed-author-attestation',
+      JSON.stringify(PRE_SIGNED_AUTHOR_ATTESTATION),
+      '--scheme-version',
+      '2',
+    ], env);
+
+    const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
+    expect(createCall?.body).toMatchObject({
+      name: 'author-inline',
+      preSignedAuthorAttestation: PRE_SIGNED_AUTHOR_ATTESTATION,
+      schemeVersion: 2,
+    });
+    expect(createCall?.body.authorAgentAddress).toBeUndefined();
+
+    calls = [];
+    await runCli([
+      'ka',
+      'finalize',
+      'paper',
+      '-c',
+      'research',
+      '--pre-signed-author-attestation',
+      join(dkgHome, 'attestation.json'),
+      '--scheme-version',
+      '2',
+    ], env);
+    const fileBackedFinalize = calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize');
+    expect(fileBackedFinalize?.body).toMatchObject({
+      contextGraphId: 'research',
+      preSignedAuthorAttestation: PRE_SIGNED_AUTHOR_ATTESTATION,
+      schemeVersion: 2,
+    });
+
+    calls = [];
+    await runCli([
+      'ka',
+      'finalize',
+      'paper',
+      '-c',
+      'research',
+      '--author-agent-address',
+      AUTHOR_AGENT_ADDRESS,
+      '--scheme-version',
+      '1',
+    ], env);
+    const authorAddressFinalize = calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize');
+    expect(authorAddressFinalize?.body).toMatchObject({
+      contextGraphId: 'research',
+      authorAgentAddress: AUTHOR_AGENT_ADDRESS,
+      schemeVersion: 1,
+    });
+    expect(authorAddressFinalize?.body.preSignedAuthorAttestation).toBeUndefined();
+
+    calls = [];
+    await expect(runCli([
+      'ka',
+      'finalize',
+      'paper',
+      '-c',
+      'research',
+      '--author-agent-address',
+      AUTHOR_AGENT_ADDRESS,
+      '--pre-signed-author-attestation',
+      join(dkgHome, 'attestation.json'),
+    ], env))
+      .rejects.toMatchObject({
+        stderr: expect.stringContaining('--author-agent-address and --pre-signed-author-attestation are mutually exclusive'),
+      });
+    expect(calls).toEqual([]);
+  }, 60000);
 
   it('treats an idempotent zero-promote sync share as successful no-op guidance', async () => {
     calls = [];
