@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDashboards } from './lib/dashboards.mjs';
 import { buildAlerts } from './lib/alerts.mjs';
+import { buildDocs } from './lib/docs.mjs';
 
 // Strict CLI boundary: one optional positional (outDir) + two value flags.
 // Fail loudly on unknown flags, missing flag values, or flag values that look
@@ -64,26 +65,22 @@ if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(PROM_NODE_LABEL)) {
 
 const { fleet, nodeLogs, metrics, traces } = buildDashboards({ PROM_NODE_LABEL });
 const { alerts, rulesTableMd } = buildAlerts({ PROM_NODE_LABEL, VM_UID, LOKI_UID });
+const docs = buildDocs({ rulesTableMd });
 
 // -------------------------------------------------------- write / --check
-// Everything renders in memory first; --check then diffs against the files on
-// disk and exits 1 on any mismatch, so CI can prove the committed artifacts
-// were produced by this generator (no stale or hand-edited JSON can ship).
-const START = '<!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->';
-const END = '<!-- GENERATED:RULES-TABLE:END -->';
+// Everything (JSON artifacts AND docs) renders fully in memory; write mode
+// emits the complete artifact set to outDir and --check diffs every file
+// against disk, exiting 1 on any mismatch — render and check are symmetric,
+// nothing is mutated in place, and CI can prove the committed artifacts were
+// produced by this generator (no stale or hand-edited file can ship).
 const rendered = new Map([
   ['grafana-dashboard-dkg-fleet-logs.json', JSON.stringify(fleet, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-logs.json', JSON.stringify(nodeLogs, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-metrics.json', JSON.stringify(metrics, null, 2) + '\n'],
   ['grafana-dashboard-dkg-node-traces.json', JSON.stringify(traces, null, 2) + '\n'],
   ['alert-rules.provisioning.json', JSON.stringify(alerts, null, 2) + '\n'],
+  ...Object.entries(docs),
 ]);
-const mdPath = path.join(outDir, 'example-alerts.md');
-const injectMd = (md) => {
-  const si = md.indexOf(START), ei = md.indexOf(END);
-  if (si < 0 || ei <= si) return null;
-  return md.slice(0, si + START.length) + '\n' + rulesTableMd + '\n' + md.slice(ei);
-};
 
 if (opts['--check']) {
   const stale = [];
@@ -91,14 +88,6 @@ if (opts['--check']) {
     const p = path.join(outDir, file);
     const have = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '<missing>';
     if (have !== want) stale.push(file);
-  }
-  if (fs.existsSync(mdPath)) {
-    const md = fs.readFileSync(mdPath, 'utf8');
-    const want = injectMd(md);
-    if (want === null) stale.push('example-alerts.md (markers missing)');
-    else if (want !== md) stale.push('example-alerts.md (generated section)');
-  } else {
-    stale.push('example-alerts.md (missing)');
   }
   if (stale.length) {
     console.error('STALE generated artifacts (regenerate with: node generate-observability.mjs):');
@@ -111,10 +100,5 @@ if (opts['--check']) {
   for (const [file, content] of rendered) {
     fs.writeFileSync(path.join(outDir, file), content);
     console.log('wrote', path.join(outDir, file));
-  }
-  if (fs.existsSync(mdPath)) {
-    const next = injectMd(fs.readFileSync(mdPath, 'utf8'));
-    if (next === null) console.warn('markers not found in example-alerts.md — table not injected');
-    else { fs.writeFileSync(mdPath, next); console.log('updated rules table in', mdPath); }
   }
 }

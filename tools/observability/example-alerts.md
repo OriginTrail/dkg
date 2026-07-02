@@ -1,3 +1,7 @@
+<!-- GENERATED FILE — do not edit. Source: tools/observability/lib/docs.mjs
+     (rules table derives from lib/alerts.mjs ALERT_SPECS). Regenerate with:
+     node tools/observability/generate-observability.mjs -->
+
 # Grafana alerting — live setup on the observability server
 
 > **Status (2026-07-02):** everything below is **provisioned and healthy** on the
@@ -42,7 +46,6 @@ All queries are **range queries** — on Loki 3.x an *instant* metric query over
 range ≥ a few hours is split internally and dies with `maximum of series (500)
 reached`; range+reduce avoids that class of failure entirely.
 
-<!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->
 | # | Alert | Channel | Datasource | Fires when | for | noData |
 |---|---|---|---|---|---|---|
 | 1 | Node silent — seen in last 3h, quiet 15m (per node) | #node-logs | Loki | `> 0` | 5m | OK |
@@ -117,7 +120,6 @@ sum by (instance) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))
 ```
 sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))
 ```
-<!-- GENERATED:RULES-TABLE:END -->
 
 ### Design notes (the "why" behind the table)
 
