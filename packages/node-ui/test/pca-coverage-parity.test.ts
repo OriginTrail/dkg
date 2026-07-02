@@ -232,7 +232,7 @@ describe('#1344 coverage parity (table-driven) — S5 / S6 / overview agree via 
 
       // 3. S6 panel (GetSponsoredPanel) — run the approval check
       const s6 = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-      await waitForText(s6.container, 'Track your approval');
+      await waitForText(s6.container, "Can't find it automatically?");
       const accountIdInput = s6.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement | null;
       expect(accountIdInput).toBeTruthy();
       await act(async () => { setInputValue(accountIdInput!, ACCOUNT); });

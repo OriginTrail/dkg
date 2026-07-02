@@ -21,7 +21,7 @@
  * (faucet/funded) TRAC and run ONLY in the lead-directed P0 validation phase,
  * never in the read-only conformance pass.
  */
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { test, expect } from '../fixtures/base.js';
 import { fetchApiInPage } from '../helpers/page-api.js';
 
@@ -36,6 +36,15 @@ async function openProjectTab(page: Page, name: string) {
     .filter({ hasText: name })
     .first()
     .click();
+}
+
+async function prepareDaemonCreateForm(
+  conviction: { createModal: Locator; createTokensInput: Locator; createSubmit: Locator },
+  tokens = '50000',
+) {
+  await conviction.createModal.getByLabel(/This node's hot wallet/i).check();
+  await conviction.createTokensInput.fill(tokens);
+  await expect(conviction.createSubmit).toBeEnabled({ timeout: 30_000 });
 }
 
 test.describe('Publisher Conviction tab (PCA) — P0', () => {
@@ -131,7 +140,7 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
       await conviction.open();
       await conviction.createBtn.click();
       await expect(conviction.createModal).toBeVisible();
-      await conviction.createTokensInput.fill('50000'); // primaryNode auto-prefills from identityId
+      await prepareDaemonCreateForm(conviction); // CI devnet signs through the daemon hot wallet.
       await conviction.createSubmit.click();
       await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
       await expect(conviction.createSuccess).toContainText(/0\s*\/\s*100 wallets approved/i);
@@ -148,7 +157,7 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await conviction.open();
     await conviction.createBtn.click();
     await expect(conviction.createModal).toBeVisible();
-    await conviction.createTokensInput.fill('50000');
+    await prepareDaemonCreateForm(conviction);
     await conviction.createSubmit.click();
     await expect(conviction.approveOwnWalletsCta).toBeVisible({ timeout: 120_000 });
     await conviction.approveOwnWalletsCta.click();
@@ -243,7 +252,7 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await conviction.open();
     await conviction.createBtn.click();
     await expect(conviction.createModal).toBeVisible();
-    await conviction.createTokensInput.fill('50000');
+    await prepareDaemonCreateForm(conviction);
     await conviction.createSubmit.click();
     await expect(conviction.createSuccess).toBeVisible({ timeout: 120_000 }); // on-chain createAccount
     await conviction.createModal.getByRole('button', { name: /^Manage PCA/ }).click();
