@@ -636,7 +636,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
 
   it('createAssertion delegates to the canonical KA create serializer', async () => {
     const calls = track({ assertionUri: 'did:dkg:context-graph:cg/assertion/legacy' });
-    await client.createAssertion('cg', 'legacy', {
+    const result = await client.createAssertion('cg', 'legacy', {
       subGraphName: 'notes',
       quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
       finalize: true,
@@ -644,6 +644,7 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       authorAgentAddress: '0x1111111111111111111111111111111111111111',
       schemeVersion: 2,
     });
+    expect(result.assertionUri).toBe('did:dkg:context-graph:cg/assertion/legacy');
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
     const sent = JSON.parse(calls[0].opts.body as string);
     expect(sent).toMatchObject({
@@ -657,6 +658,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     });
     expect(sent.quads).toHaveLength(1);
     expect(sent.alsoPublishVm).toBeUndefined();
+  });
+
+  it('createAssertion validates the legacy assertionUri response contract', async () => {
+    const calls = track({ name: 'legacy', status: 'wm-sealed' });
+    await expect(client.createAssertion('cg', 'legacy')).rejects
+      .toThrow('Knowledge asset create response missing assertionUri for assertion compatibility');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
   });
 
   it('createKnowledgeAsset normalizes finalized publish and author seal options', async () => {
@@ -872,11 +880,14 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(calls[0].opts.method).toBe('POST');
   });
 
-  it('knowledgeAssetShareAsync rejects unsupported skipSeal before HTTP serialization', async () => {
+  it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {
       skipSeal: true,
     } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      awaitCuratorAck: true,
+    } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');
     expect(calls).toHaveLength(0);
   });
 

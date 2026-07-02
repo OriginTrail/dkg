@@ -553,7 +553,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     const env = testEnv(dkgHome, smokeApiPort);
     const triples = JSON.stringify([{ subject: 'urn:company:acme', predicate: 'http://schema.org/name', object: '"Acme"' }]);
 
-    const created = await runCli(['ka', 'create', 'paper', '--context-graph-id', 'research', '--triples', triples, '--share'], env);
+    const created = await runCli(['ka', 'create', 'paper', '--context-graph-id', 'research', '--triples', triples, '--share', '--await-curator-ack'], env);
     expect(created.stdout).toContain('Knowledge asset create complete:');
 
     const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
@@ -561,12 +561,13 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       contextGraphId: 'research',
       name: 'paper',
       alsoShareSwm: true,
+      awaitCuratorAck: true,
     });
     expect(createCall?.body.alsoPublishVm).toBeUndefined();
 
     await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], env);
     await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env);
-    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme', '--skip-seal'], env);
+    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme', '--skip-seal', '--await-curator-ack'], env);
     expect(shared.stdout).not.toContain('Next:');
     const sealedShare = await runCli(['ka', 'share', 'paper', '-c', 'research'], env);
     expect(sealedShare.stdout).toContain('Next:');
@@ -595,6 +596,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     expect(shareCalls[0]?.body).toMatchObject({
       entities: ['urn:company:acme'],
       skipSeal: true,
+      awaitCuratorAck: true,
     });
     expect(shareCalls[1]?.body).toMatchObject({
       contextGraphId: 'research',

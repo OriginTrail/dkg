@@ -77,6 +77,18 @@ export interface KnowledgeAssetShareResponse {
   errors?: KnowledgeAssetLifecycleError[];
 }
 
+export interface KnowledgeAssetShareOptions {
+  subGraphName?: string;
+  entities?: string[] | 'all';
+  awaitCuratorAck?: boolean;
+  skipSeal?: boolean;
+}
+
+export type KnowledgeAssetShareAsyncOptions = Omit<
+  KnowledgeAssetShareOptions,
+  'awaitCuratorAck' | 'skipSeal'
+>;
+
 export interface KnowledgeAssetPublishResponse {
   kaId?: string;
   ual?: string;
@@ -137,6 +149,21 @@ export interface KnowledgeAssetShareJobView {
   reason?: string;
 }
 
+export interface AssertionCreateResponse extends Record<string, unknown> {
+  assertionUri: string;
+  written?: number;
+  seal?: {
+    merkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+    chainId: string;
+    kav10Address: string;
+    eip712Digest: string;
+  };
+  promotedCount?: number;
+  shareOperationId?: string;
+}
+
 function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, unknown> {
   if (typeof value === 'boolean') return value;
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
@@ -148,6 +175,28 @@ function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, un
     );
   }
   throw new Error('alsoPublishVm must be a boolean or publish-options object');
+}
+
+function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Record<K, unknown> {
+  return value !== null
+    && typeof value === 'object'
+    && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
+  if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
+    throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
+  }
+  if (hasOwnKey(options, 'awaitCuratorAck') && options.awaitCuratorAck !== undefined) {
+    throw new Error('awaitCuratorAck is not supported for async share; use knowledgeAssetShare() when curator acknowledgement must block');
+  }
+}
+
+function assertionCreateResponse(result: KnowledgeAssetCreateResponse): AssertionCreateResponse {
+  if (typeof result.assertionUri !== 'string' || result.assertionUri.length === 0) {
+    throw new Error('Knowledge asset create response missing assertionUri for assertion compatibility');
+  }
+  return { ...result, assertionUri: result.assertionUri };
 }
 
 function assertExclusiveAuthorFields(args: {
@@ -617,7 +666,7 @@ export class ApiClient {
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; entities?: string[] | 'all'; awaitCuratorAck?: boolean; skipSeal?: boolean },
+    options?: KnowledgeAssetShareOptions,
   ): Promise<KnowledgeAssetShareResponse> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
   }
@@ -625,11 +674,9 @@ export class ApiClient {
   async knowledgeAssetShareAsync(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; entities?: string[] | 'all' },
+    options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
-    if ((options as Record<string, unknown> | undefined)?.skipSeal === true) {
-      throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
-    }
+    assertSupportedAsyncShareOptions(options);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
   }
 
@@ -701,38 +748,13 @@ export class ApiClient {
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
     },
-  ): Promise<{
-    assertionUri: string;
-    written?: number;
-    seal?: {
-      merkleRoot: string;
-      authorAddress: string;
-      schemeVersion: number;
-      chainId: string;
-      kav10Address: string;
-      eip712Digest: string;
-    };
-    promotedCount?: number;
-    shareOperationId?: string;
-  }> {
-    return this.createKnowledgeAsset(
+  ): Promise<AssertionCreateResponse> {
+    const result = await this.createKnowledgeAsset(
       contextGraphId,
       name,
       options,
-    ) as Promise<{
-      assertionUri: string;
-      written?: number;
-      seal?: {
-        merkleRoot: string;
-        authorAddress: string;
-        schemeVersion: number;
-        chainId: string;
-        kav10Address: string;
-        eip712Digest: string;
-      };
-      promotedCount?: number;
-      shareOperationId?: string;
-    }>;
+    );
+    return assertionCreateResponse(result);
   }
 
   /**
