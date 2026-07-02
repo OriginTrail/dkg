@@ -2,7 +2,8 @@
 // ALERT_SPECS model plus its ONE derivation: Grafana provisioning payloads.
 // The markdown documentation rendering of the same specs lives in docs.mjs;
 // CLI handling and --check live in ../generate-observability.mjs.
-export const buildAlerts = ({ PROM_NODE_LABEL, VM_UID, LOKI_UID }) => {
+export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
+  const PROM_NODE_LABEL = nodeProfile.label;
   // Declarative spec layer: each entry below is the SINGLE definition of one
   // alert. The Grafana provisioning payload (data blocks, condition, labels) AND
   // the markdown summary table in example-alerts.md are both derived from it —
@@ -45,12 +46,12 @@ export const buildAlerts = ({ PROM_NODE_LABEL, VM_UID, LOKI_UID }) => {
       summary: 'Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent.' },
     { title: 'Publish failures on a node (armed — needs node metrics enabled)', signal: 'metrics',
       ds: 'vm', windowSec: 900,
-      expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))`,
+      expr: nodeProfile.by('rate(dkg_publish_total{outcome=~"failed|error"}[15m])'),
       condition: { op: '>', value: 0.02 }, forDur: '5m', noData: 'OK',
       summary: `Node {{ $labels.${PROM_NODE_LABEL} }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)` },
     { title: 'Chain RPC failover exhausted on a node (armed — needs node metrics enabled)', signal: 'metrics',
       ds: 'vm', windowSec: 900,
-      expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))`,
+      expr: nodeProfile.by('rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m])'),
       condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
       summary: `ALL configured RPC endpoints failed for node {{ $labels.${PROM_NODE_LABEL} }} — chain connectivity is down for it. (The metric contract also documents reason="recovered"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)` },
     { title: 'Errored spans rate (armed — needs traces + spanmetrics enabled)', signal: 'traces',

@@ -14,9 +14,9 @@ const lokiVarVisible = { name: 'loki', type: 'datasource', query: 'loki', label:
 // signal has data for (a node shipping metrics but not logs still appears on
 // the metrics dashboard, and vice versa). allowCustomValue is the escape
 // hatch while a signal has no data yet.
-const nodeIdentity = (PROM_NODE_LABEL) => ({
+const nodeIdentity = (nodeProfile) => ({
   logs: { datasource: LOKI, query: 'label_values(service_instance_id)' },
-  metrics: { datasource: VM, query: `label_values({__name__=~"dkg_.+"}, ${PROM_NODE_LABEL})` },
+  metrics: { datasource: VM, query: nodeProfile.labelValuesQuery },
   traces: { datasource: TEMPO, query: { refId: 'TempoDatasourceVariableQuery', type: 1, label: 'resource.service.instance.id' } },
 });
 const nodeVarMulti = (identity) => ({ name: 'node', label: 'Node', type: 'query', datasource: identity.datasource, query: identity.query, refresh: 2, includeAll: true, multi: true, allValue: '.+', allowCustomValue: true, current: { text: ['All'], value: ['$__all'] } });
@@ -26,14 +26,18 @@ const nodeVarMulti = (identity) => ({ name: 'node', label: 'Node', type: 'query'
 // row), so inserting or resizing a panel never requires recalculating any
 // other panel's coordinates. Builders take (w, h) and carry a gridPos
 // placeholder so the stamped key keeps its position in the rendered JSON.
+// Stamping is PURE: each panel def is copied with gridPos filled in, never
+// mutated — a def could be reused across dashboards without layout coupling.
+// The `gridPos: undefined` placeholders in the builders are deliberate: a
+// spread preserves first-occurrence key order, so the placeholder pins where
+// gridPos lands in the rendered JSON (byte-stable artifacts).
 const layout = (rows) => {
   const panels = [];
   let y = 0;
   for (const row of rows) {
     let x = 0, rowH = 0;
     for (const item of row) {
-      item.def.gridPos = { h: item.h, w: item.w, x, y };
-      panels.push(item.def);
+      panels.push({ ...item.def, gridPos: { h: item.h, w: item.w, x, y } });
       x += item.w;
       rowH = Math.max(rowH, item.h);
     }
@@ -110,17 +114,17 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
 });
 
 const R = '[$__rate_interval]';
-const buildMetricsDashboard = (PROM_NODE_LABEL, NODE_IDENTITY) => {
-  // The node-label profile in ONE place: every profile-sensitive convention a
-  // per-node panel needs (selector, group-by, legend) comes from these three —
-  // a new panel uses them instead of re-splicing PROM_NODE_LABEL by hand.
-  const SEL = `${PROM_NODE_LABEL}=~"\${node:regex}"`;
-  const BY_NODE = (inner) => `sum by (${PROM_NODE_LABEL}) (${inner})`;
-  const NODE_LEGEND = `{{${PROM_NODE_LABEL}}}`;
+const buildMetricsDashboard = (nodeProfile, NODE_IDENTITY) => {
+  // Every profile-sensitive convention a per-node panel needs comes from the
+  // profile model (lib/profile.mjs) — panels compose these, never splice the
+  // raw label into query strings.
+  const SEL = nodeProfile.selector;
+  const BY_NODE = nodeProfile.by;
+  const NODE_LEGEND = nodeProfile.legend;
   return {
   uid: 'dkg-node-metrics', title: 'DKG Nodes — Metrics', timezone: 'browser', refresh: '1m',
   time: { from: 'now-6h', to: 'now' }, tags: ['dkg', 'metrics'], links: dashLinks,
-  description: `OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: ${PROM_NODE_LABEL} (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.`,
+  description: `OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: ${nodeProfile.label} (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.`,
   templating: { list: [ { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} }, nodeVarMulti(NODE_IDENTITY.metrics) ] },
   panels: layout([
     [ TEXT('**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector\'s self-monitoring and works independently of node export.') ],
@@ -203,12 +207,12 @@ const buildTracesDashboard = (NODE_IDENTITY) => ({
   ]),
 });
 
-export const buildDashboards = ({ PROM_NODE_LABEL }) => {
-  const NODE_IDENTITY = nodeIdentity(PROM_NODE_LABEL);
+export const buildDashboards = ({ nodeProfile }) => {
+  const NODE_IDENTITY = nodeIdentity(nodeProfile);
   return {
     fleet: buildFleetLogsDashboard(),
     nodeLogs: buildNodeLogsDashboard(NODE_IDENTITY),
-    metrics: buildMetricsDashboard(PROM_NODE_LABEL, NODE_IDENTITY),
+    metrics: buildMetricsDashboard(nodeProfile, NODE_IDENTITY),
     traces: buildTracesDashboard(NODE_IDENTITY),
   };
 };

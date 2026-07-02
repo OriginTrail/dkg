@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { buildDashboards } from './lib/dashboards.mjs';
 import { buildAlerts } from './lib/alerts.mjs';
 import { buildDocs } from './lib/docs.mjs';
+import { promNodeProfile } from './lib/profile.mjs';
 
 // Strict CLI boundary: one optional positional (outDir) + two value flags.
 // Fail loudly on unknown flags, missing flag values, or flag values that look
@@ -61,10 +62,11 @@ const PROM_NODE_LABEL = opts['--prom-node-label'] ?? 'instance';
 if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(PROM_NODE_LABEL)) {
   console.error(`--prom-node-label must be a valid Prometheus label name, got: ${PROM_NODE_LABEL}\n${usage}`); process.exit(1);
 }
+const nodeProfile = promNodeProfile(PROM_NODE_LABEL);
 
 
-const { fleet, nodeLogs, metrics, traces } = buildDashboards({ PROM_NODE_LABEL });
-const { alerts, specs, routes } = buildAlerts({ PROM_NODE_LABEL, VM_UID, LOKI_UID });
+const { fleet, nodeLogs, metrics, traces } = buildDashboards({ nodeProfile });
+const { alerts, specs, routes } = buildAlerts({ nodeProfile, VM_UID, LOKI_UID });
 const docs = buildDocs({ specs, routes });
 
 // -------------------------------------------------------- write / --check
