@@ -1250,6 +1250,13 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (e?.code === "UNSEALED_SHARE_BLOCKED") {
           return jsonResponse(res, 409, { code: "UNSEALED_SHARE_BLOCKED", error: e.message, recovery: e.recovery });
         }
+        if (e?.code === "KA_NAMED_GRAPH_SHARE_UNSUPPORTED") {
+          return jsonResponse(res, 409, {
+            code: "KA_NAMED_GRAPH_SHARE_UNSUPPORTED",
+            error: e.message,
+            namedGraphs: Array.isArray(e.namedGraphs) ? e.namedGraphs : undefined,
+          });
+        }
         throw e;
       }
     }

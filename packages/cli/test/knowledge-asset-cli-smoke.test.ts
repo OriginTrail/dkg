@@ -11,6 +11,9 @@ import { fileURLToPath } from 'node:url';
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+const BUILD_CLI_COMMAND = process.platform === 'win32'
+  ? { file: 'cmd.exe', args: ['/d', '/s', '/c', 'pnpm build'] }
+  : { file: 'pnpm', args: ['build'] };
 const AUTHOR_AGENT_ADDRESS = `0x${'11'.repeat(20)}`;
 const PRE_SIGNED_AUTHOR_ATTESTATION = {
   address: `0x${'22'.repeat(20)}`,
@@ -20,15 +23,13 @@ const PRE_SIGNED_AUTHOR_ATTESTATION = {
 
 describe.sequential('knowledge-asset CLI smoke', () => {
   let dkgHome: string;
-  let server: ReturnType<typeof createServer>;
+  let server: ReturnType<typeof createServer> | undefined;
   let smokeApiPort: string;
   let calls: Array<{ method: string; url: string; body?: any; contentType?: string }> = [];
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-ka-cli-'));
-    if (!existsSync(CLI_ENTRY)) {
-      await execFileAsync('pnpm', ['build'], { cwd: join(__dirname, '..') });
-    }
+    await execFileAsync(BUILD_CLI_COMMAND.file, BUILD_CLI_COMMAND.args, { cwd: join(__dirname, '..') });
     if (!existsSync(CLI_ENTRY)) {
       throw new Error(`CLI entry not found after build: ${CLI_ENTRY}`);
     }
@@ -257,10 +258,12 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       res.end(JSON.stringify({ error: 'Not found' }));
     });
 
+    const smokeServer = server;
+    if (!smokeServer) throw new Error('Smoke API server was not initialized');
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
-        const addr = server.address();
+      smokeServer.once('error', reject);
+      smokeServer.listen(0, '127.0.0.1', () => {
+        const addr = smokeServer.address();
         smokeApiPort = typeof addr === 'object' && addr ? String(addr.port) : '0';
         resolve();
       });
@@ -268,8 +271,8 @@ describe.sequential('knowledge-asset CLI smoke', () => {
   });
 
   afterAll(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(dkgHome, { recursive: true, force: true });
+    if (server) await new Promise<void>((resolve) => server?.close(() => resolve()));
+    if (dkgHome) await rm(dkgHome, { recursive: true, force: true });
   });
 
   it('registers canonical command and ka alias help', async () => {

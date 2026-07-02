@@ -233,11 +233,41 @@ describe('Working Memory Assertion Lifecycle', () => {
     const scopedNamedGraphs = (await store.listGraphs())
       .filter((graph) => graph.includes('/_named_graph/'));
     expect(scopedNamedGraphs.length).toBeGreaterThan(0);
+  });
 
-    const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
-    expect(promoted.promotedCount).toBe(2);
-    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
-    expect((await store.listGraphs()).filter((graph) => graph.includes('/_named_graph/'))).toHaveLength(0);
+  it('rejects named-graph shares before duplicate SPOs can be flattened', async () => {
+    const name = 'named-graph-share-unsupported';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:one',
+      },
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:two',
+      },
+    ]);
+
+    const beforeShare = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(beforeShare).toEqual(expect.arrayContaining([
+      expect.objectContaining({ graph: 'urn:test:graph:one' }),
+      expect.objectContaining({ graph: 'urn:test:graph:two' }),
+    ]));
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: ['urn:test:graph:one', 'urn:test:graph:two'],
+    });
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(2);
+    const swmResult = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <urn:test:entity:duplicate-spo> <http://schema.org/name> "Same" } }`,
+    );
+    expect(swmResult.type === 'boolean' ? swmResult.value : true).toBe(false);
   });
 
   it('discard removes KA-scoped named graph draft content', async () => {

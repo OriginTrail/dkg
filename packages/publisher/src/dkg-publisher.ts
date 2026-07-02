@@ -5731,6 +5731,20 @@ export class DKGPublisher implements Publisher {
       return { promotedCount: 0, promotedAllRoots: false };
     }
 
+    const namedGraphs = [...new Set(assertionQuads
+      .map((q) => q.graph)
+      .filter((graph): graph is string => typeof graph === 'string' && graph.length > 0))];
+    if (namedGraphs.length > 0) {
+      await maintainMarker(false);
+      throw Object.assign(
+        new Error(
+          'Knowledge Asset contains RDF named-graph quads, but SWM share and VM publish do not yet preserve original graph identity. '
+          + 'Rewrite the payload into the default graph before sharing, or keep the KA in WM until graph-preserving SWM/VM semantics are implemented.',
+        ),
+        { code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED', namedGraphs },
+      );
+    }
+
     let quadsToPromote = assertionQuads;
 
     // ── Bug 8 (Codex Round 4) + Round 9 Bug 25 — import-bookkeeping filter ──
