@@ -636,7 +636,7 @@
           "datasourceUid": "<VM_DATASOURCE_UID>",
           "model": {
             "refId": "A",
-            "expr": "sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~\"failed|error\"}[15m]))",
+            "expr": "sum by (instance) (rate(dkg_publish_total{outcome=~\"failed|error\"}[15m]))",
             "range": true,
             "instant": false,
             "intervalMs": 60000,
@@ -691,7 +691,7 @@
         "signal": "metrics"
       },
       "annotations": {
-        "summary": "Node {{ $labels.instance }}{{ $labels.service_instance_id }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)"
+        "summary": "Node {{ $labels.instance }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)"
       }
     },
     {
@@ -710,7 +710,7 @@
           "datasourceUid": "<VM_DATASOURCE_UID>",
           "model": {
             "refId": "A",
-            "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason=\"exhausted\"}[15m]))",
+            "expr": "sum by (instance) (rate(dkg_chain_rpc_failover_total{reason=\"exhausted\"}[15m]))",
             "range": true,
             "instant": false,
             "intervalMs": 60000,
@@ -765,7 +765,7 @@
         "signal": "metrics"
       },
       "annotations": {
-        "summary": "ALL configured RPC endpoints failed for node {{ $labels.instance }}{{ $labels.service_instance_id }} — chain connectivity is down for it. (The metric contract also documents reason=\"recovered\"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)"
+        "summary": "ALL configured RPC endpoints failed for node {{ $labels.instance }} — chain connectivity is down for it. (The metric contract also documents reason=\"recovered\"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)"
       }
     },
     {

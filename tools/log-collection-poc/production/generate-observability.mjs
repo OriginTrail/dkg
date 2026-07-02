@@ -6,13 +6,16 @@
 // never hand-edit the rendered JSON.
 //
 //   node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>]
+//                                   [--prom-node-label <label>] [--check]
 //
 // Dashboards bind datasources through template variables (loki/vm/tempo), so
 // they import anywhere unchanged. Alert rules must reference concrete
 // datasource UIDs; the committed artifact keeps the <VM_DATASOURCE_UID>
 // placeholder (that UID is instance-specific) — pass --vm-uid to render an
 // importable payload for a real instance. The Loki UID defaults to "loki",
-// the deliberate stable name on the production server.
+// the deliberate stable name on the production server. --check verifies the
+// committed artifacts match the generator (used by CI); --prom-node-label
+// switches the metrics node-identity profile (see below).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,15 +23,18 @@ import { fileURLToPath } from 'node:url';
 // Strict CLI boundary: one optional positional (outDir) + two value flags.
 // Fail loudly on unknown flags, missing flag values, or flag values that look
 // like flags — a typoed command must not silently render a malformed payload.
-const usage = 'usage: node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>]';
-const opts = { outDir: null, '--vm-uid': null, '--loki-uid': null };
+const usage = 'usage: node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>] [--prom-node-label <label>] [--check]';
+const VALUE_FLAGS = ['--vm-uid', '--loki-uid', '--prom-node-label'];
+const opts = { outDir: null, '--check': false };
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
   const a = args[i];
-  if (a === '--vm-uid' || a === '--loki-uid') {
+  if (VALUE_FLAGS.includes(a)) {
     const v = args[++i];
     if (v === undefined || v.startsWith('--')) { console.error(`${a} requires a value\n${usage}`); process.exit(1); }
     opts[a] = v;
+  } else if (a === '--check') {
+    opts['--check'] = true;
   } else if (a.startsWith('--')) {
     console.error(`unknown flag ${a}\n${usage}`); process.exit(1);
   } else if (opts.outDir === null) {
@@ -40,6 +46,18 @@ for (let i = 0; i < args.length; i++) {
 const outDir = opts.outDir ?? path.dirname(fileURLToPath(import.meta.url));
 const VM_UID = opts['--vm-uid'] ?? '<VM_DATASOURCE_UID>';
 const LOKI_UID = opts['--loki-uid'] ?? 'loki';
+// Node-identity profile for the PROMETHEUS backend: which label carries the
+// node name (service.instance.id). 'instance' is the canonical OTLP mapping
+// (VictoriaMetrics native OTLP ingest and prometheusremotewrite both use it);
+// collectors configured with resource_to_telemetry_conversion emit
+// 'service_instance_id' instead — switch with ONE flag, every metrics query,
+// legend, group-by, alert expression and summary derives from this constant.
+// (Loki's node label is service_instance_id and Tempo's is
+// resource.service.instance.id — fixed by our own pipeline, not profiled.)
+const PROM_NODE_LABEL = opts['--prom-node-label'] ?? 'instance';
+if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(PROM_NODE_LABEL)) {
+  console.error(`--prom-node-label must be a valid Prometheus label name, got: ${PROM_NODE_LABEL}\n${usage}`); process.exit(1);
+}
 
 // ---------------------------------------------------------------- dashboards
 const LOKI = { type: 'loki', uid: '${loki}' };
@@ -109,12 +127,12 @@ const nodeLogs = {
   ],
 };
 
-const SEL = 'instance=~"${node:regex}"';
+const SEL = `${PROM_NODE_LABEL}=~"\${node:regex}"`;
 const R = '[$__rate_interval]';
 const metrics = {
   uid: 'dkg-node-metrics', title: 'DKG Nodes — Metrics', timezone: 'browser', refresh: '1m',
   time: { from: 'now-6h', to: 'now' }, tags: ['dkg', 'metrics'], links: dashLinks,
-  description: 'OTel metrics from dkg-node (meter @origintrail-official/dkg). Node filter uses the canonical OTLP mapping (instance = service.instance.id, used by both VictoriaMetrics native OTLP ingest and prometheusremotewrite). If the collector is configured with resource_to_telemetry_conversion instead, swap instance= for service_instance_id= in the panel queries.',
+  description: `OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: ${PROM_NODE_LABEL} (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.`,
   templating: { list: [ { name: 'vm', type: 'datasource', query: 'prometheus', label: 'Metrics DS', hide: 2, current: {} }, lokiVarHidden, nodeVarMulti ] },
   panels: [
     TEXT('**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector\'s self-monitoring and works independently of node export.', {h:3,w:24,x:0,y:0}),
@@ -132,10 +150,10 @@ const metrics = {
     ], {h:8,w:8,x:16,y:12}, 'ops'),
     ROW('Chain / RPC', 20),
     TS(VM, 'Raw RPC requests by method (billing unit)', [{ expr: `sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: '{{rpc_method}}' }], {h:8,w:12,x:0,y:21}, 'reqps'),
-    TS(VM, 'Raw RPC requests per node', [{ expr: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: '{{instance}}{{service_instance_id}}' }], {h:8,w:12,x:12,y:21}, 'reqps'),
+    TS(VM, 'Raw RPC requests per node', [{ expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_requests_total{${SEL}}${R}))`, legend: `{{${PROM_NODE_LABEL}}}` }], {h:8,w:12,x:12,y:21}, 'reqps'),
     TS(VM, 'Logical chain ops by method/outcome', [{ expr: `sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{${SEL}}${R}))`, legend: '{{rpc_method}} {{outcome}}' }], {h:8,w:8,x:0,y:29}, 'ops'),
     TS(VM, 'Chain RPC p95 latency by method', [{ expr: `histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~"dkg_chain_rpc_duration(_milliseconds)?_bucket", ${SEL}}${R})))`, legend: '{{rpc_method}}' }], {h:8,w:8,x:8,y:29}, 'ms'),
-    TS(VM, 'RPC endpoint failover exhaustion', [{ expr: `sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason="exhausted", ${SEL}}${R}))`, legend: '{{instance}}{{service_instance_id}}' }], {h:8,w:8,x:16,y:29}, 'ops'),
+    TS(VM, 'RPC endpoint failover exhaustion', [{ expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_failover_total{reason="exhausted", ${SEL}}${R}))`, legend: `{{${PROM_NODE_LABEL}}}` }], {h:8,w:8,x:16,y:29}, 'ops'),
     ROW('P2P / Sync', 37),
     TS(VM, 'Sync requests & responses by outcome', [
       { expr: `sum by (outcome) (rate(dkg_sync_request_total{${SEL}}${R}))`, legend: 'request: {{outcome}}' },
@@ -223,14 +241,14 @@ const ALERT_SPECS = [
     summary: 'Collector export queue at {{ $values.B }} of capacity — backpressure building, log loss imminent.' },
   { title: 'Publish failures on a node (armed — needs node metrics enabled)', signal: 'metrics',
     ds: 'vm', windowSec: 900,
-    expr: 'sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))',
+    expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))`,
     condition: { op: '>', value: 0.02 }, forDur: '5m', noData: 'OK',
-    summary: 'Node {{ $labels.instance }}{{ $labels.service_instance_id }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)' },
+    summary: `Node {{ $labels.${PROM_NODE_LABEL} }} publish failure rate {{ $values.B }}/s over 15m. (Silent until nodes export OTel metrics.)` },
   { title: 'Chain RPC failover exhausted on a node (armed — needs node metrics enabled)', signal: 'metrics',
     ds: 'vm', windowSec: 900,
-    expr: 'sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))',
+    expr: `sum by (${PROM_NODE_LABEL}) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))`,
     condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
-    summary: 'ALL configured RPC endpoints failed for node {{ $labels.instance }}{{ $labels.service_instance_id }} — chain connectivity is down for it. (The metric contract also documents reason="recovered"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)' },
+    summary: `ALL configured RPC endpoints failed for node {{ $labels.${PROM_NODE_LABEL} }} — chain connectivity is down for it. (The metric contract also documents reason="recovered"; the filter keeps recovery events from ever paging as outages. Silent until nodes export OTel metrics.)` },
   { title: 'Errored spans rate (armed — needs traces + spanmetrics enabled)', signal: 'traces',
     ds: 'vm', windowSec: 900,
     expr: 'sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))',
@@ -260,22 +278,27 @@ const specToRule = (s) => {
 };
 
 // GFM table cells: pipes must be \-escaped (the ONLY escape GFM processes
-// inside code spans in tables), and LogQL's own backticks force
-// double-backtick code-span delimiters. Escaping backslashes too would
-// CORRUPT rendering (GFM does not unescape `\\` in table cells) — but a
-// backslash in the input would then collide with the pipe escape, so reject
-// it loudly instead of producing ambiguous markdown.
-const mdCode = (t) => {
-  if (t.includes('\\')) throw new Error(`alert expr contains a backslash — not representable in a GFM table code span, extend mdCode first: ${t}`);
-  return '`` ' + t.replaceAll('|', '\\|') + ' ``';
+// Docs rendering is deliberately decoupled from query content: the summary
+// table carries only plain-text fields (no query cells, so GFM table escaping
+// can never constrain which LogQL/PromQL expressions an alert may use), and
+// each query is emitted as its own FENCED code block below the table. Fence
+// length adapts to the longest backtick run in the expression, so any valid
+// query renders verbatim.
+const fenced = (t) => {
+  const runs = t.match(/`+/g) ?? [];
+  const fence = '`'.repeat(Math.max(3, ...runs.map(r => r.length + 1)));
+  return `${fence}\n${t}\n${fence}`;
 };
-const specToMdRow = (s, i) =>
-  `| ${i + 1} | ${s.title} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | ${mdCode(s.expr)} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`;
 const rulesTableMd = [
-  '| # | Alert | Channel | Datasource | Query (range, reduced with `last`) | Fires when | for | noData |',
-  '|---|---|---|---|---|---|---|---|',
-  ...ALERT_SPECS.map(specToMdRow),
-].join('\n');
+  '| # | Alert | Channel | Datasource | Fires when | for | noData |',
+  '|---|---|---|---|---|---|---|',
+  ...ALERT_SPECS.map((s, i) =>
+    `| ${i + 1} | ${s.title} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`),
+  '',
+  '**Queries** (range queries, reduced with `last`, evaluated against the condition above):',
+  '',
+  ...ALERT_SPECS.flatMap((s, i) => [`${i + 1}. ${s.title}`, '', fenced(s.expr), '']),
+].join('\n').replace(/\n+$/, '');
 
 const alerts = {
   _readme: [
@@ -300,32 +323,56 @@ const alerts = {
   rules: ALERT_SPECS.map(specToRule),
 };
 
-// -------------------------------------------------------------------- write
-const files = [
-  ['grafana-dashboard-dkg-fleet-logs.json', fleet],
-  ['grafana-dashboard-dkg-node-logs.json', nodeLogs],
-  ['grafana-dashboard-dkg-node-metrics.json', metrics],
-  ['grafana-dashboard-dkg-node-traces.json', traces],
-  ['alert-rules.provisioning.json', alerts],
-];
-fs.mkdirSync(outDir, { recursive: true });
-for (const [file, doc] of files) {
-  fs.writeFileSync(path.join(outDir, file), JSON.stringify(doc, null, 2) + '\n');
-  console.log('wrote', path.join(outDir, file));
-}
-
-// Inject the derived rules table into example-alerts.md between markers, so
-// the doc's numeric contract can never drift from the payload.
+// -------------------------------------------------------- write / --check
+// Everything renders in memory first; --check then diffs against the files on
+// disk and exits 1 on any mismatch, so CI can prove the committed artifacts
+// were produced by this generator (no stale or hand-edited JSON can ship).
+const START = '<!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->';
+const END = '<!-- GENERATED:RULES-TABLE:END -->';
+const rendered = new Map([
+  ['grafana-dashboard-dkg-fleet-logs.json', JSON.stringify(fleet, null, 2) + '\n'],
+  ['grafana-dashboard-dkg-node-logs.json', JSON.stringify(nodeLogs, null, 2) + '\n'],
+  ['grafana-dashboard-dkg-node-metrics.json', JSON.stringify(metrics, null, 2) + '\n'],
+  ['grafana-dashboard-dkg-node-traces.json', JSON.stringify(traces, null, 2) + '\n'],
+  ['alert-rules.provisioning.json', JSON.stringify(alerts, null, 2) + '\n'],
+]);
 const mdPath = path.join(outDir, 'example-alerts.md');
-if (fs.existsSync(mdPath)) {
-  const START = '<!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->';
-  const END = '<!-- GENERATED:RULES-TABLE:END -->';
-  const md = fs.readFileSync(mdPath, 'utf8');
+const injectMd = (md) => {
   const si = md.indexOf(START), ei = md.indexOf(END);
-  if (si >= 0 && ei > si) {
-    fs.writeFileSync(mdPath, md.slice(0, si + START.length) + '\n' + rulesTableMd + '\n' + md.slice(ei));
-    console.log('updated rules table in', mdPath);
+  if (si < 0 || ei <= si) return null;
+  return md.slice(0, si + START.length) + '\n' + rulesTableMd + '\n' + md.slice(ei);
+};
+
+if (opts['--check']) {
+  const stale = [];
+  for (const [file, want] of rendered) {
+    const p = path.join(outDir, file);
+    const have = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '<missing>';
+    if (have !== want) stale.push(file);
+  }
+  if (fs.existsSync(mdPath)) {
+    const md = fs.readFileSync(mdPath, 'utf8');
+    const want = injectMd(md);
+    if (want === null) stale.push('example-alerts.md (markers missing)');
+    else if (want !== md) stale.push('example-alerts.md (generated section)');
   } else {
-    console.warn('markers not found in example-alerts.md — table not injected');
+    stale.push('example-alerts.md (missing)');
+  }
+  if (stale.length) {
+    console.error('STALE generated artifacts (regenerate with: node generate-observability.mjs):');
+    for (const f of stale) console.error('  - ' + f);
+    process.exit(1);
+  }
+  console.log('check OK: all generated artifacts match the generator output');
+} else {
+  fs.mkdirSync(outDir, { recursive: true });
+  for (const [file, content] of rendered) {
+    fs.writeFileSync(path.join(outDir, file), content);
+    console.log('wrote', path.join(outDir, file));
+  }
+  if (fs.existsSync(mdPath)) {
+    const next = injectMd(fs.readFileSync(mdPath, 'utf8'));
+    if (next === null) console.warn('markers not found in example-alerts.md — table not injected');
+    else { fs.writeFileSync(mdPath, next); console.log('updated rules table in', mdPath); }
   }
 }

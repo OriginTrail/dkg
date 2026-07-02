@@ -23,7 +23,7 @@
       "keepTime": true
     }
   ],
-  "description": "OTel metrics from dkg-node (meter @origintrail-official/dkg). Node filter uses the canonical OTLP mapping (instance = service.instance.id, used by both VictoriaMetrics native OTLP ingest and prometheusremotewrite). If the collector is configured with resource_to_telemetry_conversion instead, swap instance= for service_instance_id= in the panel queries.",
+  "description": "OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: instance (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.",
   "templating": {
     "list": [
       {
@@ -334,8 +334,8 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}}{{service_instance_id}}"
+          "expr": "sum by (instance) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}"
         }
       ]
     },
@@ -427,8 +427,8 @@
             "uid": "${vm}"
           },
           "refId": "A",
-          "expr": "sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason=\"exhausted\", instance=~\"${node:regex}\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}}{{service_instance_id}}"
+          "expr": "sum by (instance) (rate(dkg_chain_rpc_failover_total{reason=\"exhausted\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}"
         }
       ]
     },

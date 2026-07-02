@@ -41,18 +41,80 @@ range ≥ a few hours is split internally and dies with `maximum of series (500)
 reached`; range+reduce avoids that class of failure entirely.
 
 <!-- GENERATED:RULES-TABLE:START (by generate-observability.mjs — do not edit between markers) -->
-| # | Alert | Channel | Datasource | Query (range, reduced with `last`) | Fires when | for | noData |
-|---|---|---|---|---|---|---|---|
-| 1 | Node silent — seen in last 3h, quiet 15m (per node) | #node-logs | Loki | `` count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])) `` | `> 0` | 5m | OK |
-| 2 | Fleet blackout — NO node logs reaching Loki | #node-logs | Loki | `` count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))) `` | `< 1` | 5m | Alerting |
-| 3 | Error spike on a node (>10 ERROR / 10m) | #node-logs | Loki | `` sum by (service_instance_id) (count_over_time({service_name="dkg-node"} \| severity_text=`ERROR` [10m])) `` | `> 10` | 5m | OK |
-| 4 | Warn spike on a node (>150 WARN / 10m) | #node-logs | Loki | `` sum by (service_instance_id) (count_over_time({service_name="dkg-node"} \| severity_text=`WARN` [10m])) `` | `> 150` | 10m | OK |
-| 5 | RPC credit burn spike (>6000 raw RPC requests/h on a node) | #node-metrics | Loki | `` sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} \|= `rpc_usage` \| logfmt \| method != `` \| unwrap count [1h])) `` | `> 6000` | 5m | OK |
-| 6 | Log pipeline export failing (collector cannot ship to Loki) | #node-metrics | VictoriaMetrics | `` sum(rate(otelcol_exporter_send_failed_log_records[10m])) `` | `> 0` | 10m | OK |
-| 7 | Collector exporter queue near capacity (>80%) | #node-metrics | VictoriaMetrics | `` max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity) `` | `> 0.8` | 10m | OK |
-| 8 | Publish failures on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `` sum by (instance, service_instance_id) (rate(dkg_publish_total{outcome=~"failed\|error"}[15m])) `` | `> 0.02` | 5m | OK |
-| 9 | Chain RPC failover exhausted on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `` sum by (instance, service_instance_id) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m])) `` | `> 0` | 5m | OK |
-| 10 | Errored spans rate (armed — needs traces + spanmetrics enabled) | #node-traces | VictoriaMetrics | `` sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m])) `` | `> 0.05` | 5m | OK |
+| # | Alert | Channel | Datasource | Fires when | for | noData |
+|---|---|---|---|---|---|---|
+| 1 | Node silent — seen in last 3h, quiet 15m (per node) | #node-logs | Loki | `> 0` | 5m | OK |
+| 2 | Fleet blackout — NO node logs reaching Loki | #node-logs | Loki | `< 1` | 5m | Alerting |
+| 3 | Error spike on a node (>10 ERROR / 10m) | #node-logs | Loki | `> 10` | 5m | OK |
+| 4 | Warn spike on a node (>150 WARN / 10m) | #node-logs | Loki | `> 150` | 10m | OK |
+| 5 | RPC credit burn spike (>6000 raw RPC requests/h on a node) | #node-metrics | Loki | `> 6000` | 5m | OK |
+| 6 | Log pipeline export failing (collector cannot ship to Loki) | #node-metrics | VictoriaMetrics | `> 0` | 10m | OK |
+| 7 | Collector exporter queue near capacity (>80%) | #node-metrics | VictoriaMetrics | `> 0.8` | 10m | OK |
+| 8 | Publish failures on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0.02` | 5m | OK |
+| 9 | Chain RPC failover exhausted on a node (armed — needs node metrics enabled) | #node-metrics | VictoriaMetrics | `> 0` | 5m | OK |
+| 10 | Errored spans rate (armed — needs traces + spanmetrics enabled) | #node-traces | VictoriaMetrics | `> 0.05` | 5m | OK |
+
+**Queries** (range queries, reduced with `last`, evaluated against the condition above):
+
+1. Node silent — seen in last 3h, quiet 15m (per node)
+
+```
+count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))
+```
+
+2. Fleet blackout — NO node logs reaching Loki
+
+```
+count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))
+```
+
+3. Error spike on a node (>10 ERROR / 10m)
+
+```
+sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))
+```
+
+4. Warn spike on a node (>150 WARN / 10m)
+
+```
+sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))
+```
+
+5. RPC credit burn spike (>6000 raw RPC requests/h on a node)
+
+```
+sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))
+```
+
+6. Log pipeline export failing (collector cannot ship to Loki)
+
+```
+sum(rate(otelcol_exporter_send_failed_log_records[10m]))
+```
+
+7. Collector exporter queue near capacity (>80%)
+
+```
+max(otelcol_exporter_queue_size / otelcol_exporter_queue_capacity)
+```
+
+8. Publish failures on a node (armed — needs node metrics enabled)
+
+```
+sum by (instance) (rate(dkg_publish_total{outcome=~"failed|error"}[15m]))
+```
+
+9. Chain RPC failover exhausted on a node (armed — needs node metrics enabled)
+
+```
+sum by (instance) (rate(dkg_chain_rpc_failover_total{reason="exhausted"}[15m]))
+```
+
+10. Errored spans rate (armed — needs traces + spanmetrics enabled)
+
+```
+sum(rate(traces_spanmetrics_calls_total{status_code="STATUS_CODE_ERROR"}[15m]))
+```
 <!-- GENERATED:RULES-TABLE:END -->
 
 ### Design notes (the "why" behind the table)
