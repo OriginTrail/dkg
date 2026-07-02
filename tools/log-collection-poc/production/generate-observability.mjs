@@ -241,9 +241,16 @@ const specToRule = (s) => {
   };
 };
 
-// GFM table cells: pipes must be \-escaped (works inside code spans per spec),
-// and LogQL's own backticks force double-backtick code-span delimiters.
-const mdCode = (t) => '`` ' + t.replace(/\|/g, '\\|') + ' ``';
+// GFM table cells: pipes must be \-escaped (the ONLY escape GFM processes
+// inside code spans in tables), and LogQL's own backticks force
+// double-backtick code-span delimiters. Escaping backslashes too would
+// CORRUPT rendering (GFM does not unescape `\\` in table cells) — but a
+// backslash in the input would then collide with the pipe escape, so reject
+// it loudly instead of producing ambiguous markdown.
+const mdCode = (t) => {
+  if (t.includes('\\')) throw new Error(`alert expr contains a backslash — not representable in a GFM table code span, extend mdCode first: ${t}`);
+  return '`` ' + t.replaceAll('|', '\\|') + ' ``';
+};
 const specToMdRow = (s, i) =>
   `| ${i + 1} | ${s.title} | #node-${s.signal} | ${s.ds === 'loki' ? 'Loki' : 'VictoriaMetrics'} | ${mdCode(s.expr)} | \`${s.condition.op} ${s.condition.value}\` | ${s.forDur} | ${s.noData} |`;
 const rulesTableMd = [
