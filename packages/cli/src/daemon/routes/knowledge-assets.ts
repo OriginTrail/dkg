@@ -77,7 +77,7 @@ import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
 import {
   formatFinalizedPublishOptionError,
-  normalizeFinalizedPublishOptions,
+  parseHttpFinalizedPublishOptions,
   type NormalizedFinalizedPublishOptions,
 } from "../../finalized-publish-options.js";
 
@@ -517,7 +517,7 @@ function resolveFinalizedPublishOptions(
   raw: unknown,
 ): NormalizedFinalizedPublishOptions | null {
   const { res } = ctx;
-  const parsed = normalizeFinalizedPublishOptions(raw);
+  const parsed = parseHttpFinalizedPublishOptions(raw);
   if (!parsed.ok) {
     jsonResponse(res, 400, { error: formatFinalizedPublishOptionError(parsed.error) });
     return null;

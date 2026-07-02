@@ -24,7 +24,7 @@ export type FinalizedPublishOptionParseResult =
   | { ok: true; options: NormalizedFinalizedPublishOptions }
   | { ok: false; error: FinalizedPublishOptionParseError };
 
-const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
+const SDK_FINALIZED_PUBLISH_OPTION_KEYS = new Set([
   'clearAfter',
   'publishEpochs',
   'publisherNodeIdentityIdOverride',
@@ -32,51 +32,109 @@ const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
 
 const MAX_PUBLISH_EPOCHS = 0xffffffff;
 
+export function parseCliFinalizedPublishOptions(raw: {
+  publishEpochs?: unknown;
+  publisherNodeIdentityId?: unknown;
+}): FinalizedPublishOptionParseResult {
+  return parseFinalizedPublishDomainInput({
+    publishEpochs: raw.publishEpochs,
+    publishEpochsField: 'publishEpochs',
+    publisherNodeIdentityIdOverride: raw.publisherNodeIdentityId,
+    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  });
+}
+
+export function parseHttpFinalizedPublishOptions(raw: unknown): FinalizedPublishOptionParseResult {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, options: {} };
+  const source = raw as Record<string, unknown>;
+  const hasClearAfter = source.clearAfter !== undefined;
+  const hasPublishEpochs = source.publishEpochs !== undefined;
+
+  return parseFinalizedPublishDomainInput({
+    clearSharedMemoryAfter: hasClearAfter ? source.clearAfter : source.clearSharedMemoryAfter,
+    clearField: hasClearAfter ? 'clearAfter' : 'clearSharedMemoryAfter',
+    publishEpochs: source.publishEpochs ?? source.epochs,
+    publishEpochsField: hasPublishEpochs ? 'publishEpochs' : 'epochs',
+    publisherNodeIdentityIdOverride: source.publisherNodeIdentityIdOverride,
+    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  });
+}
+
 export function finalizedPublishOptionsPayload(
   options?: KnowledgeAssetFinalizedPublishOptions,
-  allowedExtraKeys: readonly string[] = [],
 ): Record<string, unknown> | undefined {
   if (!options) return undefined;
   const unsupportedKeys = Object.keys(options).filter(
-    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
+    (key) => !SDK_FINALIZED_PUBLISH_OPTION_KEYS.has(key),
   );
   if (unsupportedKeys.length > 0) {
     throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
   }
-  const normalized = normalizeFinalizedPublishOptions(options);
+  const normalized = parseSdkFinalizedPublishOptions(options);
   if (!normalized.ok) {
     throw new Error(formatFinalizedPublishOptionError(normalized.error));
   }
+  return finalizedPublishDomainPayload(normalized.options);
+}
+
+function parseSdkFinalizedPublishOptions(
+  options: KnowledgeAssetFinalizedPublishOptions,
+): FinalizedPublishOptionParseResult {
+  return parseFinalizedPublishDomainInput({
+    clearSharedMemoryAfter: options.clearAfter,
+    clearField: 'clearAfter',
+    publishEpochs: options.publishEpochs,
+    publishEpochsField: 'publishEpochs',
+    publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride,
+    publisherNodeIdentityIdOverrideField: 'publisherNodeIdentityIdOverride',
+  });
+}
+
+function finalizedPublishDomainPayload(
+  options: NormalizedFinalizedPublishOptions,
+): Record<string, unknown> | undefined {
   const payload: Record<string, unknown> = {};
-  if (normalized.options.clearSharedMemoryAfter !== undefined) {
-    payload.clearSharedMemoryAfter = normalized.options.clearSharedMemoryAfter;
+  if (options.clearSharedMemoryAfter !== undefined) {
+    payload.clearSharedMemoryAfter = options.clearSharedMemoryAfter;
   }
-  if (normalized.options.publishEpochs !== undefined) {
-    payload.publishEpochs = normalized.options.publishEpochs;
+  if (options.publishEpochs !== undefined) {
+    payload.publishEpochs = options.publishEpochs;
   }
-  if (normalized.options.publisherNodeIdentityIdOverride !== undefined) {
-    payload.publisherNodeIdentityIdOverride = normalized.options.publisherNodeIdentityIdOverride.toString();
+  if (options.publisherNodeIdentityIdOverride !== undefined) {
+    payload.publisherNodeIdentityIdOverride = options.publisherNodeIdentityIdOverride.toString();
   }
   return Object.keys(payload).length > 0 ? payload : undefined;
 }
 
-export function normalizeFinalizedPublishOptions(raw: unknown): FinalizedPublishOptionParseResult {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ok: true, options: {} };
-  const source = raw as Record<string, unknown>;
-  const { clearAfter, clearSharedMemoryAfter, publisherNodeIdentityIdOverride } = source;
-  const rawPublishEpochs = source.publishEpochs ?? source.epochs;
-  const publishEpochsField = source.publishEpochs !== undefined ? 'publishEpochs' : 'epochs';
+function parseFinalizedPublishDomainInput(input: {
+  clearSharedMemoryAfter?: unknown;
+  clearField?: string;
+  publishEpochs?: unknown;
+  publishEpochsField?: string;
+  publisherNodeIdentityIdOverride?: unknown;
+  publisherNodeIdentityIdOverrideField?: string;
+}): FinalizedPublishOptionParseResult {
+  const {
+    clearSharedMemoryAfter,
+    publisherNodeIdentityIdOverride,
+    publisherNodeIdentityIdOverrideField = 'publisherNodeIdentityIdOverride',
+  } = input;
+  const clearField = input.clearField ?? 'clearSharedMemoryAfter';
+  const publishEpochsField = input.publishEpochsField ?? 'publishEpochs';
 
   let resolvedPublisherIdentityOverride: bigint | undefined;
   if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-    const parsed = parsePublishUint72IdentityId(publisherNodeIdentityIdOverride, 'publisherNodeIdentityIdOverride');
+    const parsed = parsePublishUint72IdentityId(
+      publisherNodeIdentityIdOverride,
+      publisherNodeIdentityIdOverrideField,
+    );
     if (!parsed.ok) return parsed;
     resolvedPublisherIdentityOverride = parsed.value;
   }
 
   let resolvedPublishEpochs: number | undefined;
-  if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
-    const v = publishIntegerString(rawPublishEpochs, publishEpochsField, true);
+  if (input.publishEpochs !== undefined && input.publishEpochs !== null) {
+    const v = publishIntegerString(input.publishEpochs, publishEpochsField, true);
     if (!v.ok) return v;
     const n = Number(v.value);
     if (!Number.isSafeInteger(n)) {
@@ -88,18 +146,14 @@ export function normalizeFinalizedPublishOptions(raw: unknown): FinalizedPublish
     resolvedPublishEpochs = n;
   }
 
-  if (clearAfter !== undefined && typeof clearAfter !== 'boolean') {
-    return { ok: false, error: { kind: 'boolean', field: 'clearAfter' } };
-  }
   if (clearSharedMemoryAfter !== undefined && typeof clearSharedMemoryAfter !== 'boolean') {
-    return { ok: false, error: { kind: 'boolean', field: 'clearSharedMemoryAfter' } };
+    return { ok: false, error: { kind: 'boolean', field: clearField } };
   }
 
-  const clearValue = clearAfter !== undefined ? clearAfter : clearSharedMemoryAfter;
   return {
     ok: true,
     options: {
-      ...(clearValue !== undefined ? { clearSharedMemoryAfter: clearValue } : {}),
+      ...(clearSharedMemoryAfter !== undefined ? { clearSharedMemoryAfter } : {}),
       ...(resolvedPublishEpochs !== undefined ? { publishEpochs: resolvedPublishEpochs } : {}),
       ...(resolvedPublisherIdentityOverride !== undefined
         ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }

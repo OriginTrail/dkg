@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import {
   formatFinalizedPublishOptionError,
   type KnowledgeAssetFinalizedPublishOptions,
-  normalizeFinalizedPublishOptions,
+  parseCliFinalizedPublishOptions,
 } from '../finalized-publish-options.js';
 import type { ActionOpts } from '../cli-helpers.js';
 
@@ -13,9 +13,9 @@ export function addFinalizedPublishOptions(command: Command): Command {
 }
 
 export function parseFinalizedPublishOptions(opts: ActionOpts): KnowledgeAssetFinalizedPublishOptions {
-  const parsed = normalizeFinalizedPublishOptions({
+  const parsed = parseCliFinalizedPublishOptions({
     publishEpochs: opts.publishEpochs,
-    publisherNodeIdentityIdOverride: opts.publisherNodeIdentityId,
+    publisherNodeIdentityId: opts.publisherNodeIdentityId,
   });
   if (!parsed.ok) {
     throw new Error(formatFinalizedPublishOptionError(parsed.error, {

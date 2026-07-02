@@ -664,10 +664,11 @@ export class ApiClient {
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishResponse> {
-    const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -677,10 +678,11 @@ export class ApiClient {
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
   ): Promise<KnowledgeAssetPublishAsyncResponse> {
-    const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
       contextGraphId,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
