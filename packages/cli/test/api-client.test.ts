@@ -619,6 +619,31 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(sent.quads).toHaveLength(1);
   });
 
+  it('createAssertion delegates to the canonical KA create serializer', async () => {
+    const calls = track({ assertionUri: 'did:dkg:context-graph:cg/assertion/legacy' });
+    await client.createAssertion('cg', 'legacy', {
+      subGraphName: 'notes',
+      quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
+      finalize: true,
+      alsoShareSwm: true,
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 2,
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
+    const sent = JSON.parse(calls[0].opts.body as string);
+    expect(sent).toMatchObject({
+      contextGraphId: 'cg',
+      name: 'legacy',
+      subGraphName: 'notes',
+      finalize: true,
+      alsoShareSwm: true,
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 2,
+    });
+    expect(sent.quads).toHaveLength(1);
+    expect(sent.alsoPublishVm).toBeUndefined();
+  });
+
   it('createKnowledgeAsset normalizes finalized publish and author seal options', async () => {
     const calls = track({ name: 'f', status: 'vm-confirmed' });
     const preSignedAuthorAttestation = {

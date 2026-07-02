@@ -744,23 +744,24 @@ export class ApiClient {
     promotedCount?: number;
     shareOperationId?: string;
   }> {
-    return this.post('/api/knowledge-assets', {
+    return this.createKnowledgeAsset(
       contextGraphId,
       name,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.quads ? { quads: options.quads } : {}),
-      ...(options?.finalize !== undefined ? { finalize: options.finalize } : {}),
-      ...(options?.alsoShareSwm !== undefined ? { alsoShareSwm: options.alsoShareSwm } : {}),
-      ...(options?.authorAgentAddress
-        ? { authorAgentAddress: options.authorAgentAddress }
-        : {}),
-      ...(options?.preSignedAuthorAttestation
-        ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
-        : {}),
-      ...(options?.schemeVersion !== undefined
-        ? { schemeVersion: options.schemeVersion }
-        : {}),
-    });
+      options,
+    ) as Promise<{
+      assertionUri: string;
+      written?: number;
+      seal?: {
+        merkleRoot: string;
+        authorAddress: string;
+        schemeVersion: number;
+        chainId: string;
+        kav10Address: string;
+        eip712Digest: string;
+      };
+      promotedCount?: number;
+      shareOperationId?: string;
+    }>;
   }
 
   /**

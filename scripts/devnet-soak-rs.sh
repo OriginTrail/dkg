@@ -364,21 +364,21 @@ const path = require("path");
 snapshot_stake_state "$STAKE_BEFORE"
 log "Stake snapshot BEFORE soak written to $STAKE_BEFORE"
 
-# --- 3. Negative scenario A: publish to unregistered CG --------------------
+# --- 3. Negative scenario A: create/share to unregistered CG ---------------
 
-log "Negative scenario A: publish to unregistered CG (expect HTTP 4xx)"
+log "Negative scenario A: create/share to unregistered CG (expect HTTP 4xx)"
 NEG_TMP=$(mktemp -d -t soak-neg)
 trap 'rm -rf "$NEG_TMP"' RETURN
 echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" <did:dkg:context-graph:does-not-exist-'"$ROUND"'> .' > "$NEG_TMP/neg.nq"
 NEG_RC=0
 DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" ka create "soak-neg-${ROUND}" --context-graph-id "does-not-exist-$ROUND" --input-file "$NEG_TMP/neg.nq" --share \
-  > "$OUT_DIR/neg-publish-bogus-cg.log" 2>&1 || NEG_RC=$?
+  > "$OUT_DIR/neg-create-share-bogus-cg.log" 2>&1 || NEG_RC=$?
 if [ "$NEG_RC" -eq 0 ]; then
-  log "  WARNING: publish to unregistered CG SUCCEEDED — that should have failed"
-  echo '{"scenario":"publish_unregistered_cg","result":"unexpected_success"}' >> "$OUT_DIR/negative-results.jsonl"
+  log "  WARNING: create/share to unregistered CG SUCCEEDED - that should have failed"
+  echo '{"scenario":"create_share_unregistered_cg","result":"unexpected_success"}' >> "$OUT_DIR/negative-results.jsonl"
 else
-  log "  OK: publish to unregistered CG correctly failed (rc=$NEG_RC)"
-  echo "{\"scenario\":\"publish_unregistered_cg\",\"result\":\"correctly_rejected\",\"rc\":$NEG_RC}" >> "$OUT_DIR/negative-results.jsonl"
+  log "  OK: create/share to unregistered CG correctly failed (rc=$NEG_RC)"
+  echo "{\"scenario\":\"create_share_unregistered_cg\",\"result\":\"correctly_rejected\",\"rc\":$NEG_RC}" >> "$OUT_DIR/negative-results.jsonl"
 fi
 
 # --- 4. Background publisher loop (positive workload) ----------------------
@@ -883,13 +883,13 @@ if (sortedByStake.length >= 2) {
   }
 }
 
-// 7. Negative scenario A: publish to unregistered CG was rejected
+// 7. Negative scenario A: create/share to unregistered CG was rejected
 const negResults = readLines(out.OUT_DIR + "/negative-results.jsonl").map(jsonOrNull).filter(Boolean);
-const negA = negResults.find(r => r.scenario === "publish_unregistered_cg");
+const negA = negResults.find(r => r.scenario === "create_share_unregistered_cg");
 if (negA && negA.result === "correctly_rejected") {
-  ok.push("NEG-A publish to unregistered CG correctly rejected (rc=" + negA.rc + ")");
+  ok.push("NEG-A create/share to unregistered CG correctly rejected (rc=" + negA.rc + ")");
 } else if (negA) {
-  fail.push("NEG-A publish to unregistered CG: " + JSON.stringify(negA));
+  fail.push("NEG-A create/share to unregistered CG: " + JSON.stringify(negA));
 } else {
   warn.push("NEG-A no record of unregistered-CG negative scenario");
 }
