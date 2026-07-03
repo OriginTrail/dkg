@@ -30,7 +30,8 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
+import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -123,6 +124,8 @@ publisherWalletCmd
       console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
       console.log(`  Wallets: ${result.wallets.length}`);
       console.log(`  Address: ${result.wallets[result.wallets.length - 1]?.address}`);
+      console.log('  Funding: add native gas for transactions; register as a PCA agent or fund TRAC for direct spend.');
+      console.log('  Identity: optional; attach a node identity only when publisher-node attribution is desired.');
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -204,21 +207,18 @@ publisherCmd
     }
   });
 
-publisherCmd
+addFinalizedPublishOptions(publisherCmd
   .command('publish-async <context-graph> <name>')
   .description('Enqueue a named knowledge asset VM publish job')
-  .option('--sub-graph <name>', 'Target sub-graph within the context graph')
-  .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
+  .option('--sub-graph <name>', 'Target sub-graph within the context graph'))
   .action(async (contextGraph: string, name: string, opts: ActionOpts) => {
     try {
-      const publishEpochs = opts.publishEpochs !== undefined
-        ? parsePositiveIntegerOption(String(opts.publishEpochs), '--publish-epochs')
-        : undefined;
+      const publishOptions = parseFinalizedPublishOptions(opts);
 
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetPublishAsync(contextGraph, name, {
         ...(opts.subGraph ? { subGraphName: String(opts.subGraph) } : {}),
-        ...(publishEpochs !== undefined ? { publishEpochs } : {}),
+        ...publishOptions,
       });
 
       console.log('Knowledge asset publish job accepted:');

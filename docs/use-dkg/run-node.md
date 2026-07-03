@@ -54,6 +54,8 @@ Before registration, fund the Core wallets for the selected network:
 | Other operational wallets | Native gas token for node operations and publishing |
 | Admin wallet | Native gas token for key-management transactions, including registering additional operational wallets |
 
+Async publisher wallets are separate transaction signers stored in `publisher-wallets.json`. They need native gas plus PCA registration or TRAC for direct spend, but they do not need to be operational wallets unless you want them to carry a node identity for publisher-node attribution. See [Async Publisher Wallets](async-publisher-wallets.md).
+
 On `testnet`, setup attempts to fund these generated wallets automatically when the faucet is reachable. On `mainnet-gnosis` and `mainnet-base`, fund them yourself. Use:
 
 ```bash

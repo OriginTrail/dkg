@@ -33,7 +33,8 @@ dkg okf export my-graph ./out
 
 Import defaults to **Working Memory** and never publishes to Verifiable Memory.
 `--share` advances to **Shared Working Memory**. On-chain VM promotion (real
-TRAC) is a separate, explicitly-gated operator step — see `DEMO.md`.
+TRAC) is a separate, explicitly-gated operator step with `dkg ka publish` or
+`dkg ka publish-async`.
 `--private` creates or uses an invite-only Context Graph and keeps the same
 per-concept Knowledge Asset lifecycle, sharing each concept asset to SWM without
 VM promotion.
@@ -51,9 +52,7 @@ console.log(quadsToNQuads(result.quads)); // canonical, byte-stable N-Quads
 ## Docs
 
 - **`CONTEXT.md`** — Language / Relationships / Flagged ambiguities.
-- **`docs/adr/0005-okf-rdf-mapping.md`** — the locked OKF→RDF mapping and the
-  reuse-vs-fork decision.
-- **`docs/integrations/okf.md`** — the full-lifecycle article.
+- **`../../docs/use-dkg/okf.md`** — CLI import/export/verify lifecycle guide.
 - **`DEMO.md`** — the live mainnet runbook (WM → SWM → join invitation → Hermes
   agent → rendered graph; VM promotion held as a deferred capstone).
 

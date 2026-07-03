@@ -146,28 +146,28 @@ build_quads() {
   local quads="["
 
   # Type triple
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${RDF_NS}type>\",\"object\":\"<${DEVGRAPH_NS}Session>\",\"graph\":\"<${GRAPH_URI}>\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${RDF_NS}type\",\"object\":\"${DEVGRAPH_NS}Session\",\"graph\":\"${GRAPH_URI}\"},"
 
   # Properties
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}agent>\",\"object\":\"\\\"claude-code\\\"\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}inputTokens>\",\"object\":\"\\\"${INPUT_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}outputTokens>\",\"object\":\"\\\"${OUTPUT_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}cacheTokens>\",\"object\":\"\\\"${CACHE_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}estimatedCost>\",\"object\":\"\\\"\$${COST}\\\"\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}startedAt>\",\"object\":\"\\\"${START_TIME}\\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}endedAt>\",\"object\":\"\\\"${END_TIME}\\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>\",\"graph\":\"<${GRAPH_URI}>\"},"
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}filesModified>\",\"object\":\"\\\"${FILE_COUNT}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"<${GRAPH_URI}>\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}agent\",\"object\":\"\\\"claude-code\\\"\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}inputTokens\",\"object\":\"\\\"${INPUT_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}outputTokens\",\"object\":\"\\\"${OUTPUT_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}cacheTokens\",\"object\":\"\\\"${CACHE_TOKENS}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}estimatedCost\",\"object\":\"\\\"\$${COST}\\\"\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}startedAt\",\"object\":\"\\\"${START_TIME}\\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}endedAt\",\"object\":\"\\\"${END_TIME}\\\"^^<http://www.w3.org/2001/XMLSchema#dateTime>\",\"graph\":\"${GRAPH_URI}\"},"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}filesModified\",\"object\":\"\\\"${FILE_COUNT}\\\"^^<http://www.w3.org/2001/XMLSchema#integer>\",\"graph\":\"${GRAPH_URI}\"},"
 
   # Escape summary for JSON
   local escaped_summary
   escaped_summary=$(echo "$SESSION_SUMMARY" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g')
-  quads+="{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}summary>\",\"object\":\"\\\"${escaped_summary}\\\"\",\"graph\":\"<${GRAPH_URI}>\"}"
+  quads+="{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}summary\",\"object\":\"\\\"${escaped_summary}\\\"\",\"graph\":\"${GRAPH_URI}\"}"
 
   # Modified file links
   if [[ -n "$MODIFIED_FILES" ]]; then
     while IFS= read -r f; do
       [[ -z "$f" ]] && continue
-      quads+=",{\"subject\":\"<${SESSION_URI}>\",\"predicate\":\"<${DEVGRAPH_NS}modifiedFile>\",\"object\":\"<file:${f}>\",\"graph\":\"<${GRAPH_URI}>\"}"
+      quads+=",{\"subject\":\"${SESSION_URI}\",\"predicate\":\"${DEVGRAPH_NS}modifiedFile\",\"object\":\"file:${f}\",\"graph\":\"${GRAPH_URI}\"}"
     done <<< "$MODIFIED_FILES"
   fi
 
@@ -185,12 +185,13 @@ echo "   Time:   ${DURATION_SECS}s"
 # Publish to DKG (best effort — don't fail the script if daemon is down)
 if command -v dkg &>/dev/null; then
   QUADS=$(build_quads)
+  KA_NAME=$(echo "claude-session-${START_TIME}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]/-/g')
   echo ""
   echo "📤 Publishing to DKG context graph '${CONTEXT_GRAPH_ID}'..."
 
   # Use the DKG CLI's API to publish
   set +e
-  RESULT=$(dkg publish "$CONTEXT_GRAPH_ID" --triples "$QUADS" 2>&1)
+  RESULT=$(dkg ka create "$KA_NAME" --context-graph-id "$CONTEXT_GRAPH_ID" --triples "$QUADS" --share 2>&1)
   PUBLISH_EXIT=$?
   set -e
 

@@ -54,6 +54,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphMetaUri,
   assertionLifecycleUri,
+  assertionScopedGraphUri,
   TrustLevel,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine, resolveViewGraphs } from '../src/dkg-query-engine.js';
@@ -750,6 +751,33 @@ describe('[Q-3] resolveViewGraphs + DKGQueryEngine route working-memory', () => 
       { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT, assertionName: name },
     );
     expect(result.bindings.map((b) => b['name'])).toEqual(['"NumberedValue"']);
+  });
+
+  it('by-name WM read includes scoped child graphs without leaking sibling assertions', async () => {
+    const store = new OxigraphStore();
+    const engine = new DKGQueryEngine(store);
+    const name = 'named-draft';
+    const kaNumber = 11n;
+    const perKaGraph = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, AGENT, kaNumber);
+    const namedGraph = assertionScopedGraphUri(perKaGraph, 'urn:test:graph:named-draft');
+    const siblingGraph = contextGraphLayerUri(CG, MemoryLayer.WorkingMemory, AGENT, 12n);
+    const siblingNamedGraph = assertionScopedGraphUri(siblingGraph, 'urn:test:graph:named-draft');
+    const urn = assertionLifecycleUri(CG, AGENT, name);
+    const metaGraph = contextGraphMetaUri(CG);
+
+    await store.insert([
+      quad('urn:named:default', 'http://schema.org/name', '"DefaultDraft"', perKaGraph),
+      quad('urn:named:child', 'http://schema.org/name', '"NamedDraft"', namedGraph),
+      quad('urn:named:sibling', 'http://schema.org/name', '"SiblingDraft"', siblingNamedGraph),
+      quad(urn, 'http://dkg.io/ontology/kaId', '"11"^^<http://www.w3.org/2001/XMLSchema#integer>', metaGraph),
+    ]);
+
+    const result = await engine.query(
+      'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
+      { contextGraphId: CG, view: 'working-memory', agentAddress: AGENT, assertionName: name },
+    );
+
+    expect(result.bindings.map((b) => b['name']).sort()).toEqual(['"DefaultDraft"', '"NamedDraft"']);
   });
 });
 
