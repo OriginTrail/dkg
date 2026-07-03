@@ -147,6 +147,8 @@ export interface NetworkConfig {
     type: 'evm';
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Public RPC URLs safe to expose to browser wallets for wallet_addEthereumChain. */
+    walletRpcUrls?: string[];
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
@@ -230,6 +232,8 @@ export interface ChainConfig {
   rpcUrl: string;
   /** Ordered JSON-RPC backup endpoints. `rpcUrl` remains the primary endpoint. */
   rpcUrls?: string[];
+  /** Public RPC URLs safe to expose to browser wallets for wallet_addEthereumChain. */
+  walletRpcUrls?: string[];
   /** Hub contract address */
   hubAddress: string;
   /** Optional token contract address override. When omitted, resolve from Hub.Token. */
@@ -1207,15 +1211,15 @@ export function resolveChainConfig(
   // backups stay valid failover and must NOT be dropped. A non-loopback private
   // primary on the SAME chain still inherits the public backups; explicit
   // operator `rpcUrls` always win.
-  const operatorPinnedDifferentChain =
-    cfg?.rpcUrls === undefined &&
+  const operatorPinnedOffOverlayPrimary =
     typeof cfg?.rpcUrl === 'string' &&
     (
       isLoopbackRpcUrl(cfg.rpcUrl) ||
       (cfg?.chainId !== undefined && net?.chainId !== undefined && cfg.chainId !== net.chainId)
     );
+  const suppressInheritedBackups = cfg?.rpcUrls === undefined && operatorPinnedOffOverlayPrimary;
   const backupRpcUrls =
-    cfg?.rpcUrls ?? (operatorPinnedDifferentChain ? [] : net?.rpcUrls) ?? [];
+    cfg?.rpcUrls ?? (suppressInheritedBackups ? [] : net?.rpcUrls) ?? [];
   const orderedRpcUrls: string[] = [];
   for (const candidate of [primaryRpcUrl, ...backupRpcUrls]) {
     if (typeof candidate !== 'string') continue;
@@ -1226,6 +1230,15 @@ export function resolveChainConfig(
   if (orderedRpcUrls[0] !== undefined) merged.rpcUrl = orderedRpcUrls[0];
   if (orderedRpcUrls.length > 1 || cfg?.rpcUrls !== undefined || net?.rpcUrls !== undefined) {
     merged.rpcUrls = orderedRpcUrls.slice(1);
+  }
+  const walletRpcUrls = cfg?.walletRpcUrls ?? (operatorPinnedOffOverlayPrimary ? undefined : net?.walletRpcUrls);
+  if (walletRpcUrls !== undefined) {
+    merged.walletRpcUrls = Array.from(new Set(
+      walletRpcUrls
+        .filter((candidate): candidate is string => typeof candidate === 'string')
+        .map((candidate) => candidate.trim())
+        .filter(Boolean),
+    ));
   }
   const hubAddress = cfg?.hubAddress ?? net?.hubAddress;
   if (hubAddress !== undefined) merged.hubAddress = hubAddress;

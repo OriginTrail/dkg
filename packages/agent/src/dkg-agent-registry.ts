@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1473,6 +1473,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return typeof this.chain.getPublishingConvictionAccountInfo === 'function';
   }
 
+  /** True when the adapter can serve the daemon's PCA browser-read RPC bridge. */
+  get supportsPublishingConvictionRpc(): boolean {
+    return typeof this.chain.requestPublishingConvictionRpc === 'function';
+  }
+
   // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
   // funds via the publishing factor) is REQUIRED — no silent `0n` default. A
   // PCA created with node 0 seeds no allocation to anyone, and the SDK exposes
@@ -1513,9 +1518,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async getPublishingConvictionAccountInfo(this: DKGAgent,
     accountId: bigint,
+    opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     if (typeof this.chain.getPublishingConvictionAccountInfo !== 'function') return null;
-    return this.chain.getPublishingConvictionAccountInfo(accountId);
+    return this.chain.getPublishingConvictionAccountInfo(accountId, opts);
   }
 
   /** OT-RFC-51 designated primary node for a PCA; `null` = no chain surface, `0n` = unset. */
@@ -1567,6 +1573,67 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async removeOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
     if (typeof this.chain.removeOperationalWallet !== 'function') return null;
     return this.chain.removeOperationalWallet(address, options);
+  }
+
+  /** Enumerate registered publishing agents (operational wallets) for a PCA.
+   *  `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async getPublishingConvictionAgents(this: DKGAgent,
+    accountId: bigint,
+  ): Promise<string[] | null> {
+    if (typeof this.chain.getPublishingConvictionAgents !== 'function') return null;
+    return this.chain.getPublishingConvictionAgents(accountId);
+  }
+
+  /** Reverse-resolve which PCA a wallet is a registered publishing agent of,
+   *  via the on-chain `agentToAccountId` map. `0n` = not registered on any
+   *  account; `null` = adapter lacks the surface (daemon maps null → 503).
+   *  Chain-scoped DISCOVERY (may surface an account the node does not track);
+   *  callers route the id through coverage classification, never treating
+   *  "registered" as "covered". */
+  async getConvictionAgentAccountId(
+    this: DKGAgent,
+    agent: string,
+    opts?: { strict?: boolean },
+  ): Promise<bigint | null> {
+    if (typeof this.chain.getConvictionAgentAccountId !== 'function') return null;
+    return this.chain.getConvictionAgentAccountId(agent, opts);
+  }
+
+  /** GAP-1 — enumerate every PCA the given wallets relate to (owned + agent-on).
+   *  `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async listPublishingConvictionAccountsForWallets(
+    this: DKGAgent,
+    wallets: string[],
+  ): Promise<PcaAccountRelation[] | null> {
+    if (typeof this.chain.listPublishingConvictionAccountsForWallets !== 'function') return null;
+    return this.chain.listPublishingConvictionAccountsForWallets(wallets);
+  }
+
+  /** B-staked-nodes — the sharding table of designatable PCA primary nodes.
+   *  `opts.fresh` bypasses the adapter's TTL cache. `null` when the adapter
+   *  lacks the surface (daemon maps null → 503). */
+  async listDesignatableNodes(this: DKGAgent, opts?: { fresh?: boolean }): Promise<ShardingTableNode[] | null> {
+    if (typeof this.chain.listDesignatableNodes !== 'function') return null;
+    return this.chain.listDesignatableNodes(opts);
+  }
+
+  /** Browser-bootstrap contract addresses + chain params for the HW signing
+   *  layer (sub-PR #2). `null` when the adapter lacks the surface (daemon → 503). */
+  async getPublishingConvictionContracts(this: DKGAgent): Promise<PcaContracts | null> {
+    if (typeof this.chain.getPublishingConvictionContracts !== 'function') return null;
+    return this.chain.getPublishingConvictionContracts();
+  }
+
+  /** Daemon-internal JSON-RPC read bridge for PCA browser reads. The daemon
+   *  route owns the method allowlist and response shaping; the adapter owns the
+   *  provider/failover execution. */
+  async requestPublishingConvictionRpc(
+    this: DKGAgent,
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (typeof this.chain.requestPublishingConvictionRpc !== 'function') throw new PcaUnavailableError();
+    return this.chain.requestPublishingConvictionRpc(method, params);
   }
 
   // ---------------------------------------------------------------------------

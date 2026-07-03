@@ -186,6 +186,7 @@ describe('loadNetworkConfig', () => {
         rpcUrl: 'https://mainnet.base.org',
         // Default multi-RPC backups shipped with the overlay (failover engine).
         rpcUrls: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'],
+        walletRpcUrls: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.drpc.org'],
         hubAddress: '0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13',
         // Relays populated + pre-deployment gate lifted (#1292).
         pending: false,
@@ -200,6 +201,7 @@ describe('loadNetworkConfig', () => {
         rpcUrl: 'https://rpc.gnosischain.com',
         // Default multi-RPC backups shipped with the overlay (failover engine).
         rpcUrls: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'],
+        walletRpcUrls: ['https://rpc.gnosischain.com', 'https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'],
         hubAddress: '0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f',
         // Relays populated + pre-deployment gate lifted (#1292).
         pending: false,
@@ -242,6 +244,7 @@ describe('loadNetworkConfig', () => {
         chainId: expected.chainId,
         rpcUrl: expected.rpcUrl,
         ...(expected.rpcUrls ? { rpcUrls: expected.rpcUrls } : {}),
+        ...(expected.walletRpcUrls ? { walletRpcUrls: expected.walletRpcUrls } : {}),
         hubAddress: expected.hubAddress,
       });
       // Non-relay prep fields are identical across all mainnets regardless of
@@ -648,7 +651,33 @@ describe('resolveChainConfig (field-level merge)', () => {
       // inherited so the adapter builds a multi-RPC FallbackProvider.
       expect(merged?.rpcUrl).toBe(primary);
       expect(merged?.rpcUrls).toEqual(backups);
+      expect(merged?.walletRpcUrls).toEqual([primary, ...backups]);
     }
+  });
+
+  it('keeps wallet-public RPCs separate from operator private RPC overrides', () => {
+    const merged = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'https://private-rpc.example/v2/SECRETKEY',
+          rpcUrls: ['https://private-backup.example/v2/SECRETKEY'],
+        },
+      },
+      {
+        chain: {
+          ...fullNetworkChain,
+          walletRpcUrls: [
+            ' https://wallet-public.example/rpc ',
+            'https://wallet-public.example/rpc',
+          ],
+        },
+      },
+    );
+
+    expect(merged?.rpcUrl).toBe('https://private-rpc.example/v2/SECRETKEY');
+    expect(merged?.rpcUrls).toEqual(['https://private-backup.example/v2/SECRETKEY']);
+    expect(merged?.walletRpcUrls).toEqual(['https://wallet-public.example/rpc']);
+    expect(JSON.stringify(merged?.walletRpcUrls)).not.toContain('SECRETKEY');
   });
 
   it('a single-RPC overlay (pre-deployment neuroweb) still resolves with NO rpcUrls (back-compat)', async () => {
@@ -703,6 +732,68 @@ describe('resolveChainConfig (field-level merge)', () => {
       expect(merged?.rpcUrl).toBe(localUrl);
       expect(merged?.rpcUrls ?? []).toEqual([]);
     }
+  });
+
+  it('does NOT inherit wallet-public RPCs behind a LOCAL or different-chain primary', () => {
+    const networkWithWalletRpcs = {
+      chain: {
+        ...fullNetworkChain,
+        walletRpcUrls: ['https://wallet-public.example/rpc'],
+      },
+    };
+
+    const local = resolveChainConfig(
+      { chain: { rpcUrl: 'http://127.0.0.1:8545' } },
+      networkWithWalletRpcs,
+    );
+    expect(local?.rpcUrl).toBe('http://127.0.0.1:8545');
+    expect(local?.rpcUrls ?? []).toEqual([]);
+    expect(local?.walletRpcUrls).toBeUndefined();
+
+    const differentChain = resolveChainConfig(
+      { chain: { rpcUrl: 'http://hardhat:8545', chainId: 'evm:31337' } },
+      networkWithWalletRpcs,
+    );
+    expect(differentChain?.rpcUrl).toBe('http://hardhat:8545');
+    expect(differentChain?.rpcUrls ?? []).toEqual([]);
+    expect(differentChain?.walletRpcUrls).toBeUndefined();
+
+    const localWithExplicitBackups = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://127.0.0.1:8545',
+          rpcUrls: ['http://127.0.0.1:8546'],
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(localWithExplicitBackups?.rpcUrls).toEqual(['http://127.0.0.1:8546']);
+    expect(localWithExplicitBackups?.walletRpcUrls).toBeUndefined();
+
+    const differentChainWithExplicitBackups = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://hardhat:8545',
+          rpcUrls: ['http://hardhat:8546'],
+          chainId: 'evm:31337',
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(differentChainWithExplicitBackups?.rpcUrls).toEqual(['http://hardhat:8546']);
+    expect(differentChainWithExplicitBackups?.walletRpcUrls).toBeUndefined();
+
+    const explicit = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://hardhat:8545',
+          chainId: 'evm:31337',
+          walletRpcUrls: [' http://wallet-rpc.local:8545 '],
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(explicit?.walletRpcUrls).toEqual(['http://wallet-rpc.local:8545']);
   });
 
   it('an explicit operator rpcUrls still wins even with a loopback primary', () => {

@@ -31,6 +31,7 @@ import {
   rejectJoinRequest,
   type NotifWire,
   type NotificationsFeedResponse,
+  type ConvictionCostCovered,
 } from '../api.js';
 // The scoped feed goes through the api-wrapper so the pane also resolves in
 // mock mode (withFallback). approve/reject/markRead are called directly on the
@@ -100,6 +101,19 @@ export type ActivityItem =
       id: number;
       cgId: string;
       contextGraphName?: string;
+      ts: number;
+      read: boolean;
+    }
+  | {
+      // B8 (P2) — a CONFIRMED on-chain CostCovered draw on one of this node's
+      // publishing wallets. Informational; `covered` carries the event so the row
+      // derives the discount + saved amount (reusing convictionDiscountBps).
+      kind: 'pca_cost_covered';
+      id: number | string;
+      cgId?: string;
+      contextGraphName?: string;
+      covered: ConvictionCostCovered;
+      publisherAddress: string;
       ts: number;
       read: boolean;
     };
@@ -186,6 +200,19 @@ export function mapActivity(rows: NotifWire[]): ActivityItem[] {
         id: n.id as number,
         cgId: n.contextGraphId,
         contextGraphName: n.meta.contextGraphName,
+        ts: n.ts,
+        read: n.read === 1,
+      });
+    } else if (n.type === 'pca_cost_covered') {
+      // B8 (P2) — confirmed discount draw. `covered` = the CostCovered event (meta
+      // is a ConvictionCostCovered superset); the row derives the discount/saved.
+      out.push({
+        kind: 'pca_cost_covered',
+        id: n.id,
+        cgId: n.contextGraphId,
+        contextGraphName: n.meta.contextGraphName,
+        covered: n.meta,
+        publisherAddress: n.meta.publisherAddress,
         ts: n.ts,
         read: n.read === 1,
       });

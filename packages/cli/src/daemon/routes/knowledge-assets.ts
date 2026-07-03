@@ -49,7 +49,7 @@ import {
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
-import { recordAssertionActivity } from "../activity-notification.js";
+import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
   handleKaImportArtifactResolve,
   handleKaImportArtifactRead,
@@ -122,6 +122,27 @@ function recordActivityAndNotify(
     /* activity/notification is advisory — never block the lifecycle op */
   }
 }
+function recordPcaDiscount(ctx: RequestContext, contextGraphId: string, onChain: any): void {
+  const cc = onChain?.convictionCostCovered;
+  const publisher = onChain?.publisherAddress;
+  if (!cc || !publisher) return;
+  try {
+    recordConvictionCostCovered(ctx.dashDb, {
+      contextGraphId,
+      publisherAddress: publisher,
+      accountId: cc.accountId,
+      epoch: cc.epoch,
+      baseCost: cc.baseCost,
+      discountedCost: cc.discountedCost,
+      drawnFromEpoch: cc.drawnFromEpoch,
+      drawnFromTopUp: cc.drawnFromTopUp,
+    });
+    ctx.emitNotification?.({ contextGraphId, type: "pca_cost_covered" });
+  } catch {
+    /* confirmed-discount notification is advisory */
+  }
+}
+
 const FINALIZE_ONLY_CREATE_FIELDS = [
   "authorAgentAddress",
   "preSignedAuthorAttestation",
@@ -900,6 +921,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
           result.txHash = pub?.onChainResult?.txHash;
+          if (pub?.onChainResult?.convictionCostCovered) {
+            result.convictionCostCovered = pub.onChainResult.convictionCostCovered;
+          }
           // PR #972: only a fully-confirmed publish is "vm-confirmed"; a partial
           // (207) or non-confirmed (502) outcome is flagged as a tail error so
           // the atomic response is a 207 rather than a misleading success.
@@ -910,6 +934,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             result.status = httpStatus === 207 ? "vm-partial" : "vm-failed";
             errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(reason ?? "VM publish did not confirm") });
           }
+          recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1414,6 +1439,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           // Activity attributed to the SEAL author (PR #971), not the requester.
           recordActivityAndNotify(ctx, { contextGraphId, kind: "published", actorAgentAddress: pub?.seal?.authorAddress ?? pub?.authorAddress ?? requestAgentAddress, subGraphName });
         }
+        recordPcaDiscount(ctx, contextGraphId, pub?.onChainResult);
         // Full publish payload (PR #971) so clients can reconcile sealed↔minted.
         return jsonResponse(res, httpStatus, {
           kaId: pub?.kaId,
@@ -1427,6 +1453,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             : {}),
           ...(Array.isArray(pub?.kas) ? { kas: pub.kas } : {}),
           ...(pub?.onChainResult?.blockNumber !== undefined ? { blockNumber: pub.onChainResult.blockNumber } : {}),
+          ...(pub?.onChainResult?.convictionCostCovered ? { convictionCostCovered: pub.onChainResult.convictionCostCovered } : {}),
           ...(typeof pub?.contextGraphError === "string" ? { contextGraphError: pub.contextGraphError } : {}),
           ...(reason ? { error: reason } : {}),
         });

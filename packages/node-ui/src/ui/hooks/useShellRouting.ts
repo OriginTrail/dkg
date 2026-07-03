@@ -11,8 +11,6 @@ export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
   '/observability': { id: 'operations', label: 'Observability' },
   '/operations': { id: 'operations', label: 'Observability' },
   '/settings': { id: 'settings', label: 'Settings' },
-  // '/admin' deep-link intentionally omitted — the Admin page entry is hidden
-  // pending review (see Header.tsx). Restore this + the header button to re-enable.
 };
 export const TAB_TO_URL_PATH: Record<string, string> = {
   operations: '/observability',

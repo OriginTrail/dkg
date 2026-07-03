@@ -158,6 +158,13 @@ function AppShell() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  useLayoutEffect(() => {
+    const id = window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [leftCollapsed, rightCollapsed]);
+
   const onDragLeft = useCallback((delta: number) => {
     const w = useLayoutStore.getState().leftWidth;
     setLeftWidth(Math.max(140, Math.min(400, w + delta)));

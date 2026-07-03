@@ -10,7 +10,46 @@ import type { ethers } from 'ethers';
 export interface ConvictionReader {
   getConvictionAgentAccountId(agent: string): Promise<bigint>;
   convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
+
+/** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
+ *  `agent` (a node op wallet is its registered publishing agent), or `both`. */
+export type PcaRelation = 'owned' | 'agent' | 'both';
+export interface PcaAccountRelation {
+  accountId: bigint;
+  relation: PcaRelation;
+}
+
+/** A node from the on-chain sharding table, eligible to be designated as a
+ *  PCA `primaryNode`. `nodeId` is a display-only self-reported id; `identityId`
+ *  is the value passed as `primaryNode`. `ask`/`stake` are wei. */
+export interface ShardingTableNode {
+  nodeId: string;
+  identityId: bigint;
+  ask: bigint;
+  stake: bigint;
+}
+
+/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA actions. */
+export interface PcaContracts {
+  nft: string;
+  token: string;
+  chainId: string;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
+
+export type PcaRpcMethod =
+  | 'eth_chainId'
+  | 'eth_call'
+  | 'eth_getTransactionReceipt'
+  | 'eth_getTransactionByHash'
+  | 'eth_blockNumber'
+  | 'eth_getBlockByNumber';
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -145,6 +184,22 @@ export interface OnChainPublishResult {
   effectiveGasPrice?: bigint;
   gasCostWei?: bigint;
   tokenAmount?: bigint;
+  /**
+   * B8 — present only when this publish drew on a Publishing Conviction
+   * Account (the `CostCovered` event was emitted). The cost fields are bigint
+   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
+   * `epoch` is a small int (number). The UI derives the discount bps from
+   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
+   * confirmed-discount badge degrades hidden.
+   */
+  convictionCostCovered?: {
+    accountId: bigint;
+    epoch: number;
+    baseCost: bigint;
+    discountedCost: bigint;
+    drawnFromEpoch: bigint;
+    drawnFromTopUp: bigint;
+  };
 }
 
 export interface UpdateKAParams {
@@ -415,6 +470,16 @@ export interface V10PublishingConvictionAccountInfo {
   agentCount: number;
   lastSettledWindow: number;
   fullySwept: boolean;
+  // GAP-4/5 — populated ONLY when getInfo is called with `{ extended: true }`
+  // (the S3 budget widget; the publish hot path omits them → zero extra reads),
+  // and best-effort within that (an extended-read error leaves them undefined so
+  // the UI shows "unknown", distinct from `primaryNode === 0n` = "no node").
+  // primaryNode / lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51);
+  // remainingAllowance + currentEpoch are this epoch's spend headroom + index.
+  primaryNode?: bigint;
+  lastPrimaryNodeChangeEpoch?: number;
+  remainingAllowance?: bigint;
+  currentEpoch?: number;
 }
 
 /**
@@ -884,8 +949,35 @@ export interface ChainAdapter {
    * Optional on the adapter surface so mock-chain unit tests that
    * don't model PCA registration can omit the implementation. The
    * publisher gracefully treats `undefined` as "no PCA path active".
+  */
+  getConvictionAgentAccountId?(agent: string, opts?: { strict?: boolean }): Promise<bigint>;
+
+  /**
+   * GAP-1 — enumerate every PCA the given wallets relate to: `owned` (the wallet
+   * holds the NFT) and/or `agent` (the wallet is a registered publishing agent).
+   * Deduped, relation-tagged, sorted asc.
    */
-  getConvictionAgentAccountId?(agent: string): Promise<bigint>;
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+
+  /**
+   * B-staked-nodes — the full on-chain sharding table of nodes designatable as a
+   * PCA `primaryNode`. `opts.fresh` bypasses adapter-side cache.
+   */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+
+  /**
+   * Browser-bootstrap contract addresses + chain params for the HW signing
+   * layer. The browser needs the PCA NFT address, TRAC token address, chain id,
+   * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
+  */
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
+
+  /**
+   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
+   * route owns the allowlist; adapters forward allowed reads without exposing
+   * endpoint URLs.
+   */
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
@@ -928,7 +1020,7 @@ export interface ChainAdapter {
   registerPublishingConvictionAgents?(accountId: bigint, agents: string[]): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.
@@ -966,6 +1058,14 @@ export interface ChainAdapter {
    * (→ 403); the on-chain rate-limit (once per epoch) surfaces as a revert too.
    */
   setPublishingConvictionPrimaryNode?(accountId: bigint, primaryNode: bigint): Promise<TxResult>;
+
+  /**
+   * Enumerate the operational wallets registered as publishing agents on
+   * `accountId` (mirrors `getRegisteredAgents`). Checksummed addresses;
+   * `[]` when the account has none or the NFT is undeployed. Optional —
+   * adapters that omit it surface as "no agent enumeration" (daemon → 503).
+   */
+  getPublishingConvictionAgents?(accountId: bigint): Promise<string[]>;
 
   /**
    * Sign an arbitrary message hash using the node's primary operational key.

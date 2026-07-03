@@ -28,12 +28,16 @@ const SettingsView = React.lazy(() =>
   import('../../pages/Settings.js').then((m) => ({ default: m.SettingsPage }))
 );
 
-const AdminView = React.lazy(() =>
-  import('../../pages/Admin.js').then((m) => ({ default: m.AdminPage }))
-);
-
 const AgentProfilePage = React.lazy(() =>
   import('../AgentProfilePage.js').then((m) => ({ default: m.AgentProfilePage }))
+);
+
+const PublishingConvictionView = React.lazy(() =>
+  import('../../pages/PublishingConviction.js').then((m) => ({ default: m.PublishingConvictionPage }))
+);
+
+const ConvictionDetailView = React.lazy(() =>
+  import('../../pages/conviction/ConvictionDetailView.js').then((m) => ({ default: m.ConvictionDetailView }))
 );
 
 function TabBar() {
@@ -300,10 +304,10 @@ function ViewContainer() {
     );
   }
 
-  if (activeTabId === 'admin') {
+  if (activeTabId === 'conviction') {
     return (
-      <Suspense fallback={<div className="lazy-spinner">Loading admin...</div>}>
-        <AdminView />
+      <Suspense fallback={<div className="lazy-spinner">Loading Publisher Conviction...</div>}>
+        <PublishingConvictionView />
       </Suspense>
     );
   }
@@ -315,6 +319,15 @@ function ViewContainer() {
   if (activeTabId.startsWith('project:')) {
     const cgId = activeTabId.slice('project:'.length);
     return <ProjectView contextGraphId={cgId} />;
+  }
+
+  if (activeTabId.startsWith('conviction:')) {
+    const accountId = activeTabId.slice('conviction:'.length);
+    return (
+      <Suspense fallback={<div className="lazy-spinner">Loading account...</div>}>
+        <ConvictionDetailView accountId={accountId} />
+      </Suspense>
+    );
   }
 
   if (activeTabId.startsWith('agent:')) {

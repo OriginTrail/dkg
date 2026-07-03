@@ -20,7 +20,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
@@ -120,6 +120,40 @@ export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
 type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
+
+/**
+ * B8 — decode the `CostCovered` event from a publish receipt's logs via the
+ * PublishingConviction LOGIC ABI (the event is emitted by the logic contract, a
+ * different address than KA storage, so the KA-storage receipt loop skips it).
+ * Returns the discount detail (cost fields bigint → decimal strings via the
+ * daemon's JSON replacer; `epoch` a number) when a publish drew on a Publishing
+ * Conviction Account, else `undefined`. `coverPublishingCost` runs once per
+ * publish tx, so a (batch) publish emits ONE CostCovered covering the batch's
+ * total draw — this returns that single event (the "discount applied" badge is
+ * tx-level; a precise per-KA breakdown would be a future enhancement). Exported
+ * for unit testing.
+ */
+export function decodeConvictionCostCovered(
+  logs: ReadonlyArray<{ topics: ReadonlyArray<string>; data: string }>,
+): OnChainPublishResult['convictionCostCovered'] {
+  const pcaLogic = getPcaLogicInterface();
+  for (const log of logs) {
+    try {
+      const parsed = pcaLogic.parseLog({ topics: [...log.topics], data: log.data });
+      if (parsed?.name === 'CostCovered') {
+        return {
+          accountId: BigInt(parsed.args.accountId),
+          epoch: Number(parsed.args.epoch),
+          baseCost: BigInt(parsed.args.baseCost),
+          discountedCost: BigInt(parsed.args.discountedCost),
+          drawnFromEpoch: BigInt(parsed.args.drawnFromEpoch),
+          drawnFromTopUp: BigInt(parsed.args.drawnFromTopUp),
+        };
+      }
+    } catch { /* not a PublishingConviction event */ }
+  }
+  return undefined;
+}
 
 function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
@@ -334,6 +368,8 @@ export class EVMChainAdapterBase {
   protected readonly providers: JsonRpcProvider[];
 
   protected readonly rpcUrls: string[];
+
+  protected readonly walletRpcUrls: string[];
 
   /**
    * The pure per-endpoint RPC transport mechanism. Owns the read-failover loop +
@@ -568,6 +604,11 @@ export class EVMChainAdapterBase {
 
   constructor(config: EVMAdapterConfig) {
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
+    this.walletRpcUrls = Array.from(new Set(
+      (config.walletRpcUrls ?? [])
+        .map((url) => typeof url === 'string' ? url.trim() : '')
+        .filter((url) => /^https?:\/\//i.test(url)),
+    ));
     // Floor a finite `>= 1` value (so e.g. 10000.5 -> 10000, preserving the
     // window); only a `< 1` (or non-finite) value falls back to the default — a
     // fractional value in (0,1) must NOT floor to 0 (which makes pages Infinity).
@@ -2672,6 +2713,11 @@ export class EVMChainAdapterBase {
       }
     }
 
+    // B8: when this publish drew on a PCA, decode the CostCovered event so the
+    // daemon can return a CONFIRMED post-publish discount (vs the P0 predictive
+    // estimate). Absent for a non-PCA publish → the UI badge degrades hidden.
+    const convictionCostCovered = decodeConvictionCostCovered(receipt.logs);
+
     const blockTimestamp = await this.getBlockTimestamp(receipt.blockNumber);
 
     return {
@@ -2690,6 +2736,7 @@ export class EVMChainAdapterBase {
       effectiveGasPrice: receipt.gasPrice ? BigInt(receipt.gasPrice) : undefined,
       gasCostWei: receipt.gasUsed && receipt.gasPrice ? BigInt(receipt.gasUsed) * BigInt(receipt.gasPrice) : undefined,
       tokenAmount: params.tokenAmount,
+      ...(convictionCostCovered ? { convictionCostCovered } : {}),
     };
   }
 

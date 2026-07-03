@@ -1,5 +1,5 @@
 /**
- * Publishing Conviction NFT (PCA) API smoke against live devnet.
+ * Publisher Conviction NFT (PCA) API smoke against live devnet.
  * Full conviction discount flows live in devnet/conviction-lazy-settle/.
  */
 import { test, expect } from '../../fixtures/base.js';

@@ -4,13 +4,47 @@
 import { ethers } from 'ethers';
 import {
   isPcaUnavailableError,
+  type PcaContracts,
+  type PcaRpcMethod,
   type V10PublishingConvictionAccountInfo,
 } from '@origintrail-official/dkg-chain';
-import { jsonResponse, readBody, SMALL_BODY_BYTES, respondIfChainRpcTransportError } from '../http-utils.js';
+import {
+  classifyChainRpcTransportStatus,
+  jsonResponse,
+  readBody,
+  SMALL_BODY_BYTES,
+  respondIfChainRpcTransportError,
+  sanitizeRpcMessage,
+} from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
+const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
+const PCA_RPC_ALLOWED_METHODS = new Set<PcaRpcMethod>([
+  'eth_chainId',
+  'eth_call',
+  'eth_getTransactionReceipt',
+  'eth_getTransactionByHash',
+  'eth_blockNumber',
+  'eth_getBlockByNumber',
+]);
+const PCA_RPC_NULL_RESULT_METHODS = new Set<PcaRpcMethod>([
+  'eth_getTransactionReceipt',
+  'eth_getTransactionByHash',
+  'eth_getBlockByNumber',
+]);
+const PCA_RPC_NFT_CALL_SELECTORS = new Set([
+  '0x70a08231', // balanceOf(address)
+  '0x2f745c59', // tokenOfOwnerByIndex(address,uint256)
+  '0x6352211e', // ownerOf(uint256)
+  '0xfe57623b', // getDiscountBps(uint96)
+]);
+const PCA_RPC_TOKEN_CALL_SELECTORS = new Set([
+  '0x70a08231', // balanceOf(address)
+  '0xdd62ed3e', // allowance(address,address)
+]);
+const PCA_RPC_MAX_BATCH = 20;
 const FEATURE_UNAVAILABLE_503 = {
   error:
     'Chain adapter does not expose V10 Publishing Conviction NFT methods — ' +
@@ -25,7 +59,164 @@ function safeParseJson(body: string): { ok: true; value: any } | { ok: false; er
   }
 }
 
-// Owner-gated write by a non-owner daemon EOA → 403 (distinct from 500
+// PCA RPC proxy guard: allow the browser HW layer's bounded read calls only.
+// Unsupported methods fail before any adapter delegation.
+type JsonRpcId = string | number | null;
+
+function jsonRpcId(value: unknown): JsonRpcId {
+  return typeof value === 'string' || typeof value === 'number' || value === null ? value : null;
+}
+
+function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown): Record<string, unknown> {
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code,
+      message,
+      ...(data !== undefined ? { data } : {}),
+    },
+  };
+}
+
+function jsonRpcSuccess(id: JsonRpcId, result: unknown): Record<string, unknown> {
+  return { jsonrpc: '2.0', id, result };
+}
+
+function isPcaRpcMethod(method: string): method is PcaRpcMethod {
+  return PCA_RPC_ALLOWED_METHODS.has(method as PcaRpcMethod);
+}
+
+function walletRpcUrlsForResponse(contracts: PcaContracts): string[] {
+  return (contracts.walletRpcUrls ?? []).filter((rpcUrl) => /^https?:\/\//i.test(rpcUrl));
+}
+
+function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
+  const candidate = agent as RequestContext['agent'] & {
+    supportsPublishingConvictionRpc?: unknown;
+    requestPublishingConvictionRpc?: unknown;
+  };
+  if (typeof candidate.supportsPublishingConvictionRpc === 'boolean') {
+    return candidate.supportsPublishingConvictionRpc;
+  }
+  return typeof candidate.requestPublishingConvictionRpc === 'function';
+}
+
+function pcaRpcEthCallError(params: unknown[] | undefined, contracts: Pick<PcaContracts, 'nft' | 'token'>): string | null {
+  if (!Array.isArray(params) || params.length === 0) return 'PCA RPC eth_call params must include a transaction object';
+  const tx = params[0];
+  if (!tx || typeof tx !== 'object' || Array.isArray(tx)) return 'PCA RPC eth_call params must include a transaction object';
+  const { to, data } = tx as { to?: unknown; data?: unknown };
+  if (typeof to !== 'string' || typeof data !== 'string' || !/^0x[0-9a-fA-F]+$/.test(data) || data.length < 10) {
+    return 'PCA RPC eth_call requires a target address and function selector';
+  }
+  let target: string;
+  let nft: string;
+  let token: string;
+  try {
+    target = ethers.getAddress(to).toLowerCase();
+    nft = ethers.getAddress(contracts.nft).toLowerCase();
+    token = ethers.getAddress(contracts.token).toLowerCase();
+  } catch {
+    return 'PCA RPC eth_call target address is invalid';
+  }
+  const selector = data.slice(0, 10).toLowerCase();
+  if (target === nft && PCA_RPC_NFT_CALL_SELECTORS.has(selector)) return null;
+  if (target === token && PCA_RPC_TOKEN_CALL_SELECTORS.has(selector)) return null;
+  return 'PCA RPC eth_call target or selector is not allowed';
+}
+
+function isHex32(value: unknown): value is string {
+  return typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+function isBlockQuantity(value: unknown): value is string {
+  return typeof value === 'string' && /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value);
+}
+
+function pcaRpcParamsError(method: PcaRpcMethod, params: unknown[] | undefined): string | null {
+  const p = params ?? [];
+  switch (method) {
+    case 'eth_chainId':
+    case 'eth_blockNumber':
+      return p.length === 0 ? null : `PCA RPC ${method} does not accept params`;
+    case 'eth_getTransactionReceipt':
+    case 'eth_getTransactionByHash':
+      return p.length === 1 && isHex32(p[0]) ? null : `PCA RPC ${method} requires one 32-byte transaction hash`;
+    case 'eth_getBlockByNumber': {
+      if (p.length !== 2) return 'PCA RPC eth_getBlockByNumber requires block id and includeTransactions=false';
+      const block = p[0];
+      const includeTransactions = p[1];
+      const namedBlock = block === 'latest' || block === 'safe' || block === 'finalized';
+      const exactBlock = isBlockQuantity(block);
+      const allowed =
+        (namedBlock && includeTransactions === false) ||
+        (exactBlock && (includeTransactions === false || includeTransactions === true));
+      if (!allowed) {
+        return 'PCA RPC eth_getBlockByNumber only allows latest/safe/finalized with includeTransactions=false, or exact hex block ids with includeTransactions true/false';
+      }
+      return null;
+    }
+    case 'eth_call':
+      if (p.length < 1 || p.length > 2) return 'PCA RPC eth_call requires a transaction object and optional block id';
+      if (p.length === 2) {
+        const block = p[1];
+        const allowedBlock = block === 'latest' || block === 'safe' || block === 'finalized' || isBlockQuantity(block);
+        if (!allowedBlock) return 'PCA RPC eth_call only allows latest/safe/finalized or hex block ids';
+      }
+      return null;
+  }
+}
+
+async function handlePcaRpcRequest(
+  agent: RequestContext['agent'],
+  raw: unknown,
+): Promise<Record<string, unknown>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return jsonRpcError(null, -32600, 'Invalid JSON-RPC request');
+  }
+  const request = raw as { id?: unknown; method?: unknown; params?: unknown };
+  const id = jsonRpcId(request.id ?? null);
+  if (typeof request.method !== 'string' || request.method.length === 0) {
+    return jsonRpcError(id, -32600, 'Invalid JSON-RPC method');
+  }
+  if (!isPcaRpcMethod(request.method)) {
+    return jsonRpcError(id, -32601, `PCA RPC method not allowed: ${request.method}`);
+  }
+  if (request.params !== undefined && !Array.isArray(request.params)) {
+    return jsonRpcError(id, -32602, 'PCA RPC params must be an array');
+  }
+  const paramsError = pcaRpcParamsError(request.method, request.params);
+  if (paramsError) return jsonRpcError(id, -32602, paramsError);
+  try {
+    if (request.method === 'eth_call') {
+      const contracts = await agent.getPublishingConvictionContracts();
+      if (contracts === null) return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
+      const ethCallError = pcaRpcEthCallError(request.params, contracts);
+      if (ethCallError) return jsonRpcError(id, -32602, ethCallError);
+    }
+    const result = await agent.requestPublishingConvictionRpc(request.method, request.params ?? []);
+    if (result === null && !PCA_RPC_NULL_RESULT_METHODS.has(request.method)) {
+      return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
+    }
+    return jsonRpcSuccess(id, result);
+  } catch (err: any) {
+    const transport = classifyChainRpcTransportStatus(err);
+    if (transport) {
+      return jsonRpcError(id, -32002, String(transport.body.error ?? 'Chain RPC transport unavailable'), {
+        code: transport.body.code,
+        ...(transport.body.txHash ? { txHash: transport.body.txHash } : {}),
+      });
+    }
+    const msg = sanitizeRpcMessage(err?.message ?? String(err));
+    if (isNoChain(msg) || isPcaUnavailable(err, msg)) {
+      return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
+    }
+    return jsonRpcError(id, -32000, `PCA RPC read failed: ${msg}`);
+  }
+}
+
+// Owner-gated write by a non-owner daemon EOA -> 403 (distinct from 500
 // RPC / 503 no-chain). `NotAccountAdmin` kept for legacy parity.
 function isOwnerRevert(msg: string): boolean {
   return /NotAccountOwner|NotAccountAdmin/i.test(msg);
@@ -73,6 +264,25 @@ function classifyPcaRevert(msg: string): { status: number; error: string } | nul
     return { status: 404, error: 'UnknownAccount' };
   }
   return null;
+}
+
+function positiveAccountIdString(value: unknown): string | null {
+  if (typeof value === 'bigint') return value > 0n ? value.toString() : null;
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? String(value) : null;
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return value;
+  return null;
+}
+
+function agentAlreadyRegisteredAccountIdFromError(err: any, msg: string): string | null {
+  const args = err?.revert?.args;
+  const named = positiveAccountIdString(args?.existingAccountId ?? args?.accountId);
+  if (named) return named;
+  if (Array.isArray(args)) {
+    const positional = positiveAccountIdString(args[1]);
+    if (positional) return positional;
+  }
+  const match = /\bAgentAlreadyRegistered\s*\([^,]+,\s*([0-9]+)\s*\)/.exec(msg);
+  return match ? positiveAccountIdString(match[1]) : null;
 }
 
 function parseAccountId(idStr: string): bigint | null {
@@ -164,6 +374,14 @@ function serializeAccountInfo(
     agentCount: info.agentCount,
     lastSettledWindow: info.lastSettledWindow,
     fullySwept: info.fullySwept,
+    // GAP-4/5 - present only on the extended read (S3 budget widget); omitted
+    // (not zeroed) when absent so the UI can tell "unknown" from a real value.
+    ...(info.primaryNode !== undefined ? { primaryNode: info.primaryNode.toString() } : {}),
+    ...(info.lastPrimaryNodeChangeEpoch !== undefined ? { lastPrimaryNodeChangeEpoch: info.lastPrimaryNodeChangeEpoch } : {}),
+    ...(info.remainingAllowance !== undefined
+      ? { remainingAllowance: info.remainingAllowance.toString(), remainingAllowanceTrac: ethers.formatEther(info.remainingAllowance) }
+      : {}),
+    ...(info.currentEpoch !== undefined ? { currentEpoch: info.currentEpoch } : {}),
     // OT-RFC-51 node association: the node identityId this PCA funds.
     // `0` = unset. `fundsThisNode` is true when it equals this node's identity.
     ...(extra?.primaryNode != null ? { primaryNode: extra.primaryNode.toString() } : {}),
@@ -234,23 +452,6 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 500, {
         error: `listNodePublishingConvictionAccounts failed: ${msg}`,
       });
-    }
-  }
-
-  // GET /api/pca/contracts — addresses + chainId for the browser wallet-connect
-  // path (owner signs owner-gated PCA txs client-side). Must be matched BEFORE
-  // the `/api/pca/:id` GET, else "contracts" is parsed as an accountId → 400.
-  if (req.method === 'GET' && path === '/api/pca/contracts') {
-    try {
-      const ctxAddrs = await agent.getPcaContractContext();
-      if (ctxAddrs === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      return jsonResponse(res, 200, ctxAddrs);
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
-      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (respondIfChainRpcTransportError(res, err)) return;
-      return jsonResponse(res, 500, { error: `getPcaContractContext failed: ${msg}` });
     }
   }
 
@@ -342,7 +543,30 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
         });
       }
       const revert = classifyPcaRevert(msg);
-      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      if (revert) {
+        if (revert.error === 'AgentAlreadyRegistered') {
+          const body: { error: string; accountId: string; existingAccountId?: string } = {
+            error: revert.error,
+            accountId: idStr,
+          };
+          const existingFromError = agentAlreadyRegisteredAccountIdFromError(err, msg);
+          if (existingFromError) {
+            body.existingAccountId = existingFromError;
+          } else {
+            try {
+              const lookup = (agent as any).getConvictionAgentAccountId;
+              if (typeof lookup === 'function') {
+                const existing = positiveAccountIdString(await lookup.call(agent, agentAddr));
+                if (existing) body.existingAccountId = existing;
+              }
+            } catch {
+              // Preserve the deterministic 409 even when the best-effort reverse lookup flakes.
+            }
+          }
+          return jsonResponse(res, revert.status, body);
+        }
+        return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      }
       return jsonResponse(res, 500, { error: `registerPublishingConvictionAgent failed: ${msg}` });
     }
   }
@@ -502,8 +726,235 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     }
   }
 
+  // GET /api/pca/agent/:address - reverse-lookup which PCA a wallet is a
+  // registered publishing agent of (GAP-3, for S5/S6 discovery). Returns the
+  // bare on-chain `agentToAccountId` fact; coverage classification happens in
+  // the caller, never by treating "registered" as "covered".
+  if (req.method === 'GET' && /^\/api\/pca\/agent\/[^/]+$/.test(path)) {
+    const addr = decodeURIComponent(path.split('/')[4] ?? '');
+    if (!ethers.isAddress(addr)) {
+      return jsonResponse(res, 400, { error: 'address must be a valid 0x-prefixed EVM address' });
+    }
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    try {
+      const accountId = await agent.getConvictionAgentAccountId(addr, { strict: true });
+      if (accountId === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        agent: ethers.getAddress(addr),
+        accountId: accountId > 0n ? accountId.toString() : null,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent lookup temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `getConvictionAgentAccountId failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/:id/agents - enumerate the operational wallets registered as
+  // publishing agents on this PCA. This is declared before the generic GET :id
+  // matcher so an existing account with zero approved wallets returns 200 []
+  // while an unknown account returns 404.
+  if (req.method === 'GET' && /^\/api\/pca\/[^/]+\/agents$/.test(path)) {
+    const idStr = decodeURIComponent(path.split('/')[3] ?? '');
+    const accountId = parseAccountId(idStr);
+    if (accountId === null) {
+      return jsonResponse(res, 400, { error: 'Invalid accountId - must be a non-negative integer' });
+    }
+    try {
+      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      if (info === null) {
+        if (!agent.supportsPublishingConvictionNft) {
+          return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+        }
+        return jsonResponse(res, 404, { error: `Unknown PCA accountId ${idStr}` });
+      }
+      const agents = await agent.getPublishingConvictionAgents(accountId);
+      if (agents === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, { accountId: idStr, agents });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent enumeration temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      const revert = classifyPcaRevert(msg);
+      if (revert) return jsonResponse(res, revert.status, { error: revert.error, accountId: idStr });
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionAgents failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/mine - enumerate every PCA the node relates to (owned + agent-on
+  // across the node's operational wallets). Exact path before the generic :id
+  // matcher, otherwise "mine" would parse as an account id.
+  if (req.method === 'GET' && path === '/api/pca/mine') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const wallets = ctx.opWallets.wallets.map((wallet) => wallet.address);
+    try {
+      const accounts = await agent.listPublishingConvictionAccountsForWallets(wallets);
+      if (accounts === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      const hydrate = ctx.url.searchParams.get('hydrate') === '1';
+      if (!hydrate) {
+        return jsonResponse(res, 200, {
+          accounts: accounts.map((account) => ({
+            accountId: account.accountId.toString(),
+            relation: account.relation,
+          })),
+        });
+      }
+
+      const hydrated: Array<Record<string, unknown>> = [];
+      for (const account of accounts) {
+        const entry: Record<string, unknown> = {
+          accountId: account.accountId.toString(),
+          relation: account.relation,
+        };
+        try {
+          const info = await agent.getPublishingConvictionAccountInfo(account.accountId);
+          if (info) Object.assign(entry, serializeAccountInfo(account.accountId, info));
+        } catch {
+          // Per-account hydration is best-effort; the relation row is still useful.
+        }
+        hydrated.push(entry);
+      }
+      return jsonResponse(res, 200, { accounts: hydrated });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA enumeration temporarily unavailable - chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listPublishingConvictionAccountsForWallets failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/designatable-nodes - full sharding table of nodes that can be
+  // designated as a PCA primary node. ?fresh=1 bypasses adapter cache.
+  if (req.method === 'GET' && path === '/api/pca/designatable-nodes') {
+    if (!agent.supportsPublishingConvictionNft) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const fresh = ctx.url.searchParams.get('fresh') === '1';
+    try {
+      const nodes = await agent.listDesignatableNodes({ fresh });
+      if (nodes === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        nodes: nodes.map((node) => ({
+          nodeId: node.nodeId,
+          identityId: node.identityId.toString(),
+          ask: node.ask.toString(),
+          stake: node.stake.toString(),
+        })),
+        total: nodes.length,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
+        return jsonResponse(res, 503, {
+          error: 'Designatable-node list temporarily unavailable - sharding-table read failed',
+          code: 'SHARDING_TABLE_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `listDesignatableNodes failed: ${msg}`,
+      });
+    }
+  }
+
+  // GET /api/pca/contracts — browser bootstrap (sub-PR #2 HW signing). Hands the
+  // in-browser viem layer resolved PCA addresses plus the same-origin daemon RPC
+  // proxy. Raw adapter RPC URLs may carry operator API keys, so they remain
+  // daemon-internal and never cross this HTTP boundary. Matched EXACTLY before
+  // the generic GET :id below, else 'contracts' parses as an accountId and 400s.
+  if (req.method === 'GET' && path === '/api/pca/contracts') {
+    if (!agent.supportsPublishingConvictionNft || !supportsPcaRpcBridge(agent)) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    try {
+      const contracts = await agent.getPublishingConvictionContracts();
+      if (contracts === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      return jsonResponse(res, 200, {
+        ...contracts,
+        rpcUrls: [PCA_RPC_PROXY_PATH],
+        walletRpcUrls: walletRpcUrlsForResponse(contracts),
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION/BAD_DATA here is an address-resolution read failure (the
+      // adapter may Hub-read) → 503 retryable with a DEDICATED code, NOT a 500 a
+      // browser bootstrap would treat as terminal.
+      if (err?.code === 'CALL_EXCEPTION' || err?.code === 'BAD_DATA') {
+        return jsonResponse(res, 503, {
+          error: 'PCA contract addresses temporarily unavailable — chain read failed',
+          code: 'CONTRACTS_READ_FAILED',
+        });
+      }
+      return jsonResponse(res, 500, {
+        error: `getPublishingConvictionContracts failed: ${sanitizeRpcMessage(msg)}`,
+      });
+    }
+  }
+
+  // POST /api/pca/rpc - restricted JSON-RPC read proxy for the browser HW
+  // layer. It forwards only the read methods viem needs for PCA discovery,
+  // allowance reads, and receipt polling. It never exposes upstream URLs.
+  if (req.method === 'POST' && path === PCA_RPC_PROXY_PATH) {
+    if (!agent.supportsPublishingConvictionNft || !supportsPcaRpcBridge(agent)) {
+      return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+    }
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    const parsed = safeParseJson(body);
+    if (!parsed.ok) return jsonResponse(res, 400, { error: parsed.error });
+    if (Array.isArray(parsed.value)) {
+      if (parsed.value.length === 0) {
+        return jsonResponse(res, 400, { error: 'JSON-RPC batch must contain at least one request' });
+      }
+      if (parsed.value.length > PCA_RPC_MAX_BATCH) {
+        return jsonResponse(res, 400, { error: `JSON-RPC batch must contain at most ${PCA_RPC_MAX_BATCH} requests` });
+      }
+      const responses = await Promise.all(parsed.value.map((item) => handlePcaRpcRequest(agent, item)));
+      return jsonResponse(res, 200, responses);
+    }
+    return jsonResponse(res, 200, await handlePcaRpcRequest(agent, parsed.value));
+  }
+
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...
-  // probes whether that address is a registered agent.
+  // probes whether that address is a registered agent. Optional ?extended=1
+  // adds the GAP-4/5 budget fields (primaryNode + current-epoch allowance);
+  // default-OFF so the hot S1/S5 polling path stays cheap (no extra reads).
   if (req.method === 'GET' && /^\/api\/pca\/[^/]+$/.test(path)) {
     const idStr = decodeURIComponent(path.split('/')[3] ?? '');
     const accountId = parseAccountId(idStr);
@@ -511,7 +962,8 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'Invalid accountId — must be a non-negative integer' });
     }
     try {
-      const info = await agent.getPublishingConvictionAccountInfo(accountId);
+      const extended = ctx.url.searchParams.get('extended') === '1';
+      const info = await agent.getPublishingConvictionAccountInfo(accountId, { extended });
       if (info === null) {
         // null = view absent OR account missing; the facade capability
         // signal disambiguates (no chain surface → 503, else genuine 404).
@@ -562,6 +1014,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (isPcaUnavailable(err, msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
       if (respondIfChainRpcTransportError(res, err)) return;
+      // A CALL_EXCEPTION on the `isAgent` probe is a read failure (the view
+      // returns false for a normal not-approved wallet), so it must stay
+      // inconclusive instead of becoming `registered:false`.
+      if (err?.code === 'CALL_EXCEPTION') {
+        return jsonResponse(res, 503, {
+          error: 'PCA agent probe temporarily unavailable — chain read failed',
+          code: 'PCA_LOOKUP_READ_FAILED',
+        });
+      }
       return jsonResponse(res, 500, {
         error: `getPublishingConvictionAccountInfo failed: ${msg}`,
       });

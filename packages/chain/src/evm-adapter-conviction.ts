@@ -16,9 +16,29 @@ import type {
   V10PublishingConvictionAccountInfo,
   NodePublishingConvictionAccount,
   ConvictionReader,
+  PcaAccountRelation,
+  ShardingTableNode,
+  PcaContracts,
+  PcaRpcMethod,
 } from './chain-adapter.js';
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
+
+export interface RawShardingTableNode extends ArrayLike<unknown> {
+  nodeId?: unknown;
+  identityId?: unknown;
+  ask?: unknown;
+  stake?: unknown;
+}
+
+export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNode {
+  return {
+    nodeId: String(raw.nodeId ?? raw[0]),
+    identityId: BigInt((raw.identityId ?? raw[1]) as bigint | number | string),
+    ask: BigInt((raw.ask ?? raw[2]) as bigint | number | string),
+    stake: BigInt((raw.stake ?? raw[3]) as bigint | number | string),
+  };
+}
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
   // =====================================================================
@@ -39,9 +59,19 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * deployed on this chain, the address is malformed, or the chain
    * call fails — callers treat the unknown case as "no PCA path".
    */
-  async getConvictionAgentAccountId(agent: string): Promise<bigint> {
+  async getConvictionAgentAccountId(
+    agent: string,
+    opts?: { strict?: boolean },
+  ): Promise<bigint> {
     await this.init();
-    if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
+    if (!this.contracts.dkgPublishingConvictionNFT) {
+      // Selector fail-safe: "no PCA contract on this chain" → "no PCA path"
+      // (0n), so publishing stays on direct-spend. The discovery path (strict)
+      // surfaces it instead, so the daemon answers 503 rather than letting a UI
+      // read "unavailable" as "registered nowhere".
+      if (opts?.strict) throw new PcaUnavailableError();
+      return 0n;
+    }
     if (!ethers.isAddress(agent)) return 0n;
     try {
       const id: bigint = await this.readContract(
@@ -49,7 +79,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       );
       return BigInt(id);
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return 0n;
+      // `agentToAccountId` is a plain mapping getter — it returns 0 (NOT a
+      // revert) for an unregistered address, so a CALL_EXCEPTION here is a real
+      // read failure, never a normal "unregistered". The selector fail-safe
+      // masks it as 0n (publish at full price, safe); the discovery path
+      // (strict) rethrows so a transient blip stays inconclusive instead of
+      // flipping a covered wallet to a confirmed "registered nowhere".
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return 0n;
       throw err;
     }
   }
@@ -59,10 +95,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     if (!this.contracts.dkgPublishingConvictionNFT) return 0;
     if (accountId <= 0n) return 0;
     try {
-      // `accounts(uint256)` returns
-      // (committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
-      //  expiresAtTimestamp, lockDurationEpochs, discountBps,
-      //  lastSettledWindow, fullySwept). Pull index 5.
+      // `accounts(uint256)` returns, in order:
+      //  [0] committedTRAC          [1] createdAtEpoch
+      //  [2] expiresAtEpoch         [3] createdAtTimestamp
+      //  [4] expiresAtTimestamp     [5] lockDurationEpochs
+      //  [6] discountBps            [7] lastSettledWindow
+      //  [8] fullySwept             [9] primaryNode (uint72, OT-RFC-51)
+      //  [10] lastPrimaryNodeChangeEpoch
+      // Pull index 5 for the lock duration. (primaryNode [9] /
+      // lastPrimaryNodeChangeEpoch [10] were appended in the RFC-51 bump;
+      // `getAccountInfo` does not surface them — GAP-4 reads them here.)
       const tuple = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
       );
@@ -268,7 +310,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     });
   }
 
-  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null> {
+  async getPublishingConvictionAccountInfo(
+    accountId: bigint,
+    opts?: { extended?: boolean },
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
     // Undeployed NFT → capability error (503). null is reserved below
     // for a genuine account-missing revert so the route can disambiguate.
@@ -277,7 +322,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const t = await this.readContract(
         this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getAccountInfo', 'getAccountInfo', accountId,
       );
-      return {
+      const info: V10PublishingConvictionAccountInfo = {
         owner: ethers.getAddress(t[0]),
         committedTRAC: BigInt(t[1]),
         baseEpochAllowance: BigInt(t[2]),
@@ -291,6 +336,35 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         lastSettledWindow: Number(t[10]),
         fullySwept: Boolean(t[11]),
       };
+      // GAP-4/5 (opt-in; the S3 budget widget passes `extended`). The default
+      // path (incl. the `convictionAccountCanCover` publish hot path) skips
+      // this entirely — zero extra reads. FAIL-SOFT: an extended-read error
+      // must NOT null the account (core getAccountInfo already succeeded); the
+      // fields are simply left undefined so the UI shows them as unknown
+      // (distinct from primaryNode '0' = "no designated node"). primaryNode /
+      // lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51, not in
+      // getAccountInfo); remainingAllowance is the current epoch's headroom.
+      if (opts?.extended) {
+        try {
+          const acct = await this.readContract(
+            this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
+          );
+          info.primaryNode = BigInt(acct[9]);
+          info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
+          if (!this.contracts.chronos) {
+            this.contracts.chronos = await this.resolveContract('Chronos');
+          }
+          const currentEpoch: bigint = BigInt(await this.readContract(
+            this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
+          ));
+          info.currentEpoch = Number(currentEpoch);
+          info.remainingAllowance = BigInt(await this.readContract(
+            this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRemainingAllowance',
+            'getRemainingAllowance', accountId, currentEpoch,
+          ));
+        } catch { /* extended enrichment is best-effort; leave fields undefined */ }
+      }
+      return info;
     } catch (err: any) {
       if (err?.code === 'CALL_EXCEPTION') return null;
       throw err;
@@ -420,26 +494,14 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     if (!ethers.isAddress(agent)) return false;
-    try {
-      return Boolean(await this.readContract(
-        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
-      ));
-    } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return false;
-      throw err;
-    }
+    // `isAgent` is a pure view that returns false for normal not-approved cases.
+    // A CALL_EXCEPTION here is a read failure, not a confirmed negative; callers
+    // must surface it as inconclusive so the UI never makes a false coverage claim.
+    return Boolean(await this.readContract(
+      this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
+    ));
   }
 
-  /**
-   * OT-RFC-51 designated primary node for a PCA. Reads index 9 of the
-   * `accounts(uint256)` tuple
-   * `(committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
-   *   expiresAtTimestamp, lockDurationEpochs, discountBps, lastSettledWindow,
-   *   fullySwept, primaryNode, lastPrimaryNodeChangeEpoch)`.
-   * `getAccountInfo` (used by {@link getPublishingConvictionAccountInfo}) does
-   * NOT carry `primaryNode`, so this is a separate read. Returns `0n` when
-   * unset, the account is missing, or the NFT is undeployed.
-   */
   /**
    * Addresses + numeric chain id a browser wallet needs to build owner-signed
    * PCA txs client-side (wallet-connect path). The node's RPC URL is
@@ -489,6 +551,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     };
   }
 
+  /**
+   * OT-RFC-51 designated primary node for a PCA. Reads index 9 of the
+   * `accounts(uint256)` tuple
+   * `(committedTRAC, createdAtEpoch, expiresAtEpoch, createdAtTimestamp,
+   *   expiresAtTimestamp, lockDurationEpochs, discountBps, lastSettledWindow,
+   *   fullySwept, primaryNode, lastPrimaryNodeChangeEpoch)`.
+   * `getAccountInfo` (used by {@link getPublishingConvictionAccountInfo}) does
+   * NOT carry `primaryNode`, so this is a separate read. Returns `0n` when
+   * unset, the account is missing, or the NFT is undeployed.
+   */
   async getConvictionPrimaryNode(accountId: bigint): Promise<bigint> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return 0n;
@@ -564,5 +636,129 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       );
       return { hash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, success: receipt.status === 1 };
     });
+  }
+
+  /**
+   * Enumerate every publishing agent (operational wallet) currently
+   * registered to `accountId`, mirroring
+   * `PublishingConvictionStorage.getRegisteredAgents` (surfaced via the
+   * `DKGPublishingConvictionNFT` wrapper). The on-chain view already
+   * returns checksummed addresses; normalize defensively so callers (and
+   * the daemon's approved-wallet table) always get EIP-55 form.
+   *
+   * Discovery-only (no funded-wallet-selector caller), so it does NOT
+   * fail-safe a read error to `[]`: `getRegisteredAgents` is reached only
+   * AFTER the daemon route's existence/capability gate
+   * (`getPublishingConvictionAccountInfo`), so a CALL_EXCEPTION here is a real
+   * read failure (stale binding / RPC), never a "missing account". Surfacing
+   * it lets the route answer 503 — a transient blip must not read as a
+   * confirmed empty list ("no approved wallets"), the same #9 honesty rule as
+   * the strict GAP-3 lookup. A healthy empty read still returns `[]`. The
+   * undeployed / non-positive-id guards are defensive (the route gates both).
+   */
+  async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
+    await this.init();
+    if (!this.contracts.dkgPublishingConvictionNFT) return [];
+    if (accountId <= 0n) return [];
+    const raw: string[] = await this.readContract(
+      this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
+    );
+    return (raw ?? []).map((a) => ethers.getAddress(a));
+  }
+
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    await this.init();
+    const nft = this.contracts.dkgPublishingConvictionNFT;
+    if (!nft) throw new PcaUnavailableError();
+
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+    for (const wallet of wallets) {
+      if (!ethers.isAddress(wallet)) continue;
+
+      const balance = BigInt(await this.readContract(
+        nft, 'pcaNFT.balanceOf', 'balanceOf', wallet,
+      ));
+      for (let index = 0n; index < balance; index++) {
+        const tokenId = BigInt(await this.readContract(
+          nft, 'pcaNFT.tokenOfOwnerByIndex', 'tokenOfOwnerByIndex', wallet, index,
+        ));
+        owned.add(tokenId);
+      }
+
+      const accountId = await this.getConvictionAgentAccountId(wallet, { strict: true });
+      if (accountId > 0n) agent.add(accountId);
+    }
+
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const isOwned = owned.has(accountId);
+      const isAgent = agent.has(accountId);
+      return { accountId, relation: isOwned && isAgent ? 'both' : isOwned ? 'owned' : 'agent' };
+    });
+  }
+
+  private static readonly DESIGNATABLE_NODES_TTL_MS = 30_000;
+  private cachedDesignatableNodes: { value: ShardingTableNode[]; cachedAt: number } | undefined;
+
+  async listDesignatableNodes(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    const now = Date.now();
+    const cached = this.cachedDesignatableNodes;
+    if (!opts?.fresh && cached && now - cached.cachedAt < ConvictionMethods.DESIGNATABLE_NODES_TTL_MS) {
+      return cached.value;
+    }
+
+    await this.init();
+    const shardingTable = await this.resolveContract('ShardingTable');
+    const raw = await this.readContractWith<readonly RawShardingTableNode[]>(
+      shardingTable,
+      'shardingTable.getShardingTable',
+      (contract) => contract.getFunction('getShardingTable()').staticCall(),
+    );
+    const nodes: ShardingTableNode[] = [];
+    for (const item of raw ?? []) {
+      const node = toShardingTableNode(item);
+      if (node.identityId <= 0n) continue;
+      nodes.push(node);
+    }
+    this.cachedDesignatableNodes = { value: nodes, cachedAt: now };
+    return nodes;
+  }
+
+  /**
+   * Browser bootstrap (sub-PR #2 HW signing) — the minimal resolved contract
+   * addresses + chain params the in-browser viem layer needs to submit
+   * owner-actions direct-to-contract, in ONE call (no in-browser Hub
+   * resolution, H2). Returns `{ nft, token, chainId, rpcUrls }`:
+   *   - `nft` = DKGPublishingConvictionNFT (wrapper) — every wallet-signed write
+   *     (create/topUp/registerAgent/deregisterAgent) targets it, and it's the
+   *     ERC721Enumerable + mint-Transfer source for discovery/accountId parse.
+   *   - `token` = the TRAC ERC-20 the approve pre-step allows the wrapper to pull.
+   * Both EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
+   * `base:84532` form — the FE extracts the numeric tail for viem's Chain.id).
+   * `rpcUrls` contains only configured wallet-public endpoints. The daemon route
+   * replaces it with same-origin `/api/pca/rpc` for node-UI browser reads so
+   * configured operator RPC URLs/API keys never leave the node process.
+   * Undeployed NFT/token → PcaUnavailableError (route → 503), the same
+   * capability signal as the other PCA reads. NO Hub/logic/ShardingTable — no
+   * browser owner-action touches them.
+   */
+  async getPublishingConvictionContracts(): Promise<PcaContracts> {
+    await this.init();
+    const nft = this.requireConvictionNFT();
+    const token = this.contracts.token;
+    if (!token) throw new PcaUnavailableError();
+    return {
+      nft: ethers.getAddress(await nft.getAddress()),
+      token: ethers.getAddress(await token.getAddress()),
+      chainId: this.chainId,
+      rpcUrls: [...this.walletRpcUrls],
+      walletRpcUrls: [...this.walletRpcUrls],
+    };
+  }
+
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    await this.init();
+    return this.readProvider(`pca rpc ${method}`, (provider) => provider.send(method, params));
   }
 }
