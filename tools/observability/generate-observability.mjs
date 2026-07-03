@@ -23,31 +23,19 @@ import { buildDashboards } from './lib/dashboards.mjs';
 import { buildAlerts } from './lib/alerts.mjs';
 import { buildDocs } from './lib/docs.mjs';
 import { promNodeProfile } from './lib/profile.mjs';
+import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
 
-// Strict CLI boundary: one optional positional (outDir) + two value flags.
-// Fail loudly on unknown flags, missing flag values, or flag values that look
-// like flags — a typoed command must not silently render a malformed payload.
+// CLI boundary shared with verify-profile-render.mjs (lib/cli.mjs): unknown
+// flags, missing/flag-shaped values and extra positionals fail loudly with
+// usage — a typoed command must not silently render a malformed payload.
 const usage = 'usage: node generate-observability.mjs [outDir] [--vm-uid <uid>] [--loki-uid <uid>] [--prom-node-label <label>] [--check]';
-const VALUE_FLAGS = ['--vm-uid', '--loki-uid', '--prom-node-label'];
-const opts = { outDir: null, '--check': false };
-const args = process.argv.slice(2);
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (VALUE_FLAGS.includes(a)) {
-    const v = args[++i];
-    if (v === undefined || v.startsWith('--')) { console.error(`${a} requires a value\n${usage}`); process.exit(1); }
-    opts[a] = v;
-  } else if (a === '--check') {
-    opts['--check'] = true;
-  } else if (a.startsWith('--')) {
-    console.error(`unknown flag ${a}\n${usage}`); process.exit(1);
-  } else if (opts.outDir === null) {
-    opts.outDir = a;
-  } else {
-    console.error(`unexpected extra argument ${a}\n${usage}`); process.exit(1);
-  }
-}
-const outDir = opts.outDir ?? path.dirname(fileURLToPath(import.meta.url));
+const opts = parseCliArgs({
+  argv: process.argv.slice(2),
+  usage,
+  valueFlags: ['--vm-uid', '--loki-uid', '--prom-node-label'],
+  boolFlags: ['--check'],
+});
+const outDir = opts.positional ?? path.dirname(fileURLToPath(import.meta.url));
 const VM_UID = opts['--vm-uid'] ?? '<VM_DATASOURCE_UID>';
 const LOKI_UID = opts['--loki-uid'] ?? 'loki';
 // Node-identity profile for the PROMETHEUS backend: which label carries the
@@ -59,9 +47,7 @@ const LOKI_UID = opts['--loki-uid'] ?? 'loki';
 // (Loki's node label is service_instance_id and Tempo's is
 // resource.service.instance.id — fixed by our own pipeline, not profiled.)
 const PROM_NODE_LABEL = opts['--prom-node-label'] ?? 'instance';
-if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(PROM_NODE_LABEL)) {
-  console.error(`--prom-node-label must be a valid Prometheus label name, got: ${PROM_NODE_LABEL}\n${usage}`); process.exit(1);
-}
+assertPromLabel(PROM_NODE_LABEL, usage);
 const nodeProfile = promNodeProfile(PROM_NODE_LABEL);
 
 

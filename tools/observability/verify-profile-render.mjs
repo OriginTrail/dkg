@@ -26,33 +26,20 @@
 // All violations are collected and reported together; any violation exits 1.
 import fs from 'node:fs';
 import path from 'node:path';
+import { assertPromLabel, parseCliArgs } from './lib/cli.mjs';
 
 const usage = 'usage: node verify-profile-render.mjs <dir> --prom-node-label <label> [--vm-uid <uid>] [--loki-uid <uid>]';
-const VALUE_FLAGS = ['--prom-node-label', '--vm-uid', '--loki-uid'];
-const opts = { dir: null };
-const args = process.argv.slice(2);
-for (let i = 0; i < args.length; i++) {
-  const a = args[i];
-  if (VALUE_FLAGS.includes(a)) {
-    const v = args[++i];
-    if (v === undefined || v.startsWith('--')) { console.error(`${a} requires a value\n${usage}`); process.exit(1); }
-    opts[a] = v;
-  } else if (a.startsWith('--')) {
-    console.error(`unknown flag ${a}\n${usage}`); process.exit(1);
-  } else if (opts.dir === null) {
-    opts.dir = a;
-  } else {
-    console.error(`unexpected extra argument ${a}\n${usage}`); process.exit(1);
-  }
-}
-if (!opts.dir || !opts['--prom-node-label']) { console.error(usage); process.exit(1); }
-const DIR = opts.dir;
+const opts = parseCliArgs({
+  argv: process.argv.slice(2),
+  usage,
+  valueFlags: ['--prom-node-label', '--vm-uid', '--loki-uid'],
+});
+if (!opts.positional || !opts['--prom-node-label']) { console.error(usage); process.exit(1); }
+const DIR = opts.positional;
 const LABEL = opts['--prom-node-label'];
-// mirror the generator's label validation so a malformed label is a usage
-// error here too, not a raw RegExp SyntaxError from a detector below
-if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(LABEL)) {
-  console.error(`--prom-node-label must be a valid Prometheus label name, got: ${LABEL}\n${usage}`); process.exit(1);
-}
+// shared validation (lib/cli.mjs): a malformed label is a usage error here
+// too, not a raw RegExp SyntaxError from a detector below
+assertPromLabel(LABEL, usage);
 const VM_UID = opts['--vm-uid'] ?? '<VM_DATASOURCE_UID>';
 const LOKI_UID = opts['--loki-uid'] ?? 'loki';
 const DEFAULT_LABEL = 'instance';
@@ -173,6 +160,36 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   // alerting surface must EXIST, not merely be well-formed where present
   if ((payload.rules ?? []).length < 1) fail(alertsFile, 'no alert rules — expected the DKG alert catalog');
   if ((payload.contactPoints ?? []).length < 3) fail(alertsFile, `expected 3 signal contact points, got ${(payload.contactPoints ?? []).length}`);
+  // ── golden inventory tripwire ─────────────────────────────────────────────
+  // DELIBERATELY duplicated from the alert catalog: the generated-artifact
+  // check proves the files came from the generator, but not that the
+  // generator still ships the production alert coverage — a rule deleted from
+  // the catalog regenerates matching JSON and sails through every other
+  // check. Removing/adding a rule now requires consciously editing this list
+  // in the same PR, which is exactly the review speed bump it exists to be.
+  const EXPECTED_RULE_STEMS = [
+    'Node silent',
+    'Fleet blackout',
+    'Error spike',
+    'Warn spike',
+    'RPC credit burn spike',
+    'Log pipeline export failing',
+    'Collector exporter queue',
+    'Publish failures',
+    'Chain RPC failover exhausted',
+    'Errored spans rate',
+  ];
+  for (const stem of EXPECTED_RULE_STEMS) {
+    const n = (payload.rules ?? []).filter((r) => (r.title ?? '').startsWith(stem)).length;
+    if (n !== 1) fail(alertsFile, `golden inventory: expected exactly 1 rule titled "${stem}…", found ${n}`);
+  }
+  if ((payload.rules ?? []).length !== EXPECTED_RULE_STEMS.length) {
+    fail(alertsFile, `golden inventory: expected ${EXPECTED_RULE_STEMS.length} rules, payload has ${(payload.rules ?? []).length} — update EXPECTED_RULE_STEMS consciously when the catalog changes`);
+  }
+  const EXPECTED_CONTACT_POINTS = ['logs', 'metrics', 'traces'].map((sig) => `DKG node ${sig} (Slack)`);
+  for (const name of EXPECTED_CONTACT_POINTS) {
+    if (!(payload.contactPoints ?? []).some((cp) => cp.name === name)) fail(alertsFile, `golden inventory: contact point "${name}" missing`);
+  }
   let perNodeDkgRules = 0;
   for (const rule of payload.rules ?? []) {
     const where = `rule "${rule.title}"`;
@@ -210,6 +227,7 @@ const dkgSelectorViolations = (rawExpr, rawNodeFilter) => {
   const logsRoute = routeFor('logs');
   if (!logsRoute) fail(alertsFile, 'no logs policy route');
   else if (!(logsRoute.group_by ?? []).includes('service_instance_id')) fail(alertsFile, `logs route group_by ${JSON.stringify(logsRoute.group_by)} lacks service_instance_id`);
+  if (!routeFor('traces')) fail(alertsFile, 'no traces policy route');
   for (const cp of payload.contactPoints ?? []) {
     const url = cp.settings?.url ?? '';
     if (!/^<SLACK_WEBHOOK_[A-Z_]+>$/.test(url)) fail(`contact point "${cp.name}"`, `settings.url must be a <SLACK_WEBHOOK_*> placeholder, got: ${url}`);

@@ -17,7 +17,7 @@ const lokiVarVisible = { name: 'loki', type: 'datasource', query: 'loki', label:
 // the metrics dashboard, and vice versa). allowCustomValue is the escape
 // hatch while a signal has no data yet.
 const nodeIdentity = (nodeProfile) => ({
-  logs: { datasource: LOKI, query: 'label_values(service_instance_id)' },
+  logs: { datasource: LOKI, query: 'label_values({service_name="dkg-node"}, service_instance_id)' },
   metrics: { datasource: VM, query: nodeProfile.labelValuesQuery },
   traces: { datasource: TEMPO, query: { refId: 'TempoDatasourceVariableQuery', type: 1, label: 'resource.service.instance.id' } },
 });
@@ -109,7 +109,10 @@ const buildFleetLogsDashboard = () => ({
   ]),
 });
 
-const NB = '{service_instance_id="$node"}';
+// Per-node selector scoped to DKG node streams: service_instance_id is a
+// resource identity, not a service guarantee — on a shared Loki another
+// service could reuse the same instance id.
+const NB = '{service_name="dkg-node", service_instance_id="$node"}';
 const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
   uid: 'dkg-node-logs', title: 'DKG Node — Logs', timezone: 'browser', refresh: '30s',
   time: { from: 'now-1h', to: 'now' }, tags: ['dkg', 'logs'], links: dashLinks,

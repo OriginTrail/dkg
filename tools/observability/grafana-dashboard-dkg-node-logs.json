@@ -40,7 +40,7 @@
           "type": "loki",
           "uid": "${loki}"
         },
-        "query": "label_values(service_instance_id)",
+        "query": "label_values({service_name=\"dkg-node\"}, service_instance_id)",
         "refresh": 2,
         "current": {}
       },
@@ -100,7 +100,7 @@
             "uid": "${loki}"
           },
           "refId": "A",
-          "expr": "{service_instance_id=\"$node\"} | severity_text=~`${level:regex}` |~ `(?i)$search`"
+          "expr": "{service_name=\"dkg-node\", service_instance_id=\"$node\"} | severity_text=~`${level:regex}` |~ `(?i)$search`"
         }
       ]
     },
@@ -130,7 +130,7 @@
             "uid": "${loki}"
           },
           "refId": "A",
-          "expr": "sum by (severity_text) (count_over_time({service_instance_id=\"$node\"} | severity_text=~`${level:regex}` |~ `(?i)$search` [$__auto]))",
+          "expr": "sum by (severity_text) (count_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} | severity_text=~`${level:regex}` |~ `(?i)$search` [$__auto]))",
           "legendFormat": "{{severity_text}}"
         }
       ]
@@ -161,7 +161,7 @@
             "uid": "${loki}"
           },
           "refId": "A",
-          "expr": "sum by (method) (sum_over_time({service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))",
+          "expr": "sum by (method) (sum_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))",
           "legendFormat": "{{method}}"
         }
       ]
@@ -201,7 +201,7 @@
             "uid": "${loki}"
           },
           "refId": "A",
-          "expr": "sum(sum_over_time({service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))"
+          "expr": "sum(sum_over_time({service_name=\"dkg-node\", service_instance_id=\"$node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [$__auto]))"
         }
       ]
     }
