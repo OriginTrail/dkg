@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractBearerToken, verifyToken } from "../auth.js";
+import type { RequestAuthPrincipal } from "../auth.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "./http-utils.js";
 
 export const DASHBOARD_SESSION_COOKIE = "dkg_ui_session";
@@ -8,7 +9,8 @@ const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 const MAX_COOKIE_AGE_SECONDS = Math.floor(DEFAULT_SESSION_TTL_MS / 1000);
 
 export interface DashboardSessionRecord {
-  token: string;
+  compatToken: string;
+  principal: RequestAuthPrincipal;
   csrfToken: string;
   source: "loopback" | "exchange";
   issuedAt: number;
@@ -18,7 +20,8 @@ export interface DashboardSessionRecord {
 
 export interface AuthenticatedDashboardSession {
   sessionId: string;
-  token: string;
+  compatToken: string;
+  principal: RequestAuthPrincipal;
   csrfToken: string;
   source: DashboardSessionRecord["source"];
   expiresAt: number;
@@ -27,14 +30,20 @@ export interface AuthenticatedDashboardSession {
 export class DashboardSessionStore {
   private sessions = new Map<string, DashboardSessionRecord>();
 
-  create(token: string, source: DashboardSessionRecord["source"], now = Date.now()): {
+  create(
+    compatToken: string,
+    source: DashboardSessionRecord["source"],
+    principal: RequestAuthPrincipal,
+    now = Date.now(),
+  ): {
     sessionId: string;
     record: DashboardSessionRecord;
   } {
     this.prune(now);
     const sessionId = randomBytes(32).toString("base64url");
     const record: DashboardSessionRecord = {
-      token,
+      compatToken,
+      principal,
       csrfToken: randomBytes(32).toString("base64url"),
       source,
       issuedAt: now,
@@ -54,7 +63,8 @@ export class DashboardSessionStore {
     record.lastUsedAt = now;
     return {
       sessionId,
-      token: record.token,
+      compatToken: record.compatToken,
+      principal: record.principal,
       csrfToken: record.csrfToken,
       source: record.source,
       expiresAt: record.expiresAt,
@@ -77,6 +87,7 @@ export interface DashboardSessionHandlerOptions {
   authEnabled: boolean;
   validTokens: Set<string>;
   loopbackToken?: string;
+  resolvePrincipal: (token: string) => RequestAuthPrincipal;
   corsOrigin?: string | null;
 }
 
@@ -97,7 +108,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 200, { authenticated: true, authDisabled: true }, options.corsOrigin);
       return true;
     }
-    if (!session || !verifyToken(session.token, options.validTokens)) {
+    if (!session || !verifyToken(session.compatToken, options.validTokens)) {
       jsonResponse(res, 200, { authenticated: false }, options.corsOrigin);
       return true;
     }
@@ -106,7 +117,7 @@ export async function handleDashboardSessionRequest(
   }
 
   if (req.method === "GET" && path === "/api/dashboard/session/csrf") {
-    if (!session || !verifyToken(session.token, options.validTokens)) {
+    if (!session || !verifyToken(session.compatToken, options.validTokens)) {
       jsonResponse(res, 401, { error: "Dashboard session required" }, options.corsOrigin);
       return true;
     }
@@ -127,7 +138,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 503, { error: "No valid dashboard bootstrap token is available" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(options.loopbackToken, "loopback");
+    const created = store.create(options.loopbackToken, "loopback", options.resolvePrincipal(options.loopbackToken));
     setSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
@@ -154,7 +165,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 401, { error: "Invalid dashboard session token" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(token!, "exchange");
+    const created = store.create(token!, "exchange", options.resolvePrincipal(token!));
     setSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,

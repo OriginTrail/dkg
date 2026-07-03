@@ -1,19 +1,20 @@
-import { apiFetch } from './dashboardSessionClient.js';
+import { daemonFetch as apiFetch } from './dashboardSessionClient.js';
 
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 
 export {
-  apiFetch,
-  authHeaders,
+  daemonFetch,
+  daemonFetch as apiFetch,
   dashboardSessionAuthKey,
   ensureDashboardSession,
   exchangeDashboardSession,
   getDashboardSession,
   isDashboardSessionReady,
   subscribeDashboardSession,
-  __setDashboardSessionForTesting,
+  withDashboardSessionCredentials,
+  type DaemonPath,
   type DashboardSessionStatus,
 } from './dashboardSessionClient.js';
 

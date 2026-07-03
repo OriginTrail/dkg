@@ -4,17 +4,12 @@ import { describe, expect, it, afterEach, vi } from 'vitest';
 
 import { numericChainId, chainIdHex } from '../src/ui/web3/chainId.js';
 import { synthesizeChain, publicClientFor, _resetClientCacheForTesting } from '../src/ui/web3/clients.js';
-import { __setDashboardSessionForTesting } from '../src/ui/api.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   _resetClientCacheForTesting();
-  __setDashboardSessionForTesting({
-    authenticated: true,
-    source: 'test',
-    csrfToken: 'csrf-test',
-    expiresAt: Number.MAX_SAFE_INTEGER,
-  });
+  resetDashboardSession();
 });
 
 describe('chainId helpers', () => {
@@ -74,9 +69,7 @@ describe('publicClientFor', () => {
   it('can read through a same-origin relative PCA RPC URL in the browser', async () => {
     const seenUrls: string[] = [];
     const seenInits: Array<RequestInit | undefined> = [];
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
+    useAuthenticatedDashboardSession({
       csrfToken: 'csrf-123',
       expiresAt: Date.now() + 60_000,
     });
@@ -103,9 +96,7 @@ describe('publicClientFor', () => {
 
   it('uses the current CSRF token for each same-origin RPC request on a cached client', async () => {
     const seenHeaders: Array<HeadersInit | undefined> = [];
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
+    useAuthenticatedDashboardSession({
       csrfToken: 'csrf-old',
       expiresAt: Date.now() + 60_000,
     });
@@ -137,9 +128,7 @@ describe('publicClientFor', () => {
     await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
     expect(headerValue(seenHeaders[0], 'X-DKG-CSRF')).toBe('csrf-old');
 
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
+    useAuthenticatedDashboardSession({
       csrfToken: 'csrf-old',
       expiresAt: Date.now() - 1,
     });

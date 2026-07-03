@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import {
   fileUrl,
-  authHeaders,
+  withDashboardSessionCredentials,
   fetchStatus,
   fetchAgents,
   fetchMetrics,
@@ -44,8 +44,8 @@ import {
   SwmSubsetNotSealableError,
   partialPublishWarning,
   knowledgeAssetFinalize,
-  __setDashboardSessionForTesting,
 } from '../src/ui/api.js';
+import { useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 let server: Server;
 let baseUrl: string;
@@ -174,12 +174,7 @@ describe('UI API tests', () => {
     requestLog.length = 0;
     queryBindings = [];
     responseOverrides = [];
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
-      csrfToken: 'csrf-test',
-      expiresAt: Date.now() + 60_000,
-    });
+    useAuthenticatedDashboardSession({ expiresAt: Date.now() + 60_000 });
   });
 
   describe('fileUrl', () => {
@@ -212,10 +207,11 @@ describe('UI API tests', () => {
     });
   });
 
-  describe('authHeaders', () => {
-    it('returns dashboard CSRF header when a session is active', () => {
-      const headers = authHeaders();
-      expect(headers).toEqual({ 'X-DKG-CSRF': 'csrf-test' });
+  describe('withDashboardSessionCredentials', () => {
+    it('attaches dashboard CSRF credentials when a session is active', () => {
+      const init = withDashboardSessionCredentials();
+      expect(init.credentials).toBe('same-origin');
+      expect(init.headers).toEqual({ 'X-DKG-CSRF': 'csrf-test' });
     });
   });
 

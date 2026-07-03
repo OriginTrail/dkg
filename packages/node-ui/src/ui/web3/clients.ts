@@ -18,7 +18,7 @@ import {
   type WalletClient,
 } from 'viem';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
-import { authHeaders, ensureDashboardSession, mergeHeaders } from '../dashboardSessionClient.js';
+import { ensureDashboardSession, withDashboardSessionCredentials } from '../dashboardSessionClient.js';
 import { numericChainId } from './chainId.js';
 import type { Eip1193Provider } from './eip6963.js';
 
@@ -64,11 +64,7 @@ function rpcFetchOptions(url: string): RequestInit | undefined {
 
 async function rpcOnFetchRequest(_request: Request, init: RequestInit): Promise<RequestInit> {
   await ensureDashboardSession();
-  return {
-    ...init,
-    credentials: init.credentials ?? 'same-origin',
-    headers: mergeHeaders(init.headers, authHeaders()),
-  };
+  return withDashboardSessionCredentials(init);
 }
 
 /**

@@ -6,16 +6,9 @@ export type DashboardSessionStatus = {
   expiresAt?: number;
 };
 
-const TEST_DASHBOARD_SESSION: DashboardSessionStatus = {
-  authenticated: true,
-  source: 'test',
-  csrfToken: 'csrf-test',
-  expiresAt: Number.MAX_SAFE_INTEGER,
-};
+export type DaemonPath = `/${string}`;
 
-let dashboardSession: DashboardSessionStatus = import.meta.env.MODE === 'test'
-  ? TEST_DASHBOARD_SESSION
-  : { authenticated: false };
+let dashboardSession: DashboardSessionStatus = { authenticated: false };
 let dashboardSessionPromise: Promise<DashboardSessionStatus> | null = null;
 
 const sessionListeners = new Set<() => void>();
@@ -69,17 +62,12 @@ export function isDashboardSessionReady(session = dashboardSession): boolean {
   return session.authenticated === true || session.authDisabled === true;
 }
 
-export function authHeaders(): Record<string, string> {
-  if (dashboardSession.csrfToken) return { 'X-DKG-CSRF': dashboardSession.csrfToken };
-  return {};
-}
-
 export function dashboardSessionAuthKey(): string {
   if (!isDashboardSessionReady()) return '';
   return `${dashboardSession.source ?? 'session'}:${dashboardSession.expiresAt ?? 0}`;
 }
 
-export function __setDashboardSessionForTesting(session: DashboardSessionStatus): void {
+export function setDashboardSessionForTesting(session: DashboardSessionStatus): void {
   dashboardSessionPromise = null;
   setDashboardSession(session);
 }
@@ -131,7 +119,12 @@ export async function exchangeDashboardSession(token: string): Promise<Dashboard
   return setDashboardSession(body as DashboardSessionStatus);
 }
 
-export function mergeHeaders(base?: HeadersInit, extra: Record<string, string> = {}): Record<string, string> {
+function dashboardSessionHeaders(): Record<string, string> {
+  if (dashboardSession.csrfToken) return { 'X-DKG-CSRF': dashboardSession.csrfToken };
+  return {};
+}
+
+function mergeHeaders(base?: HeadersInit, extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = {};
   if (base instanceof Headers) {
     base.forEach((value, key) => {
@@ -145,13 +138,25 @@ export function mergeHeaders(base?: HeadersInit, extra: Record<string, string> =
   return { ...headers, ...extra };
 }
 
-export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const sessionBeforeRequest = await ensureDashboardSession();
-  const withSession = () => fetch(input, {
+function assertDaemonPath(input: string): DaemonPath {
+  if (!input.startsWith('/') || input.startsWith('//')) {
+    throw new Error('daemonFetch only accepts same-origin daemon paths');
+  }
+  return input as DaemonPath;
+}
+
+export function withDashboardSessionCredentials(init: RequestInit = {}): RequestInit {
+  return {
     ...init,
     credentials: init.credentials ?? 'same-origin',
-    headers: mergeHeaders(init.headers, authHeaders()),
-  });
+    headers: mergeHeaders(init.headers, dashboardSessionHeaders()),
+  };
+}
+
+export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const path = assertDaemonPath(input);
+  const sessionBeforeRequest = await ensureDashboardSession();
+  const withSession = () => fetch(path, withDashboardSessionCredentials(init));
 
   const res = await withSession();
   if (res.status !== 401 || !isDashboardSessionReady(sessionBeforeRequest)) return res;
@@ -161,3 +166,5 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
   if (!isDashboardSessionReady(refreshed)) return res;
   return withSession();
 }
+
+export const apiFetch = daemonFetch;

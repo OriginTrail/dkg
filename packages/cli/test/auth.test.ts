@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import {
   extractBearerToken,
   httpAuthGuard,
   loadTokens,
+  resolveRequestAuthDecision,
 } from '../src/auth.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,71 @@ describe('verifyToken', () => {
 
   it('returns false for empty string', () => {
     expect(verifyToken('', tokens)).toBe(false);
+  });
+});
+
+describe('resolveRequestAuthDecision', () => {
+  const VALID_TOKEN = 'decision-token';
+  const validTokens = new Set([VALID_TOKEN]);
+
+  function request(
+    url: string,
+    options: { method?: string; headers?: IncomingMessage['headers'] } = {},
+  ): IncomingMessage {
+    return {
+      url,
+      method: options.method ?? 'GET',
+      headers: {
+        host: '127.0.0.1:8900',
+        ...(options.headers ?? {}),
+      },
+    } as IncomingMessage;
+  }
+
+  it('returns an authorization-header context for a valid bearer credential', () => {
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
+      validTokens,
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+      context: {
+        source: 'authorization-header',
+        token: VALID_TOKEN,
+        csrf: { required: false, validated: false },
+      },
+    });
+  });
+
+  it('does not fall back to dashboard-cookie auth after an invalid explicit bearer attempt', () => {
+    const authenticate = vi.fn(() => ({
+      compatToken: VALID_TOKEN,
+      principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+      csrfToken: 'csrf',
+      source: 'loopback' as const,
+      expiresAt: Date.now() + 60_000,
+    }));
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', {
+        headers: {
+          authorization: 'Bearer wrong-token',
+          cookie: 'dkg_ui_session=present',
+        },
+      }),
+      validTokens,
+      {
+        dashboardSession: {
+          authenticate,
+          verifyCsrf: () => true,
+        },
+      },
+    );
+
+    expect(decision).toBeNull();
+    expect(authenticate).not.toHaveBeenCalled();
   });
 });
 

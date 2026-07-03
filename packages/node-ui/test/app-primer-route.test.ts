@@ -19,8 +19,8 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 }));
 
 vi.mock('../src/ui/api.js', () => ({
-  authHeaders: () => ({}),
   fileUrl: () => '',
+  withDashboardSessionCredentials: (init?: RequestInit) => init ?? {},
 }));
 
 vi.mock('../src/ui/components/Shell/Header.js', () => ({

@@ -156,6 +156,14 @@ async function installMockApis(page: Page) {
     if (path === MOCK_RPC_PATH) {
       return handleMockRpc(route);
     }
+    if (path === '/api/dashboard/session/status' || path === '/api/dashboard/session/loopback') {
+      return fulfillJson(route, 200, {
+        authenticated: true,
+        source: 'test',
+        csrfToken: 'csrf-test',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+      });
+    }
     if (path === '/api/status') {
       return fulfillJson(route, 200, {
         name: 'Mock PCA Core',

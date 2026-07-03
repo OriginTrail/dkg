@@ -2875,6 +2875,16 @@ export async function runDaemonInner(
     log("API authentication disabled (auth.enabled = false)");
   }
   const dashboardSessions = new DashboardSessionStore();
+  const resolveDashboardPrincipal = (token: string) => {
+    const agentAddress = agent.resolveAgentAddress(token);
+    return {
+      kind: agent.resolveAgentByToken(token) ? "agent" as const : "node-admin" as const,
+      agentAddress,
+    };
+  };
+  const dashboardLoopbackToken =
+    Array.from(validTokens).find((token) => !agent.resolveAgentByToken(token))
+    ?? (validTokens.values().next().value as string | undefined);
 
   // Trusted server-side port binding used downstream (SSRF defence in
   // manifestSelfClient; passed to handleRequest + route modules).
@@ -3054,7 +3064,8 @@ export async function runDaemonInner(
           {
             authEnabled,
             validTokens,
-            loopbackToken: validTokens.size > 0 ? validTokens.values().next().value as string : undefined,
+            loopbackToken: dashboardLoopbackToken,
+            resolvePrincipal: resolveDashboardPrincipal,
             corsOrigin: reqCorsOrigin,
           },
         );

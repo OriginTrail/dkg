@@ -1,10 +1,8 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  apiFetch,
-  __setDashboardSessionForTesting,
-} from '../src/ui/dashboardSessionClient.js';
+import { apiFetch } from '../src/ui/dashboardSessionClient.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 function headerValue(headers: HeadersInit | undefined, name: string): string | undefined {
   if (!headers) return undefined;
@@ -19,19 +17,23 @@ function headerValue(headers: HeadersInit | undefined, name: string): string | u
 describe('dashboard session client', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
-      csrfToken: 'csrf-test',
-      expiresAt: Number.MAX_SAFE_INTEGER,
-    });
+    resetDashboardSession();
+  });
+
+  it('rejects absolute cross-origin inputs before bootstrapping credentials', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(apiFetch('https://example.invalid/rpc')).rejects.toThrow(
+      'daemonFetch only accepts same-origin daemon paths',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('refreshes a stale browser session and retries once after a protected API 401', async () => {
     const calls: Array<{ url: string; method: string; headers?: HeadersInit }> = [];
     let protectedCalls = 0;
-    __setDashboardSessionForTesting({
-      authenticated: true,
+    useAuthenticatedDashboardSession({
       source: 'loopback',
       csrfToken: 'csrf-old',
       expiresAt: Date.now() + 60_000,

@@ -13,8 +13,14 @@ import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dkgDir } from './config.js';
 
+export type RequestAuthPrincipal = {
+  kind: 'agent' | 'node-admin';
+  agentAddress: string;
+};
+
 export interface DashboardSessionAuthResult {
-  token: string;
+  compatToken: string;
+  principal: RequestAuthPrincipal;
   csrfToken: string;
   source?: 'loopback' | 'exchange';
   expiresAt?: number;
@@ -29,7 +35,9 @@ export interface HttpAuthGuardOptions {
 
 export interface RequestAuthContext {
   source: 'authorization-header' | 'events-query' | 'dashboard-session';
-  token: string;
+  token?: string;
+  compatToken?: string;
+  principal?: RequestAuthPrincipal;
   csrf: {
     required: boolean;
     validated: boolean;
@@ -800,6 +808,142 @@ function isPublicPath(method: string, pathname: string): boolean {
   return false;
 }
 
+export type RequestAuthDecision =
+  | { ok: true; context: RequestAuthContext; credentialToken: string }
+  | { ok: false; status: 403; error: string };
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function isUnsafeHttpMethod(method: string | undefined): boolean {
+  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+}
+
+function parseOrigin(value: string | undefined): string | undefined {
+  if (!value || value === '*') return undefined;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const host = firstHeaderValue(req.headers.host);
+  if (!host) return undefined;
+  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto'])
+    ?.split(',')[0]
+    ?.trim()
+    ?.toLowerCase();
+  const proto = forwardedProto === 'https' ? 'https' : 'http';
+  return parseOrigin(`${proto}://${host}`);
+}
+
+function trustedDashboardOrigins(req: IncomingMessage, corsOrigin?: string | null): Set<string> {
+  const origins = new Set<string>();
+  const ownOrigin = requestOrigin(req);
+  if (ownOrigin) origins.add(ownOrigin);
+  const allowedCorsOrigin = parseOrigin(corsOrigin ?? undefined);
+  if (allowedCorsOrigin) origins.add(allowedCorsOrigin);
+  return origins;
+}
+
+function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | null): boolean {
+  const fetchSite = firstHeaderValue(req.headers['sec-fetch-site'])?.toLowerCase();
+  if (fetchSite === 'cross-site') return false;
+
+  const allowed = trustedDashboardOrigins(req, corsOrigin);
+  const originHeader = firstHeaderValue(req.headers.origin);
+  if (originHeader && !allowed.has(parseOrigin(originHeader) ?? '')) return false;
+
+  const refererHeader = firstHeaderValue(req.headers.referer);
+  if (refererHeader && !allowed.has(parseOrigin(refererHeader) ?? '')) return false;
+
+  return true;
+}
+
+export function resolveRequestAuthDecision(
+  req: IncomingMessage,
+  validTokens: Set<string>,
+  options?: HttpAuthGuardOptions,
+  corsOrigin?: string | null,
+): RequestAuthDecision | null {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const pathname = url.pathname;
+  const token = extractBearerToken(req.headers.authorization);
+
+  if (token && verifyToken(token, validTokens)) {
+    return {
+      ok: true,
+      credentialToken: token,
+      context: {
+        source: 'authorization-header',
+        token,
+        csrf: { required: false, validated: false },
+      },
+    };
+  }
+
+  const hasEventsQueryToken = pathname === '/api/events' && url.searchParams.has('token');
+  if (hasEventsQueryToken) {
+    const queryToken = url.searchParams.get('token') ?? undefined;
+    if (queryToken && verifyToken(queryToken, validTokens)) {
+      return {
+        ok: true,
+        credentialToken: queryToken,
+        context: {
+          source: 'events-query',
+          token: queryToken,
+          csrf: { required: false, validated: false },
+        },
+      };
+    }
+  }
+
+  const explicitAuthAttempt = Boolean(token) || hasEventsQueryToken;
+  if (explicitAuthAttempt || !options?.dashboardSession) return null;
+
+  const session = options.dashboardSession.authenticate(req);
+  if (!session || !verifyToken(session.compatToken, validTokens)) return null;
+
+  const unsafe = isUnsafeHttpMethod(req.method);
+  const csrfValidated = unsafe ? options.dashboardSession.verifyCsrf(req, session) : false;
+  if (unsafe && !csrfValidated) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Invalid or missing dashboard CSRF token',
+    };
+  }
+  if (unsafe && !hasTrustedDashboardOrigin(req, corsOrigin)) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Untrusted dashboard request origin',
+    };
+  }
+
+  return {
+    ok: true,
+    credentialToken: session.compatToken,
+    context: {
+      source: 'dashboard-session',
+      compatToken: session.compatToken,
+      principal: session.principal,
+      csrf: {
+        required: unsafe,
+        validated: csrfValidated,
+      },
+      dashboardSession: {
+        source: session.source,
+        expiresAt: session.expiresAt,
+      },
+    },
+  };
+}
+
 /**
  * CLI-10 /.
  *
@@ -872,63 +1016,19 @@ export function httpAuthGuard(
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
   if (isPublicPath(req.method ?? '', pathname)) return true;
 
-  const token = extractBearerToken(req.headers.authorization);
-  let acceptedToken: string | undefined;
-  let acceptedAuthSource: RequestAuthContext['source'] | undefined;
-  let acceptedDashboardSession: RequestAuthContext['dashboardSession'] | undefined;
-  let csrfRequired = false;
-  let csrfValidated = false;
-  if (verifyToken(token, validTokens)) {
-    acceptedToken = token;
-    acceptedAuthSource = 'authorization-header';
-  } else if (pathname === '/api/events') {
-    // EventSource can't set headers — accept token as query param, but ONLY
-    // for the SSE endpoint to avoid leaking credentials in URLs/logs/referrers.
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const qsToken = url.searchParams.get('token');
-    if (qsToken && verifyToken(qsToken, validTokens)) {
-      acceptedToken = qsToken;
-      acceptedAuthSource = 'events-query';
-    }
-  }
-
-  const explicitAuthAttempt = Boolean(token) ||
-    (pathname === '/api/events' && new URL(req.url ?? '/', `http://${req.headers.host}`).searchParams.has('token'));
-
-  if (!acceptedToken && !explicitAuthAttempt && options?.dashboardSession) {
-    const session = options.dashboardSession.authenticate(req);
-    if (session && verifyToken(session.token, validTokens)) {
-      const method = req.method ?? 'GET';
-      const unsafe = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
-      csrfRequired = unsafe;
-      csrfValidated = unsafe ? options.dashboardSession.verifyCsrf(req, session) : false;
-      if (unsafe && !csrfValidated) {
-        res.writeHead(403, {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': corsOrigin ?? '*',
-        });
-        res.end(JSON.stringify({ error: 'Invalid or missing dashboard CSRF token' }));
-        return false;
-      }
-      acceptedToken = session.token;
-      acceptedAuthSource = 'dashboard-session';
-      acceptedDashboardSession = {
-        source: session.source,
-        expiresAt: session.expiresAt,
-      };
-    }
-  }
-
-  if (acceptedToken) {
-    setRequestAuthContext(req, {
-      source: acceptedAuthSource ?? 'authorization-header',
-      token: acceptedToken,
-      csrf: {
-        required: csrfRequired,
-        validated: csrfValidated,
-      },
-      ...(acceptedDashboardSession ? { dashboardSession: acceptedDashboardSession } : {}),
+  const authDecision = resolveRequestAuthDecision(req, validTokens, options, corsOrigin);
+  if (authDecision?.ok === false) {
+    res.writeHead(authDecision.status, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': corsOrigin ?? '*',
     });
+    res.end(JSON.stringify({ error: authDecision.error }));
+    return false;
+  }
+
+  if (authDecision?.ok === true) {
+    setRequestAuthContext(req, authDecision.context);
+    const acceptedCredentialToken = authDecision.credentialToken;
 
     const now = Date.now();
 
@@ -1006,7 +1106,7 @@ export function httpAuthGuard(
       // pre-check and the full verifier enforce identical replay
       // semantics.
       pruneNonces(now);
-      const preBodyNonceScope = createHash('sha256').update(acceptedToken).digest('hex');
+      const preBodyNonceScope = createHash('sha256').update(acceptedCredentialToken).digest('hex');
       const preBodyNonceKey = `${preBodyNonceScope}:${nonceHeader}`;
       if (seenNonces.has(preBodyNonceKey)) {
         res.writeHead(401, {
@@ -1022,7 +1122,7 @@ export function httpAuthGuard(
       // buffering the body. The actual HMAC check happens there
       // (or synchronously below for body-less requests).
       (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth = {
-        token: acceptedToken,
+        token: acceptedCredentialToken,
         timestamp: tsHeader,
         nonce: nonceHeader,
         signature: sigHeader,

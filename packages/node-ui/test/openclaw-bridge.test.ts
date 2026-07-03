@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
@@ -418,18 +419,14 @@ describe('OpenClaw bridge behavioral tests', () => {
       setItem: () => {},
       removeItem: () => {},
     };
-    const { __setDashboardSessionForTesting } = await import('../src/ui/api.js');
-    __setDashboardSessionForTesting({
-      authenticated: true,
+    useAuthenticatedDashboardSession({
       csrfToken: 'csrf-openclaw-test',
-      source: 'test',
       expiresAt: Date.now() + 60_000,
     });
   });
 
   afterEach(async () => {
-    const { __setDashboardSessionForTesting } = await import('../src/ui/api.js');
-    __setDashboardSessionForTesting({ authenticated: false });
+    resetDashboardSession();
     delete (globalThis as any).window;
     delete (globalThis as any).localStorage;
   });

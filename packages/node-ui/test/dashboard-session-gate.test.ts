@@ -4,7 +4,8 @@ import React, { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DashboardSessionGate } from '../src/ui/App.js';
-import { apiFetch, __setDashboardSessionForTesting } from '../src/ui/dashboardSessionClient.js';
+import { apiFetch } from '../src/ui/dashboardSessionClient.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,7 +42,7 @@ describe('DashboardSessionGate', () => {
     root = createRoot(container);
     calls.length = 0;
     resolveExchange = undefined;
-    __setDashboardSessionForTesting({ authenticated: false });
+    resetDashboardSession();
     const exchangeResponse = new Promise<Response>((resolve) => {
       resolveExchange = resolve;
     });
@@ -83,12 +84,7 @@ describe('DashboardSessionGate', () => {
     root = null;
     container.remove();
     vi.unstubAllGlobals();
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
-      csrfToken: 'csrf-test',
-      expiresAt: Number.MAX_SAFE_INTEGER,
-    });
+    useAuthenticatedDashboardSession();
   });
 
   it('requires operator token exchange when loopback bootstrap is rejected before protected API calls run', async () => {

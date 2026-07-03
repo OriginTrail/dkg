@@ -8,6 +8,9 @@ import {
 import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
 
 const VALID_TOKEN = 'dashboard-backed-token';
+const AGENT_TOKEN = 'dkg_at_agent-token';
+const DEFAULT_AGENT_ADDRESS = 'did:dkg:agent:default';
+const TOKEN_AGENT_ADDRESS = 'did:dkg:agent:token';
 
 function cookieFrom(res: Response): string {
   const setCookie = res.headers.get('set-cookie');
@@ -16,14 +19,18 @@ function cookieFrom(res: Response): string {
 }
 
 async function startServer(): Promise<{ server: Server; baseUrl: string }> {
-  const validTokens = new Set([VALID_TOKEN]);
+  const validTokens = new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
+  const resolvePrincipal = (token: string) => token === AGENT_TOKEN
+    ? { kind: 'agent' as const, agentAddress: TOKEN_AGENT_ADDRESS }
+    : { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (await handleDashboardSessionRequest(req, res, url, sessions, {
       authEnabled: true,
       validTokens,
       loopbackToken: VALID_TOKEN,
+      resolvePrincipal,
     })) {
       return;
     }
@@ -135,7 +142,8 @@ describe('dashboard browser sessions', () => {
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
-        token: VALID_TOKEN,
+        compatToken: VALID_TOKEN,
+        principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
         dashboardSession: { source: 'loopback' },
         csrf: { required: false, validated: false },
       },
@@ -169,7 +177,34 @@ describe('dashboard browser sessions', () => {
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
-        token: VALID_TOKEN,
+        compatToken: VALID_TOKEN,
+        principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
+        dashboardSession: { source: 'exchange' },
+      },
+    });
+  });
+
+  it('stores a deterministic principal when exchanging an agent-scoped token', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: AGENT_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: cookieFrom(exchange) },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      authorization: null,
+      requestAuth: {
+        source: 'dashboard-session',
+        compatToken: AGENT_TOKEN,
+        principal: { kind: 'agent', agentAddress: TOKEN_AGENT_ADDRESS },
         dashboardSession: { source: 'exchange' },
       },
     });
@@ -211,6 +246,66 @@ describe('dashboard browser sessions', () => {
       headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken },
     });
     expect(res.status).toBe(200);
+  });
+
+  it('allows unsafe session-authenticated requests with same-origin browser metadata', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: started.baseUrl,
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects unsafe session-authenticated requests with valid CSRF but hostile Origin', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: 'https://attacker.example',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
+  });
+
+  it('rejects unsafe session-authenticated requests with valid CSRF but cross-site fetch metadata', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        'Sec-Fetch-Site': 'cross-site',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
   });
 
   it('keeps invalid explicit Authorization from falling back to a valid cookie', async () => {

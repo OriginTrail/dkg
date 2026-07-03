@@ -25,8 +25,8 @@ import {
   pcaTopUp,
   pcaSettle,
   registerContextGraph,
-  __setDashboardSessionForTesting,
 } from '../src/ui/api.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 describe('describePcaError', () => {
   it('returns null for non-HttpError throwables (falls back to err.message)', () => {
@@ -183,9 +183,7 @@ describe('PCA api helpers (transport shaping)', () => {
     originalFetch = globalThis.fetch;
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    __setDashboardSessionForTesting({
-      authenticated: true,
-      source: 'test',
+    useAuthenticatedDashboardSession({
       csrfToken: 'csrf-123',
       expiresAt: Date.now() + 60_000,
     });
@@ -193,7 +191,7 @@ describe('PCA api helpers (transport shaping)', () => {
 
   afterEach(() => {
     if (originalFetch) globalThis.fetch = originalFetch;
-    __setDashboardSessionForTesting({ authenticated: false });
+    resetDashboardSession();
   });
 
   function ok(body: unknown) {
