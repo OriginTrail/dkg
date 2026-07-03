@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { ensureDashboardSession } from '../api.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -65,34 +66,36 @@ export function isMemoryGraphEventRelevant(
 function connect() {
   if (source) return;
 
-  const token = typeof window !== 'undefined' ? (window as any).__DKG_TOKEN__ : undefined;
-  const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
-  source = new EventSource(url);
+  void ensureDashboardSession().finally(() => {
+    if (source || listeners.size === 0) return;
+    const nextSource = new EventSource('/api/events');
+    source = nextSource;
 
-  const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
-    let data: Record<string, unknown> = {};
-    try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
-    const event: NodeEvent = { type, data };
-    for (const fn of listeners) {
-      try { fn(event); } catch { /* never crash listeners */ }
-    }
-  };
+    const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
+      const event: NodeEvent = { type, data };
+      for (const fn of listeners) {
+        try { fn(event); } catch { /* never crash listeners */ }
+      }
+    };
 
-  source.addEventListener('join_request', handleEvent('join_request'));
-  source.addEventListener('join_approved', handleEvent('join_approved'));
-  source.addEventListener('join_rejected', handleEvent('join_rejected'));
-  source.addEventListener('project_synced', handleEvent('project_synced'));
-  source.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
-  source.addEventListener('notification', handleEvent('notification'));
-  source.addEventListener('connected', handleEvent('connected'));
+    nextSource.addEventListener('join_request', handleEvent('join_request'));
+    nextSource.addEventListener('join_approved', handleEvent('join_approved'));
+    nextSource.addEventListener('join_rejected', handleEvent('join_rejected'));
+    nextSource.addEventListener('project_synced', handleEvent('project_synced'));
+    nextSource.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
+    nextSource.addEventListener('notification', handleEvent('notification'));
+    nextSource.addEventListener('connected', handleEvent('connected'));
 
-  source.onerror = () => {
-    source?.close();
-    source = null;
-    if (listeners.size > 0) {
-      reconnectTimer = setTimeout(connect, 3000);
-    }
-  };
+    nextSource.onerror = () => {
+      source?.close();
+      source = null;
+      if (listeners.size > 0) {
+        reconnectTimer = setTimeout(connect, 3000);
+      }
+    };
+  });
 }
 
 function disconnect() {

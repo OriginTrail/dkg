@@ -490,6 +490,23 @@ describe('mock detection request fan-out guard', () => {
   });
 });
 
+describe('dashboard browser auth bootstrap', () => {
+  const api = readFile('api.ts');
+  const wrapper = readFile('api-wrapper.ts');
+  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
+
+  it('does not read or declare the legacy browser bearer token global', () => {
+    expect(api).not.toContain('__DKG_TOKEN__');
+    expect(wrapper).not.toContain('__DKG_TOKEN__');
+    expect(nodeEventsHook).not.toContain('__DKG_TOKEN__');
+  });
+
+  it('opens the browser SSE feed without a token query string', () => {
+    expect(nodeEventsHook).toContain("new EventSource('/api/events')");
+    expect(nodeEventsHook).not.toContain('?token=');
+  });
+});
+
 describe('memory layer custom query execution', () => {
   const memoryLayerView = readFile('views/MemoryLayerView.tsx');
 

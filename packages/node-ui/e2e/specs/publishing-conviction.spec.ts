@@ -102,12 +102,12 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
     await expect(conviction.accountCard.first()).toBeVisible();
   });
 
-  // ── Auth pattern (window.__DKG_TOKEN__) ────────────────────────────────────
+  // ── Auth/session pattern ──────────────────────────────────────────────────
 
   test('authed /api/pca/:id round-trips from the browser context', async ({ page }) => {
-    // Bearer-token pattern UXUI/QA reuse for any authed probe: fetchApiInPage
-    // attaches window.__DKG_TOKEN__ (injected by vite.config.ts), matching the
-    // UI's own requests. Structured 200/404/503 contract itself is asserted in
+    // Browser-session pattern UXUI/QA reuse for any authed probe: fetchApiInPage
+    // sends the same-origin dashboard cookie, matching the UI's own requests.
+    // Structured 200/404/503 contract itself is asserted in
     // conviction-publishing.devnet.spec.ts.
     const res = await fetchApiInPage<{ accountId?: string; error?: string }>(page, '/api/pca/1');
     expect([200, 404, 503]).toContain(res.status);

@@ -5,7 +5,7 @@ import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
 import { MemoryStackView } from '../../views/MemoryStackView.js';
-import { authHeaders, fileUrl } from '../../api.js';
+import { apiFetch, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
@@ -120,7 +120,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
     const fileHash = docRef.replace('urn:dkg:file:', '');
     const controller = new AbortController();
 
-    fetch(fileUrl(fileHash, expectedContentType || undefined), { headers: authHeaders(), signal: controller.signal })
+    apiFetch(fileUrl(fileHash, expectedContentType || undefined), { signal: controller.signal })
       .then(async res => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const ct = res.headers.get('content-type') ?? 'application/octet-stream';

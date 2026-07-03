@@ -1,9 +1,17 @@
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
-declare global {
-  interface Window { __DKG_TOKEN__?: string; }
-}
+
+type DashboardSessionStatus = {
+  authenticated?: boolean;
+  authDisabled?: boolean;
+  source?: string;
+  csrfToken?: string;
+  expiresAt?: number;
+};
+
+let dashboardSession: DashboardSessionStatus = { authenticated: false };
+let dashboardSessionPromise: Promise<void> | null = null;
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -37,10 +45,81 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
 }
 
 export function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = window.__DKG_TOKEN__;
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
+  if (dashboardSession.csrfToken) return { 'X-DKG-CSRF': dashboardSession.csrfToken };
+  return {};
+}
+
+export function dashboardSessionAuthKey(): string {
+  if (!dashboardSession.authenticated) return '';
+  return `${dashboardSession.source ?? 'session'}:${dashboardSession.expiresAt ?? 0}`;
+}
+
+export function __setDashboardSessionForTesting(session: DashboardSessionStatus): void {
+  dashboardSession = session;
+  dashboardSessionPromise = null;
+}
+
+export async function ensureDashboardSession(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (
+    dashboardSession.authenticated &&
+    (!dashboardSession.expiresAt || dashboardSession.expiresAt > Date.now() + 5000)
+  ) {
+    return;
+  }
+  if (dashboardSessionPromise) return dashboardSessionPromise;
+
+  dashboardSessionPromise = (async () => {
+    const status = await fetch('/api/dashboard/session/status', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    }).then((res) => res.ok ? res.json() as Promise<DashboardSessionStatus> : null).catch(() => null);
+    if (status?.authenticated) {
+      dashboardSession = status;
+      return;
+    }
+
+    const loopback = await fetch('/api/dashboard/session/loopback', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    }).then((res) => res.ok ? res.json() as Promise<DashboardSessionStatus> : null).catch(() => null);
+    if (loopback?.authenticated) {
+      dashboardSession = loopback;
+      return;
+    }
+
+    dashboardSession = { authenticated: false };
+  })();
+
+  try {
+    await dashboardSessionPromise;
+  } finally {
+    dashboardSessionPromise = null;
+  }
+}
+
+function mergeHeaders(base?: HeadersInit, extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (base instanceof Headers) {
+    base.forEach((value, key) => {
+      headers[key] = value;
+    });
+  } else if (Array.isArray(base)) {
+    for (const [key, value] of base) headers[key] = value;
+  } else if (base) {
+    Object.assign(headers, base);
+  }
+  return { ...headers, ...extra };
+}
+
+export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  await ensureDashboardSession();
+  return fetch(input, {
+    ...init,
+    credentials: init.credentials ?? 'same-origin',
+    headers: mergeHeaders(init.headers, authHeaders()),
+  });
 }
 
 export class HttpError extends Error {
@@ -74,7 +153,13 @@ export class LocalAgentApiError extends Error {
 
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   try {
-    return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    await ensureDashboardSession();
+    return await fetch(input, {
+      ...init,
+      credentials: init.credentials ?? 'same-origin',
+      headers: mergeHeaders(init.headers, authHeaders()),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') {
       throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
@@ -84,7 +169,7 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const res = await apiFetch(`${BASE}${path}`);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -99,7 +184,7 @@ async function get<T>(path: string): Promise<T> {
 // TRANSPORT 503/504 (transient RPC outage, `code: 'RPC_*'`) — see
 // `isPcaFeatureUnavailable` / `describePcaError`.
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
+  const res = await apiFetch(`${BASE}${path}`);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -109,7 +194,7 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
+  const res = await fetchWithTimeout(`${BASE}${path}`, {}, timeoutMs);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -119,9 +204,9 @@ async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await apiFetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -133,9 +218,9 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await apiFetch(`${BASE}${path}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -147,7 +232,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: authHeaders() });
+  const res = await apiFetch(`${BASE}${path}`, { method: 'DELETE' });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -163,7 +248,7 @@ async function del<T>(path: string): Promise<T> {
 // `describePcaError`) route through this instead. Both are kept so existing
 // `del` callers keep their current contract.
 async function delJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: authHeaders() });
+  const res = await apiFetch(`${BASE}${path}`, { method: 'DELETE' });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -194,7 +279,7 @@ export const fetchConnections = () => get<any>('/api/connections');
 export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =>
   fetchWithTimeout(`${BASE}/api/connect`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ multiaddr }),
   }, timeoutMs).then(async (res) => {
     if (!res.ok) {
@@ -211,7 +296,7 @@ export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =
 export const connectToPeerIdWithTimeout = (peerId: string, timeoutMs = 20000) =>
   fetchWithTimeout(`${BASE}/api/connect`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ peerId }),
   }, timeoutMs).then(async (res) => {
     if (!res.ok) {
@@ -392,9 +477,9 @@ export async function createContextGraph(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const res = await fetch(`${BASE}/api/context-graph/create`, {
+    const res = await apiFetch(`${BASE}/api/context-graph/create`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id, name, description,
         // Codex PR #608 R1/R2 #5/#8 + OT-RFC-38 LU-6 contract:
@@ -662,9 +747,8 @@ export async function importFile(
   if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
   if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
 
-  const res = await fetch(`${BASE}/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`, {
+  const res = await apiFetch(`${BASE}/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`, {
     method: 'POST',
-    headers: authHeaders(),
     body: form,
   });
   if (!res.ok) {
@@ -697,9 +781,9 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   const existing = inflightQuery.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const res = await fetch(`${BASE}/api/query`, {
+    const res = await apiFetch(`${BASE}/api/query`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      headers: { 'Content-Type': 'application/json' },
       body: key,
     });
     if (!res.ok) {
@@ -1495,7 +1579,7 @@ export async function listAssertions(
     // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
     // already drops these daemon-side; this guards the parser too.
     if (subGraph === 'meta') continue;
-    const key = `${subGraph ?? ''} ${name}`;
+    const key = `${subGraph ?? ''}\0${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const cnt = countByGraph.get(g);
@@ -2381,9 +2465,9 @@ export async function sendOpenClawLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/openclaw-channel/send', {
+  const res = await apiFetch('/api/openclaw-channel/send', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts?.signal,
   });
@@ -2462,12 +2546,11 @@ export async function streamOpenClawLocalChat(
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/openclaw-channel/stream', {
+  const res = await apiFetch('/api/openclaw-channel/stream', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
-      ...authHeaders(),
     },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts.signal,
@@ -2559,9 +2642,9 @@ export async function sendHermesLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/hermes-channel/send', {
+  const res = await apiFetch('/api/hermes-channel/send', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts?.signal,
   });
@@ -2578,12 +2661,11 @@ export async function streamHermesLocalChat(
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await fetch('/api/hermes-channel/stream', {
+  const res = await apiFetch('/api/hermes-channel/stream', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
-      ...authHeaders(),
     },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
     signal: opts.signal,

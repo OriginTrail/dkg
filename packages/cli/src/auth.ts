@@ -13,6 +13,18 @@ import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dkgDir } from './config.js';
 
+export interface DashboardSessionAuthResult {
+  token: string;
+  csrfToken: string;
+}
+
+export interface HttpAuthGuardOptions {
+  dashboardSession?: {
+    authenticate: (req: IncomingMessage) => DashboardSessionAuthResult | null;
+    verifyCsrf: (req: IncomingMessage, session: DashboardSessionAuthResult) => boolean;
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -827,6 +839,7 @@ export function httpAuthGuard(
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
+  options?: HttpAuthGuardOptions,
 ): boolean | Promise<boolean> {
   if (!authEnabled) return true;
   if (req.method === 'OPTIONS') return true;
@@ -845,6 +858,28 @@ export function httpAuthGuard(
     const qsToken = url.searchParams.get('token');
     if (qsToken && verifyToken(qsToken, validTokens)) {
       acceptedToken = qsToken;
+    }
+  }
+
+  const explicitAuthAttempt = Boolean(token) ||
+    (pathname === '/api/events' && new URL(req.url ?? '/', `http://${req.headers.host}`).searchParams.has('token'));
+
+  if (!acceptedToken && !explicitAuthAttempt && options?.dashboardSession) {
+    const session = options.dashboardSession.authenticate(req);
+    if (session && verifyToken(session.token, validTokens)) {
+      const method = req.method ?? 'GET';
+      const unsafe = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+      if (unsafe && !options.dashboardSession.verifyCsrf(req, session)) {
+        res.writeHead(403, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+        });
+        res.end(JSON.stringify({ error: 'Invalid or missing dashboard CSRF token' }));
+        return false;
+      }
+      acceptedToken = session.token;
+      req.headers.authorization = `Bearer ${session.token}`;
+      (req as unknown as { __dkgAuthSource?: string }).__dkgAuthSource = 'dashboard-session';
     }
   }
 

@@ -559,6 +559,50 @@ describe('serveStatic path traversal prevention', () => {
     const body = await res.text();
     expect(body).toContain('<html>');
   });
+
+  it('does not inject browser bearer tokens into /ui HTML', async () => {
+    setup();
+    writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><head></head><body></body></html>');
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/ui/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain('window.__DKG_TOKEN__');
+    expect(body).not.toContain('sentinel-secret-token');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toContain("script-src 'self'");
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('does not inject tokens into SPA fallback HTML', async () => {
+    setup();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/ui/projects/example`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).not.toContain('window.__DKG_TOKEN__');
+    expect(body).not.toContain('sentinel-secret-token');
+  });
+
+  it('serves assets without HTML security header injection', async () => {
+    setup();
+    harness.setArgs([
+      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/ui/assets/app.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/javascript');
+    expect(res.headers.get('cache-control')).toContain('immutable');
+    expect(res.headers.get('content-security-policy')).toBeNull();
+    await expect(res.text()).resolves.toContain('console.log("ok")');
+  });
 });
 
 describe('handleNodeUIRequest CORS origin handling', () => {

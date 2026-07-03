@@ -1,7 +1,7 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat, realpath } from 'node:fs/promises';
+import { stat, realpath } from 'node:fs/promises';
 import { PayloadTooLargeError, type RelayStats } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 import { type ChatMemoryManager } from './chat-memory.js';
@@ -92,7 +92,7 @@ export async function handleNodeUIRequest(
   staticDir: string,
   _legacyRemovedArg?: unknown,
   metricsCollector?: MetricsCollector,
-  authToken?: string,
+  _authTokenRemoved?: string,
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
   telemetrySettings?: TelemetrySettingsCallbacks,
@@ -667,13 +667,13 @@ export async function handleNodeUIRequest(
   // --- Static UI files ---
 
   if (path === '/ui' || path.startsWith('/ui/')) {
-    return serveStatic(res, staticDir, path, authToken);
+    return serveStatic(res, staticDir, path);
   }
 
   return false;
 }
 
-async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
+async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string): Promise<true> {
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
@@ -720,42 +720,52 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
   const isHtml = mimeExt === '.html';
 
   try {
-    if (isHtml && authToken) {
-      const html = await readFile(filePath, 'utf-8');
-      const injection = `<script>window.__DKG_TOKEN__=${JSON.stringify(authToken)}</script>`;
-      const injected = html.replace('</head>', `${injection}</head>`);
-      const buf = Buffer.from(injected, 'utf-8');
-      res.writeHead(200, {
-        'Content-Type': 'text/html',
-        'Content-Length': buf.byteLength,
-        'Cache-Control': 'no-cache',
-      });
-      res.end(buf);
-    } else {
-      const s = await stat(filePath);
-      const contentType = MIME[mimeExt] ?? 'application/octet-stream';
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Content-Length': s.size,
-        'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
-      });
-      const stream = createReadStream(filePath);
-      stream.on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Stream read error' }));
-        } else {
-          res.destroy(err);
-        }
-      });
-      stream.pipe(res);
-    }
+    const s = await stat(filePath);
+    const contentType = MIME[mimeExt] ?? 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': s.size,
+      'Cache-Control': isHtml ? 'no-store' : 'public, max-age=31536000, immutable',
+      ...staticSecurityHeaders(isHtml),
+    });
+    const stream = createReadStream(filePath);
+    stream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Stream read error' }));
+      } else {
+        res.destroy(err);
+      }
+    });
+    stream.pipe(res);
   } catch {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(503, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
     res.end('<!DOCTYPE html><html><body><h1>Node UI not built</h1><p>Run <code>pnpm build:ui</code> in @origintrail-official/dkg-node-ui</p></body></html>');
   }
 
   return true;
+}
+
+function staticSecurityHeaders(isHtml: boolean): Record<string, string> {
+  const headers: Record<string, string> = {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  };
+  if (isHtml) {
+    headers['Content-Security-Policy'] = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self'",
+      "connect-src 'self' http: https: ws: wss:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+    ].join('; ');
+  }
+  return headers;
 }
 
 function json(res: ServerResponse, status: number, data: unknown): true {

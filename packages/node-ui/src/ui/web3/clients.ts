@@ -60,7 +60,7 @@ function isSameOriginRpcUrl(url: string): boolean {
 function rpcFetchOptions(url: string): RequestInit | undefined {
   if (!isSameOriginRpcUrl(url)) return undefined;
   const headers = authHeaders();
-  return Object.keys(headers).length ? { headers } : undefined;
+  return { credentials: 'same-origin', ...(Object.keys(headers).length ? { headers } : {}) };
 }
 
 /**

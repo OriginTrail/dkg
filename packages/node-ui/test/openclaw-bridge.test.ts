@@ -411,16 +411,25 @@ describe('OpenClaw bridge behavioral tests', () => {
   const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
   const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
 
-  beforeEach(() => {
-    (globalThis as any).window = { __DKG_TOKEN__: undefined };
+  beforeEach(async () => {
+    (globalThis as any).window = {};
     (globalThis as any).localStorage = {
       getItem: () => null,
       setItem: () => {},
       removeItem: () => {},
     };
+    const { __setDashboardSessionForTesting } = await import('../src/ui/api.js');
+    __setDashboardSessionForTesting({
+      authenticated: true,
+      csrfToken: 'csrf-openclaw-test',
+      source: 'test',
+      expiresAt: Date.now() + 60_000,
+    });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    const { __setDashboardSessionForTesting } = await import('../src/ui/api.js');
+    __setDashboardSessionForTesting({ authenticated: false });
     delete (globalThis as any).window;
     delete (globalThis as any).localStorage;
   });

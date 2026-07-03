@@ -5,11 +5,16 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fetchCurrentAgentMock = vi.fn();
+let authKey = 'session-old';
 
 vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchCurrentAgent: () => fetchCurrentAgentMock(),
   },
+}));
+
+vi.mock('../src/ui/api.js', () => ({
+  dashboardSessionAuthKey: () => authKey,
 }));
 
 const { useCurrentAgent } = await import('../src/ui/hooks/useCurrentAgent.js');
@@ -38,14 +43,13 @@ function Probe() {
 describe('useCurrentAgent', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
-    (window as any).__DKG_TOKEN__ = 'token-old';
+    authKey = 'session-old';
     fetchCurrentAgentMock.mockReset();
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
-    delete (window as any).__DKG_TOKEN__;
     document.body.innerHTML = '';
   });
 
@@ -79,7 +83,7 @@ describe('useCurrentAgent', () => {
     expect(container.firstElementChild?.getAttribute('data-loading')).toBe('false');
     expect(container.firstElementChild?.getAttribute('data-error')).toBe('temporary failure');
 
-    (window as any).__DKG_TOKEN__ = 'token-new';
+    authKey = 'session-new';
     fetchCurrentAgentMock.mockRejectedValueOnce(new Error('auth failed'));
     await act(async () => {
       vi.advanceTimersByTime(60_000);
@@ -110,7 +114,7 @@ describe('useCurrentAgent', () => {
     });
     expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(1);
 
-    (window as any).__DKG_TOKEN__ = 'token-new';
+    authKey = 'session-new';
     await act(async () => {
       vi.advanceTimersByTime(60_000);
       await Promise.resolve();
@@ -171,7 +175,7 @@ describe('useCurrentAgent', () => {
     });
     expect(fetchCurrentAgentMock).toHaveBeenCalledTimes(1);
 
-    (window as any).__DKG_TOKEN__ = 'token-new';
+    authKey = 'session-new';
     await act(async () => {
       oldLoad.resolve({
         agentDid: 'did:dkg:agent:0xold',
@@ -237,7 +241,7 @@ describe('useCurrentAgent', () => {
       nodeIdentityId: '0',
     });
 
-    (window as any).__DKG_TOKEN__ = 'token-new';
+    authKey = 'session-new';
     await act(async () => {
       root.render(React.createElement(React.Fragment, {},
         React.createElement(Probe),

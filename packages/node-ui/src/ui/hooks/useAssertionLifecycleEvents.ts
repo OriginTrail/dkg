@@ -31,7 +31,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 import { subGraphFromAssertionGraphUri } from '../lib/sub-graph-uri.js';
 
 export type AssertionLifecycleKind = 'created' | 'promoted';
@@ -228,9 +228,9 @@ export function useAssertionLifecycleEvents(
           }, QUERY_TIMEOUT_MS);
         });
         const request = (async () => {
-          const res = await fetch('/api/query', {
+          const res = await apiFetch('/api/query', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
             body: JSON.stringify({
               sparql: buildLifecycleEventsQuery(contextGraphId),

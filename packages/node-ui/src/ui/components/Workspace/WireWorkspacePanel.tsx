@@ -25,7 +25,7 @@
  *     today; Codex is listed as "coming soon" (visible but disabled).
  */
 import React, { useState, useEffect, useMemo } from 'react';
-import { authHeaders, fetchCurrentAgent } from '../../api.js';
+import { apiFetch, fetchCurrentAgent } from '../../api.js';
 import {
   planProjectManifestInstall,
   installProjectManifest,
@@ -152,7 +152,7 @@ export function WireWorkspacePanel({
     (async () => {
       try {
         const [hostRes, agentRes] = await Promise.all([
-          fetch('/api/host/info', { headers: authHeaders() }).then(r => r.ok ? r.json() : null),
+          apiFetch('/api/host/info').then(r => r.ok ? r.json() : null),
           fetchCurrentAgent().catch(() => null),
         ]);
         if (cancelled) return;

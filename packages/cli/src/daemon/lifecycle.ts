@@ -142,6 +142,11 @@ import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
+import {
+  DashboardSessionStore,
+  handleDashboardSessionRequest,
+  verifyDashboardCsrf,
+} from './dashboard-session.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -2869,6 +2874,7 @@ export async function runDaemonInner(
   } else {
     log("API authentication disabled (auth.enabled = false)");
   }
+  const dashboardSessions = new DashboardSessionStore();
 
   // Trusted server-side port binding used downstream (SSRF defence in
   // manifestSelfClient; passed to handleRequest + route modules).
@@ -3033,10 +3039,26 @@ export async function runDaemonInner(
             ? { "Access-Control-Allow-Origin": reqCorsOrigin }
             : {}),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-DKG-CSRF",
         });
         res.end();
         return;
+      }
+
+      if (reqUrl.pathname.startsWith("/api/dashboard/session")) {
+        const handledSession = await handleDashboardSessionRequest(
+          req,
+          res,
+          reqUrl,
+          dashboardSessions,
+          {
+            authEnabled,
+            validTokens,
+            loopbackToken: validTokens.size > 0 ? validTokens.values().next().value as string : undefined,
+            corsOrigin: reqCorsOrigin,
+          },
+        );
+        if (handledSession) return;
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
@@ -3046,6 +3068,12 @@ export async function runDaemonInner(
         authEnabled,
         validTokens,
         resolveCorsOrigin(req, corsAllowed),
+        {
+          dashboardSession: {
+            authenticate: (request) => dashboardSessions.authenticate(request),
+            verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
+          },
+        },
       );
       if (!authAllowed) return;
 
@@ -3138,7 +3166,6 @@ export async function runDaemonInner(
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
       // Only inject the relay-stats provider when this node is actually
       // running a relay server. Without this gate, edge nodes always
       // hit the `relayStatsProvider != null` branch in `api.ts` and
@@ -3154,7 +3181,7 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
       if (handled) return;
 
       await handleRequest(

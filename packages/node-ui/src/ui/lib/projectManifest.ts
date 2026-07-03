@@ -10,12 +10,12 @@
  * calls those helpers; this module just gives the React components
  * a typed surface to call.
  */
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 
 async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await apiFetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   const text = await res.text();

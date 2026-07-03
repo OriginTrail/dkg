@@ -44,6 +44,7 @@ import {
   SwmSubsetNotSealableError,
   partialPublishWarning,
   knowledgeAssetFinalize,
+  __setDashboardSessionForTesting,
 } from '../src/ui/api.js';
 
 let server: Server;
@@ -173,6 +174,12 @@ describe('UI API tests', () => {
     requestLog.length = 0;
     queryBindings = [];
     responseOverrides = [];
+    __setDashboardSessionForTesting({
+      authenticated: true,
+      source: 'test',
+      csrfToken: 'csrf-test',
+      expiresAt: Date.now() + 60_000,
+    });
   });
 
   describe('fileUrl', () => {
@@ -206,9 +213,9 @@ describe('UI API tests', () => {
   });
 
   describe('authHeaders', () => {
-    it('returns empty object when window is undefined', () => {
+    it('returns dashboard CSRF header when a session is active', () => {
       const headers = authHeaders();
-      expect(headers).toEqual({});
+      expect(headers).toEqual({ 'X-DKG-CSRF': 'csrf-test' });
     });
   });
 

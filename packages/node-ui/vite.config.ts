@@ -4,13 +4,6 @@ import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 
-function readTokenFile(path: string): string {
-  try {
-    const raw = readFileSync(path, 'utf-8');
-    return raw.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))[0] || '';
-  } catch { return ''; }
-}
-
 function readDkgConfig() {
   // Devnet takes priority over ~/.dkg only when explicitly requested.
   // `scripts/devnet.sh ui start` exports DEVNET_NODE=$UI_NODE_ID, so
@@ -29,39 +22,26 @@ function readDkgConfig() {
       );
     }
     const port = parseInt(readFileSync(portFile, 'utf-8').trim(), 10) || 9201;
-    const token = readTokenFile(join(devnetDir, 'auth.token'));
     console.log(`[vite] Using devnet node${devnetNodeNum} on port ${port}`);
-    return { port, token };
+    return { port };
   }
 
   // Fall back to ~/.dkg (testnet / production node)
   const dkgDir = join(homedir(), '.dkg');
   let port = 9200;
-  let token = '';
   try {
     if (existsSync(join(dkgDir, 'api.port'))) {
       port = parseInt(readFileSync(join(dkgDir, 'api.port'), 'utf-8').trim(), 10) || 9200;
     }
   } catch {}
-  token = readTokenFile(join(dkgDir, 'auth.token'));
   console.log(`[vite] Using node on port ${port} (from ~/.dkg)`);
-  return { port, token };
+  return { port };
 }
 
-const { port, token } = readDkgConfig();
+const { port } = readDkgConfig();
 
 export default defineConfig({
-  plugins: [
-    react(),
-    {
-      name: 'inject-dkg-token',
-      apply: 'serve',
-      transformIndexHtml(html) {
-        if (!token) return html;
-        return html.replace('</head>', `<script>window.__DKG_TOKEN__=${JSON.stringify(token)}</script></head>`);
-      },
-    },
-  ],
+  plugins: [react()],
   root: 'src/ui',
   base: '/ui/',
   build: {
