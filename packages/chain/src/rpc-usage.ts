@@ -88,7 +88,13 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
 }
 
 export interface RpcUsageWindow {
-  /** Raw requests since the previous drain, by (sanitized) method name. */
+  /**
+   * Raw requests since the previous drain, keyed by the RAW JSON-RPC method
+   * name (NOT sanitized — full diagnostic fidelity is the point). Keys are
+   * bounded in COUNT, not value: at most {@link RpcUsageTracker.MAX_WINDOW_METHODS}
+   * distinct names per window, overflow aggregated under 'other'. Consumers
+   * must sanitize keys for their own sink (the cli logfmt formatter does).
+   */
   byMethod: Record<string, number>;
   /** Sum of byMethod — raw requests since the previous drain. */
   total: number;
