@@ -64,16 +64,20 @@ const load = (file) => JSON.parse(fs.readFileSync(path.join(DIR, file), 'utf8'))
 
 // ── label-position detectors (word-boundary safe: `instance` must not match
 //    inside `service_instance_id`) ─────────────────────────────────────────
-const labelMatcherRe = (label) => new RegExp(`(^|[^A-Za-z0-9_])${label}\\s*(=~|!~|!=|=)`);
+// Labels are already validated as identifier-only at the CLI boundary, but
+// escape regex metacharacters anyway before interpolating into patterns —
+// a provable non-injection rather than an implied one (CodeQL js/regex-injection).
+const reEscape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const labelMatcherRe = (label) => new RegExp(`(^|[^A-Za-z0-9_])${reEscape(label)}\\s*(=~|!~|!=|=)`);
 // every PromQL clause that names labels: aggregation grouping AND vector
 // matching/joining — `on(instance)` or `group_left(instance)` is just as
 // unprofiled as `by (instance)`
 const clauseLabels = (expr) => [...expr.matchAll(/(?:by|without|on|ignoring|group_left|group_right)\s*\(([^)]*)\)/gi)]
   .flatMap((m) => m[1].split(',').map((t) => t.trim()).filter(Boolean));
-const legendRe = (label) => new RegExp(`\\{\\{\\s*${label}\\s*\\}\\}`);
+const legendRe = (label) => new RegExp(`\\{\\{\\s*${reEscape(label)}\\s*\\}\\}`);
 // both label_values forms: label_values(label) and label_values(metric, label)
-const labelValuesRe = (label) => new RegExp(`label_values\\(([^)]*,)?\\s*${label}\\s*\\)`);
-const labelsRefRe = (label) => new RegExp(`\\$labels\\.${label}(?![A-Za-z0-9_])`);
+const labelValuesRe = (label) => new RegExp(`label_values\\(([^)]*,)?\\s*${reEscape(label)}\\s*\\)`);
+const labelsRefRe = (label) => new RegExp(`\\$labels\\.${reEscape(label)}(?![A-Za-z0-9_])`);
 const usesUnprofiledLabel = (text) =>
   labelMatcherRe(DEFAULT_LABEL).test(text)
   || clauseLabels(text).includes(DEFAULT_LABEL)
