@@ -17,6 +17,7 @@ import { join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { rpcUsageWindowTotal } from '@origintrail-official/dkg-chain';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
 
 // Hardhat dev keys #0 and #1 — loopback only, never touch a real network.
@@ -104,14 +105,14 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     expect(runtime.walletIds).toHaveLength(WALLETS.length);
     const usage = runtime.drainRpcUsage();
     expect(usage).toBeDefined();
-    expect(usage!.total).toBeGreaterThanOrEqual(2); // non-vacuous: both adapters made calls
-    expect(usage!.total).toBe(loopback.totalHits());
+    expect(rpcUsageWindowTotal(usage!)).toBeGreaterThanOrEqual(2); // non-vacuous: both adapters made calls
+    expect(rpcUsageWindowTotal(usage!)).toBe(loopback.totalHits());
     for (const [method, count] of Object.entries(usage!.byMethod)) {
       expect(loopback.hits(method), `method ${method}`).toBe(count);
     }
 
     // Delta semantics survive the runtime boundary: second drain is empty.
     const drained = runtime.drainRpcUsage();
-    expect(drained?.total ?? 0).toBe(0);
+    expect(rpcUsageWindowTotal(drained)).toBe(0);
   }, 30_000);
 });

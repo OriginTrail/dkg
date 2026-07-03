@@ -89,7 +89,7 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
 
 /** A fresh all-zero window — the identity element for merging and the value of "nothing to report". */
 export function emptyRpcUsageWindow(): RpcUsageWindow {
-  return { byMethod: {}, total: 0, lifetimeTotal: 0 };
+  return { byMethod: {}, lifetimeTotal: 0 };
 }
 
 /**
@@ -107,7 +107,7 @@ export interface RpcUsageDrainable {
 
 /**
  * Merge usage windows from multiple trackers into one (pure model operation:
- * per-method sums, summed totals, summed lifetimes). A process can own several
+ * per-method sums, summed lifetimes). A process can own several
  * chain adapters with independent trackers — one per configured RPC consumer
  * (e.g. the agent's adapter plus one per publisher wallet); billing-exact
  * accounting is the SUM across all of them. undefined inputs (an absent
@@ -120,14 +120,12 @@ export function mergeRpcUsageWindows(
   const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
   if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
-  let total = 0;
   let lifetimeTotal = 0;
   for (const w of defined) {
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
-    total += w.total;
     lifetimeTotal += w.lifetimeTotal;
   }
-  return { byMethod, total, lifetimeTotal };
+  return { byMethod, lifetimeTotal };
 }
 
 export interface RpcUsageWindow {
@@ -139,10 +137,19 @@ export interface RpcUsageWindow {
    * must sanitize keys for their own sink (the cli logfmt formatter does).
    */
   byMethod: Record<string, number>;
-  /** Sum of byMethod — raw requests since the previous drain. */
-  total: number;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
+}
+
+/**
+ * Total raw requests in a window — DERIVED from byMethod on demand. The
+ * window model deliberately stores no separate total, so an inconsistent
+ * {byMethod, total} pair is unrepresentable.
+ */
+export function rpcUsageWindowTotal(window: RpcUsageWindow): number {
+  let total = 0;
+  for (const count of Object.values(window.byMethod)) total += count;
+  return total;
 }
 
 /**
@@ -202,13 +209,9 @@ export class RpcUsageTracker {
    */
   drainWindow(): RpcUsageWindow {
     const byMethod: Record<string, number> = {};
-    let total = 0;
-    for (const [method, count] of this.window) {
-      byMethod[method] = count;
-      total += count;
-    }
+    for (const [method, count] of this.window) byMethod[method] = count;
     this.window.clear();
-    return { byMethod, total, lifetimeTotal: this.lifetime };
+    return { byMethod, lifetimeTotal: this.lifetime };
   }
 }
 

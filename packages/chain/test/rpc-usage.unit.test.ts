@@ -18,7 +18,7 @@ import {
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { boundedRpcMethodLabel, mergeRpcUsageWindows, RpcUsageTracker } from '../src/rpc-usage.js';
+import { boundedRpcMethodLabel, mergeRpcUsageWindows, rpcUsageWindowTotal, RpcUsageTracker } from '../src/rpc-usage.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -80,8 +80,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     // Source of truth: the server's own per-method request log. The tracker's
     // window must EQUAL it — no over- or under-counting.
     const usage = a.drainRpcUsage();
-    expect(usage.total).toBe(rpc.totalHits());
-    expect(usage.total).toBeGreaterThanOrEqual(1); // guard against a 0==0 vacuous pass
+    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+    expect(rpcUsageWindowTotal(usage)).toBeGreaterThanOrEqual(1); // guard against a 0==0 vacuous pass
     for (const [method, count] of Object.entries(usage.byMethod)) {
       expect(rpc.hits(method), `method ${method}`).toBe(count);
     }
@@ -98,7 +98,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
     // Drain semantics: deltas, not cumulative; lifetime monotonic.
     const drained = a.drainRpcUsage();
-    expect(drained.total).toBe(0);
+    expect(rpcUsageWindowTotal(drained)).toBe(0);
     expect(drained.lifetimeTotal).toBe(usage.lifetimeTotal);
   });
 
@@ -119,7 +119,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const usage = a.drainRpcUsage();
     expect(rpc.hits('eth_chainId')).toBeGreaterThanOrEqual(2); // initial + ≥1 retry actually happened
     expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
-    expect(usage.total).toBe(rpc.totalHits());
+    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
   }, 30_000);
 
   it('bounds unknown methods to "other" for the metric label', () => {
@@ -149,7 +149,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rpcA.hits('eth_chainId')).toBeGreaterThanOrEqual(1); // billed refusal happened
     expect(rpcB.hits('eth_chainId')).toBeGreaterThanOrEqual(1); // fallback success happened
     expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpcA.hits('eth_chainId') + rpcB.hits('eth_chainId'));
-    expect(usage.total).toBe(rpcA.totalHits() + rpcB.totalHits());
+    expect(rpcUsageWindowTotal(usage)).toBe(rpcA.totalHits() + rpcB.totalHits());
   }, 30_000);
 
   it('caps distinct window keys at MAX_WINDOW_METHODS; overflow aggregates into "other", existing keys keep counting raw', () => {
@@ -161,24 +161,23 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(Object.keys(w.byMethod).length).toBeLessThanOrEqual(max + 1); // raw keys + 'other'
     expect(w.byMethod['fabricated_0']).toBe(2);
     expect(w.byMethod['other']).toBe(6); // the 6 overflow names
-    expect(w.total).toBe(max + 7);
+    expect(rpcUsageWindowTotal(w)).toBe(max + 7);
   });
 
-  it('mergeRpcUsageWindows sums per-method, total and lifetime across trackers', () => {
+  it('mergeRpcUsageWindows sums per-method and lifetime across trackers', () => {
     const merged = mergeRpcUsageWindows(
-      { byMethod: { eth_call: 5, eth_estimateGas: 2 }, total: 7, lifetimeTotal: 100 },
-      { byMethod: { eth_call: 3, eth_sendRawTransaction: 4 }, total: 7, lifetimeTotal: 50 },
+      { byMethod: { eth_call: 5, eth_estimateGas: 2 }, lifetimeTotal: 100 },
+      { byMethod: { eth_call: 3, eth_sendRawTransaction: 4 }, lifetimeTotal: 50 },
     );
     expect(merged).toEqual({
       byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
-      total: 14,
       lifetimeTotal: 150,
     });
   });
 
   it('mergeRpcUsageWindows skips undefined inputs; nothing to merge yields a concrete EMPTY window', () => {
-    const w = { byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 };
-    const empty = { byMethod: {}, total: 0, lifetimeTotal: 0 };
+    const w = { byMethod: { eth_call: 1 }, lifetimeTotal: 1 };
+    const empty = { byMethod: {}, lifetimeTotal: 0 };
     expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
     expect(mergeRpcUsageWindows()).toEqual(empty);
@@ -191,7 +190,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(() => t.record('')).not.toThrow(); // degenerate → 'other'
     expect(() => t.record('x'.repeat(500))).not.toThrow(); // oversized → 'other'
     const w = t.drainWindow();
-    expect(w.total).toBe(4);
+    expect(rpcUsageWindowTotal(w)).toBe(4);
     expect(w.byMethod['eth_call']).toBe(1);
     expect(w.byMethod['debug_traceTransaction']).toBe(1); // NOT sanitized to 'other'
     expect(w.byMethod['other']).toBe(2);

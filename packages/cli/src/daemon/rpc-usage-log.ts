@@ -9,7 +9,7 @@
  *   rpc_usage method=eth_call count=42 window_s=60 chain=base:8453
  */
 
-import type { RpcUsageDrainable, RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { rpcUsageWindowTotal, type RpcUsageDrainable, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
@@ -26,7 +26,7 @@ export function formatRpcUsageLines(
   windowSeconds: number,
   chainId?: string,
 ): string[] {
-  if (!usage || usage.total <= 0) return [];
+  if (!usage || rpcUsageWindowTotal(usage) <= 0) return [];
   const chain = chainId ? ` chain=${safeToken(chainId, 'unknown')}` : '';
   const lines: string[] = [];
   for (const [method, count] of Object.entries(usage.byMethod)) {
@@ -54,7 +54,7 @@ export function emitRpcUsage(
 ): number {
   try {
     const usage = source?.drainRpcUsage?.();
-    if (!usage || usage.total <= 0) return 0;
+    if (!usage || rpcUsageWindowTotal(usage) <= 0) return 0;
     const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
     for (const line of lines) emit(line);
     return lines.length;
