@@ -517,9 +517,11 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       // Orchestration + response assembly live in the focused pca-register-agent
       // module; this handler owns input validation + chain-error classification
       // (the catch below) and maps the outcome to a response.
-      const outcome = await resolveRegisterPcaAgent(agent, accountId, agentAddr, idStr);
+      const outcome = await resolveRegisterPcaAgent(agent, accountId, agentAddr);
       if (outcome.kind === 'unavailable') return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (outcome.kind === 'tx-failed') return jsonResponse(res, 502, { error: outcome.error });
+      if (outcome.kind === 'reverted') {
+        return jsonResponse(res, 502, { error: 'PCA agent registration transaction was mined but did not succeed on-chain' });
+      }
       return jsonResponse(res, 200, outcome.body);
     } catch (err: any) {
       const msg = err?.message ?? String(err);

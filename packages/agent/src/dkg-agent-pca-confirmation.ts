@@ -1,62 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// #1346 — PCA register-agent confirmation: the advisory outcome model + the
-// bounded-probe state machine, in a focused module (extracted from the
-// dkg-agent-registry catch-all). The DKGAgent facade
-// (`confirmPublishingConvictionAgentRegistration`) is a thin delegate over
-// `confirmPcaAgentRegistration`; only `PcaConfirmationOutcome` is re-exported as
-// public API through `src/index.ts` — `confirmPcaAgentRegistration` is
-// package-internal (imported by the facade, not exported from the index).
+// PCA register-agent confirmation: the advisory outcome model + the bounded-probe
+// retry state machine. The DKGAgent facade delegates to
+// confirmPcaAgentRegistration; only PcaConfirmationOutcome is public API (via
+// src/index.ts) — the helper is package-internal.
 
 /**
- * The advisory outcome of confirming a just-mined PCA agent registration, as a
- * SINGLE discriminant (no coupled boolean/null fields to keep in lock-step).
- * The mined receipt is already authoritative for `registered:true`; this only
- * refines the ADVISORY picture:
- *   - `confirmed`    — an on-chain read observed the agent registered.
- *   - `not_observed` — the probe read but did not (yet) observe it (follower-RPC lag).
- *   - `inconclusive` — the probe surface exists but every read threw.
- *   - `unsupported`  — no on-chain probe surface (the chain adapter lacks the read).
- * This is the agent's DOMAIN result; the daemon/CLI boundary derives the wire
- * `{ verified, adapterSupported }` from it (see the cli `pca-confirmation-wire`
- * module) — the wire representation deliberately does not live in the agent.
+ * Outcomes reachable once the probe surface is known to exist — the retry state
+ * machine's result. `unsupported` (a static adapter-capability gap) is decided by
+ * the facade before the loop, so it is not one of these.
  */
-/** The outcomes reachable once the probe surface is known to EXIST — i.e. the
- *  retry state machine's result. `unsupported` is a separate, static adapter
- *  capability gap decided by the facade BEFORE the loop, not a probe result. */
 export type ProbedConfirmationOutcome = 'confirmed' | 'not_observed' | 'inconclusive';
 
+/**
+ * The advisory outcome of confirming a just-mined PCA agent registration; the
+ * receipt is already authoritative for `registered:true`, this only refines the
+ * advisory picture:
+ *   confirmed    — an on-chain read observed the agent registered.
+ *   not_observed — the probe read but did not (yet) observe it (follower-RPC lag).
+ *   inconclusive — the probe surface exists but every read threw.
+ *   unsupported  — no on-chain probe surface (the chain adapter lacks the read).
+ * The daemon/CLI boundary derives the wire { verified, adapterSupported } from it.
+ */
 export type PcaConfirmationOutcome = ProbedConfirmationOutcome | 'unsupported';
 
-// Production confirmation policy: a bounded post-mine probe. Fixed domain
-// constants, NOT caller-tunable knobs (implementation detail of the advisory
-// read, never a public facade option).
 const PCA_CONFIRM_ATTEMPTS = 3;
 const PCA_CONFIRM_BACKOFF_MS = 300;
 
 /**
- * Advisory-confirmation retry state machine, operating on a probe that ONLY
- * yields a read result: `true` (registered) | `false` (not yet — follower-RPC
- * lag → retry) | throws (RPC read failure). Adapter capability (`unsupported`)
- * is decided ONCE by the facade before this runs, so it is not modeled here.
- *
- * A definitive `not_observed` (a `false` read) is NEVER downgraded by a later
- * throw: once the surface has reported not-yet-registered, an RPC blip on a
- * subsequent attempt leaves the outcome `not_observed` (not `inconclusive`) —
- * only a later `true` upgrades it to `confirmed`. The retry policy is a fixed
- * internal constant. The full matrix is exercised through the facade in
- * pca-v10-facade.test.ts.
+ * Bounded-probe retry state machine. `probe` yields the registration read: true
+ * (registered) | false (not yet — retry) | throws (RPC read failure). A
+ * definitive not_observed (a false read) is never downgraded by a later throw;
+ * only a later true upgrades it to confirmed.
  */
 export async function confirmPcaAgentRegistration(
   probe: () => Promise<boolean>,
 ): Promise<ProbedConfirmationOutcome> {
-  let sawNotObserved = false; // a read returned `false` at least once
+  let sawNotObserved = false;
   for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
     try {
       if (await probe()) return 'confirmed';
-      sawNotObserved = true; // a definitive not-yet-registered read (follower-RPC lag) — retry
+      sawNotObserved = true;
     } catch {
-      // An RPC read failure — does NOT downgrade a prior definitive `not_observed`.
+      // An RPC read failure does not downgrade a prior not_observed.
     }
     if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
   }

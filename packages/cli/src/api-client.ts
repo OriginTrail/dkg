@@ -6,8 +6,8 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { AnyRegisterPcaAgentResponse, RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { decodeRegisterAgentAdvisory } from './pca-confirmation-wire.js';
+import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -990,25 +990,13 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  // #1346 — the client is the version-skew boundary: it posts, then NORMALIZES
-  // the raw current-or-legacy wire response into a stable
-  // `{ registered, advisory }` result so callers render directly and don't
-  // re-derive the `verified`-presence rules. (The daemon route emits the strict
-  // `RegisterPcaAgentResponse`; the decoder handles legacy tolerance.)
+  // The client is the version-skew boundary: it posts, then PARSES + normalizes
+  // the raw JSON (validated at runtime, not just cast) into a stable
+  // `{ registered, advisory }` result — so callers render directly and a
+  // malformed/incoherent wire shape fails loudly here rather than mis-rendering.
   async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResult> {
-    const raw = await this.post<AnyRegisterPcaAgentResponse>(
-      `/api/pca/${encodeURIComponent(accountId)}/agent`,
-      { agent },
-    );
-    const { registered, advisory } = decodeRegisterAgentAdvisory(raw);
-    return {
-      accountId: raw.accountId,
-      agent: raw.agent,
-      registered,
-      advisory,
-      txHash: raw.txHash,
-      blockNumber: raw.blockNumber,
-    };
+    const raw = await this.post<unknown>(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+    return parseRegisterPcaAgentResult(raw);
   }
 
   async getPcaInfo(accountId: string, probeKey?: string): Promise<{

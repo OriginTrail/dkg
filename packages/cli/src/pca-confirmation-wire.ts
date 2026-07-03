@@ -35,25 +35,6 @@ type RegisterPcaAgentResponseBase = {
  */
 export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: true } & PcaAgentConfirmation;
 
-/**
- * The pre-#1346 legacy wire shape: `registered` is the OLD probe-derived boolean
- * (registered = `verified === true`; may be `false`), with `adapterSupported`
- * present and `verified` absent. A legacy daemon had NO `success:false` guard,
- * so a legacy `registered:false` may be an unconfirmed OR a failed tx — hence a
- * loose boolean here (only the legacy shape carries that looseness).
- */
-export type LegacyRegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: boolean } & {
-  adapterSupported: boolean;
-  verified?: undefined;
-};
-
-/**
- * What a CLIENT must TOLERATE under CLI/daemon version skew — current OR legacy.
- * `ApiClient.registerPcaAgent` returns this wider union; the strict
- * `RegisterPcaAgentResponse` stays the producer's contract.
- */
-export type AnyRegisterPcaAgentResponse = RegisterPcaAgentResponse | LegacyRegisterPcaAgentResponse;
-
 /** Derive the wire advisory fields from the agent's single confirmation outcome. */
 export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {
   switch (outcome) {
@@ -132,4 +113,45 @@ export function decodeRegisterAgentAdvisory(
   }
   // Legacy: old read did not confirm — cannot assert the tx succeeded.
   return { registered: resp.registered, advisory: 'legacy-unverified' };
+}
+
+/**
+ * Parse a RAW register-agent JSON response into a stable {@link RegisterPcaAgentResult},
+ * VALIDATING the wire shape at the boundary rather than trusting a cast. Throws
+ * on a missing/mistyped field or an incoherent advisory (e.g. no probe surface —
+ * `adapterSupported:false` — with a non-null `verified`). Accepts the current
+ * coherent shape and the legacy shape (`verified` absent).
+ */
+export function parseRegisterPcaAgentResult(raw: unknown): RegisterPcaAgentResult {
+  const reject = (why: string): never => {
+    throw new Error(`Malformed register-agent response from daemon: ${why}`);
+  };
+  if (typeof raw !== 'object' || raw === null) return reject('not an object');
+  const r = raw as Record<string, unknown>;
+  if (typeof r.accountId !== 'string') return reject('accountId');
+  if (typeof r.agent !== 'string') return reject('agent');
+  if (typeof r.txHash !== 'string') return reject('txHash');
+  if (typeof r.blockNumber !== 'number') return reject('blockNumber');
+  if (typeof r.registered !== 'boolean') return reject('registered');
+  if (typeof r.adapterSupported !== 'boolean') return reject('adapterSupported');
+
+  let input: DecodableRegisterAgentResponse;
+  if ('verified' in r && r.verified !== undefined) {
+    if (typeof r.verified !== 'boolean' && r.verified !== null) return reject('verified');
+    // No probe surface can only be inconclusive: adapterSupported:false ⟹ verified:null.
+    if (r.adapterSupported === false && r.verified !== null) return reject('incoherent verified/adapterSupported');
+    // Runtime-validated coherent current shape; the cast is safe past these checks.
+    input = { registered: true, verified: r.verified, adapterSupported: r.adapterSupported } as DecodableRegisterAgentResponse;
+  } else {
+    input = { registered: r.registered, adapterSupported: r.adapterSupported };
+  }
+  const { registered, advisory } = decodeRegisterAgentAdvisory(input);
+  return {
+    accountId: r.accountId,
+    agent: r.agent,
+    registered,
+    advisory,
+    txHash: r.txHash,
+    blockNumber: r.blockNumber,
+  };
 }

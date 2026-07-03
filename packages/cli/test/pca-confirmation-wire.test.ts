@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { pcaConfirmationToWire, decodeRegisterAgentAdvisory } from '../src/pca-confirmation-wire.js';
+import { pcaConfirmationToWire, decodeRegisterAgentAdvisory, parseRegisterPcaAgentResult } from '../src/pca-confirmation-wire.js';
+
+const BASE = { accountId: '7', agent: '0xabc', txHash: '0xreg', blockNumber: 9 };
 
 // R9 (9-A) — the wire advisory derivation lives at the CLI boundary now (moved
 // out of the agent package); pin the exhaustive outcome → { verified,
@@ -42,5 +44,32 @@ describe('decodeRegisterAgentAdvisory', () => {
     // read ran but did not observe it — cannot assert tx success; registered stays false
     expect(decodeRegisterAgentAdvisory({ registered: false, adapterSupported: true }))
       .toEqual({ registered: false, advisory: 'legacy-unverified' });
+  });
+});
+
+// R16 (16-A) — the client is a REAL runtime boundary: parse+validate the raw
+// JSON, don't just cast it. Incoherent/malformed wire shapes fail loudly here.
+describe('parseRegisterPcaAgentResult', () => {
+  it('current coherent response → normalized result', () => {
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: true, adapterSupported: true }))
+      .toEqual({ ...BASE, registered: true, advisory: 'confirmed' });
+  });
+
+  it('legacy response (verified absent, registered:false) → registered:false + legacy-unverified', () => {
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: false, adapterSupported: false }))
+      .toEqual({ ...BASE, registered: false, advisory: 'legacy-unverified' });
+  });
+
+  it('rejects an INCOHERENT shape (adapterSupported:false with a non-null verified)', () => {
+    expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: false, verified: true, adapterSupported: false }))
+      .toThrow(/incoherent/i);
+  });
+
+  it('rejects a malformed shape (missing/mistyped required field)', () => {
+    expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: true, adapterSupported: 'yes' as unknown }))
+      .toThrow(/adapterSupported/);
+    expect(() => parseRegisterPcaAgentResult(null)).toThrow(/not an object/);
+    expect(() => parseRegisterPcaAgentResult({ agent: '0xabc', registered: true, adapterSupported: true }))
+      .toThrow(/accountId/);
   });
 });
