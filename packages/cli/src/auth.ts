@@ -27,6 +27,7 @@ export interface DashboardSessionAuthResult {
 }
 
 export interface HttpAuthGuardOptions {
+  resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   dashboardSession?: {
     authenticate: (req: IncomingMessage) => DashboardSessionAuthResult | null;
     verifyCsrf: (req: IncomingMessage, session: DashboardSessionAuthResult) => boolean;
@@ -37,7 +38,7 @@ export interface RequestAuthContext {
   source: 'authorization-header' | 'events-query' | 'dashboard-session';
   token?: string;
   compatToken?: string;
-  principal?: RequestAuthPrincipal;
+  principal: RequestAuthPrincipal;
   csrf: {
     required: boolean;
     validated: boolean;
@@ -864,6 +865,14 @@ function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | n
   return true;
 }
 
+function defaultRequestPrincipal(): RequestAuthPrincipal {
+  return { kind: 'node-admin', agentAddress: 'unknown' };
+}
+
+function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal {
+  return options?.resolvePrincipal?.(token) ?? defaultRequestPrincipal();
+}
+
 export function resolveRequestAuthDecision(
   req: IncomingMessage,
   validTokens: Set<string>,
@@ -881,6 +890,7 @@ export function resolveRequestAuthDecision(
       context: {
         source: 'authorization-header',
         token,
+        principal: resolveRequestPrincipal(token, options),
         csrf: { required: false, validated: false },
       },
     };
@@ -896,6 +906,7 @@ export function resolveRequestAuthDecision(
         context: {
           source: 'events-query',
           token: queryToken,
+          principal: resolveRequestPrincipal(queryToken, options),
           csrf: { required: false, validated: false },
         },
       };

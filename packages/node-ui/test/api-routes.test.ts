@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve, sep, isAbsolute } from 'node:path';
-import { handleNodeUIRequest } from '../src/api.js';
+import { handleNodeUIRequest, type HandleNodeUIRequestOptions } from '../src/api.js';
 import { DashboardDB } from '../src/db.js';
 
 /**
@@ -18,19 +18,16 @@ import { DashboardDB } from '../src/db.js';
  */
 function makeHarness() {
   type HandlerArgs = Parameters<typeof handleNodeUIRequest>;
-  type Tail = [
-    HandlerArgs[3], // db
-    HandlerArgs[4], // staticRoot
-    HandlerArgs[5], HandlerArgs[6], HandlerArgs[7], HandlerArgs[8], HandlerArgs[9],
-    HandlerArgs[10]?, HandlerArgs[11]?, HandlerArgs[12]?,
-  ];
-  let nextArgs: Tail = [
-    {} as any, '.', undefined, undefined, undefined, undefined, undefined,
-  ] as Tail;
+  type HarnessArgs = {
+    db: HandlerArgs[3];
+    staticDir: HandlerArgs[4];
+    options?: HandleNodeUIRequestOptions;
+  };
+  let nextArgs: HarnessArgs = { db: {} as any, staticDir: '.' };
 
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    handleNodeUIRequest(req, res, url, ...nextArgs).then((handled) => {
+    handleNodeUIRequest(req, res, url, nextArgs.db, nextArgs.staticDir, nextArgs.options).then((handled) => {
       if (!handled && !res.headersSent) {
         res.statusCode = 404;
         res.end('Not Found');
@@ -52,7 +49,7 @@ function makeHarness() {
       });
     }),
     close: (): Promise<void> => new Promise((resolve) => server.close(() => resolve())),
-    setArgs: (tail: Tail) => { nextArgs = tail; },
+    setArgs: (args: HarnessArgs) => { nextArgs = args; },
   };
 }
 
@@ -95,10 +92,11 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
       },
       triples: [{ subject: 's', predicate: 'p', object: 'o' }],
     }));
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSessionGraphDelta: delta.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: { memoryManager: { getSessionGraphDelta: delta.fn } as any },
+    });
 
     const res = await fetch(
       `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=turn-1`,
@@ -112,10 +110,11 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
   it('returns 400 for invalid turn id in graph-delta route', async () => {
     const delta = recorder(() => undefined);
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSessionGraphDelta: delta.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: { memoryManager: { getSessionGraphDelta: delta.fn } as any },
+    });
 
     const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=bad/turn`);
 
@@ -127,10 +126,11 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
   it('returns 400 for invalid baseTurnId in graph-delta route', async () => {
     const delta = recorder(() => undefined);
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSessionGraphDelta: delta.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: { memoryManager: { getSessionGraphDelta: delta.fn } as any },
+    });
 
     const res = await fetch(
       `${baseUrl}/api/memory/sessions/session-1/graph-delta?turnId=turn-2&baseTurnId=bad/base`,
@@ -161,10 +161,11 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
         },
       ],
     }));
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSession: session.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: { memoryManager: { getSession: session.fn } as any },
+    });
 
     const res = await fetch(`${baseUrl}/api/memory/sessions/session-1?limit=25&order=desc`);
 
@@ -182,10 +183,11 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 
   it('returns 400 for invalid session query parameters', async () => {
     const session = recorder(() => undefined);
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSession: session.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: { memoryManager: { getSession: session.fn } as any },
+    });
 
     const invalidPaths = [
       '/api/memory/sessions/session-1?limit=0',
@@ -213,10 +215,13 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   it('returns 501 Not Implemented for GET /api/memory/sessions/:id/publication (Codex B38)', async () => {
     const status = recorder(() => undefined);
     const publish = recorder(() => undefined);
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: {
+        memoryManager: { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any,
+      },
+    });
 
     const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publication`);
 
@@ -233,10 +238,13 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   it('returns 501 Not Implemented for POST /api/memory/sessions/:id/publish (Codex B38)', async () => {
     const status = recorder(() => undefined);
     const publish = recorder(() => undefined);
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any, undefined,
-    ] as any);
+    harness.setArgs({
+      db: {} as any,
+      staticDir: '.',
+      options: {
+        memoryManager: { getSessionPublicationStatus: status.fn, publishSession: publish.fn } as any,
+      },
+    });
 
     const res = await fetch(`${baseUrl}/api/memory/sessions/session-1/publish`, {
       method: 'POST',
@@ -266,10 +274,7 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
   // `POST /api/knowledge-assets/:name/wm/write` direct route. Mirrors the
   // B38 pattern for the session-publication routes above.
   it('returns 410 Gone for POST /api/memory/import with migration pointers (Codex B52)', async () => {
-    harness.setArgs([
-      {} as any, '.', undefined, undefined, undefined,
-      undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: {} as any, staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/memory/import`, {
       method: 'POST',
@@ -305,8 +310,8 @@ describe('handleNodeUIRequest Stage 5 memory/publication routes', () => {
 describe('handleNodeUIRequest /api/logs', () => {
   it('delegates to the DB-backed compatibility search surface', async () => {
     const calls: any[] = [];
-    harness.setArgs([
-      {
+    harness.setArgs({
+      db: {
         searchLogs: (opts: any) => {
           calls.push(opts);
           return {
@@ -315,8 +320,8 @@ describe('handleNodeUIRequest /api/logs', () => {
           };
         },
       } as any,
-      '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+      staticDir: '.',
+    });
 
     const res = await fetch(`${baseUrl}/api/logs?q=publish&level=info&module=Publisher&limit=5&offset=2`);
     expect(res.status).toBe(200);
@@ -351,9 +356,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 20 }, (_, i) => `log line ${i + 1}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=5`);
     expect(res.status).toBe(200);
@@ -368,9 +371,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 10 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log`);
     const body = await res.json();
@@ -382,9 +383,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
     writeFileSync(join(tmpDir, 'daemon.log'), 'single line\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=-10`);
     expect(res.status).toBe(200);
@@ -397,9 +396,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
     writeFileSync(join(tmpDir, 'daemon.log'), lines.join('\n') + '\n');
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log?lines=99999`);
     expect(res.status).toBe(200);
@@ -417,9 +414,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
     ].join('\n') + '\n';
     writeFileSync(join(tmpDir, 'daemon.log'), content);
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log?q=publish`);
     const body = await res.json();
@@ -430,9 +425,7 @@ describe('handleNodeUIRequest /api/node-log', () => {
   it('returns empty lines when daemon.log does not exist', async () => {
     tmpDir = mkdtempSync(join(tmpdir(), 'dkg-log-test-'));
 
-    harness.setArgs([
-      makeFakeDb(tmpDir), '.', undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: makeFakeDb(tmpDir), staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/node-log`);
     expect(res.status).toBe(200);
@@ -460,9 +453,7 @@ describe('serveStatic path traversal prevention', () => {
 
   it('URL normalization prevents ../ traversal at the HTTP layer', async () => {
     setup();
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     // Real HTTP normalizes /ui/../../etc/passwd → /etc/passwd before it
     // reaches our handler, so the handler returns false (not its route)
@@ -485,7 +476,6 @@ describe('serveStatic path traversal prevention', () => {
         const rawUrl = { pathname: '/ui/../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
         handleNodeUIRequest(
           req, res, rawUrl, fakeDb(staticDir), staticDir,
-          undefined, undefined, undefined, undefined, undefined,
         );
       });
       s.listen(0, '127.0.0.1', () => {
@@ -511,7 +501,6 @@ describe('serveStatic path traversal prevention', () => {
         const rawUrl = { pathname: '/ui/assets/../../../etc/passwd', searchParams: new URLSearchParams() } as unknown as URL;
         handleNodeUIRequest(
           req, res, rawUrl, fakeDb(staticDir), staticDir,
-          undefined, undefined, undefined, undefined, undefined,
         );
       });
       s.listen(0, '127.0.0.1', () => {
@@ -530,9 +519,7 @@ describe('serveStatic path traversal prevention', () => {
 
   it('serves valid /ui/index.html normally', async () => {
     setup();
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     const res = await fetch(`${baseUrl}/ui/index.html`);
     expect(res.status).toBe(200);
@@ -550,9 +537,7 @@ describe('serveStatic path traversal prevention', () => {
 
   it('serves valid /ui/ root normally', async () => {
     setup();
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     const res = await fetch(`${baseUrl}/ui/`);
     expect(res.status).toBe(200);
@@ -563,9 +548,7 @@ describe('serveStatic path traversal prevention', () => {
   it('does not inject browser bearer tokens into /ui HTML', async () => {
     setup();
     writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><head></head><body></body></html>');
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     const res = await fetch(`${baseUrl}/ui/`);
     expect(res.status).toBe(200);
@@ -579,9 +562,7 @@ describe('serveStatic path traversal prevention', () => {
 
   it('does not inject tokens into SPA fallback HTML', async () => {
     setup();
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     const res = await fetch(`${baseUrl}/ui/projects/example`);
     expect(res.status).toBe(200);
@@ -592,9 +573,7 @@ describe('serveStatic path traversal prevention', () => {
 
   it('serves assets without HTML security header injection', async () => {
     setup();
-    harness.setArgs([
-      fakeDb(staticDir), staticDir, undefined, undefined, 'sentinel-secret-token', undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb(staticDir), staticDir });
 
     const res = await fetch(`${baseUrl}/ui/assets/app.js`);
     expect(res.status).toBe(200);
@@ -608,9 +587,7 @@ describe('serveStatic path traversal prevention', () => {
 describe('handleNodeUIRequest CORS origin handling', () => {
   it('omits Access-Control-Allow-Origin when corsOrigin is undefined', async () => {
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
-    harness.setArgs([
-      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-    ] as any);
+    harness.setArgs({ db: fakeDb, staticDir: '.' });
 
     const res = await fetch(`${baseUrl}/api/metrics`);
     expect(res.status).toBe(200);
@@ -619,9 +596,11 @@ describe('handleNodeUIRequest CORS origin handling', () => {
 
   it('sets Access-Control-Allow-Origin when corsOrigin is provided', async () => {
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
-    harness.setArgs([
-      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, 'https://example.com',
-    ] as any);
+    harness.setArgs({
+      db: fakeDb,
+      staticDir: '.',
+      options: { corsOrigin: 'https://example.com' },
+    });
 
     const res = await fetch(`${baseUrl}/api/metrics`);
     expect(res.status).toBe(200);
@@ -630,9 +609,11 @@ describe('handleNodeUIRequest CORS origin handling', () => {
 
   it('omits Access-Control-Allow-Origin when corsOrigin is explicitly null (rejected origin)', async () => {
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
-    harness.setArgs([
-      fakeDb, '.', undefined, undefined, undefined, undefined, undefined, undefined, null,
-    ] as any);
+    harness.setArgs({
+      db: fakeDb,
+      staticDir: '.',
+      options: { corsOrigin: null },
+    });
 
     const res = await fetch(`${baseUrl}/api/metrics`);
     expect(res.status).toBe(200);
@@ -662,7 +643,7 @@ describe('handleNodeUIRequest replication routes (Phase F)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const args = () => [db as any, '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined] as any;
+  const args = () => ({ db: db as any, staticDir: '.' });
 
   it('GET /api/replication/summary returns KPIs', async () => {
     harness.setArgs(args());

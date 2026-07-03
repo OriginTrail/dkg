@@ -3080,6 +3080,7 @@ export async function runDaemonInner(
         validTokens,
         resolveCorsOrigin(req, corsAllowed),
         {
+          resolvePrincipal: resolveDashboardPrincipal,
           dashboardSession: {
             authenticate: (request) => dashboardSessions.authenticate(request),
             verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
@@ -3192,7 +3193,14 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, {
+        metricsCollector,
+        memoryManager,
+        llmSettings,
+        telemetrySettings,
+        corsOrigin: resolveCorsOrigin(req, corsAllowed),
+        relayStatsProvider,
+      });
       if (handled) return;
 
       await handleRequest(

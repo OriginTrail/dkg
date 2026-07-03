@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, getRequestAuthContext, setRequestAuthContext, extractBearerToken } from '../auth.js';
+import { loadTokens, httpAuthGuard, getRequestAuthContext, extractBearerToken } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -370,24 +370,11 @@ export async function handleRequest(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Resolve the requesting principal from trusted auth-guard state.
-  // Dashboard sessions store a principal at session creation; bearer/query
-  // callers are enriched here so route code can prefer principal identity
-  // while legacy self-call helpers continue to receive requestToken.
-  let requestAuth = getRequestAuthContext(req);
+  // Use the auth-guard's resolved principal when present; legacy/internal callers
+  // without guard context still fall back to the token-derived agent address.
+  const requestAuth = getRequestAuthContext(req);
   const requestToken = requestAuth?.token ?? requestAuth?.compatToken ?? extractBearerToken(req.headers.authorization);
-  if (requestAuth && !requestAuth.principal) {
-    const agentAddress = agent.resolveAgentAddress(requestToken);
-    requestAuth = {
-      ...requestAuth,
-      principal: {
-        kind: requestToken && agent.resolveAgentByToken(requestToken) ? 'agent' : 'node-admin',
-        agentAddress,
-      },
-    };
-    setRequestAuthContext(req, requestAuth);
-  }
-  const requestAgentAddress = requestAuth?.principal?.agentAddress ?? agent.resolveAgentAddress(requestToken);
+  const requestAgentAddress = requestAuth?.principal.agentAddress ?? agent.resolveAgentAddress(requestToken);
 
   const ctx: RequestContext = {
     req,

@@ -35,6 +35,7 @@ async function startServer(): Promise<{ server: Server; baseUrl: string }> {
       return;
     }
     if (!(await httpAuthGuard(req, res, true, validTokens, null, {
+      resolvePrincipal,
       dashboardSession: {
         authenticate: (request) => sessions.authenticate(request),
         verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
@@ -121,6 +122,26 @@ describe('dashboard browser sessions', () => {
     const res = await rawRequest(started.baseUrl, '/api/dashboard/session/loopback', {
       method: 'POST',
       headers: { Host: 'attacker.example' },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: expect.stringContaining('localhost'),
+    });
+  });
+
+  it('rejects loopback bootstrap when reverse-proxy forwarding metadata is present', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const url = new URL(started.baseUrl);
+    const res = await rawRequest(started.baseUrl, '/api/dashboard/session/loopback', {
+      method: 'POST',
+      headers: {
+        Host: `${url.hostname}:${url.port}`,
+        'X-Forwarded-For': '203.0.113.20',
+        'X-Forwarded-Proto': 'https',
+      },
     });
     expect(res.status).toBe(403);
     expect(res.headers['set-cookie']).toBeUndefined();

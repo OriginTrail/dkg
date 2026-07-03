@@ -50,14 +50,7 @@ beforeAll(async () => {
       url,
       db,
       '.',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      currentProvider,
+      { relayStatsProvider: currentProvider },
     )
       .then((handled) => {
         if (!handled && !res.headersSent) {

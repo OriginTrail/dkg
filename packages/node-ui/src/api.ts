@@ -80,6 +80,15 @@ export interface TelemetrySettingsCallbacks {
   setTelemetryEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
 }
 
+export interface HandleNodeUIRequestOptions {
+  metricsCollector?: MetricsCollector;
+  memoryManager?: ChatMemoryManager;
+  llmSettings?: LlmSettingsCallbacks;
+  telemetrySettings?: TelemetrySettingsCallbacks;
+  corsOrigin?: string | null;
+  relayStatsProvider?: RelayStatsProvider;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
@@ -90,15 +99,16 @@ export async function handleNodeUIRequest(
   url: URL,
   db: DashboardDB,
   staticDir: string,
-  _legacyRemovedArg?: unknown,
-  metricsCollector?: MetricsCollector,
-  _authTokenRemoved?: string,
-  memoryManager?: ChatMemoryManager,
-  llmSettings?: LlmSettingsCallbacks,
-  telemetrySettings?: TelemetrySettingsCallbacks,
-  corsOrigin?: string | null,
-  relayStatsProvider?: RelayStatsProvider,
+  options: HandleNodeUIRequestOptions = {},
 ): Promise<boolean> {
+  const {
+    metricsCollector,
+    memoryManager,
+    llmSettings,
+    telemetrySettings,
+    corsOrigin,
+    relayStatsProvider,
+  } = options;
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 

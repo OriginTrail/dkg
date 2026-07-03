@@ -198,10 +198,6 @@ export function verifyDashboardCsrf(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function isUnsafeDashboardMethod(method: string | undefined): boolean {
-  return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
-}
-
 function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken" | "source" | "expiresAt">) {
   return {
     authenticated: true,
@@ -277,6 +273,7 @@ function isHttpsRequest(req: IncomingMessage): boolean {
 function isLoopbackRequest(req: IncomingMessage): boolean {
   const remote = req.socket.remoteAddress ?? "";
   if (!isLoopbackAddress(remote)) return false;
+  if (hasProxyForwardingHeaders(req)) return false;
   return isAllowedLoopbackHost(req.headers.host);
 }
 
@@ -294,4 +291,24 @@ function isAllowedLoopbackHost(hostHeader: string | undefined): boolean {
     ? rawHost.slice(1, rawHost.indexOf("]"))
     : rawHost.split(":")[0];
   return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+const PROXY_FORWARDING_HEADERS = [
+  "forwarded",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-real-ip",
+  "x-client-ip",
+  "cf-connecting-ip",
+  "true-client-ip",
+] as const;
+
+function hasProxyForwardingHeaders(req: IncomingMessage): boolean {
+  return PROXY_FORWARDING_HEADERS.some((header) => headerHasValue(req.headers[header]));
+}
+
+function headerHasValue(value: string | string[] | undefined): boolean {
+  if (Array.isArray(value)) return value.some((item) => item.trim().length > 0);
+  return typeof value === "string" && value.trim().length > 0;
 }

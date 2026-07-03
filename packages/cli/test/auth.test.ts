@@ -8,6 +8,7 @@ import {
   verifyToken,
   extractBearerToken,
   httpAuthGuard,
+  getRequestAuthContext,
   loadTokens,
   resolveRequestAuthDecision,
 } from '../src/auth.js';
@@ -66,6 +67,7 @@ describe('verifyToken', () => {
 describe('resolveRequestAuthDecision', () => {
   const VALID_TOKEN = 'decision-token';
   const validTokens = new Set([VALID_TOKEN]);
+  const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:decision' };
 
   function request(
     url: string,
@@ -85,6 +87,7 @@ describe('resolveRequestAuthDecision', () => {
     const decision = resolveRequestAuthDecision(
       request('/api/agents', { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
       validTokens,
+      { resolvePrincipal: () => principal },
     );
 
     expect(decision).toMatchObject({
@@ -93,6 +96,26 @@ describe('resolveRequestAuthDecision', () => {
       context: {
         source: 'authorization-header',
         token: VALID_TOKEN,
+        principal,
+        csrf: { required: false, validated: false },
+      },
+    });
+  });
+
+  it('returns an events-query context with a resolved principal for a valid SSE credential', () => {
+    const decision = resolveRequestAuthDecision(
+      request(`/api/events?token=${VALID_TOKEN}`),
+      validTokens,
+      { resolvePrincipal: () => principal },
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+      context: {
+        source: 'events-query',
+        token: VALID_TOKEN,
+        principal,
         csrf: { required: false, validated: false },
       },
     });
@@ -184,14 +207,17 @@ describe('loadTokens', () => {
 describe('httpAuthGuard', () => {
   const VALID_TOKEN = 'test-secret-token';
   const validTokens = new Set([VALID_TOKEN]);
+  const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:http-guard' };
   let server: Server;
   let baseUrl: string;
 
   beforeEach(async () => {
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (!(await httpAuthGuard(req, res, true, validTokens))) return;
+      if (!(await httpAuthGuard(req, res, true, validTokens, null, {
+        resolvePrincipal: () => principal,
+      }))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, requestAuth: getRequestAuthContext(req) ?? null }));
     });
 
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -319,6 +345,24 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+    expect(body.requestAuth).toMatchObject({
+      source: 'authorization-header',
+      token: VALID_TOKEN,
+      principal,
+      csrf: { required: false, validated: false },
+    });
+  });
+
+  it('resolves the same principal shape for valid SSE query-token auth', async () => {
+    const res = await fetch(`${baseUrl}/api/events?token=${encodeURIComponent(VALID_TOKEN)}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requestAuth).toMatchObject({
+      source: 'events-query',
+      token: VALID_TOKEN,
+      principal,
+      csrf: { required: false, validated: false },
+    });
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {
