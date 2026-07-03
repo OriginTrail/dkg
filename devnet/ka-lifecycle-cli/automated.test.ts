@@ -101,7 +101,7 @@ function parseJobId(stdout: string, label = 'CLI output'): string {
   return jobId;
 }
 
-function writeNtFixture(name: string, value: string): { filePath: string; subject: string } {
+function writeNtFixture(name: string, value: string): { filePath: string; subject: string; value: string } {
   const dir = join(import.meta.dirname, 'turns');
   mkdirSync(dir, { recursive: true });
   const subject = `urn:test:ka-lifecycle-cli:${name}:${Date.now()}:${++fileCounter}`;
@@ -111,7 +111,7 @@ function writeNtFixture(name: string, value: string): { filePath: string; subjec
     `<${subject}> <${PREDICATE}> "${value}" .\n`,
     'utf8',
   );
-  return { filePath, subject };
+  return { filePath, subject, value };
 }
 
 async function assertSubjectVisible(
@@ -337,8 +337,8 @@ async function reopenEditFinalizeAndShare(
   name: string,
   layer: 'swm' | 'vm',
   initialSubject: string,
-  update: { filePath: string; subject: string },
-  opts: { flowLabel: string; updateValue: string },
+  update: { filePath: string; subject: string; value: string },
+  flowLabel: string,
 ): Promise<void> {
   expectCliOk(
     await runDkgCli(
@@ -346,31 +346,31 @@ async function reopenEditFinalizeAndShare(
       ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', layer, '--on-conflict', 'replace', '--json'],
       60_000,
     ),
-    `ka pull-from ${layer} for ${opts.flowLabel}`,
+    `ka pull-from ${layer} for ${flowLabel}`,
   );
   await assertWorkingMemorySubjectPresent(
     node,
     contextGraphId,
     name,
     initialSubject,
-    `${opts.flowLabel} WM after pull-from`,
+    `${flowLabel} WM after pull-from`,
   );
 
   expectCliOk(
     await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
-    `ka write ${opts.flowLabel}`,
+    `ka write ${flowLabel}`,
   );
   await assertWorkingMemorySubjectPresent(
     node,
     contextGraphId,
     name,
     update.subject,
-    `${opts.flowLabel} WM after edit`,
+    `${flowLabel} WM after edit`,
   );
 
-  expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), `ka finalize ${opts.flowLabel}`);
-  expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), `ka share ${opts.flowLabel}`);
-  await assertSharedSubject(node, contextGraphId, update.subject, opts.updateValue);
+  expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), `ka finalize ${flowLabel}`);
+  expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), `ka share ${flowLabel}`);
+  await assertSharedSubject(node, contextGraphId, update.subject, update.value);
 }
 
 beforeAll(async () => {
@@ -540,10 +540,7 @@ describe('KA lifecycle CLI on devnet', () => {
       label: 'VM after initial SWM-only share',
     });
 
-    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'swm', initial.subject, update, {
-      flowLabel: 'SWM update',
-      updateValue: 'swm update edited',
-    });
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'swm', initial.subject, update, 'SWM update');
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM after SWM-only update',
@@ -571,10 +568,7 @@ describe('KA lifecycle CLI on devnet', () => {
       label: 'VM before edited publish',
     });
 
-    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'vm', initial.subject, update, {
-      flowLabel: 'VM update',
-      updateValue: 'vm update edited',
-    });
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'vm', initial.subject, update, 'VM update');
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM before edited publish after re-share',
