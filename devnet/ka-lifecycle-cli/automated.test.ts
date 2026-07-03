@@ -513,7 +513,11 @@ describe('KA lifecycle CLI on devnet', () => {
     const legacyCli = await runDkgCli(node, ['publish', contextGraphId, '--file', filePath], 30_000);
     expect(legacyCli.code, `top-level publish unexpectedly succeeded:\n${legacyCli.stdout}\n${legacyCli.stderr}`)
       .not.toBe(0);
-    expect(`${legacyCli.stdout}\n${legacyCli.stderr}`).toMatch(/unknown command|error/i);
+    expect(legacyCli.stderr.replace(/\r\n/g, '\n')).toContain("error: unknown command 'publish'");
+
+    const help = await runDkgCli(node, ['--help'], 30_000);
+    expectCliOk(help, 'dkg --help');
+    expect(help.stdout).not.toMatch(/^\s+publish\b/m);
 
     const directPublish = await postJson(node, '/api/knowledge-assets/publish', { contextGraphId });
     expect(directPublish.status).toBe(404);
