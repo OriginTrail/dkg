@@ -1,0 +1,660 @@
+{
+  "uid": "dkg-node-metrics",
+  "title": "DKG Nodes — Metrics",
+  "timezone": "browser",
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "tags": [
+    "dkg",
+    "metrics"
+  ],
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "dkg"
+      ],
+      "asDropdown": true,
+      "title": "DKG dashboards",
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "description": "OTel metrics from dkg-node (meter @origintrail-official/dkg). Node label profile: instance (= service.instance.id under the canonical OTLP mapping). If the collector emits a different node label (e.g. resource_to_telemetry_conversion -> service_instance_id), regenerate with --prom-node-label.",
+  "templating": {
+    "list": [
+      {
+        "name": "vm",
+        "type": "datasource",
+        "query": "prometheus",
+        "label": "Metrics DS",
+        "hide": 2,
+        "current": {}
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${vm}"
+        },
+        "query": "label_values({__name__=~\"dkg_.+\"}, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".+",
+        "allowCustomValue": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "",
+      "gridPos": {
+        "h": 3,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "type": "text",
+      "options": {
+        "mode": "markdown",
+        "content": "**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector's self-monitoring and works independently of node export."
+      },
+      "transparent": true
+    },
+    {
+      "title": "Publishing",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Publish rate by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(dkg_publish_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Publish duration p50/p95",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate({__name__=~\"dkg_publish_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "title": "ACK quorum outcomes",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(dkg_ack_quorum_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "ACK peer results (publisher side)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (result) (rate(dkg_ack_peer_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "title": "ACK declines by code + handler outcomes",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (decline_code) (rate(dkg_ack_peer_total{result=\"decline\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "sent-to-us: {{decline_code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(dkg_ack_handler_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "handler: {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Chain / RPC",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Raw RPC requests by method (billing unit — post-#1409 node builds)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (rpc_method) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{rpc_method}}"
+        }
+      ]
+    },
+    {
+      "title": "Raw RPC requests per node (post-#1409 node builds)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (instance) (rate(dkg_chain_rpc_requests_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "Logical chain ops by method/outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (rpc_method, outcome) (rate(dkg_chain_rpc_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{rpc_method}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Chain RPC p95 latency by method",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, rpc_method) (rate({__name__=~\"dkg_chain_rpc_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{rpc_method}}"
+        }
+      ]
+    },
+    {
+      "title": "RPC endpoint failover exhaustion",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (instance) (rate(dkg_chain_rpc_failover_total{reason=\"exhausted\", instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "title": "P2P / Sync",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Sync requests & responses by outcome",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(dkg_sync_request_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "request: {{outcome}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(dkg_sync_response_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "response: {{outcome}}"
+        }
+      ]
+    },
+    {
+      "title": "Protocol send rate + p95 by protocol",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(dkg_protocol_router_send_total{instance=~\"${node:regex}\"}[$__rate_interval]))",
+          "legendFormat": "send: {{outcome}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le, protocol_id) (rate({__name__=~\"dkg_protocol_router_send_duration(_milliseconds)?_bucket\", instance=~\"${node:regex}\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{protocol_id}}"
+        }
+      ]
+    },
+    {
+      "title": "Pipeline health (collector — live now)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "type": "row",
+      "collapsed": false
+    },
+    {
+      "title": "Collector log records/s: accepted vs exported",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(rate(otelcol_receiver_accepted_log_records[$__rate_interval]))",
+          "legendFormat": "accepted (in)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum(rate(otelcol_exporter_sent_log_records[$__rate_interval]))",
+          "legendFormat": "sent (out)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "C",
+          "expr": "sum(rate(otelcol_exporter_send_failed_log_records[$__rate_interval]))",
+          "legendFormat": "send FAILED"
+        }
+      ]
+    },
+    {
+      "title": "Collector exporter queue",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(otelcol_exporter_queue_size)",
+          "legendFormat": "queue size"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum(otelcol_exporter_queue_capacity)",
+          "legendFormat": "capacity"
+        }
+      ]
+    },
+    {
+      "title": "Collector CPU / memory",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "A",
+          "expr": "sum(rate(otelcol_process_cpu_seconds[$__rate_interval]))",
+          "legendFormat": "CPU cores"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${vm}"
+          },
+          "refId": "B",
+          "expr": "sum(otelcol_process_memory_rss)",
+          "legendFormat": "RSS bytes"
+        }
+      ]
+    }
+  ]
+}

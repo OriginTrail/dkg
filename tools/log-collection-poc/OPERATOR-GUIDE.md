@@ -67,7 +67,16 @@ Each signal is independent and stays off until it has an endpoint (or set
 traces backend and metrics at a Prometheus/Mimir-backed collector.
 
 ## Viewing
-Point Grafana at your log store and import `production/grafana-dashboard-dkg-node-logs.json`
-(per-node) and/or `production/grafana-dashboard-dkg-fleet-logs.json` (fleet),
-then pick your node and a time range. If your store is Loki < 3.0, front it with
-Grafana Alloy (see `production/RUNBOOK.md`).
+Pick the dashboards that match your Loki version — the query shapes differ:
+
+- **Loki >= 3.0 with native OTLP ingest** (recommended): import
+  `tools/observability/grafana-dashboard-dkg-node-logs.json` (per-node) and/or
+  `tools/observability/grafana-dashboard-dkg-fleet-logs.json` (fleet). These
+  filter severity via OTLP structured metadata (`severity_text`) and will show
+  empty level/error panels on older stores.
+- **Loki < 3.0 behind Grafana Alloy** (legacy path, see
+  `tools/observability/RUNBOOK.md`): import the Alloy-compatible
+  `grafana-dashboard-dkg-node-logs.json` from THIS directory instead — it
+  matches the labels/fields the Alloy bridge produces.
+
+Then pick your node and a time range.

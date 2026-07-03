@@ -1,4 +1,62 @@
-# Production runbook — DKG node logs → existing Grafana (polaris)
+# Production runbook — DKG node observability
+
+## ⭐ Current production (since 2026-07-02): dedicated observability server
+
+Devops moved production ingest off polaris to a dedicated server running the
+full three-signal stack — **OTel Collector → Loki 3.x (native OTLP) + Tempo +
+VictoriaMetrics → Grafana**. The mainnet fleet ships logs there today; nodes
+send OTLP straight to the collector (no Alloy bridge needed on this stack).
+
+**Dashboards** (folder "DKG V10 Node Observability", JSONs in this directory,
+import via `POST /api/dashboards/db {dashboard, folderUid, overwrite:true}`):
+
+| uid | file | needs |
+|---|---|---|
+| `dkg-fleet-logs` | `grafana-dashboard-dkg-fleet-logs.json` | logs (live) |
+| `dkg-node-logs` | `grafana-dashboard-dkg-node-logs.json` | logs (live) |
+| `dkg-node-metrics` | `grafana-dashboard-dkg-node-metrics.json` | node metrics endpoint + collector→VictoriaMetrics route (collector self-monitoring row is live already; the two raw-RPC panels additionally need nodes on a post-PR-#1409 build, which ships `dkg.chain.rpc.requests.total`) |
+| `dkg-node-traces` | `grafana-dashboard-dkg-node-traces.json` | node traces endpoint + collector→Tempo route |
+
+Datasources are template variables (`loki` / `vm` / `tempo`) — the dashboards
+bind to whatever datasources exist on import. Alerting (10 rules, 3 Slack
+channels): `example-alerts.md` (importable payloads: `alert-rules.provisioning.json`).
+
+**Query shapes differ from the polaris/Alloy stack — do not mix them up:**
+- The log **line is the plain message body** (native OTLP ingest). There is
+  **no** `| json | line_format "{{.body}}"` step.
+- Severity is **structured metadata**: filter with `| severity_text=`ERROR``
+  (values DEBUG/INFO/WARN/ERROR) or `detected_level`. There is no `level` label.
+- Other metadata available per line: `dkg_module`, `dkg_operation_id`,
+  `dkg_peer_id`, `dkg_chain`, `dkg_node_role` — filter the same way.
+- `rpc_usage` accounting lines parse directly:
+  `|= `rpc_usage` | logfmt | method != `` | unwrap count`.
+- **Loki 3 gotcha:** *instant* metric queries over ranges ≥ a few hours are
+  split internally and fail with `maximum of series (500) reached` even at tiny
+  stream counts. Use **range queries** + a Grafana reduce (`sum`/`last`) for
+  totals; keep instant queries to short fixed windows (e.g. `[10m]`).
+
+**To light up metrics + traces** (node side, per node): set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318` (one env var
+resolves the endpoints for all three signals: `/v1/traces` + `/v1/metrics` +
+`/v1/logs`) or set `telemetry.metrics.endpoint` / `telemetry.traces.endpoint`
+in config, restart the daemon. Collector side: add otlp-receiver pipelines
+routing metrics → VictoriaMetrics and traces → Tempo (enable Tempo's
+metrics-generator/spanmetrics for the traces alert). There is deliberately no
+default endpoint — a node with only a logs endpoint runs traces/metrics as
+silent no-ops.
+
+> **⚠️ The env var alone does NOT switch logs to OTLP.** It only resolves
+> endpoints; the log exporter *mode* is a separate switch, and an unset
+> `telemetry.logs.exporter` still defaults to the **legacy syslog** path. A
+> fresh node needs `telemetry.enabled: true` **and**
+> `telemetry.logs.exporter: "otlp"` for logs to reach the collector — traces
+> and metrics have no such mode switch and follow the resolved endpoint
+> directly. (The fleet's current nodes already ship logs, so they have this
+> set; this matters when provisioning new nodes from a template.)
+
+---
+
+## Legacy: polaris setup (Loki 2.5.0 behind Alloy)
 
 Goal: in Grafana, pick a node and see its logs for the last X hours.
 
@@ -62,7 +120,7 @@ Restart the node. Local logging (SQLite + daemon.log) is unaffected; this only a
 - **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panel is volume-by-level.
 - **Fleet overview:** `https://polaris.xtrmstrngth.com/d/dkg-fleet-logs` → active-node count, log volume per node, errors per node, recent fleet-wide errors (filter by `Environment`).
 
-Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node-operator self-serve guide (any operator, their own backend): `../OPERATOR-GUIDE.md`.
+Both dashboards are already imported. Note: `example-alerts.md` in this directory targets the CURRENT stack (Loki 3.x structured metadata + VictoriaMetrics) — its query shapes and datasources do not apply to this legacy Loki 2.5/Alloy path; polaris keeps its own 4-rule set configured directly in its Grafana. Node-operator self-serve guide (any operator, their own backend): `tools/log-collection-poc/OPERATOR-GUIDE.md`.
 
 ---
 
@@ -71,4 +129,4 @@ Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node
 - **Labels kept low-cardinality** on purpose: `service_name`, `service_instance_id` (node), `deployment_environment` (network), `dkg_node_role`. `operation_id` etc. stay inside the JSON line — filter with `| json | dkg_operation_id="..."`.
 - **Don't add `operation_id`/`peer_id` as Loki labels** — high cardinality will hurt Loki 2.5.0.
 - If you ever upgrade Loki to ≥3.0, you can drop Alloy's `| json | line_format` step in the dashboard and push OTLP straight to Loki's `/otlp` endpoint.
-- Local validation stack (do not deploy): `docker-compose.sim.yml` (Loki 2.5.0 + Alloy) + `../send-sample-logs.mjs`.
+- Local validation stack (do not deploy): `docker-compose.sim.yml` (Loki 2.5.0 + Alloy) + `tools/log-collection-poc/send-sample-logs.mjs`.
