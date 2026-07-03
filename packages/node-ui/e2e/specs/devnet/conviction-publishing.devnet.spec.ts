@@ -2,6 +2,7 @@
  * Publisher Conviction NFT (PCA) API smoke against live devnet.
  * Full conviction discount flows live in devnet/conviction-lazy-settle/.
  */
+import type { PcaContracts } from '../../../src/ui/api.js';
 import { test, expect } from '../../fixtures/base.js';
 import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
@@ -9,6 +10,51 @@ test.describe.configure({ mode: 'serial' });
 
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const HEX_QUANTITY = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
+
+type PcaRpcError = { code: number; message: string };
+type PcaRpcResponse<T> = { jsonrpc?: '2.0'; id?: number; result?: T; error?: PcaRpcError };
+type PcaRpcMethod = 'eth_chainId' | 'eth_blockNumber' | 'eth_getBlockByNumber' | 'eth_sendTransaction';
+
+function numericChainId(chainId: PcaContracts['chainId']): number {
+  const tail = String(chainId).match(/(\d+)\s*$/)?.[1];
+  const parsed = tail ? Number.parseInt(tail, 10) : Number.NaN;
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`Unrecognized PCA chain id: ${chainId}`);
+  }
+  return parsed;
+}
+
+function hexQuantityToNumber(value: string): number {
+  expect(value).toMatch(HEX_QUANTITY);
+  return Number.parseInt(value.slice(2), 16);
+}
+
+async function getPcaContracts(): Promise<PcaContracts> {
+  const res = await devnetApiFetch('/api/pca/contracts');
+  expect(res.status).toBe(200);
+  return (await res.json()) as PcaContracts;
+}
+
+async function postPcaRpc<T>(id: number, method: PcaRpcMethod, params: unknown[] = []): Promise<PcaRpcResponse<T>> {
+  const res = await devnetApiFetch('/api/pca/rpc', {
+    method: 'POST',
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as PcaRpcResponse<T>;
+}
+
+function expectRpcSuccess<T>(response: PcaRpcResponse<T>): T {
+  expect(response.error).toBeUndefined();
+  expect(response.result).toBeDefined();
+  return response.result as T;
+}
+
+function expectRpcError(response: PcaRpcResponse<unknown>, code: number): PcaRpcError {
+  expect(response.error?.code).toBe(code);
+  expect(response.error?.message).toBeTruthy();
+  return response.error as PcaRpcError;
+}
 
 test.beforeAll(async () => {
   await requireDevnetNode(test, 1);
@@ -28,67 +74,31 @@ test.describe('Conviction NFT (PCA) API', () => {
   });
 
   test('GET /api/pca/contracts exposes HW bootstrap addresses and same-origin RPC only', async () => {
-    const res = await devnetApiFetch('/api/pca/contracts');
-    expect(res.status).toBe(200);
+    const contracts = await getPcaContracts();
 
-    const json = (await res.json()) as {
-      nft?: string;
-      token?: string;
-      chainId?: string | number;
-      rpcUrls?: string[];
-      walletRpcUrls?: string[];
-    };
-
-    expect(json.nft).toMatch(EVM_ADDRESS);
-    expect(json.token).toMatch(EVM_ADDRESS);
-    expect(String(json.chainId ?? '')).toMatch(/\d+$/);
-    expect(json.rpcUrls).toEqual(['/api/pca/rpc']);
-    expect(json.walletRpcUrls ?? []).not.toContain('/api/pca/rpc');
-    expect(JSON.stringify(json)).not.toMatch(/SECRETKEY/i);
+    expect(contracts.nft).toMatch(EVM_ADDRESS);
+    expect(contracts.token).toMatch(EVM_ADDRESS);
+    expect(String(contracts.chainId)).toMatch(/\d+$/);
+    expect(contracts.rpcUrls).toEqual(['/api/pca/rpc']);
+    expect(contracts.walletRpcUrls ?? []).not.toContain('/api/pca/rpc');
+    expect(JSON.stringify(contracts)).not.toMatch(/SECRETKEY/i);
   });
 
   test('POST /api/pca/rpc forwards receipt-polling reads and rejects wallet-write RPC', async () => {
-    const readRes = await devnetApiFetch('/api/pca/rpc', {
-      method: 'POST',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
-    });
-    expect(readRes.status).toBe(200);
-    const readJson = (await readRes.json()) as { result?: unknown; error?: { message?: string } };
-    expect(readJson.error).toBeUndefined();
-    expect(String(readJson.result ?? '')).toMatch(HEX_QUANTITY);
+    const contracts = await getPcaContracts();
+    const chainId = expectRpcSuccess<string>(await postPcaRpc<string>(1, 'eth_chainId'));
+    expect(hexQuantityToNumber(chainId)).toBe(numericChainId(contracts.chainId));
 
-    const blockNumberRes = await devnetApiFetch('/api/pca/rpc', {
-      method: 'POST',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_blockNumber', params: [] }),
-    });
-    expect(blockNumberRes.status).toBe(200);
-    const blockNumberJson = (await blockNumberRes.json()) as { result?: unknown; error?: { message?: string } };
-    expect(blockNumberJson.error).toBeUndefined();
-    const blockNumber = String(blockNumberJson.result ?? '');
+    const blockNumber = expectRpcSuccess<string>(await postPcaRpc<string>(2, 'eth_blockNumber'));
     expect(blockNumber).toMatch(HEX_QUANTITY);
 
-    const exactBlockRes = await devnetApiFetch('/api/pca/rpc', {
-      method: 'POST',
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'eth_getBlockByNumber',
-        params: [blockNumber, true],
-      }),
-    });
-    expect(exactBlockRes.status).toBe(200);
-    const exactBlockJson = (await exactBlockRes.json()) as { result?: unknown; error?: { message?: string } };
-    expect(exactBlockJson.error).toBeUndefined();
-    expect(exactBlockJson.result).toBeTruthy();
+    const exactBlock = expectRpcSuccess<unknown>(
+      await postPcaRpc<unknown>(3, 'eth_getBlockByNumber', [blockNumber, true]),
+    );
+    expect(exactBlock).toBeTruthy();
 
-    const writeRes = await devnetApiFetch('/api/pca/rpc', {
-      method: 'POST',
-      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'eth_sendTransaction', params: [] }),
-    });
-    expect(writeRes.status).toBe(200);
-    const writeJson = (await writeRes.json()) as { error?: { code?: number; message?: string } };
-    expect(writeJson.error?.code).toBe(-32601);
-    expect(writeJson.error?.message).toContain('PCA RPC method not allowed');
+    const writeError = expectRpcError(await postPcaRpc<unknown>(4, 'eth_sendTransaction'), -32601);
+    expect(writeError.message).toContain('PCA RPC method not allowed');
   });
 
   test('publish without PCA registration uses the KA lifecycle path', async () => {
