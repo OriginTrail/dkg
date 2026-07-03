@@ -305,8 +305,8 @@ describe('DiscountTierLadder', () => {
     expect(active).toBeTruthy();
     expect(active.getAttribute('aria-current')).toBe('true');
     expect(active.getAttribute('data-bps')).toBe('2000');
-    expect(container.querySelector('.v10-pca-tier-caption')?.textContent?.toLowerCase()).toContain(
-      'estimated',
+    expect(container.querySelector('.v10-pca-tier-caption')?.textContent).toContain(
+      'Discount tier for the entered commitment',
     );
     await unmount();
   });
@@ -479,13 +479,13 @@ describe('EligibilityVerdictBanner', () => {
     const amber = await render(
       React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough', accountId: '2', discountBps: 3000 }),
     );
-    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s −30%');
+    expect(amber.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s 30% discount');
     await amber.unmount();
 
     const danger = await render(
       React.createElement(EligibilityVerdictBanner, { verdict: 'fallthrough-no-funds', accountId: '2', discountBps: 3000 }),
     );
-    expect(danger.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s −30%');
+    expect(danger.container.querySelector('.v10-pca-verdict-banner')?.textContent).toContain('forfeiting PCA #2’s 30% discount');
     await danger.unmount();
 
     // No discount in context → no fabricated forfeit clause.
@@ -540,25 +540,17 @@ describe('EligibilityVerdictBanner', () => {
     await unmount();
   });
 
-  it('chip variant carries the verdict text + an aria-expanded "why?" disclosure', async () => {
-    const onWhy = vi.fn();
+  it('chip variant carries the verdict text without the retired disclosure', async () => {
     const { container, unmount } = await render(
       React.createElement(EligibilityVerdictBanner, {
         verdict: 'fallthrough',
         variant: 'chip',
-        onWhy,
-        whyExpanded: false,
-        controlsId: 's5-popover',
       }),
     );
     const label = container.querySelector('.v10-pca-verdict-chip-label')!;
     expect(label.getAttribute('role')).toBe('alert');
     expect(label.textContent).toContain('No PCA discount');
-    const why = container.querySelector('.v10-pca-verdict-why')!;
-    expect(why.getAttribute('aria-expanded')).toBe('false');
-    expect(why.getAttribute('aria-controls')).toBe('s5-popover');
-    why.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    expect(onWhy).toHaveBeenCalled();
+    expect(container.querySelector('.v10-pca-verdict-why')).toBeNull();
     await unmount();
   });
 });

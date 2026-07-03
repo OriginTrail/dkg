@@ -66,7 +66,7 @@ describe('DashboardView — PcaDashboardRow wiring', () => {
     const root: Root = createRoot(container);
     await act(async () => { root.render(React.createElement(DashboardView)); });
     await waitForText(container, 'Publishing discount');
-    // covered → discount + "pending confirmation"; the CTA button is wired.
+    // covered → exact discount tier; the CTA button is wired.
     expect(container.querySelector('.v10-ws-pca-value')?.textContent).toContain('10%');
     expect(container.querySelector('.v10-ws-pca-cta')).toBeTruthy();
     await act(async () => root.unmount());

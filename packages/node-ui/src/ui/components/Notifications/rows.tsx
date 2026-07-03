@@ -322,8 +322,8 @@ export function ConfirmationRow({
 // ─── PCA discount applied (informational, B8 confirmed) ──────────────────────
 
 /** B8 (P2) — the CONFIRMED post-publish discount bell row. Informational + non-
- *  clickable (like the rejected confirmation), distinct from S5's predictive
- *  "pending confirmation" alert: this is the on-chain CostCovered draw. Derives the
+ *  clickable (like the rejected confirmation), distinct from S5's pre-spend
+ *  eligibility tier: this is the on-chain CostCovered draw. Derives the
  *  discount + saved amount from the event; falls back gracefully if the costs are
  *  un-parseable (never asserts a bogus number — #9). */
 export function PcaCostCoveredRow({

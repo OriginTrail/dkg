@@ -358,8 +358,11 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, createModalProps()),
     );
-    await waitForText(container, 'node #42');
-    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('✓ this node');
+    await waitForText(container, 'Node #42');
+    const selected = container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent ?? '';
+    expect(selected).toContain('Selected primary node');
+    expect(selected).toContain('Node #42');
+    expect(selected).toContain('this node');
     await unmount();
   });
 
@@ -427,7 +430,7 @@ describe('CreatePcaModal', () => {
     const { container, unmount } = await render(
       React.createElement(CreatePcaModal, createModalProps()),
     );
-    await waitForText(container, 'node #42'); // #42 pre-selected from the initial list
+    await waitForText(container, 'Node #42'); // #42 pre-selected from the initial list
     setInputValue(container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement, '100000');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const submit = () => container.querySelector('[data-testid="pca-create-submit"]') as HTMLButtonElement;
@@ -627,8 +630,8 @@ describe('CreatePcaModal', () => {
     // Commit amount is seeded from the expiring account.
     expect((container.querySelector('[data-testid="pca-create-tokens"]') as HTMLInputElement).value).toBe('100000.0');
     // Primary node is seeded into the picker (shown as the selected node).
-    await waitForText(container, 'node #42');
-    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('node #42');
+    await waitForText(container, 'Node #42');
+    expect(container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent).toContain('Node #42');
     await unmount();
   });
 

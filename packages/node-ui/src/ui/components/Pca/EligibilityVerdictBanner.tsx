@@ -46,9 +46,8 @@ const VERDICT_META: Record<PcaVerdict, { glyph: string; toneClass: string }> = {
  *  - #4 the escrow caveat appears ONLY on owner-publishes (`ownerPublish`);
  *    sponsored/edge verdicts are definitive.
  *  - #6 the no-TRAC fall-through is DANGER ("will FAIL"), not a soft amber.
- *  - #9 a green verdict is a PREDICTION — callers label the post-publish line
- *    "pending confirmation" until B8 confirms (this component states the
- *    pre-spend verdict only; it never claims a confirmed discount).
+ *  - #9 this pre-spend verdict may not claim a post-publish CostCovered event,
+ *    but the account discount tier itself is known and can be stated exactly.
  */
 export function EligibilityVerdictBanner({
   verdict,
@@ -58,9 +57,6 @@ export function EligibilityVerdictBanner({
   reasons = [],
   ownerPublish = false,
   variant = 'banner',
-  onWhy,
-  whyExpanded = false,
-  controlsId,
   children,
   className = '',
 }: {
@@ -76,10 +72,6 @@ export function EligibilityVerdictBanner({
   /** #4 — when true (you own the target CG), append the escrow caveat. */
   ownerPublish?: boolean;
   variant?: 'banner' | 'chip';
-  /** Chip "why?" disclosure → opens the full S5 popover. */
-  onWhy?: () => void;
-  whyExpanded?: boolean;
-  controlsId?: string;
   /** Banner-only fix-it links / extra content. */
   children?: ReactNode;
   className?: string;
@@ -103,7 +95,7 @@ export function EligibilityVerdictBanner({
   if (variant === 'chip') {
     const chipLabel =
       verdict === 'eligible'
-        ? `Funded by ${pcaLabel}${trackedNote}${disc ? ` (−${disc})` : ''}`
+        ? `Funded by ${pcaLabel}${trackedNote}${disc ? ` (${disc} discount)` : ''}`
         : verdict === 'fallthrough'
           ? '⚠ No PCA discount'
           : verdict === 'fallthrough-no-funds'
@@ -118,17 +110,6 @@ export function EligibilityVerdictBanner({
         <span className="v10-pca-verdict-chip-label" role={role} aria-live={ariaLive}>
           {chipLabel}
         </span>
-        {onWhy && (
-          <button
-            type="button"
-            className="v10-pca-verdict-why"
-            onClick={onWhy}
-            aria-expanded={whyExpanded}
-            {...(controlsId ? { 'aria-controls': controlsId } : {})}
-          >
-            why?
-          </button>
-        )}
       </span>
     );
   }
@@ -139,7 +120,7 @@ export function EligibilityVerdictBanner({
       <>
         This publish will use {pcaLabel}
         {trackedNote}
-        {disc ? ` (−${disc})` : ''}.{ownerPublish ? `${escrowCaveat}.` : ''}
+        {disc ? ` (${disc} discount)` : ''}.{ownerPublish ? `${escrowCaveat}.` : ''}
       </>
     );
   } else if (verdict === 'fallthrough') {
@@ -151,7 +132,7 @@ export function EligibilityVerdictBanner({
         No PCA discount on this publish — it will attempt to pay the direct cost from the signing
         wallet’s TRAC
         {/* F9 — name the forfeited discount when it's in context (§5.5 / #5a). */}
-        {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
+        {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
         {ownerPublish ? escrowCaveat : ''}; the publish fails if that TRAC is below the fee.{reasonText}
       </>
     );
@@ -161,7 +142,7 @@ export function EligibilityVerdictBanner({
         {/* Q2 — source-agnostic: DANGER now fires on no TRAC (R3) OR no gas (Q2);
             the specific cause is carried in reasonText. */}
         This publish will FAIL — no signing wallet can cover it
-        {disc ? `, forfeiting ${pcaLabel}’s −${disc}` : ''}
+        {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>
     );

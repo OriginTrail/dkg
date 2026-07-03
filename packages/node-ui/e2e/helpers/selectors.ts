@@ -325,8 +325,7 @@ export const sel = {
     // is tracked → reachable at the capstone/CI-devnet, not a fresh core.
     publishEligibility: '[data-testid="pca-publish-eligibility"]',  // chip wrapper on the SWM→VM publish CTA (layer-widgets)
     eligibilityVerdict: '[data-testid="pca-eligibility-verdict"]', // EligibilityVerdictBanner (role=alert on amber/danger)
-    eligibilityChip: '[data-testid="pca-eligibility-chip"]',       // condensed chip label/popover
-    verdictWhy: '.v10-pca-verdict-why',                            // "why?" → preflight popover (no testid yet)
+    eligibilityChip: '[data-testid="pca-eligibility-chip"]',       // condensed chip label
     discountBadge: '[data-testid="pca-discount-badge"]',           // DiscountAppliedBadge (B8; degrade-to-hidden)
     // S6 edge onboarding
     getSponsoredPanel: '[data-testid="pca-get-sponsored"]',        // GetSponsoredPanel / SponsorshipHandshake

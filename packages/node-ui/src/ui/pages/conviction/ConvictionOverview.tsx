@@ -284,7 +284,7 @@ export function ConvictionOverview() {
         </div>
         <p className="v10-pca-overview-explainer">
           {role === 'edge'
-            ? "Publisher Conviction Accounts let publishers dedicate TRAC spend in advance and receive a publishing discount based on the committed amount, up to 75%. Nodes can create their own PCA or get added to an existing PCA by sharing operational publishing wallets with the PCA owner. You still pay gas; the PCA covers only the TRAC publishing fee for approved wallets."
+            ? "Publisher Conviction Accounts let publishers dedicate TRAC spend in advance and receive a publishing discount by tier: 0%, 10%, 20%, 30%, 40%, 50%, or 75%, based on the committed amount. Nodes can create their own PCA or get added to an existing PCA by sharing operational publishing wallets with the PCA owner. You still pay gas; the PCA covers only the TRAC publishing fee for approved wallets."
             : "A Publisher Conviction Account (PCA) lets you lock TRAC up front and approve publishing wallets to publish at a discount. The discount applies to the wallet that signs the publish (on-chain msg.sender), not a peerId, admin wallet, or author identity."}
         </p>
       </header>

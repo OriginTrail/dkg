@@ -106,11 +106,7 @@ describe('PublishEligibilityChip (S5)', () => {
     await waitForText(container, 'Publish will fail');
     expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
     expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
-    // The danger foot mentions gas (a PCA covers only the TRAC fee), keeps "fail on-chain".
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'needs native gas');
-    expect(container.querySelector('.v10-pca-publish-foot')?.textContent).toContain('would fail on-chain');
+    expect(container.querySelector('.v10-pca-publish-popover')).toBeNull();
     await unmount();
   });
 
@@ -130,13 +126,8 @@ describe('PublishEligibilityChip (S5)', () => {
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'Funded by PCA #7'); // ≥1 covered wallet has gas → GREEN
-    // L8 — the gas popover row stays informational (neutral) under the GREEN verdict.
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    const gasRow = Array.from(container.querySelectorAll('.v10-pca-publish-cond')).find((li) =>
-      li.textContent?.toLowerCase().includes('gas'),
-    )!;
-    expect(gasRow.getAttribute('data-tone')).toBe('neutral');
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeTruthy();
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
     await unmount();
   });
 
@@ -243,10 +234,10 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
-  // C1 — `dead` and out-of-budget are INDEPENDENT reason facets: an account that
-  // is BOTH expired AND zero-budget must surface BOTH reasons in the popover (the
-  // two independent `if`s in usePublishEligibility fire), not just one.
-  it('C1: an expired AND out-of-budget approved account surfaces BOTH reasons', async () => {
+  // C1 — `dead` and out-of-budget are independent reason facets; at the chip
+  // boundary the important product behavior is still amber fall-through, not a
+  // false GREEN or DANGER.
+  it('C1: an expired AND out-of-budget approved account resolves AMBER, not green/danger', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // gas+TRAC → amber fall-through
     const deadBroke = makePcaSnapshot({
       expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400, // expired
@@ -259,16 +250,15 @@ describe('PublishEligibilityChip (S5)', () => {
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount'); // amber (wallet has TRAC)
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'expired or been fully swept');
-    expect(container.textContent).toContain('out of budget'); // BOTH independent facets surfaced
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeNull();
     await unmount();
   });
 
   // #3 — an approved wallet on a swept/expired PCA is uncovered via HEALTH (not
-  // solvency), and reads "approved … but swept", never a misleading "no PCA".
-  it('an approved wallet on a SWEPT PCA reads "approved … but swept", not "no PCA" (#3)', async () => {
+  // solvency), so the spend-time chip must not render green.
+  it('an approved wallet on a SWEPT PCA resolves AMBER, not green (#3)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50')); // has TRAC → amber
     const swept = makePcaSnapshot({ fullySwept: true });
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
@@ -276,10 +266,8 @@ describe('PublishEligibilityChip (S5)', () => {
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount'); // amber chip (swept → no discount applies)
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'approved on PCA #7, but it’s swept/expired');
-    expect(container.textContent).not.toContain('no PCA → pays direct cost');
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
     await unmount();
   });
 
@@ -436,49 +424,36 @@ describe('PublishEligibilityChip (S5)', () => {
     await unmount();
   });
 
-  it('"why?" opens the preflight popover with the per-condition breakdown (gas row informational, L8)', async () => {
+  it('does not render the retired disclosure or preflight popover', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('50'));
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
       key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount');
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'All signing wallets approved');
-    expect(container.querySelector('.v10-pca-publish-popover')).toBeTruthy();
-    // L8 — the gas row is informational (neutral), never a ⚠ that contradicts the verdict.
-    const gasRow = Array.from(container.querySelectorAll('.v10-pca-publish-cond')).find((li) =>
-      li.textContent?.toLowerCase().includes('gas is separate'),
-    )!;
-    expect(gasRow).toBeTruthy();
-    expect(gasRow.getAttribute('data-tone')).toBe('neutral');
-    // QA #2 — AMBER is non-blocking, so the "won't block" fix-footer is correct here.
-    expect(container.textContent).toContain('won’t block the publish');
+    expect(container.querySelector('.v10-pca-verdict-why')).toBeNull();
+    expect(container.querySelector('.v10-pca-publish-popover')).toBeNull();
     await unmount();
   });
 
-  // QA #2 — DANGER ("will FAIL") is BLOCKING, so the amber "won't block" footer is
-  // wrong; it must read as a blocking-failure fix instead.
-  it('DANGER popover footer warns of on-chain failure, NOT "won’t block" (QA #2)', async () => {
+  // QA #2 — DANGER ("will FAIL") remains blocking at the chip boundary.
+  it('DANGER chip warns of failure without rendering retired popover copy (QA #2)', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue(walletsBalances('0')); // no TRAC → danger
     mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
       key ? { ...makePcaSnapshot(), probedKey: { key, registered: false } } : makePcaSnapshot(),
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'Publish will fail');
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'would fail on-chain');
-    const foot = container.querySelector('.v10-pca-publish-foot')!;
-    expect(foot.textContent).not.toContain('won’t block the publish');
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    expect(container.textContent).not.toContain('won’t block the publish');
+    expect(container.querySelector('.v10-pca-publish-popover')).toBeNull();
     await unmount();
   });
 
-  // L12 — the #4 escrow caveat must fire on owner-publishes (node curates the
-  // target CG). Pre-fix it never did because the CG list has no isCurator/role —
-  // the owner signal is cg.curator vs the node's agentDid.
-  it('appends the #4 escrow caveat on an owner-publish, sourced from cg.curator vs agentDid (L12)', async () => {
+  // L12 — owner-publish detection must still flow into S5 without changing the
+  // chip's fall-through verdict. Full-banner caveat copy is covered in
+  // pca-components.test.ts.
+  it('keeps owner-publish fall-through at the chip boundary (L12)', async () => {
     const CURATOR = 'did:dkg:agent:0x' + 'a'.repeat(40);
     mocks.fetchContextGraphs.mockResolvedValue({ contextGraphs: [{ id: 'cg', curator: CURATOR }] });
     mocks.fetchCurrentAgent.mockResolvedValue({ agentDid: CURATOR }); // node curates → owner-publish
@@ -488,10 +463,7 @@ describe('PublishEligibilityChip (S5)', () => {
     );
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount');
-    // The escrow caveat lives in the full banner (popover), not the chip label.
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'registration escrow already covers it');
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
     await unmount();
   });
 
@@ -534,10 +506,7 @@ describe('PublishEligibilityChip (S5)', () => {
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount'); // amber fall-through, NOT eligible
     expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
-    // The popover names the dead account it discovered (#3 "approved … but swept/expired").
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'approved on PCA #9, but it’s swept/expired');
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
     await unmount();
   });
 
@@ -615,9 +584,7 @@ describe('PublishEligibilityChip (S5)', () => {
     const { container, unmount } = await render(React.createElement(PublishEligibilityChip, { contextGraphId: 'cg' }));
     await waitForText(container, 'No PCA discount'); // amber fall-through, NOT eligible
     expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
-    const why = container.querySelector('.v10-pca-verdict-why') as HTMLButtonElement;
-    await act(async () => { why.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'out of budget'); // the discovered account's reason facet
+    expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
     await unmount();
   });
 });

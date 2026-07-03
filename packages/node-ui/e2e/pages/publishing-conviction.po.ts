@@ -49,7 +49,6 @@ export class PublishingConvictionPage {
   readonly publishEligibility: Locator;
   readonly eligibilityVerdict: Locator;
   readonly eligibilityChip: Locator;
-  readonly verdictWhy: Locator;
   readonly discountBadge: Locator;
   readonly getSponsoredPanel: Locator;
   readonly bellAlert: Locator;
@@ -87,7 +86,6 @@ export class PublishingConvictionPage {
     this.publishEligibility = page.locator(sel.conviction.publishEligibility);
     this.eligibilityVerdict = page.locator(sel.conviction.eligibilityVerdict);
     this.eligibilityChip = page.locator(sel.conviction.eligibilityChip);
-    this.verdictWhy = page.locator(sel.conviction.verdictWhy);
     this.discountBadge = page.locator(sel.conviction.discountBadge);
     this.getSponsoredPanel = page.locator(sel.conviction.getSponsoredPanel);
     this.bellAlert = page.locator(sel.conviction.bellAlert);

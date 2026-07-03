@@ -182,14 +182,14 @@ test.describe('Publisher Conviction tab (PCA) — P0', () => {
   test.fixme('S5 a11y @mutating: danger verdict (unapproved, no-TRAC signer) is role=alert', async ({ conviction }) => {
     // INVARIANT 6: fail-open is graceful ONLY if the signing wallet can pay full
     // price in TRAC; else the fall-through HARD-REVERTS. approved+funded → GREEN
-    // "Funded by PCA #N (−Y%)"; unapproved+has-TRAC → AMBER "will pay direct
+    // "Funded by PCA #N (Y% discount)"; unapproved+has-TRAC → AMBER "will pay direct
     // cost"; unapproved+no-TRAC → DANGER "Publish will fail" (role=alert).
     await expect(conviction.publishEligibility.first()).toBeVisible();
     expect(await conviction.verdictRole()).toBe('alert');
   });
 
-  test.fixme('S5 @mutating INVARIANT 9: pre-B8 the discount is PREDICTED ("pending confirmation")', async ({ conviction }) => {
-    await expect(conviction.eligibilityChip.first()).toContainText(/pending confirmation/i);
+  test.fixme('S5 @mutating INVARIANT 9: pre-B8 chip states the exact tier, not a confirmed saved amount', async ({ conviction }) => {
+    await expect(conviction.eligibilityChip.first()).toContainText(/\d+% discount/i);
   });
 
   test.fixme('predictive bell @mutating: a 0-approved PCA surfaces "discounts nothing yet" (fall-through)', async ({ conviction }) => {

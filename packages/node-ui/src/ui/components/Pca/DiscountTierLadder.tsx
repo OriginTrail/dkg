@@ -38,14 +38,14 @@ export function discountTierForTrac(trac: number | null | undefined): PcaDiscoun
 }
 
 /**
- * The discount tiers rendered as a live-highlighting ladder. Labelled
- * "estimated — confirmed on-chain at creation" because the real `discountBps`
- * is only known after the create receipt. Deliberately NOT an aria-live region
- * (per-keystroke updates would spam a screen reader — UX §5.2 step 2).
+ * The discount tiers rendered as a live-highlighting ladder. The tier follows
+ * the committed TRAC floor, so the preview can be stated exactly. Deliberately
+ * NOT an aria-live region (per-keystroke updates would spam a screen reader —
+ * UX §5.2 step 2).
  */
 export function DiscountTierLadder({
   committedTrac,
-  caption = 'Estimated — confirmed on-chain at creation.',
+  caption = 'Discount tier for the entered commitment.',
   className = '',
 }: {
   committedTrac?: number | null;

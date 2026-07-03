@@ -429,17 +429,6 @@
 .v10-pca-verdict-chip.v10-pca-verdict-neutral {
   color: var(--text-secondary);
 }
-.v10-pca-verdict-why {
-  border: none;
-  background: transparent;
-  color: var(--text-link);
-  font-size: 11px;
-  cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
-}
-.v10-pca-verdict-why:focus-visible { outline: 2px solid var(--text-link); outline-offset: 1px; }
-
 /* ----- SponsorshipHandshake ----- */
 .v10-pca-handshake {
   display: grid;
@@ -1030,6 +1019,11 @@
 .v10-pca-node-picker-combo {
   margin-top: 10px;
 }
+.v10-pca-node-picker-combo.has-selection .v10-form-input::placeholder {
+  color: var(--text-primary);
+  font-weight: 700;
+  opacity: 1;
+}
 .v10-pca-node-picker-list {
   list-style: none;
   margin: 8px 0 0;
@@ -1072,6 +1066,25 @@
   align-items: start;
   gap: 8px;
   margin-top: 10px;
+}
+.v10-pca-node-picker-selected {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 8px;
+  background: rgba(96, 165, 250, 0.08);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.v10-pca-node-picker-selected strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
 }
 .v10-pca-create-review {
   gap: 8px;

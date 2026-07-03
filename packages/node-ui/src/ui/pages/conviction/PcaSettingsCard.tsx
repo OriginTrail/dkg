@@ -31,8 +31,7 @@ export function PcaSettingsCard() {
           <p className="v10-pca-settings-line">No tracked Publisher Conviction Account on this node.</p>
         ) : covered ? (
           <p className="v10-pca-settings-line">
-            This node’s publishes get up to <strong>{pct(bestCoveringDiscountBps)}</strong> off
-            (pending confirmation).
+            This node’s approved publishing wallets use a <strong>{pct(bestCoveringDiscountBps)}</strong> discount.
           </p>
         ) : walletsInconclusive ? (
           // T2/#9 — don't assert "none covers" off unreadable wallets.

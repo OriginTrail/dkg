@@ -13,8 +13,7 @@ function pct(bps: number | null): string {
 /**
  * Dashboard "Wallets and Spending" → "Publishing discount" row (UX §3.2) — the
  * primary benefit-framed discovery surface. Driven from the SAME `usePcaOverview`
- * summary as S1 (no phantom backend field), and labelled "pending confirmation"
- * (#9 — no B8 confirmation yet). The CTA opens the conviction tab.
+ * summary as S1 (no phantom backend field). The CTA opens the conviction tab.
  */
 export function PcaDashboardRow() {
   usePcaScopeBootstrap();
@@ -30,7 +29,7 @@ export function PcaDashboardRow() {
         {walletsInconclusive
           ? 'Couldn’t verify your wallets — retry'
           : covered
-            ? `${pct(bestCoveringDiscountBps)} (pending confirmation)`
+            ? `${pct(bestCoveringDiscountBps)} discount`
             : 'None — publishing at the direct cost'}
       </span>
       <button

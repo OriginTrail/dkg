@@ -475,13 +475,13 @@ export function CreatePcaModal({
             <div className="v10-pca-create-success-stats">
               <span>Account <strong>#{result.accountId}</strong></span>
               {typeof realBps === 'number' && (
-                <span>Discount <strong>{pctFromBps(realBps)}</strong> (verified on-chain)</span>
+                <span>Discount tier <strong>{pctFromBps(realBps)}</strong></span>
               )}
               <span>Committed <strong>{formatPcaTrac(result.committedTokens)} TRAC</strong></span>
             </div>
             {delta && (
               <p className="v10-pca-create-warn">
-                Heads up: the on-chain discount ({pctFromBps(realBps!)}) differs from the {pctFromBps(estBps)} estimate.
+                Heads up: the created account returned a {pctFromBps(realBps!)} discount tier instead of the previewed {pctFromBps(estBps)} tier.
               </p>
             )}
             {result.txHash && (
@@ -714,7 +714,7 @@ export function CreatePcaModal({
           <h3 className="v10-pca-create-section-title">4 · Review</h3>
           <div className="v10-pca-create-review">
             <div><span>Commit</span><strong>{amountValid ? `${formatPcaTrac(tokens)} TRAC` : '—'}</strong></div>
-            <div><span>Discount (estimated)</span><strong>{pctFromBps(estTier.bps)}</strong></div>
+            <div><span>Discount tier</span><strong>{pctFromBps(estTier.bps)}</strong></div>
             <div><span>Primary node</span><strong>{primaryValid ? `#${primaryNode.trim()}` : '—'}</strong></div>
           </div>
           {createOwnerAddress && (

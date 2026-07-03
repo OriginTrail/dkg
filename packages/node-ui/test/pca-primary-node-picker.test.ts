@@ -75,6 +75,12 @@ describe('PrimaryNodePicker', () => {
     const picked = await render(base({ required: true, value: '22' }));
     const input2 = picked.container.querySelector('[data-testid="pca-primary-node-search"]') as HTMLInputElement;
     expect(input2.getAttribute('aria-invalid')).toBe('false');
+    expect(input2.getAttribute('placeholder')).toContain('Selected node #22');
+    expect(input2.getAttribute('aria-describedby')).toBeTruthy();
+    expect(picked.container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent)
+      .toContain('Selected primary node');
+    expect(picked.container.querySelector('[data-testid="pca-primary-node-selected"]')?.textContent)
+      .toContain('Node #22 · 120,000 TRAC staked');
     await picked.unmount();
   });
 

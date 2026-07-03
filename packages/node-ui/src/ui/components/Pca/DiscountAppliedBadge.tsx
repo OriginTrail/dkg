@@ -32,7 +32,7 @@ export function convictionDiscountBps(covered: ConvictionCostCovered | null | un
 
 /**
  * Renders the CONFIRMED post-publish discount badge — invariant #9: this is the
- * confirmed signal, distinct from S5's "pending confirmation" PREDICTION.
+ * confirmed CostCovered signal, distinct from S5's pre-spend eligibility tier.
  *
  * P0 has no B8 propagation yet, so `convictionCostCovered` is always absent and
  * this component renders **nothing** (degrade-to-hidden) — it must NEVER assert

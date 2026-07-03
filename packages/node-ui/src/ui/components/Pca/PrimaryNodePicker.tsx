@@ -120,6 +120,12 @@ export function PrimaryNodePicker({
   const pickedOwn = value !== '' && ownIdentityId != null && value === ownIdentityId;
   const pickedOther = value !== '' && (ownIdentityId == null || value !== ownIdentityId);
   const isEdgeLike = role === 'edge' || ownIdentityId == null;
+  const selectedStake = selectedNode ? formatWeiToTrac(selectedNode.stake) : null;
+  const selectedSummary =
+    value !== ''
+      ? `Selected node #${value}${selectedStake ? ` · ${selectedStake} TRAC staked` : ''}${pickedOwn ? ' · this node' : ''}`
+      : null;
+  const selectedSummaryId = selectedSummary ? `${listboxId}-selected` : undefined;
 
   return (
     <div className="v10-pca-node-picker" data-testid="pca-primary-node-picker">
@@ -154,7 +160,7 @@ export function PrimaryNodePicker({
         <p className="v10-pca-create-hint" role="status">No staked nodes found.</p>
       ) : (
         <>
-          <div className="v10-pca-node-picker-combo">
+          <div className={['v10-pca-node-picker-combo', selectedSummary ? 'has-selection' : ''].filter(Boolean).join(' ')}>
             <input
               type="text"
               role="combobox"
@@ -162,6 +168,7 @@ export function PrimaryNodePicker({
               aria-controls={open ? listboxId : undefined}
               aria-autocomplete="list"
               aria-label="Search staked nodes"
+              aria-describedby={selectedSummaryId}
               aria-required={required}
               aria-invalid={required && value === ''}
               aria-activedescendant={
@@ -172,7 +179,7 @@ export function PrimaryNodePicker({
               className="v10-form-input"
               data-testid="pca-primary-node-search"
               value={query}
-              placeholder="Search staked nodes by id…"
+              placeholder={selectedSummary ?? 'Search staked nodes by id…'}
               autoComplete="off"
               onFocus={() => setOpen(true)}
               onChange={(e) => {
@@ -231,6 +238,17 @@ export function PrimaryNodePicker({
             )}
           </div>
 
+          {selectedSummary && (
+            <div className="v10-pca-node-picker-selected" data-testid="pca-primary-node-selected" id={selectedSummaryId} role="status">
+              <span>Selected primary node</span>
+              <strong>
+                Node #{value}
+                {selectedStake ? ` · ${selectedStake} TRAC staked` : ''}
+                {pickedOwn ? ' · this node' : ''}
+              </strong>
+            </div>
+          )}
+
           {/* Paste-an-id convenience (NOT a replacement for the dropdown). */}
           <div className="v10-pca-node-picker-paste">
             <input
@@ -266,14 +284,6 @@ export function PrimaryNodePicker({
               </p>
             )}
           </div>
-
-          {value !== '' && (
-            <p className="v10-pca-create-hint" data-testid="pca-primary-node-selected">
-              Selected: node #{value}
-              {selectedNode ? ` (${formatWeiToTrac(selectedNode.stake)} TRAC staked)` : ''}
-              {pickedOwn && ' — ✓ this node'}
-            </p>
-          )}
 
           {/* Honest reward-weight DONATION copy. */}
           {isEdgeLike ? (

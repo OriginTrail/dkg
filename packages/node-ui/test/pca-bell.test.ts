@@ -84,7 +84,7 @@ describe('usePcaAlerts derivation', () => {
     );
     const { container, unmount } = await render(React.createElement(AlertsHarness));
     await waitFor(() => !!container.querySelector('[data-kind="fallthrough"]'));
-    expect(container.textContent).toContain('Pending confirmation');
+    expect(container.textContent).toContain('pay the direct cost until you approve');
     await unmount();
   });
 

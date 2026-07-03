@@ -24,7 +24,8 @@ export interface PcaAlert {
  * The fall-through alert is gated on `!probesInconclusive` (H2 — never assert
  * "covers 0 wallets" when the probes couldn't be read) and on not-expired (an
  * expired account's actionable alert is "renew", not "approve more wallets").
- * Fall-through is PREDICTIVE — "pending confirmation", no exact TRAC delta (#9).
+ * Fall-through is pre-spend status: do not claim a post-publish CostCovered event
+ * or exact TRAC delta (#9).
  */
 export function usePcaAlerts(): PcaAlert[] {
   usePcaScopeBootstrap();
@@ -53,7 +54,7 @@ export function usePcaAlerts(): PcaAlert[] {
       // Pre-B8 fall-through: an owned PCA covering none of its own wallets — only
       // when we could actually verify the probes (H2) and it isn't expired.
       if (a.classification === 'owned' && a.approvedCount === 0 && !a.probesInconclusive && !expired) {
-        out.push({ id: `pca-${id}-fallthrough`, accountId: id, kind: 'fallthrough', severity: 'warn', title: `PCA #${id} discounts nothing yet`, message: 'Your publishes likely pay the direct cost — approve this node’s operational wallets. Pending confirmation.' });
+        out.push({ id: `pca-${id}-fallthrough`, accountId: id, kind: 'fallthrough', severity: 'warn', title: `PCA #${id} discounts nothing yet`, message: 'Publishes from this node pay the direct cost until you approve this node’s operational wallets.' });
       }
     }
     return out;

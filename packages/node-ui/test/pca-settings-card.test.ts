@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 //
 // O5 — PcaSettingsCard (Settings -> Publisher Conviction). Pins: no-tracked / covered
-// ("pending confirmation") / tracked-but-uncovered copy, and the Manage CTA opens the
+// exact discount-tier / tracked-but-uncovered copy, and the Manage CTA opens the
 // conviction tab. Deps mocked (the card is pure presentation off usePcaOverview).
 
 import React, { act } from 'react';
@@ -52,11 +52,12 @@ describe('PcaSettingsCard', () => {
     await unmount();
   });
 
-  it('covered → discount + "pending confirmation"', async () => {
+  it('covered → exact discount tier', async () => {
     state.overview = { accounts: [{}], covered: true, bestCoveringDiscountBps: 1000, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaSettingsCard));
     expect(container.textContent).toContain('10%');
-    expect(container.textContent).toContain('pending confirmation');
+    expect(container.textContent).toContain('This node’s approved publishing wallets use a');
+    expect(container.textContent).not.toContain('pending confirmation');
     await unmount();
   });
 
