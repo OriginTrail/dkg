@@ -61,8 +61,17 @@ describe('parseRegisterPcaAgentResult', () => {
   });
 
   it('rejects an INCOHERENT shape (adapterSupported:false with a non-null verified)', () => {
-    expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: false, verified: true, adapterSupported: false }))
+    expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: true, adapterSupported: false }))
       .toThrow(/incoherent/i);
+  });
+
+  // R17 — a verified-present (current) response with registered:false is neither
+  // a current nor a legacy shape; it must be REJECTED, never promoted to success.
+  it('rejects a verified-present response with registered:false (all verified values)', () => {
+    for (const verified of [true, false, null]) {
+      expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: false, verified, adapterSupported: true }))
+        .toThrow(/registered:false/i);
+    }
   });
 
   it('rejects a malformed shape (missing/mistyped required field)', () => {

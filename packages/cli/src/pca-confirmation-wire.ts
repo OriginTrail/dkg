@@ -137,11 +137,18 @@ export function parseRegisterPcaAgentResult(raw: unknown): RegisterPcaAgentResul
 
   let input: DecodableRegisterAgentResponse;
   if ('verified' in r && r.verified !== undefined) {
+    // A valid CURRENT response must have registered:true (the mined-tx invariant;
+    // a success:false tx is rejected upstream). A verified-present registered:false
+    // is neither a current nor a legacy shape — reject it rather than promoting
+    // it to a successful registration.
+    if (r.registered !== true) return reject('current response with registered:false');
     if (typeof r.verified !== 'boolean' && r.verified !== null) return reject('verified');
     // No probe surface can only be inconclusive: adapterSupported:false ⟹ verified:null.
     if (r.adapterSupported === false && r.verified !== null) return reject('incoherent verified/adapterSupported');
-    // Runtime-validated coherent current shape; the cast is safe past these checks.
-    input = { registered: true, verified: r.verified, adapterSupported: r.adapterSupported } as DecodableRegisterAgentResponse;
+    // Coherent now — build the exact PcaAgentConfirmation union member (no cast).
+    input = r.adapterSupported
+      ? { registered: true, adapterSupported: true, verified: r.verified }
+      : { registered: true, adapterSupported: false, verified: null };
   } else {
     input = { registered: r.registered, adapterSupported: r.adapterSupported };
   }
