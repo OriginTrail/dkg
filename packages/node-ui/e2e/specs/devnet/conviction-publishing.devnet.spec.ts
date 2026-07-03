@@ -7,6 +7,9 @@ import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, require
 
 test.describe.configure({ mode: 'serial' });
 
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const HEX_QUANTITY = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
+
 test.beforeAll(async () => {
   await requireDevnetNode(test, 1);
   await waitForDevnetStatus(1);
@@ -22,6 +25,70 @@ test.describe('Conviction NFT (PCA) API', () => {
     } else {
       expect(json.error).toBeTruthy();
     }
+  });
+
+  test('GET /api/pca/contracts exposes HW bootstrap addresses and same-origin RPC only', async () => {
+    const res = await devnetApiFetch('/api/pca/contracts');
+    expect(res.status).toBe(200);
+
+    const json = (await res.json()) as {
+      nft?: string;
+      token?: string;
+      chainId?: string | number;
+      rpcUrls?: string[];
+      walletRpcUrls?: string[];
+    };
+
+    expect(json.nft).toMatch(EVM_ADDRESS);
+    expect(json.token).toMatch(EVM_ADDRESS);
+    expect(String(json.chainId ?? '')).toMatch(/\d+$/);
+    expect(json.rpcUrls).toEqual(['/api/pca/rpc']);
+    expect(json.walletRpcUrls ?? []).not.toContain('/api/pca/rpc');
+    expect(JSON.stringify(json)).not.toMatch(/SECRETKEY/i);
+  });
+
+  test('POST /api/pca/rpc forwards receipt-polling reads and rejects wallet-write RPC', async () => {
+    const readRes = await devnetApiFetch('/api/pca/rpc', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
+    });
+    expect(readRes.status).toBe(200);
+    const readJson = (await readRes.json()) as { result?: unknown; error?: { message?: string } };
+    expect(readJson.error).toBeUndefined();
+    expect(String(readJson.result ?? '')).toMatch(HEX_QUANTITY);
+
+    const blockNumberRes = await devnetApiFetch('/api/pca/rpc', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'eth_blockNumber', params: [] }),
+    });
+    expect(blockNumberRes.status).toBe(200);
+    const blockNumberJson = (await blockNumberRes.json()) as { result?: unknown; error?: { message?: string } };
+    expect(blockNumberJson.error).toBeUndefined();
+    const blockNumber = String(blockNumberJson.result ?? '');
+    expect(blockNumber).toMatch(HEX_QUANTITY);
+
+    const exactBlockRes = await devnetApiFetch('/api/pca/rpc', {
+      method: 'POST',
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'eth_getBlockByNumber',
+        params: [blockNumber, true],
+      }),
+    });
+    expect(exactBlockRes.status).toBe(200);
+    const exactBlockJson = (await exactBlockRes.json()) as { result?: unknown; error?: { message?: string } };
+    expect(exactBlockJson.error).toBeUndefined();
+    expect(exactBlockJson.result).toBeTruthy();
+
+    const writeRes = await devnetApiFetch('/api/pca/rpc', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'eth_sendTransaction', params: [] }),
+    });
+    expect(writeRes.status).toBe(200);
+    const writeJson = (await writeRes.json()) as { error?: { code?: number; message?: string } };
+    expect(writeJson.error?.code).toBe(-32601);
+    expect(writeJson.error?.message).toContain('PCA RPC method not allowed');
   });
 
   test('publish without PCA registration uses the KA lifecycle path', async () => {
