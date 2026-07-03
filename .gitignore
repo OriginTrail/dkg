@@ -20,6 +20,10 @@ data/
 packages/evm-module/artifacts/
 packages/evm-module/cache/
 packages/evm-module/typechain/
+# Devnet-only (hardhat.devnet.config.ts) compile output — isolated from the
+# production artifacts so a UI-test devnet boot never overwrites them (#1403 P3)
+packages/evm-module/artifacts-devnet/
+packages/evm-module/cache-devnet/
 # .devnet/ is a runtime workspace (Hardhat data dir, per-node DKG_HOME
 # state, daemon logs). Not checked in.
 .devnet/

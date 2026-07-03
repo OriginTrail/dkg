@@ -66,4 +66,15 @@ export default {
     ...baseConfig.networks,
     hardhat: { ...baseHardhatNetwork, hardfork: 'cancun' },
   },
+  // Isolate the devnet's compile outputs so the 0.8.24/cancun bytecode this
+  // config produces never overwrites the production 0.8.20/london artifacts in
+  // the shared checkout: a UI-test devnet boot must not leave stale/foreign
+  // build-info + artifacts that a later non-devnet `hardhat` task would pick up
+  // (otReviewAgent #1403 P3). Only cache/artifacts are redirected; sources,
+  // tests and deploy roots stay on the base paths.
+  paths: {
+    ...((baseConfig as { paths?: Record<string, unknown> }).paths ?? {}),
+    cache: './cache-devnet',
+    artifacts: './artifacts-devnet',
+  },
 };
