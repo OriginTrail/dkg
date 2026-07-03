@@ -411,7 +411,7 @@ describe('KA lifecycle CLI on devnet', () => {
     await assertVerifiableSubject(node, contextGraphId, subject, 'one-shot shared', subGraphName);
   });
 
-  it('stepwise lifecycle drains share-async, then pull-from/query/discard works', async () => {
+  it('stepwise lifecycle drains share-async, then pull-from reopens WM and discard clears the reopened draft', async () => {
     const { node, contextGraphId } = suite;
     const name = unique('stepwise');
     const { filePath, subject } = writeNtFixture(name, 'stepwise shared');
@@ -448,6 +448,7 @@ describe('KA lifecycle CLI on devnet', () => {
     });
 
     await assertSharedSubject(node, contextGraphId, subject, 'stepwise shared');
+    await assertWorkingMemorySubjectAbsent(node, contextGraphId, name, subject, 'ka query after share before pull-from');
 
     const jobs = await runDkgCli(
       node,
@@ -459,11 +460,6 @@ describe('KA lifecycle CLI on devnet', () => {
       parseLastJsonBlock(jobs.stdout, 'ka share-jobs stdout').jobs ?? []
     ) as Array<{ jobId?: string }>;
     expect(listed.some((job) => job.jobId === jobId), `share-jobs output: ${jobs.stdout}`).toBe(true);
-
-    const clearedBeforePull = await runDkgCli(node, ['ka', 'discard', name, '-c', contextGraphId, '--json'], 60_000);
-    expectCliOk(clearedBeforePull, 'ka discard before pull-from');
-    expect(parseLastJsonBlock(clearedBeforePull.stdout, 'ka discard before pull-from stdout').discarded).toBe(true);
-    await assertWorkingMemorySubjectAbsent(node, contextGraphId, name, subject, 'ka query after pre-pull discard');
 
     const pulled = await runDkgCli(
       node,
