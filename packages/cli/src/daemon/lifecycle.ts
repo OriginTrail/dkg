@@ -137,7 +137,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
-import { startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { mergeRpcUsageWindows, startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -2435,13 +2435,23 @@ export async function runDaemonInner(
   // ~$200 of RPC credits in a day with nothing measuring it). The whole
   // lifecycle (minutely drain→format→emit tick + shutdown final-drain) lives in
   // startRpcUsageTelemetry (rpc-usage-log.ts, unit-tested); this is wiring only:
-  // the agent's public drainChainRpcUsage() boundary as the source, the Logger →
-  // redacted-OTLP → Loki path as the sink, and the EFFECTIVE chain id (chainBase
-  // resolves field-level inheritance — config.chain?.chainId alone is undefined
-  // for operator configs that override only rpcUrl).
+  // the source MERGES every tracker this process owns — the agent adapter's
+  // window PLUS the async-publisher runtime's per-wallet adapters (publish
+  // transactions are the highest credit-burn path; draining only the agent
+  // would silently omit them). `publisherRuntime` starts null and is assigned
+  // when the runtime boots, so the composite reads the live variable at each
+  // drain. Sink is the Logger → redacted-OTLP → Loki path; chain id is the
+  // EFFECTIVE one (chainBase resolves field-level inheritance —
+  // config.chain?.chainId alone is undefined for operator configs that
+  // override only rpcUrl).
   const rpcUsageLogger = new Logger("chain-rpc");
   const rpcUsageTelemetry = startRpcUsageTelemetry({
-    source: agent,
+    source: {
+      drainChainRpcUsage: () => mergeRpcUsageWindows(
+        agent.drainChainRpcUsage?.(),
+        publisherRuntime?.drainRpcUsage(),
+      ),
+    },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
   });

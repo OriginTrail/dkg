@@ -132,17 +132,23 @@ export class RpcUsageTracker {
   static readonly MAX_WINDOW_METHODS = 64;
 
   record(method: string): void {
+    // Authoritative window/lifetime state first, OUTSIDE any try — pure map
+    // arithmetic that cannot realistically throw, and it must never be
+    // skipped because an OPTIONAL sink misbehaved.
+    const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
+    const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
+    this.window.set(key, (this.window.get(key) ?? 0) + 1);
+    this.lifetime += 1;
+    // Best-effort applies ONLY to the OTel side effect (and the chainId
+    // thunk it evaluates) — a throwing metrics backend must not break the
+    // RPC call, and the window above is already committed either way.
     try {
-      const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
-      const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
-      this.window.set(key, (this.window.get(key) ?? 0) + 1);
-      this.lifetime += 1;
       getMetrics().chainRpcRequestsTotal.add(1, {
         rpc_method: boundedRpcMethodLabel(method),
         chain_id: this.chainId(),
       });
     } catch {
-      /* accounting must never break an RPC call */
+      /* metrics emission must never break an RPC call */
     }
   }
 

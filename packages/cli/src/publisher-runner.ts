@@ -1,17 +1,25 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
+import { mergeRpcUsageWindows } from './daemon/rpc-usage-log.js';
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
   readonly stop: () => Promise<void>;
+  /**
+   * Drain the merged raw-RPC usage window across every per-wallet chain
+   * adapter this runtime owns. The daemon merges this with the agent
+   * adapter's window so publish-transaction RPC (the highest credit-burn
+   * path) is included in the minutely rpc_usage accounting.
+   */
+  readonly drainRpcUsage: () => RpcUsageWindow | undefined;
 }
 
 export interface PublisherInspector {
@@ -221,6 +229,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const publishers = new Map<string, DKGPublisher>();
+  const chainAdapters: ChainAdapter[] = [];
   const invalidWallets: string[] = [];
 
   for (const wallet of publisherWallets.wallets) {
@@ -240,6 +249,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       invalidWallets.push(wallet.address);
       continue;
     }
+    chainAdapters.push(chain);
     publishers.set(
       wallet.address,
       new DKGPublisher({
@@ -350,6 +360,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
+    drainRpcUsage: () => mergeRpcUsageWindows(...chainAdapters.map((c) => c.drainRpcUsage?.())),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {

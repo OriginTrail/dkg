@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { formatRpcUsageLines, emitRpcUsage, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
+import { formatRpcUsageLines, emitRpcUsage, mergeRpcUsageWindows, startRpcUsageTelemetry } from '../src/daemon/rpc-usage-log.js';
 
 /**
  * The rpc_usage line format is a CONTRACT with the Grafana dashboards (parsed
@@ -39,6 +39,50 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
       'weird chain id',
     );
     expect(lines).toEqual(['rpc_usage method=other count=5 window_s=60 chain=unknown']);
+  });
+});
+
+describe('mergeRpcUsageWindows — one process, many trackers (agent + per-wallet publisher adapters)', () => {
+  it('sums per-method, total and lifetime across windows', () => {
+    const merged = mergeRpcUsageWindows(
+      { byMethod: { eth_call: 5, eth_estimateGas: 2 }, total: 7, lifetimeTotal: 100 },
+      { byMethod: { eth_call: 3, eth_sendRawTransaction: 4 }, total: 7, lifetimeTotal: 50 },
+    );
+    expect(merged).toEqual({
+      byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
+      total: 14,
+      lifetimeTotal: 150,
+    });
+  });
+
+  it('skips undefined inputs (adapters without the capability / runtime not started)', () => {
+    const w = { byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 };
+    expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
+    expect(mergeRpcUsageWindows(undefined, undefined)).toBeUndefined();
+    expect(mergeRpcUsageWindows()).toBeUndefined();
+  });
+
+  it('COMPOSITE SOURCE end-to-end: publisher-runtime traffic reaches the emitted rpc_usage lines', () => {
+    // The exact daemon wiring shape: the source merges the agent window with
+    // the (lazily started) publisher runtime's window at every drain. The
+    // publish-transaction methods MUST appear in the emitted lines — this is
+    // the undercount the review flagged (per-wallet publisher adapters were
+    // never drained).
+    let runtime: { drainRpcUsage: () => { byMethod: Record<string, number>; total: number; lifetimeTotal: number } | undefined } | null = null;
+    const agentLike = { drainChainRpcUsage: () => ({ byMethod: { eth_call: 2 }, total: 2, lifetimeTotal: 2 }) };
+    const source = { drainChainRpcUsage: () => mergeRpcUsageWindows(agentLike.drainChainRpcUsage(), runtime?.drainRpcUsage()) };
+
+    const before: string[] = [];
+    emitRpcUsage(source, (l) => before.push(l), 60, 'base:8453');
+    expect(before).toEqual(['rpc_usage method=eth_call count=2 window_s=60 chain=base:8453']);
+
+    // runtime boots later (the daemon assigns the live variable) — its
+    // per-wallet adapter traffic must now be merged in.
+    runtime = { drainRpcUsage: () => ({ byMethod: { eth_sendRawTransaction: 3, eth_call: 1 }, total: 4, lifetimeTotal: 4 }) };
+    const after: string[] = [];
+    emitRpcUsage(source, (l) => after.push(l), 60, 'base:8453');
+    expect(after).toContain('rpc_usage method=eth_call count=3 window_s=60 chain=base:8453');
+    expect(after).toContain('rpc_usage method=eth_sendRawTransaction count=3 window_s=60 chain=base:8453');
   });
 });
 
