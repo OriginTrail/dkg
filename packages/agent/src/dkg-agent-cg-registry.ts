@@ -781,6 +781,36 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   }
 
   /**
+   * #1085 — canonical "body wins, else rehydrate stored" resolver for the
+   * effective register-time `publishPolicy`. An explicit body value wins; an
+   * omitted policy best-effort rehydrates the create-time policy persisted by
+   * `createContextGraph` (via {@link getStoredContextGraphRegistrationOptions}).
+   * A stored-read error is warned, never fatal — the caller proceeds with the
+   * request/default policy, mirroring the publish auto-register path.
+   *
+   * The pca-only-with-curated request validation stays at the route boundary
+   * (it validates the request body's `pcaAccountId`); this resolver only
+   * computes the effective policy so the daemon route and the transparent
+   * publish auto-register (`ensureRegisteredForPublish`) share one source of
+   * truth.
+   */
+  async resolveRegistrationPublishPolicy(this: DKGAgent,
+    contextGraphId: string,
+    bodyPublishPolicy?: number,
+  ): Promise<number | undefined> {
+    if (bodyPublishPolicy !== undefined) return bodyPublishPolicy;
+    try {
+      const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
+      return stored.publishPolicy;
+    } catch (err) {
+      console.warn(
+        `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${contextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
    * Get the peer allowlist for a context graph (if curated).
    * Returns null if no allowlist is set (open CG).
    */

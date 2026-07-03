@@ -3393,6 +3393,11 @@ export class PublishMethods extends DKGAgentBase {
     try {
       await this.registerContextGraph(contextGraphId, {
         ...(opts?.callerAgentAddress != null ? { callerAgentAddress: opts.callerAgentAddress } : {}),
+        // #1085 — there is no request-body policy on the publish path, so the
+        // effective publishPolicy is exactly the stored create-time value. That
+        // is precisely what the canonical `resolveRegistrationPublishPolicy`
+        // (dkg-agent-cg-registry.ts) returns for an undefined body; we reuse the
+        // `storedOpts` already read above rather than re-query the store.
         ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
         ...(storedOpts.publishAuthorityAccountId !== undefined
           ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }

@@ -1511,6 +1511,55 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return this.chain.isPublishingConvictionAgent(accountId, agent);
   }
 
+  // #1346 — Best-effort on-chain confirmation of a just-mined agent
+  // registration. The tx receipt is already authoritative for
+  // `registered:true`; this read only upgrades the ADVISORY `verified` +
+  // `adapterSupported` signals. Under RPC lag the immediate post-submit read
+  // can race the mined state and return a stale `false` (or throw), so we
+  // retry a couple of times with a short bounded backoff. A lagging/throwing
+  // read stays advisory and NEVER flips the authoritative registration.
+  //
+  // The two signals are DECOUPLED (QA #1346 acceptance contract):
+  //   `adapterSupported` = does the probe read SURFACE exist?
+  //     - an explicit `null` return (the typed facade's "no probe surface"
+  //       signal) → false (genuine capability gap).
+  //     - a boolean return, OR a throw (an RPC read error — the surface
+  //       exists, the read just failed) → true.
+  //   `verified` = the on-chain read OUTCOME (advisory only):
+  //     - true  — confirmed registered on-chain
+  //     - false — probe ran but did not (yet) observe it (follower-RPC lag)
+  //     - null  — inconclusive (no capability, or every attempt threw)
+  async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
+    accountId: bigint,
+    agent: string,
+    opts?: { attempts?: number; backoffMs?: number },
+  ): Promise<{ verified: boolean | null; adapterSupported: boolean }> {
+    const attempts = opts?.attempts ?? 3;
+    const backoffMs = opts?.backoffMs ?? 300;
+    let adapterSupported = false;
+    let last: boolean | null = null;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        // Typed facade call: `isPublishingConvictionAgent` always exists and
+        // returns `null` when the chain adapter exposes no probe surface —
+        // that `null` is the SOLE "unsupported" signal.
+        const result = await this.isPublishingConvictionAgent(accountId, agent);
+        if (result === null) return { verified: null, adapterSupported: false };
+        // A boolean return proves the read surface exists.
+        adapterSupported = true;
+        if (result === true) return { verified: true, adapterSupported: true };
+        last = false; // `false` could be follower-RPC lag on a mined tx → retry.
+      } catch {
+        // The read surface exists; a throw is an RPC read failure (not a
+        // capability gap) → supported, outcome inconclusive.
+        adapterSupported = true;
+        last = null;
+      }
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, backoffMs));
+    }
+    return { verified: last, adapterSupported };
+  }
+
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {
     if (typeof this.chain.settlePublishingConvictionAccount !== 'function') return null;
     return this.chain.settlePublishingConvictionAccount(accountId);

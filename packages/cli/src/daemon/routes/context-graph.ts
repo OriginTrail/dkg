@@ -394,36 +394,6 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
-// #1085 — resolve the effective register publishPolicy for POST /register.
-// The body value wins; an omitted policy rehydrates the create-time policy
-// stored by `createContextGraph` (best-effort — a stored-read error is warned,
-// never fatal — mirroring the publish auto-register path). `pcaAccountId` is
-// NEVER rehydrated (explicit-only by design; anti-stale-replay). Returns the
-// effective policy, or a route-boundary validation error: pcaAccountId is
-// curated-only, so it is rejected against the EFFECTIVE (post-rehydration) policy.
-async function resolveRegisterPublishPolicy(
-  agent: DKGAgent,
-  contextGraphId: string,
-  bodyPublishPolicy: number | undefined,
-  pcaAccountId: bigint | undefined,
-): Promise<{ publishPolicy: number | undefined } | { error: string }> {
-  let publishPolicy = bodyPublishPolicy;
-  if (publishPolicy === undefined) {
-    try {
-      const stored = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
-      if (stored?.publishPolicy !== undefined) publishPolicy = stored.publishPolicy;
-    } catch (err) {
-      console.warn(
-        `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${contextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
-      );
-    }
-  }
-  if (pcaAccountId !== undefined && publishPolicy === 1) {
-    return { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' };
-  }
-  return { publishPolicy };
-}
-
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -689,21 +659,21 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
-      // #1085 — resolve the effective publishPolicy (rehydrate the stored
-      // create-time policy on omission; reject an explicit pcaAccountId against
-      // an open effective policy). See `resolveRegisterPublishPolicy`.
-      const resolved = await resolveRegisterPublishPolicy(
-        agent,
+      // #1085 — resolve the effective publishPolicy on the typed facade
+      // (body wins, else rehydrate the create-time policy stored by
+      // createContextGraph). The pcaAccountId request-validation stays at the
+      // route boundary: pcaAccountId is curated-only, so reject it against the
+      // EFFECTIVE (post-rehydration) policy.
+      const effectivePublishPolicy = await agent.resolveRegistrationPublishPolicy(
         resolvedContextGraphId,
         publishPolicy,
-        parsedPcaAccountId.value,
       );
-      if ('error' in resolved) {
-        return jsonResponse(res, 400, { error: resolved.error });
+      if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
+        return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
       }
       const result = await agent.registerContextGraph(resolvedContextGraphId, {
         accessPolicy,
-        publishPolicy: resolved.publishPolicy,
+        publishPolicy: effectivePublishPolicy,
         callerAgentAddress: requestAgentAddress,
         publishAuthorityAccountId: parsedPcaAccountId.value,
         ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),

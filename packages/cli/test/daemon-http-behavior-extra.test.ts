@@ -1005,7 +1005,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   ): Promise<{ status: number; json: any; registerOpts: any }> {
     const contextGraphId = String(body.id ?? body.contextGraphId);
     let registerOpts: any = null;
-    const agent = {
+    const agent: any = {
       listContextGraphs: async () => [{
         id: contextGraphId,
         uri: `did:dkg:context-graph:${contextGraphId}`,
@@ -1016,6 +1016,28 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
       registerContextGraph: async (_id: string, opts: any) => {
         registerOpts = opts;
         return { onChainId: '42', txHash: '0x' + 'ab'.repeat(32) };
+      },
+      // PR #1423 R2-A — the route now resolves the effective publishPolicy on
+      // the typed facade. This mock mirrors the real
+      // `resolveRegistrationPublishPolicy` semantics (body wins, else rehydrate
+      // the stored create-time policy, best-effort with a warn on read error),
+      // delegating to whatever `getStoredContextGraphRegistrationOptions` the
+      // individual cases install below.
+      resolveRegistrationPublishPolicy: async function (
+        this: any,
+        cgId: string,
+        bodyPublishPolicy?: number,
+      ): Promise<number | undefined> {
+        if (bodyPublishPolicy !== undefined) return bodyPublishPolicy;
+        try {
+          const stored = await this.getStoredContextGraphRegistrationOptions(cgId);
+          return stored?.publishPolicy;
+        } catch (err) {
+          console.warn(
+            `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${cgId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+          );
+          return undefined;
+        }
       },
       ...agentOverrides,
     };
