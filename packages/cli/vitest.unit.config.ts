@@ -18,6 +18,7 @@ export default defineConfig({
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           'test/memory-graph-events.test.ts',
+          'test/memory-turn-route.test.ts',
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
@@ -33,6 +34,7 @@ export default defineConfig({
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
+          'test/daemon-ka-transport.test.ts',
           'test/async-promote-worker.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
@@ -66,6 +68,11 @@ export default defineConfig({
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
           'test/http-literal-size-validation.test.ts',
+          // CLI subprocess smoke with stub daemon only; no hardhat needed.
+          'test/assertion-cli-smoke.test.ts',
+          'test/knowledge-asset-cli-smoke.test.ts',
+          'test/okf-subcommands.test.ts',
+          'test/okf-private-lifecycle.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.

@@ -2,10 +2,10 @@
 #
 # Shared helpers for devnet test scripts — rc.12+ single-root sync publish.
 #
-# Since #925, POST /api/shared-memory/publish rejects `selection: "all"`
-# when multiple root entities exist (MULTI_ROOT_PUBLISH_NOT_ATOMIC). Scripts
-# that previously published whole SWM graphs in one call must publish one root
-# at a time.
+# Devnet scripts publish through named knowledge assets. Multi-root payloads are
+# split into one named KA per root by default so each VM publish remains
+# independently verifiable. Set DEVNET_PUBLISH_PRESERVE_BATCH=1 for tests that
+# intentionally need one KC containing the full multi-root payload.
 #
 # Usage: source this file AFTER defining `api_call NODE METHOD PATH [DATA]`.
 #
@@ -22,6 +22,8 @@
 DEVNET_PUBLISH_STATE_FILE="${DEVNET_PUBLISH_STATE_FILE:-${DEVNET_DIR:-/tmp}/.devnet-publish-state-$$.json}"
 DEVNET_PUBLISH_ALL_RESPONSES='[]'
 DEVNET_PUBLISH_ROOT_ENTITIES='[]'
+DEVNET_PUBLISH_ASSET_NAMES='[]'
+DEVNET_PUBLISH_PENDING_ASSETS='[]'
 # Node that performed the last publish. KC metadata (merkleRoot, KCS records)
 # must be read from this node — late-joining/non-curator verifier peers may not
 # have materialized the batch yet, which would race verify-batch.
@@ -35,6 +37,142 @@ devnet_json_field() {
       catch { process.exit(1); }
     })
   "
+}
+
+_devnet_append_pending_assets() {
+  local new_assets="$1"
+  devnet_publish_load_state
+  local merged names
+  merged=$(OLD="$DEVNET_PUBLISH_PENDING_ASSETS" NEW="$new_assets" node -e '
+    const oldAssets = JSON.parse(process.env.OLD || "[]");
+    const newAssets = JSON.parse(process.env.NEW || "[]");
+    console.log(JSON.stringify(oldAssets.concat(newAssets)));
+  ')
+  names=$(ASSETS="$merged" node -e '
+    const assets = JSON.parse(process.env.ASSETS || "[]");
+    console.log(JSON.stringify(assets.map(a => a.name)));
+  ')
+  _devnet_publish_persist_state "$DEVNET_PUBLISH_ALL_RESPONSES" "$DEVNET_PUBLISH_ROOT_ENTITIES" "$DEVNET_PUBLISH_NODE" "$names" "$merged"
+}
+
+# Create one or more named knowledge assets, seal them, and share them to SWM.
+# Echoes a legacy-shaped write response so older devnet scripts can keep their
+# `triplesWritten` assertions while exercising the named KA lifecycle path.
+devnet_create_shared_ka() {
+  local node_id="$1" payload="$2" name_prefix="${3:-devnet-ka}" extra_fields="${4:-}"
+  local nonce plan count i asset body resp responses new_assets triples names roots
+
+  _devnet_publish_init_state_file
+  nonce="$(date +%s)-$$-${RANDOM:-0}"
+  plan=$(PAYLOAD="$payload" NAME_PREFIX="$name_prefix" EXTRA_FIELDS="$extra_fields" NONCE="$nonce" node -e '
+    const payload = JSON.parse(process.env.PAYLOAD);
+    const extra = process.env.EXTRA_FIELDS ? JSON.parse("{" + process.env.EXTRA_FIELDS + "}") : {};
+    const quads = Array.isArray(payload.quads) ? payload.quads : [];
+    const rootOf = (subject) => String(subject || "").split("/.well-known/genid/")[0];
+    const slug = (value) => String(value || "ka")
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "ka";
+    const prefix = slug(process.env.NAME_PREFIX || "devnet-ka");
+    const roots = [...new Set(quads.map(q => rootOf(q.subject)).filter(Boolean))];
+    const effectiveRoots = roots.length > 0 ? roots : [prefix];
+    const preserveBatch = process.env.DEVNET_PUBLISH_PRESERVE_BATCH === "1";
+    const assetRoots = preserveBatch ? [effectiveRoots[0]] : effectiveRoots;
+    const assets = assetRoots.map((root, index) => {
+      const rootQuads = roots.length > 0
+        ? (preserveBatch ? quads : quads.filter(q => rootOf(q.subject) === root))
+        : quads;
+      const name = `${prefix}-${process.env.NONCE}-${index + 1}-${slug(root).slice(0, 24)}`;
+      return {
+        name,
+        root,
+        rootEntities: effectiveRoots,
+        preserveBatch,
+        ...(extra.subGraphName || payload.subGraphName ? { subGraphName: extra.subGraphName || payload.subGraphName } : {}),
+        quads: rootQuads,
+        body: {
+          contextGraphId: payload.contextGraphId,
+          name,
+          quads: rootQuads,
+          finalize: true,
+          alsoShareSwm: true,
+          ...(payload.subGraphName ? { subGraphName: payload.subGraphName } : {}),
+          ...extra,
+        },
+      };
+    });
+    console.log(JSON.stringify({
+      contextGraphId: payload.contextGraphId,
+      totalQuads: quads.length,
+      assets,
+    }));
+  ')
+
+  count=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).assets.length));')
+  responses='[]'
+  new_assets='[]'
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    asset=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).assets[Number(process.argv[1])])));' "$i")
+    body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).body)));')
+    resp=$(api_call "$node_id" POST /api/knowledge-assets "$body")
+    if ! printf '%s' "$resp" | node -e '
+      let d=""; process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          if (j.error || (Array.isArray(j.errors) && j.errors.length > 0)) process.exit(1);
+          if (j.swmShared !== true) process.exit(1);
+          if (j.publishReady !== true) process.exit(1);
+          if (typeof j.shareOperationId !== "string" || j.shareOperationId.trim().length === 0) process.exit(1);
+          if (Number(j.promotedCount || 0) <= 0) process.exit(1);
+        } catch {
+          process.exit(1);
+        }
+      });
+    '; then
+      printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
+      return 1
+    fi
+    responses=$(node -e 'const arr=JSON.parse(process.argv[1]); arr.push(JSON.parse(process.argv[2])); console.log(JSON.stringify(arr));' "$responses" "$resp")
+    new_assets=$(node -e '
+      const arr = JSON.parse(process.argv[1]);
+      const asset = JSON.parse(process.argv[2]);
+      arr.push({
+        name: asset.name,
+        root: asset.root,
+        rootEntities: asset.rootEntities || [asset.root],
+        preserveBatch: Boolean(asset.preserveBatch),
+        ...(asset.subGraphName ? { subGraphName: asset.subGraphName } : {}),
+      });
+      console.log(JSON.stringify(arr));
+    ' "$new_assets" "$asset")
+    i=$((i + 1))
+  done
+
+  _devnet_append_pending_assets "$new_assets"
+  triples=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).totalQuads));')
+  names=$(printf '%s' "$new_assets" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).map(a=>a.name))));')
+  roots=$(printf '%s' "$new_assets" | node -e '
+    let d=""; process.stdin.on("data",c=>d+=c);
+    process.stdin.on("end",()=>{
+      const assets = JSON.parse(d);
+      console.log(JSON.stringify([...new Set(assets.flatMap(a => a.rootEntities || [a.root]))]));
+    });
+  ')
+  node -e '
+    const names = JSON.parse(process.argv[1]);
+    const roots = JSON.parse(process.argv[2]);
+    const responses = JSON.parse(process.argv[3]);
+    console.log(JSON.stringify({
+      triplesWritten: Number(process.argv[4]),
+      shareOperationId: "knowledge-assets:" + names.join(","),
+      names,
+      rootEntities: roots,
+      responses,
+    }));
+  ' "$names" "$roots" "$responses" "$triples"
 }
 
 # Publish statuses the devnet harness treats as success (matches devnet-test.sh).
@@ -52,7 +190,7 @@ _devnet_publish_init_state_file() {
 }
 
 _devnet_publish_persist_state() {
-  local all_responses="$1" root_entities="${2:-[]}" publish_node="${3:-}"
+  local all_responses="$1" root_entities="${2:-[]}" publish_node="${3:-}" asset_names="${4:-[]}" pending_assets="${5:-[]}"
   node -e "
     require('fs').writeFileSync(
       process.argv[1],
@@ -60,9 +198,11 @@ _devnet_publish_persist_state() {
         allResponses: JSON.parse(process.argv[2]),
         rootEntities: JSON.parse(process.argv[3]),
         publishNode: process.argv[4],
+        assetNames: JSON.parse(process.argv[5]),
+        pendingAssets: JSON.parse(process.argv[6]),
       }),
     );
-  " "$DEVNET_PUBLISH_STATE_FILE" "$all_responses" "$root_entities" "$publish_node"
+  " "$DEVNET_PUBLISH_STATE_FILE" "$all_responses" "$root_entities" "$publish_node" "$asset_names" "$pending_assets"
 }
 
 devnet_publish_load_state() {
@@ -70,6 +210,8 @@ devnet_publish_load_state() {
   if [ ! -f "$DEVNET_PUBLISH_STATE_FILE" ]; then
     DEVNET_PUBLISH_ALL_RESPONSES='[]'
     DEVNET_PUBLISH_ROOT_ENTITIES='[]'
+    DEVNET_PUBLISH_ASSET_NAMES='[]'
+    DEVNET_PUBLISH_PENDING_ASSETS='[]'
     DEVNET_PUBLISH_NODE=''
     return 0
   fi
@@ -85,14 +227,22 @@ devnet_publish_load_state() {
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
     console.log(s.publishNode || '');
   " "$DEVNET_PUBLISH_STATE_FILE")
+  DEVNET_PUBLISH_ASSET_NAMES=$(node -e "
+    const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+    console.log(JSON.stringify(s.assetNames || []));
+  " "$DEVNET_PUBLISH_STATE_FILE")
+  DEVNET_PUBLISH_PENDING_ASSETS=$(node -e "
+    const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+    console.log(JSON.stringify(s.pendingAssets || []));
+  " "$DEVNET_PUBLISH_STATE_FILE")
 }
 
 # Echo the number of publishes recorded by the last devnet_publish_swm_all_roots
 # call. This counts `allResponses` (one entry per confirmed publish), NOT
 # `rootEntities`: the single-root path persists 1 response but `[]` root
-# subjects (the `/api/shared-memory/publish` success body carries no
-# `rootEntities`), so counting rootEntities would report 0 for a perfectly good
-# one-root publish and make `devnet_verify_each_published_root` reject it. The
+# subjects for older single-root runs may be absent, so counting rootEntities
+# would report 0 for a perfectly good one-root publish and make
+# `devnet_verify_each_published_root` reject it. The
 # verify loop indexes `allResponses[i]` via `devnet_publish_ka_id_at`, so this
 # count must track `allResponses`. rootEntities is supplementary (per-root quad
 # filtering, guarded by `roots.length > 0`).
@@ -264,95 +414,65 @@ devnet_verify_each_published_root() {
   return 0
 }
 
+_devnet_publish_swm_all_roots_retired_legacy() {
+  echo "retired legacy anonymous SWM publish helper; use devnet_create_shared_ka + devnet_publish_swm_all_roots" >&2
+  return 1
+}
+
 devnet_publish_swm_all_roots() {
   local node="$1" cg="$2" clear_after="${3:-false}"
   local extra_fields="${4:-}"
 
   _devnet_publish_init_state_file
+  devnet_publish_load_state
 
-  local probe_body
-  probe_body=$(node -e "
-    const cg = process.argv[1];
-    const clearAfter = process.argv[2] === 'true';
-    const extra = process.argv[3] ? JSON.parse('{' + process.argv[3] + '}') : {};
-    console.log(JSON.stringify({ contextGraphId: cg, selection: 'all', clearAfter, ...extra }));
-  " "$cg" "$clear_after" "$extra_fields")
-
-  local probe probe_code
-  probe=$(api_call "$node" POST /api/shared-memory/publish "$probe_body")
-  probe_code=$(devnet_json_field "$probe" '.code')
-
-  if [ "$probe_code" != "MULTI_ROOT_PUBLISH_NOT_ATOMIC" ]; then
-    # Not the multi-root sentinel. The only other response we may treat as a
-    # single-root publish is a genuinely successful one. Any other error
-    # (empty SWM, auto-register failure, malformed extra fields, …) must fail
-    # loudly here instead of being persisted as a successful single-root
-    # publish — otherwise the later verify steps run against a payload that
-    # was never published and a real publish regression passes as green.
-    local probe_status
-    probe_status=$(devnet_json_field "$probe" '.status')
-    if ! _devnet_publish_status_ok "$probe_status"; then
-      printf '%s' "$probe" >&2
-      return 1
-    fi
-    local single_arr single_roots
-    single_arr=$(printf '%s' "$probe" | node -e '
-      let d=""; process.stdin.on("data",c=>d+=c);
-      process.stdin.on("end",()=>console.log(JSON.stringify([JSON.parse(d)])));
-    ')
-    # Record the published root subject when the response exposes it so
-    # devnet_publish_ka_id_for_root can validate single-root lookups too.
-    single_roots=$(printf '%s' "$probe" | node -e '
-      let d=""; process.stdin.on("data",c=>d+=c);
-      process.stdin.on("end",()=>{
-        try {
-          const j = JSON.parse(d);
-          const roots = j.rootEntities || j.publishedRootEntities || j.roots || [];
-          console.log(JSON.stringify(Array.isArray(roots) ? roots : []));
-        } catch { console.log("[]"); }
-      });
-    ')
-    _devnet_publish_persist_state "$single_arr" "$single_roots" "$node"
-    printf '%s' "$probe"
-    return 0
-  fi
-
-  local roots_json count i last_resp root ca st all_resps
-  roots_json=$(printf '%s' "$probe" | node -e '
-    let d=""; process.stdin.on("data",c=>d+=c);
-    process.stdin.on("end",()=>{
-      try { console.log(JSON.stringify(JSON.parse(d).rootEntities || [])); }
-      catch { console.log("[]"); }
-    });
-  ')
-  count=$(printf '%s' "$roots_json" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).length))')
+  local pending_json count roots_json names_json i name pending_subgraph ca body last_resp st all_resps
+  pending_json="$DEVNET_PUBLISH_PENDING_ASSETS"
+  count=$(printf '%s' "$pending_json" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d || "[]").length))')
   if [ "$count" -eq 0 ]; then
-    printf '%s' "$probe" >&2
+    echo "devnet_publish_swm_all_roots: no pending named KAs; use devnet_create_shared_ka before publishing" >&2
     return 1
   fi
 
+  roots_json=$(printf '%s' "$pending_json" | node -e '
+    let d=""; process.stdin.on("data",c=>d+=c);
+    process.stdin.on("end",()=>{
+      const assets = JSON.parse(d || "[]");
+      if (assets.some(a => a.preserveBatch)) {
+        console.log("[]");
+        return;
+      }
+      console.log(JSON.stringify(assets.map(a => a.root)));
+    });
+  ')
+  names_json=$(printf '%s' "$pending_json" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).map(a=>a.name))))')
   all_resps="[]"
   i=0
   last_resp=""
   while [ "$i" -lt "$count" ]; do
-    root=$(printf '%s' "$roots_json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d)[Number(process.argv[1])]))" "$i")
+    name=$(printf '%s' "$pending_json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d)[Number(process.argv[1])].name))" "$i")
+    pending_subgraph=$(printf '%s' "$pending_json" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d)[Number(process.argv[1])].subGraphName || ''))" "$i")
     ca="$clear_after"
     if [ "$clear_after" = "true" ] && [ "$i" -lt $((count - 1)) ]; then
       ca="false"
     fi
-    last_resp=$(node -e "
+    body=$(node -e "
       const cg = process.argv[1];
-      const root = process.argv[2];
-      const clearAfter = process.argv[3] === 'true';
-      const extra = process.argv[4] ? JSON.parse('{' + process.argv[4] + '}') : {};
+      const clearAfter = process.argv[2] === 'true';
+      const extra = process.argv[3] ? JSON.parse('{' + process.argv[3] + '}') : {};
+      const pendingSubGraphName = process.argv[4] || '';
+      const { subGraphName, ...publishOptions } = extra;
+      const resolvedSubGraphName = subGraphName || pendingSubGraphName;
       console.log(JSON.stringify({
         contextGraphId: cg,
-        selection: { rootEntities: [root] },
-        clearAfter,
-        ...extra,
+        ...(resolvedSubGraphName ? { subGraphName: resolvedSubGraphName } : {}),
+        options: {
+          clearAfter,
+          ...publishOptions,
+        },
       }));
-    " "$cg" "$root" "$ca" "$extra_fields")
-    last_resp=$(api_call "$node" POST /api/shared-memory/publish "$last_resp")
+    " "$cg" "$ca" "$extra_fields" "$pending_subgraph")
+    last_resp=$(api_call "$node" POST "/api/knowledge-assets/${name}/vm/publish" "$body")
     st=$(devnet_json_field "$last_resp" '.status')
     if ! _devnet_publish_status_ok "$st"; then
       printf '%s' "$last_resp" >&2
@@ -366,7 +486,7 @@ devnet_publish_swm_all_roots() {
     i=$((i + 1))
     sleep 1
   done
-  _devnet_publish_persist_state "$all_resps" "$roots_json" "$node"
+  _devnet_publish_persist_state "$all_resps" "$roots_json" "$node" "$names_json" "[]"
   printf '%s' "$last_resp"
   return 0
 }

@@ -27,7 +27,7 @@ Finalize seals the draft with an EIP-712 author attestation over its merkle root
 
 ## Memory lifecycle
 
-The Knowledge Asset lifecycle is the write path agents should prefer. (In the CLI and lifecycle records, a Knowledge Asset is still called an _assertion_ while it is a Working Memory draft — see `dkg assertion …` and the `dkg:Assertion` record.)
+The Knowledge Asset lifecycle is the write path agents should prefer. Use `dkg ka ...` or `dkg knowledge-asset ...` for lifecycle-native CLI workflows. The older `dkg assertion ...` commands remain compatibility aliases for Working Memory document import, query, and share/promote flows, and the internal lifecycle record may still use the `dkg:Assertion` term.
 
 1. Create a Knowledge Asset in Working Memory.
 2. Write RDF quads into that Knowledge Asset.

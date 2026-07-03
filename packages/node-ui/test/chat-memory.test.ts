@@ -33,18 +33,14 @@ function createTools(overrides?: {
   const mockShare = overrides?.mockShare ?? trackFn({ shareOperationId: 'op-1' });
   const mockCreateContextGraph = overrides?.mockCreateContextGraph ?? trackFn(undefined);
   const mockListContextGraphs = overrides?.mockListContextGraphs ?? trackFn([{ id: 'agent-memory', name: 'Agent Memory' }]);
-  const mockPublishFromSharedMemory = overrides?.mockPublishFromSharedMemory ?? trackFn({});
 
   return {
     mockQuery,
     mockShare,
     mockCreateContextGraph,
     mockListContextGraphs,
-    mockPublishFromSharedMemory,
     tools: {
       query: mockQuery,
-      share: mockShare,
-      publishFromSharedMemory: mockPublishFromSharedMemory,
       createContextGraph: mockCreateContextGraph,
       listContextGraphs: mockListContextGraphs,
     },
@@ -147,10 +143,8 @@ describe('ChatMemoryManager', () => {
     manager = new ChatMemoryManager(
       {
         query: mockQuery,
-        share: mockShare,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory: trackFn({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -292,10 +286,8 @@ describe('ChatMemoryManager', () => {
     const m = new ChatMemoryManager(
       {
         query: mockQuery,
-        share: mockShare,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory: trackFn({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -680,10 +672,8 @@ describe('ChatMemoryManager', () => {
     const gpt5Manager = new ChatMemoryManager(
       {
         query: mockQuery,
-        share: mockShare,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory: trackFn({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },
@@ -760,116 +750,12 @@ describe('ChatMemoryManager', () => {
     expect(query).not.toContain('<http://dkg.io/ontology/MemoryImport>');
   });
 
-  it('publishSession uses derived session root entities when none are provided', async () => {
-    const publishFromSharedMemory = trackFn({
-      status: 'confirmed',
-      publicQuads: [{}, {}],
-      kaId: 10n,
-      ual: 'did:dkg:mock:123',
-    });
-    const managerWithPublish = new ChatMemoryManager(
-      {
-        query: mockQuery,
-        share: mockShare,
-        createAssertion: mockCreateAssertion,
-        writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory,
-        createContextGraph: mockCreateContextGraph,
-        listContextGraphs: mockListContextGraphs,
-      },
-      { apiKey: 'test' },
-      { agentAddress: 'did:dkg:agent:test' },
-    );
-
-    mockQuery.returns.push(
-      { bindings: [] },
-      { bindings: [{ s: 'urn:dkg:chat:session:s-2' }, { s: 'urn:dkg:chat:msg:m-2' }] },
-      { bindings: [{ c: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
-      { bindings: [{ c: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
-      { bindings: [{ s: 'urn:dkg:chat:session:s-2' }] },
-    );
-
-    const result = await managerWithPublish.publishSession('s-2');
-    expect(publishFromSharedMemory.calls[0]).toEqual([
-      'agent-context',
-      { rootEntities: ['urn:dkg:chat:session:s-2', 'urn:dkg:chat:msg:m-2'] },
-      { clearSharedMemoryAfter: false },
-    ]);
-    expect(result.sessionId).toBe('s-2');
-    expect(result.rootEntityCount).toBe(2);
-    expect(result.publication.scope).toBe('published');
+  it('publishSession is retired until chat turns are promoted through named KA lifecycle routes', async () => {
+    await expect(manager.publishSession('s-2')).rejects.toThrow('Session publication is not implemented in v1');
   });
 
-  it('publishSession restricts requested roots to entities belonging to the target session', async () => {
-    const publishFromSharedMemory = trackFn({
-      status: 'confirmed',
-      publicQuads: [{}, {}],
-      kaId: 11n,
-      ual: 'did:dkg:mock:124',
-    });
-    const managerWithPublish = new ChatMemoryManager(
-      {
-        query: mockQuery,
-        share: mockShare,
-        createAssertion: mockCreateAssertion,
-        writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory,
-        createContextGraph: mockCreateContextGraph,
-        listContextGraphs: mockListContextGraphs,
-      },
-      { apiKey: 'test' },
-      { agentAddress: 'did:dkg:agent:test' },
-    );
-
-    mockQuery.returns.push(
-      { bindings: [] },
-      { bindings: [{ s: 'urn:dkg:chat:session:s-3' }, { s: 'urn:dkg:chat:msg:m-3' }] },
-      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
-      { bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
-      { bindings: [{ s: 'urn:dkg:chat:session:s-3' }, { s: 'urn:dkg:chat:msg:m-3' }] },
-    );
-
-    await managerWithPublish.publishSession('s-3', {
-      rootEntities: ['urn:dkg:chat:msg:m-3', 'urn:dkg:chat:msg:not-in-session'],
-    });
-
-    expect(publishFromSharedMemory.calls[0]).toEqual([
-      'agent-context',
-      { rootEntities: ['urn:dkg:chat:msg:m-3'] },
-      { clearSharedMemoryAfter: false },
-    ]);
-  });
-
-  it('publishSession rejects requested roots that are not in session scope', async () => {
-    const publishFromSharedMemory = trackFn({
-      status: 'confirmed',
-      publicQuads: [{}, {}],
-    });
-    const managerWithPublish = new ChatMemoryManager(
-      {
-        query: mockQuery,
-        share: mockShare,
-        createAssertion: mockCreateAssertion,
-        writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory,
-        createContextGraph: mockCreateContextGraph,
-        listContextGraphs: mockListContextGraphs,
-      },
-      { apiKey: 'test' },
-      { agentAddress: 'did:dkg:agent:test' },
-    );
-
-    mockQuery.returns.push(
-      { bindings: [] },
-      { bindings: [{ s: 'urn:dkg:chat:session:s-4' }] },
-    );
-
-    await expect(
-      managerWithPublish.publishSession('s-4', {
-        rootEntities: ['urn:dkg:chat:msg:not-in-session'],
-      }),
-    ).rejects.toThrow('Selected root entities are not part of session s-4');
-    expect(publishFromSharedMemory.calls).toHaveLength(0);
+  it('publishFromSwm is retired as a raw SWM publish helper', async () => {
+    await expect(manager.publishFromSwm('all')).rejects.toThrow('publishFromSwm is retired in v1');
   });
 
   it('getSessionGraphDelta returns turn-scoped triples when watermark matches', async () => {
@@ -1043,10 +929,8 @@ describe('ChatMemoryManager WM write discipline', () => {
     return new ChatMemoryManager(
       {
         query: mockQuery,
-        share: mockShare,
         createAssertion: mockCreateAssertion,
         writeAssertion: mockWriteAssertion,
-        publishFromSharedMemory: trackFn({}),
         createContextGraph: mockCreateContextGraph,
         listContextGraphs: mockListContextGraphs,
       },

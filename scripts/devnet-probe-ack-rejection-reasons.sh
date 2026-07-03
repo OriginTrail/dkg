@@ -105,7 +105,7 @@ done
 
 # --- 3. SWM-based publish trigger: confirm new ACK traffic + zero structured rejections ---
 # rc.12 deprecated the synchronous /api/publish endpoint (404 in
-# this branch). The async publish path is /api/publisher/enqueue
+# this branch). The async publish path is /api/knowledge-assets/<name>/vm/publish-async
 # which requires a pre-staged shareOperationId + authority proof.
 # Reproducing that surface for a probe is brittle; instead we let the
 # devnet-full-sweep / rfc38-all suites do the publishing and use the

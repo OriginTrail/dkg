@@ -10,6 +10,37 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 - **`dkg init` runs from a monorepo / checkout clone again** (`packages/cli/src/cli.ts`). PR #753 (RFC-41 Bundle B1c) hard-refused `dkg init` from a monorepo checkout; that was over-strict — the CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`) already routes a clone to `~/.dkg-dev` (kept separate from an npm install's `~/.dkg`), the same home the local dev daemon resolves, so there was no real risk of divergence. The hard refusal (and its non-functional `DKG_HOME` escape) is replaced by a one-line notice showing which home is being written. Restores the pre-#753 dev workflow: a clone runs `dkg init` exactly like an npm install, differing only in the home directory.
 - **OpenClaw / Hermes / MCP setups now seed the `oxigraph-server` default on a fresh node** (`packages/core/src/ensure-dkg-node-config.ts`). The rc.15 `oxigraph-server` default previously reached only nodes set up via the `dkg init` store-wizard; the shared `ensureDkgNodeConfig` helper (used by `dkg openclaw/hermes/mcp setup`) left `store` unset, so those nodes fell back to `oxigraph-worker`. It now adopts `oxigraph-server` on a **fresh** install (no existing config) with no explicit store — matching the wizard default — while never rewriting an existing node's backend (which would force a store reset) and preserving any explicit `store` block.
 
+## [10.0.2] - 2026-07-01
+
+**Google Open Knowledge Format (OKF) support.** The DKG can now turn a portable **Google Open Knowledge Format** bundle — Markdown + YAML frontmatter + untyped cross-links — into owned, cryptographically-provenanced RDF Knowledge Assets, and serialise a Context Graph cleanly back out to a conformant bundle. Alongside it: PCA agent- and operational-wallet management, a Context-Graph registration deposit waiver, sub-graph Random Sampling fixes, and backend-independent leaf canonicalization so a node can run on any SPARQL 1.1 store.
+
+### Added — Google OKF → DKG integration (#1388)
+
+- **`dkg okf import ./bundle`** maps a Google Open Knowledge Format bundle to owned, verifiable Knowledge Assets — **deterministic and offline** (no LLM, no network): the same bundle always yields identical triples and IRIs. OKF standardises *how* knowledge is written and exchanged but ships no verification, provenance or ownership layer; `@origintrail-official/dkg-okf` is the bridge that adds them, reconstructing the bundle's cross-concept link graph as RDF. The same portable Markdown, now provenanced, owned and shareable across agents.
+- **`--share`** finalizes the import into Shared Working Memory (free, team-visible); **`dkg okf verify`** gates the shared Context Graph against the source bundle per-predicate; **`dkg okf export <graph> ./out`** is a clean inverse that serialises a Context Graph back into a conformant OKF bundle. Ships as a new published package, `@origintrail-official/dkg-okf`.
+
+### Added — PCA agent & operational-wallet management (#1387, #1384, #1370)
+
+- **Bulk `registerAgents(uint256, address[])`** (#1387) — add many PCA agents in a single transaction instead of one-by-one.
+- **Agents are preserved when a PCA is transferred** (#1384) — a PublishingConviction account keeps its registered agents across ownership transfer.
+- **Node UI Admin page** (#1370) — manage operational wallets, PCAs and agent encryption keys from the Node UI via wallet-connect, gated to node-admin callers.
+
+### Added — Context-Graph registration deposit waiver (#1366)
+
+- An anti-spam Context-Graph registration deposit with a **waiver** for accounts holding a sufficient **active PublishingConviction commitment** (quota + minimum-commitment floor), pinned in the mainnet parameters.
+
+### Fixed — backend-independent V10 leaf canonicalization (#1386, #1399)
+
+- V10 merkle leaves are now computed from a **backend-independent value canon**, so nodes running **any SPARQL 1.1 store** (Oxigraph, Blazegraph, …) produce identical leaves for the same triple — Random Sampling no longer depends on which store backend a node runs. Validated against a live cross-backend oracle and a mixed-backend devnet. Spec: OT-RFC-57.
+
+### Fixed — sub-graph Random Sampling extraction (#1385)
+
+- The Random Sampling extractor now resolves a sub-graph Knowledge Asset's content across its data homes, so a KA published into a named sub-graph is extractable and provable (no `KCDataMissingError` stall).
+
+### Changed — Node UI (#1391)
+
+- Hide the Admin page entry point (icon + `/admin` route) by default.
+
 ## [10.0.0-rc.15] - 2026-06-03
 
 **Off-chain runtime release.** No Solidity changes since rc.13 — the Base Sepolia (chainId 84532) deployment is **unchanged**, the `chainResetMarker` stays `v10-rc12-ka-rename-2026-06-01`, and **no contract redeploy is required**. The sync protocol ID is **unchanged** (`/dkg/10.0.2/sync`), so rc.15 nodes interoperate with rc.14 peers — nodes upgrade in place with **no local-state wipe**. This release makes `oxigraph-server` the default store backend for **new** installs, fixes the Node UI Working-Memory scoped-query violation (and the SWM/VM bleed + reserved-meta false-positives it surfaced), reclaims the `node-ui.db` WAL on a running node, splits the `DKGAgent` god class into subsystem mixin holders, and lands typed publisher errors plus CI/bench hardening.

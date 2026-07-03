@@ -40,6 +40,7 @@ import {
   DEFAULT_WALLET_LOCK_GRAPH_URI,
   requestSubject,
   jobSubject,
+  literal,
   serializeWalletLock,
   walletLockSubject,
 } from '../src/async-lift-control-plane.js';
@@ -95,6 +96,37 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     authority: { type: 'owner', proofRef: 'proof:owner:1' },
   });
 
+  const kaVmPublishRequest = (overrides: Partial<Parameters<TripleStoreAsyncLiftPublisher['enqueueKnowledgeAssetVmPublish']>[0]> = {}) => {
+    const authorAddress = '0x1111111111111111111111111111111111111111';
+    const kaNumber = 7n;
+    const base = {
+      contextGraphId: 'music-social',
+      name: 'albums',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:album:one', 'urn:album:two'],
+      seal: {
+        merkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+        authorAddress: authorAddress as `0x${string}`,
+        signature: {
+          r: (`0x${'34'.repeat(32)}`) as `0x${string}`,
+          vs: (`0x${'56'.repeat(32)}`) as `0x${string}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: ((BigInt(authorAddress) << 96n) | kaNumber).toString() as `${bigint}`,
+      },
+      sealChainId: '31337' as `${bigint}`,
+      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: (`0x${'12'.repeat(32)}`) as `0x${string}`,
+      intentKey: 'sha256:' + 'ab'.repeat(32),
+      wmCurrentAssertion: '12'.repeat(32),
+      swmCurrentAssertion: '12'.repeat(32),
+      kaNumber: kaNumber.toString(),
+      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+    };
+    return { ...base, ...overrides };
+  };
+
   beforeEach(() => {
     store = new OxigraphStore();
     now = 1_000;
@@ -114,6 +146,25 @@ describe('TripleStoreAsyncLiftPublisher', () => {
         options.recoveryResult === undefined ? undefined : async () => options.recoveryResult ?? null,
       ...options.config,
     });
+  }
+
+  function confirmedPublishResult() {
+    return {
+      kaId: 11n,
+      ual: 'did:dkg:mock:31337/0xdef/11',
+      merkleRoot: new Uint8Array([0xde, 0xf0]),
+      kaManifest: [],
+      status: 'confirmed' as const,
+      onChainResult: {
+        batchId: 11n,
+        startKAId: 11n,
+        endKAId: 11n,
+        txHash: '0xdef',
+        blockNumber: 77,
+        blockTimestamp: 1700000077,
+        publisherAddress: '0x2222222222222222222222222222222222222222',
+      },
+    };
   }
 
   async function readLockExpiresAt(walletId: string): Promise<number> {
@@ -146,13 +197,401 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(jobId).toBe('job-1');
     expect(job?.status).toBe('accepted');
     expect(job?.jobSlug).toBe('music-social/person-profile/create/op-1/rihana');
-    expect(job?.request.contextGraphId).toBe('music-social');
-    expect(job?.request.swmId).toBe('swm-1');
-    expect(job?.request.shareOperationId).toBe('op-1');
+    expect(job?.request).toMatchObject({
+      jobType: 'lift',
+      lift: {
+        contextGraphId: 'music-social',
+        swmId: 'swm-1',
+        shareOperationId: 'op-1',
+      },
+    });
     expect(job?.retries.maxRetries).toBe(10);
   });
 
-  it('exposes the renamed shared-memory publisher contract', async () => {
+  it('normalizes and processes legacy persisted raw lift job payloads', async () => {
+    const executorCalls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        publishExecutor: async (input) => {
+          executorCalls.push(input);
+          return confirmedPublishResult();
+        },
+      },
+    });
+    const dkgPublisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await dkgPublisher.share('music-social', [
+      { subject: 'urn:local:/rihana', predicate: 'http://schema.org/name', object: '"Rihana"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+    const legacyRequest = {
+      ...request(),
+      shareOperationId: share.shareOperationId,
+    };
+    const jobId = await publisher.lift(legacyRequest);
+    const stored = await publisher.getStatus(jobId);
+    expect(stored?.request.jobType).toBe('lift');
+    if (!stored) throw new Error('expected stored job');
+
+    await store.deleteByPattern({
+      subject: jobSubject(jobId),
+      predicate: CONTROL_PAYLOAD,
+      graph: DEFAULT_CONTROL_GRAPH_URI,
+    });
+    await store.insert([{
+      subject: jobSubject(jobId),
+      predicate: CONTROL_PAYLOAD,
+      object: literal(JSON.stringify({ ...stored, request: legacyRequest })),
+      graph: DEFAULT_CONTROL_GRAPH_URI,
+    }]);
+
+    const normalized = await publisher.getStatus(jobId);
+    expect(normalized?.request).toMatchObject({
+      jobType: 'lift',
+      lift: {
+        contextGraphId: 'music-social',
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:local:/rihana'],
+      },
+    });
+
+    const processed = await publisher.processNext('wallet-1');
+    expect(processed?.status).toBe('finalized');
+    expect(executorCalls).toHaveLength(1);
+  });
+
+  it('enqueues named knowledge asset VM publish jobs', async () => {
+    const publisher = createPublisher();
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      subGraphName: 'research',
+      publishEpochs: 3,
+      clearSharedMemoryAfter: false,
+      publisherNodeIdentityIdOverride: '42',
+    }));
+    const job = await publisher.getStatus(jobId);
+
+    expect(jobId).toBe('job-1');
+    expect(job?.status).toBe('accepted');
+    expect(job?.jobSlug).toBe('music-social/knowledge-assets/albums/vm-publish/share-op-1/one-two');
+    expect(job?.request.jobType).toBe('knowledge-asset-vm-publish');
+    expect(job?.request.knowledgeAssetVmPublish).toEqual({
+      contextGraphId: 'music-social',
+      name: 'albums',
+      subGraphName: 'research',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:album:one', 'urn:album:two'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: ((BigInt('0x1111111111111111111111111111111111111111') << 96n) | 7n).toString(),
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: 'sha256:' + 'ab'.repeat(32),
+      wmCurrentAssertion: '12'.repeat(32),
+      swmCurrentAssertion: '12'.repeat(32),
+      kaNumber: '7',
+      reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+      publishEpochs: 3,
+      clearSharedMemoryAfter: false,
+      publisherNodeIdentityIdOverride: '42',
+    });
+    expect((job?.request as any).scope).toBeUndefined();
+    expect((job?.request as any).namespace).toBeUndefined();
+    expect((job?.request as any).authority).toBeUndefined();
+  });
+
+  it('rejects duplicate active knowledge asset VM publish jobs', async () => {
+    const publisher = createPublisher();
+
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      subGraphName: 'research',
+    }));
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        subGraphName: 'research',
+      })),
+    ).resolves.toBe('job-1');
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        subGraphName: 'research',
+        shareOperationId: 'share-op-2',
+        intentKey: 'sha256:' + 'cd'.repeat(32),
+      })),
+    ).rejects.toMatchObject({
+      name: 'AsyncLiftJobConflictError',
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
+      existingJobId: 'job-1',
+    });
+  });
+
+  it('scopes active knowledge asset VM publish duplicate detection by agent address', async () => {
+    const publisher = createPublisher();
+    const agentA = `0x${'aa'.repeat(20)}`;
+    const agentAUpper = `0x${'AA'.repeat(20)}`;
+    const agentB = `0x${'bb'.repeat(20)}`;
+
+    const jobA = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      agentAddress: agentA,
+      subGraphName: 'research',
+    }));
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        agentAddress: agentAUpper,
+        subGraphName: 'research',
+      })),
+    ).resolves.toBe(jobA);
+
+    const jobB = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      agentAddress: agentB,
+      subGraphName: 'research',
+      shareOperationId: 'share-op-2',
+      intentKey: 'sha256:' + 'cd'.repeat(32),
+    }));
+
+    expect(jobB).toBe('job-2');
+    expect((await publisher.getStatus(jobA))?.request.knowledgeAssetVmPublish.agentAddress).toBe(agentA);
+    expect((await publisher.getStatus(jobB))?.request.knowledgeAssetVmPublish.agentAddress).toBe(agentB);
+
+    await expect(
+      publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+        agentAddress: agentA,
+        subGraphName: 'research',
+        shareOperationId: 'share-op-3',
+        intentKey: 'sha256:' + 'ef'.repeat(32),
+      })),
+    ).rejects.toMatchObject({
+      name: 'AsyncLiftJobConflictError',
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
+      existingJobId: jobA,
+    });
+  });
+
+  it('reaccepts a compatible retryable failed knowledge asset VM publish when enqueued again', async () => {
+    const publisher = createPublisher();
+    const intent = kaVmPublishRequest({ subGraphName: 'research' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(intent);
+    const claimed = await publisher.claimNext('wallet-1');
+    expect(claimed?.jobId).toBe(jobId);
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {
+          'urn:album:one': 'urn:album:one',
+          'urn:album:two': 'urn:album:two',
+        },
+        swmQuadCount: 2,
+        authorityProofRef: 'urn:dkg:publish-async:share-op-1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: {
+        txHash: `0x${'ab'.repeat(32)}`,
+        walletId: 'wallet-1',
+        merkleRoot: intent.sealMerkleRoot,
+      },
+    });
+    const failed = await publisher.recordPublishFailure(jobId, {
+      error: new Error('RPC endpoint temporarily unavailable'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:rpc-unavailable',
+    });
+    expect(failed.status).toBe('failed');
+    if (failed.status !== 'failed') throw new Error('expected failed job');
+    expect(failed.failure.retryable).toBe(true);
+
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(intent)).resolves.toBe(jobId);
+    const reaccepted = await publisher.getStatus(jobId);
+    expect(reaccepted?.status).toBe('accepted');
+    expect(reaccepted?.retries.retryCount).toBe(1);
+    expect(reaccepted?.retries.lastRetryReason).toBe('rpc_unavailable');
+    expect(reaccepted?.timestamps.lastRetriedAt).toBeDefined();
+
+    const claimedAgain = await publisher.claimNext('wallet-2');
+    expect(claimedAgain?.jobId).toBe(jobId);
+    expect(claimedAgain?.status).toBe('claimed');
+  });
+
+  it('processes knowledge asset VM publish jobs through the lifecycle executor', async () => {
+    const calls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishExecutor: async (input) => {
+          calls.push(input);
+          return confirmedPublishResult();
+        },
+      },
+    });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
+      clearSharedMemoryAfter: true,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.finalization?.ual).toBe('did:dkg:mock:31337/0xdef/11');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+        walletId: 'wallet-1',
+        request: {
+          contextGraphId: 'music-social',
+          name: 'albums',
+          shareOperationId: share.shareOperationId,
+          roots: ['urn:album:one', 'urn:album:two'],
+          seal: {
+            merkleRoot: `0x${'12'.repeat(32)}`,
+            authorAddress: '0x1111111111111111111111111111111111111111',
+            signature: {
+              r: `0x${'34'.repeat(32)}`,
+              vs: `0x${'56'.repeat(32)}`,
+            },
+            schemeVersion: 1,
+          },
+          sealChainId: '31337',
+          sealKav10Address: '0x2222222222222222222222222222222222222222',
+          sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+          sealMerkleRoot: `0x${'12'.repeat(32)}`,
+          intentKey: 'sha256:' + 'ab'.repeat(32),
+          wmCurrentAssertion: '12'.repeat(32),
+          swmCurrentAssertion: '12'.repeat(32),
+          kaNumber: '7',
+          reservedUal: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+          clearSharedMemoryAfter: true,
+        },
+        validation: {
+          canonicalRoots: ['urn:album:one', 'urn:album:two'],
+          swmQuadCount: 2,
+          transitionType: 'CREATE',
+        },
+        resolved: {
+          publisherPeerId: 'peer-1',
+        },
+        publishOptions: {
+          publisherPeerId: 'peer-1',
+          quads: [
+            { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+            { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+          ],
+        },
+      });
+  });
+
+  it('finalizes knowledge asset VM publish jobs as no-op when execution preflight says already published', async () => {
+    let executorCalls = 0;
+    const preflightCalls: unknown[] = [];
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishPreflight: async (input) => {
+          preflightCalls.push(input);
+          return { action: 'noop', reason: 'already-published' };
+        },
+        knowledgeAssetVmPublishExecutor: async () => {
+          executorCalls++;
+          throw new Error('executor should not run for preflight no-op');
+        },
+      },
+    });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+    const reloaded = await publisher.getStatus(jobId);
+
+    expect(preflightCalls).toHaveLength(1);
+    expect(executorCalls).toBe(0);
+    expect(processed?.status).toBe('finalized');
+    expect(processed?.finalization?.mode).toBe('noop');
+    expect(reloaded?.status).toBe('finalized');
+    expect(reloaded?.finalization?.mode).toBe('noop');
+  });
+
+  it('fails stale knowledge asset VM publish jobs before executor invocation', async () => {
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishPreflight: async () => {
+          throw Object.assign(
+            new Error('queued VM publish intent is stale'),
+            { code: 'PUBLISH_INTENT_STALE' },
+          );
+        },
+        knowledgeAssetVmPublishExecutor: async () => {
+          executorCalls++;
+          throw new Error('executor should not run for stale preflight');
+        },
+      },
+    });
+    const publisherContract: Publisher = makeTestPublisher({
+      store,
+      chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+    const share = await publisherContract.share('music-social', [
+      { subject: 'urn:album:one', predicate: 'http://schema.org/name', object: '"One"', graph: '' },
+      { subject: 'urn:album:two', predicate: 'http://schema.org/name', object: '"Two"', graph: '' },
+    ], { publisherPeerId: 'peer-1' });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId: share.shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('claimed');
+    expect(processed?.failure?.code).toBe('publish_intent_stale');
+  });
+
+  it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,
       chain: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
@@ -556,6 +995,52 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(finalized.finalization?.batchId).toBe('7');
   });
 
+  it('rejects publish results whose tx differs from persisted broadcast tx', async () => {
+    const publisher = createPublisher();
+    const jobId = await publisher.lift(request());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['dkg:music-social:aloha:person/rihana'],
+        canonicalRootMap: { 'urn:local:/rihana': 'dkg:music-social:aloha:person/rihana' },
+        swmQuadCount: 3,
+        authorityProofRef: 'proof:owner:1',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: {
+        txHash: '0xaaa',
+        walletId: 'wallet-1',
+      },
+    });
+
+    await expect(
+      publisher.recordPublishResult(jobId, {
+        kaId: 1n,
+        ual: 'did:dkg:mock:31337/0xbbb/1',
+        merkleRoot: new Uint8Array([0xab, 0xcd]),
+        kaManifest: [],
+        status: 'confirmed',
+        onChainResult: {
+          batchId: 7n,
+          startKAId: 1n,
+          endKAId: 1n,
+          txHash: '0xbbb',
+          blockNumber: 10,
+          blockTimestamp: 1700000000,
+          publisherAddress: '0x1111111111111111111111111111111111111111',
+        },
+      }),
+    ).rejects.toThrow(/does not match persisted broadcast tx 0xaaa/);
+
+    const stored = await publisher.getStatus(jobId);
+    expect(stored?.status).toBe('broadcast');
+    expect(stored?.broadcast?.txHash).toBe('0xaaa');
+    expect(stored?.inclusion).toBeUndefined();
+    expect(stored?.finalization).toBeUndefined();
+  });
+
   it('records canonical publish failures back into LiftJob failed state', async () => {
     const publisher = createPublisher();
     const jobId = await publisher.lift(request());
@@ -777,7 +1262,8 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     });
 
     const job = await publisher.getStatus(jobId);
-    expect(job?.request.shareOperationId).toBe(write.shareOperationId);
+    expect(job?.request.jobType).toBe('lift');
+    expect(job?.request.jobType === 'lift' ? job.request.lift.shareOperationId : undefined).toBe(write.shareOperationId);
     expect(job?.jobSlug).toContain(write.shareOperationId);
   });
 
@@ -1240,6 +1726,79 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.recovery?.action).toBe('finalized_from_chain');
     expect(job?.recovery?.recoveredFromStatus).toBe('included');
     expect(job?.timestamps?.failedAt).toBeUndefined();
+  });
+
+  it('keeps broadcast knowledge asset VM publish jobs pending instead of blind retrying', async () => {
+    const publisher = createPublisher();
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
+    });
+
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+    const lock = await store.query(`SELECT ?p ?o WHERE {
+      GRAPH <${DEFAULT_WALLET_LOCK_GRAPH_URI}> {
+        <${walletLockSubject('wallet-1')}> ?p ?o .
+      }
+    }`);
+
+    expect(recovered).toBe(0);
+    expect(job?.status).toBe('broadcast');
+    expect(job?.broadcast?.txHash).toBe('0xkavm');
+    expect(job?.recovery).toBeUndefined();
+    expect(lock.type).toBe('bindings');
+    if (lock.type !== 'bindings') return;
+    expect(lock.bindings.length).toBeGreaterThan(0);
+  });
+
+  it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
+    const publisher = createPublisher({
+      config: {
+        recoveryLookupTimeoutMs: 50,
+      },
+    });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', {
+      validation: {
+        canonicalRoots: ['urn:album:one', 'urn:album:two'],
+        canonicalRootMap: {},
+        swmQuadCount: 2,
+        authorityProofRef: 'knowledge-asset-lifecycle',
+        transitionType: 'CREATE',
+      },
+    });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: '0xkavm', walletId: 'wallet-1' },
+    });
+    await publisher.update(jobId, 'included', {
+      inclusion: { txHash: '0xkavm', blockNumber: 99 },
+    });
+
+    now += 100;
+    const recovered = await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+
+    expect(recovered).toBe(1);
+    expect(job?.status).toBe('failed');
+    expect(job?.failure?.code).toBe('recovery_state_inconsistent');
+    expect(job?.failure?.resolution).toBe('fail_job');
+
+    expect(await publisher.clear('failed')).toBe(1);
+    expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
   it('supports pause, resume, cancel, retry, and clear', async () => {

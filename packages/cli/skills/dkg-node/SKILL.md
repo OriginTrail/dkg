@@ -120,6 +120,31 @@ curl -X POST $BASE_URL/api/knowledge-assets/notes/vm/publish -H "Authorization: 
 curl -X POST $BASE_URL/api/query -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 10","contextGraphId":"my-project","view":"working-memory","agentAddress":"YOUR_PEER_ID"}'
 ```
 
+**CLI equivalents for shell-driving agents:**
+
+```bash
+dkg context-graph create my-project
+
+# RDF payload source: <name> is the Knowledge Asset name; --input-file is the local source.
+dkg ka create notes -c my-project --input-file ./notes.ttl --share
+
+# Document extraction source: import into WM, then finalize/share explicitly.
+dkg ka import-file notes-doc -c my-project --input-file ./notes.md
+dkg ka finalize notes-doc -c my-project
+dkg ka share notes-doc -c my-project
+
+# VM publish is always explicit and operates on a named KA already shared to SWM.
+dkg ka publish notes-doc -c my-project
+dkg ka publish-async notes-doc -c my-project
+
+# Recovery/edit loop.
+dkg ka pull-from notes-doc -c my-project --layer swm --on-conflict replace
+dkg ka query notes-doc -c my-project
+dkg ka history notes-doc -c my-project
+```
+
+`dkg ka create ... --share` is the one-shot create/write/finalize/share convenience and never VM-publishes. `-f` is a short alias for `--input-file`; prefer the long flag in docs and scripts so the local payload source is not confused with the positional KA `<name>`.
+
 ## 4. Authentication
 
 **Token usage:** Include `Authorization: Bearer $TOKEN` on all requests.
@@ -132,7 +157,7 @@ requests without an explicit caller fall back to the node's default agent.
 
 ### Token discovery
 
-**Co-located agents (running on the same machine as the daemon).** The daemon writes its admin token to `~/.dkg/auth.token` on first start. If your adapter provides a DKG client (e.g. the OpenClaw adapter's `DkgDaemonClient`), **prefer the adapter's high-level tools** (`createContextGraph`, `createAssertion`, `promoteAssertion`, etc.) — they load this file automatically and you never need to handle `$TOKEN` yourself. Only fall back to raw HTTP if no adapter tool covers what you need, in which case:
+**Co-located agents (running on the same machine as the daemon).** The daemon writes its admin token to `~/.dkg/auth.token` on first start. If your adapter provides a DKG client (for example MCP, Hermes, or OpenClaw), **prefer the adapter's high-level lifecycle tools** (`dkg_context_graph_create`, `dkg_knowledge_asset_create`, `dkg_knowledge_asset_share`, `dkg_knowledge_asset_publish`, etc.) — they load this file automatically and you never need to handle `$TOKEN` yourself. Only fall back to raw HTTP if no adapter tool covers what you need, in which case:
 
 ```bash
 TOKEN=$(cat ~/.dkg/auth.token)
@@ -273,21 +298,18 @@ SWM is for knowledge you've shared from WM and want peers to see. Agents put dat
 > Working Memory is per-agent regardless of CG visibility.
 
 - `POST /api/knowledge-assets/{name}/swm/share` — the canonical way an agent puts a named assertion into SWM (after `create` → `write`); a full share seals by default and is publish-ready. **This is the agent path** — see §5 WM and the lifecycle in §3.
-- `POST /api/knowledge-assets/publish` — direct explicit-quads one-shot mint, for **CLI / programmatic** callers that already hold the exact quads to publish (the ACK path carries the inline payload, no SWM stage). Body: `{ contextGraphId, quads, privateQuads?, accessPolicy?, allowedPeers?, subGraphName? }`. **Not the agent path** — agents use the named-KA lifecycle (`…/swm/share` → `…/vm/publish`).
+- `POST /api/knowledge-assets/{name}/swm/share-async` — enqueue the same WM→SWM share for the in-daemon worker. Use this for bulk importers that should not block on the synchronous share round.
 
-> **Note — daemon loose-write primitives.** `POST /api/shared-memory/write` and
-> `POST /api/shared-memory/conditional-write` write un-named triples directly to SWM. They are retained for
-> **non-agent producers** (bulk source-worker ingest, programmatic clients); they are **not an agent tool or
-> path**, and content written this way is un-named loose SWM that is **not publishable through the canonical
-> lifecycle** (no assertion name for `/vm/publish` to key on). Consolidating these onto the named-KA model is
-> tracked in OriginTrail/dkg#1260. Agents: always author a named knowledge asset.
+> **No loose SWM writes.** Agent-facing producers must author a named knowledge
+> asset and move it through WM→SWM→VM. The legacy loose-write SWM routes were
+> retired so shared/published data always has a lifecycle name, seal, and audit
+> record.
 
 ### Verifiable Memory (VM) — Permanent, on-chain
 
 > **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
-> shared to SWM, then published from there. One-shot requests that already carry
-> explicit quads use `POST /api/knowledge-assets/publish` so the publish ACK path
-> carries the payload directly.
+> shared to SWM, then published from there. The public daemon API no longer has
+> an unnamed direct explicit-quads publish route.
 
 **Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
 Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
@@ -299,11 +321,6 @@ Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publish
 `409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
 `vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the
 **publish response body** below.
-
-> **Direct one-shot (CLI / programmatic only — not the agent path):** `POST /api/knowledge-assets/publish`
-> mints directly from inline quads (no WM draft, no named assertion, no SWM stage). It is the explicit
-> "publish quads you already hold" escape hatch used by the CLI (`dkg index`, `dkg knowledge publish`) and
-> programmatic clients. Agents do **not** use it — author a named KA and publish via `/vm/publish`.
 
 **Publish response body (`vm/publish`).** A successful publish returns:
 
@@ -759,12 +776,25 @@ dkg agent publish-profile   # retry after a partial-success rotate/revoke
 
 Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead.
 
+CLI equivalents:
+
+```bash
+dkg ka publish-async <name> -c <context-graph-id>
+dkg publisher publish-async <context-graph-id> <name>   # operational alias
+dkg publisher publish-async <context-graph-id> <name> --publisher-node-identity-id 0
+dkg publisher jobs
+dkg publisher job <job-id>
+dkg publisher stats
+```
+
+Async publisher wallets need native gas plus PCA agent registration or TRAC for direct spend. They do not need on-chain identities/profiles to claim VM publish jobs. Identity `0` is valid no-attribution mode; a non-zero identity is optional publisher-node attribution only. Separate publisher wallets are not automatically attached to the node's Core identity; use `POST /api/operational-wallets` only when attribution to that node identity is desired. See `docs/use-dkg/async-publisher-wallets.md`.
+
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/publisher/enqueue` | Enqueue a publish job. Body: `{ contextGraphId, ... }`. Returns `{ jobId }`. |
+| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`; `options.publisherNodeIdentityIdOverride: "0"` forces no-attribution. Returns `202 { jobId, status: "accepted" }`. |
 | `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
 | `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
-| `GET`  | `/api/publisher/job-payload?id=...` | Fetch a job's payload. |
+| `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs. Named lifecycle publish jobs return no raw payload. |
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
@@ -778,11 +808,21 @@ The worker runs in-daemon and is **on by default**. Disable per node with `confi
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `202 { jobId, state: "queued", enqueuedAt }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Read one job (`state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`). |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (subdivided an over-large entity set, restarted an upstream, etc.). |
+
+CLI equivalents:
+
+```bash
+dkg ka share-async <name> -c <context-graph-id>
+dkg ka share-jobs --context-graph-id <context-graph-id> --state queued,failed_retrying --limit 20
+dkg ka share-job <job-id>
+dkg ka cancel-share-job <job-id>
+dkg ka recover-share-job <job-id>
+```
 
 Failure classifications you'll see in `attempt.lastError.classification`:
 

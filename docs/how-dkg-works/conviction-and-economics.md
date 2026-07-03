@@ -27,7 +27,7 @@ A Publishing Conviction Account lets a publisher commit TRAC for a fixed publish
 Current operator surface:
 
 ```bash
-dkg pca create --tokens 100000
+dkg pca create --tokens 100000 --primary-node <identityId>
 dkg pca register-agent <accountId> <agentAddress>
 dkg pca deregister-agent <accountId> <agentAddress>
 dkg pca funds <accountId> --tokens 50000
@@ -61,7 +61,7 @@ The current V10 contract tests pin the publishing discount ladder by committed T
 | 500,000        | 50%      |
 | 1,000,000+     | 75%      |
 
-Publishing can use the PCA path only when the publishing wallet is registered as an agent for the account and the publish window matches the account configuration. Otherwise the publisher path falls back to direct spend at the normal price.
+Publishing can use the PCA path only when the publishing wallet is registered as an agent for the account and the publish window matches the account configuration. The wallet still needs native gas. It does not need an on-chain node identity for PCA payment eligibility; node identity is optional publisher-node attribution. Otherwise the publisher path falls back to direct spend at the normal price.
 
 ## Curated Context Graphs and PCA
 

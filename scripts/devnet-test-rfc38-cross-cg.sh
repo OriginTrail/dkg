@@ -28,6 +28,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -111,7 +114,7 @@ sleep 2
 act "2. Curator writes private content to BOTH CGs"
 # ===========================================================================
 log "Writing to CG-A..."
-WRITE_A=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
+WRITE_A=$(devnet_create_shared_ka "$CURATOR_NODE" "$(cat <<EOF
 { "contextGraphId": "$CG_A",
   "quads": [
     { "subject": "urn:xcg:${STAMP}/A/secret", "predicate": "http://schema.org/value", "object": "\"shared-secret-A\"", "graph": "" }
@@ -122,7 +125,7 @@ log "write A: $WRITE_A"
 [ "$(parse_json "$WRITE_A" '.triplesWritten')" = "1" ] || fail "CG-A write failed: $WRITE_A"
 
 log "Writing to CG-B..."
-WRITE_B=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$(cat <<EOF
+WRITE_B=$(devnet_create_shared_ka "$CURATOR_NODE" "$(cat <<EOF
 { "contextGraphId": "$CG_B",
   "quads": [
     { "subject": "urn:xcg:${STAMP}/B/secret", "predicate": "http://schema.org/value", "object": "\"curator-only-secret-B\"", "graph": "" }

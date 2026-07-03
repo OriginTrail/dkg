@@ -442,6 +442,8 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   swmCurrentAssertion?: string;
   /** Merkle hex of the assertion confirmed on-chain (VM). */
   vmCurrentAssertion?: string;
+  /** Latest SWM share operation id stamped on the lifecycle subject. */
+  currentShareOperationId?: string;
   /** OT-RFC-43 §10.5.4 derived overall status. */
   status: KaStatus;
   /** The per-author KA NUMBER (low 96 bits) stamped at finalize, as a string. */
@@ -1914,7 +1916,7 @@ export class DKGAgent extends DKGAgentBase {
           ...(opts?.onConflict !== undefined ? { onConflict: opts.onConflict } : {}),
         });
       },
-      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean }> {
+      async promote(contextGraphId: string, name: string, opts?: { entities?: string[] | 'all'; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string; preSignedAuthorAttestation?: PreSignedAuthorAttestation; awaitCuratorAck?: boolean; curatorAckTimeoutMs?: number; skipSeal?: boolean }): Promise<{ promotedCount: number; sealed: boolean; publishReady: boolean; shareOperationId?: string }> {
         const promoteAgentAddress = opts?.agentAddress ?? agentAddress;
         // Seal-before-share: the on-chain publish path
         // (`publishFromFinalizedAssertion`) requires a FINALIZED assertion, and
@@ -2036,7 +2038,7 @@ export class DKGAgent extends DKGAgentBase {
         const trustedNonManifestCatalogTriples = isPrivateContextGraph
           ? generatedPrivateCatalogTripleKeys(contextGraphId)
           : undefined;
-        const { promotedCount, gossipMessage, promotedAllRoots } = await agent.publisher.assertionPromote(
+        const { promotedCount, gossipMessage, promotedAllRoots, shareOperationId } = await agent.publisher.assertionPromote(
           contextGraphId, name, promoteAgentAddress,
           {
             ...(opts?.entities !== undefined ? { entities: opts.entities } : {}),
@@ -2085,8 +2087,8 @@ export class DKGAgent extends DKGAgentBase {
         // different merkleRoot and fail the seal guard. The seal still EXISTS
         // (`sealed:true`), but the asset is NOT publish-ready. The single-author
         // happy path skips no roots ⇒ promotedAllRoots:true ⇒ publishReady:true.
-        const publishReady = promotingAllEntities && sealed && promotedAllRoots;
-        return { promotedCount, sealed, publishReady };
+        const publishReady = promotingAllEntities && sealed && promotedAllRoots && promotedCount > 0 && !!shareOperationId;
+        return { promotedCount, sealed, publishReady, ...(shareOperationId ? { shareOperationId } : {}) };
       },
       async discard(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<void> {
         const discardAgentAddress = opts?.agentAddress ?? agentAddress;
@@ -2242,7 +2244,7 @@ export class DKGAgent extends DKGAgentBase {
 
         // Query assertion entity (current state + layer + OT-RFC-43 A2 pointers).
         const entityResult = await agent.store.query(
-          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?kaNum ?reservedUal ?publishedUal WHERE {
+          `SELECT ?state ?memoryLayer ?assertionGraph ?wm ?swm ?vm ?currentShareOpId ?kaNum ?reservedUal ?publishedUal WHERE {
             GRAPH <${metaGraph}> {
               <${lifecycleUri}> <${DKG_NS}state> ?state .
               OPTIONAL { <${lifecycleUri}> <${DKG_NS}memoryLayer> ?memoryLayer }
@@ -2250,6 +2252,7 @@ export class DKGAgent extends DKGAgentBase {
               OPTIONAL { <${lifecycleUri}> <${WM_CURRENT_ASSERTION_PRED}> ?wm }
               OPTIONAL { <${lifecycleUri}> <${SWM_CURRENT_ASSERTION_PRED}> ?swm }
               OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+              OPTIONAL { <${lifecycleUri}> <${DKG_NS}shareOperationId> ?currentShareOpId }
               OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
               OPTIONAL { <${lifecycleUri}> <${RESERVED_UAL_PRED}> ?reservedUal }
               OPTIONAL { <${lifecycleUri}> <${DKG_NS}publishedUal> ?publishedUal }
@@ -2269,6 +2272,7 @@ export class DKGAgent extends DKGAgentBase {
         const vmCurrentAssertion = strip(row['vm']);
         const wmCurrentAssertion = strip(row['wm']) ?? vmCurrentAssertion;
         const swmCurrentAssertion = strip(row['swm']) ?? vmCurrentAssertion;
+        const currentShareOperationId = strip(row['currentShareOpId']);
         const kaNumberStr = strip(row['kaNum']);
         const reservedUal = strip(row['reservedUal']);
         const publishedUal = strip(row['publishedUal']);
@@ -2363,6 +2367,9 @@ export class DKGAgent extends DKGAgentBase {
             if (ev.type === 'promoted' && !ev.rootEntities && subjectRoots.length > 0) {
               ev.rootEntities = [...subjectRoots];
             }
+            if (ev.type === 'promoted' && !ev.shareOperationId && currentShareOperationId) {
+              ev.shareOperationId = currentShareOperationId;
+            }
           }
         }
 
@@ -2381,6 +2388,7 @@ export class DKGAgent extends DKGAgentBase {
           wmCurrentAssertion,
           swmCurrentAssertion,
           vmCurrentAssertion,
+          currentShareOperationId,
           status: deriveStatus(pointers),
           kaNumber: kaNumberStr,
           reservedUal,

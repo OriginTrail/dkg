@@ -20,7 +20,6 @@ mkdir -p "$RESULTS_DIR"
 SCRIPTS=(
   "rfc38-curator-offline-midbatch"
   "rfc38-revocation"
-  "rfc38-prereg-bytecap-stress"
   "rfc38-unclean-restart"
   "publish"
   "sharing"

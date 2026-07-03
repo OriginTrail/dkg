@@ -1,5 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { LiftJob, LiftJobHex, LiftRequest } from './lift-job.js';
+import type { LiftJob, LiftJobHex, LiftJobRequest } from './lift-job.js';
 
 export const DEFAULT_CONTROL_GRAPH_URI = 'urn:dkg:publisher:control-plane';
 export const DEFAULT_WALLET_LOCK_GRAPH_URI = 'urn:dkg:publisher:wallet-locks';
@@ -207,26 +207,43 @@ export function serializeJob(job: LiftJob, graphUri: string): Quad[] {
   return quads;
 }
 
-export function serializeRequest(request: LiftRequest, subject: string, graphUri: string): Quad[] {
+export function serializeRequest(request: LiftJobRequest, subject: string, graphUri: string): Quad[] {
+  if (request.jobType === 'knowledge-asset-vm-publish') {
+    const publish = request.knowledgeAssetVmPublish;
+    const quads: Quad[] = [
+      quad(subject, RDF_TYPE_PREDICATE, iri(CONTROL_REQUEST_TYPE), graphUri),
+      quad(subject, CONTROL_CONTEXT_GRAPH_ID, literal(publish.contextGraphId), graphUri),
+      quad(subject, CONTROL_SHARE_OPERATION_ID, literal(publish.shareOperationId), graphUri),
+    ];
+
+    for (const root of publish.roots) {
+      quads.push(quad(subject, CONTROL_ROOT, literal(root), graphUri));
+    }
+
+    pushOptional(quads, subject, CONTROL_SUB_GRAPH_NAME, publish.subGraphName, graphUri, literal);
+    return quads;
+  }
+
+  const lift = request.lift;
   const quads: Quad[] = [
     quad(subject, RDF_TYPE_PREDICATE, iri(CONTROL_REQUEST_TYPE), graphUri),
-    quad(subject, CONTROL_CONTEXT_GRAPH_ID, literal(request.contextGraphId), graphUri),
-    quad(subject, CONTROL_SCOPE, literal(request.scope), graphUri),
-    quad(subject, CONTROL_NAMESPACE, literal(request.namespace), graphUri),
-    quad(subject, CONTROL_TRANSITION_TYPE, literal(request.transitionType), graphUri),
-    quad(subject, CONTROL_SHARE_OPERATION_ID, literal(request.shareOperationId), graphUri),
-    quad(subject, CONTROL_AUTHORITY_TYPE, literal(request.authority.type), graphUri),
-    quad(subject, CONTROL_AUTHORITY_PROOF_REF, literal(request.authority.proofRef), graphUri),
+    quad(subject, CONTROL_CONTEXT_GRAPH_ID, literal(lift.contextGraphId), graphUri),
+    quad(subject, CONTROL_SCOPE, literal(lift.scope), graphUri),
+    quad(subject, CONTROL_NAMESPACE, literal(lift.namespace), graphUri),
+    quad(subject, CONTROL_TRANSITION_TYPE, literal(lift.transitionType), graphUri),
+    quad(subject, CONTROL_SHARE_OPERATION_ID, literal(lift.shareOperationId), graphUri),
+    quad(subject, CONTROL_AUTHORITY_TYPE, literal(lift.authority.type), graphUri),
+    quad(subject, CONTROL_AUTHORITY_PROOF_REF, literal(lift.authority.proofRef), graphUri),
   ];
 
-  quads.push(quad(subject, CONTROL_SWM_ID, literal(request.swmId), graphUri));
+  quads.push(quad(subject, CONTROL_SWM_ID, literal(lift.swmId), graphUri));
 
-  for (const root of request.roots) {
+  for (const root of lift.roots) {
     quads.push(quad(subject, CONTROL_ROOT, literal(root), graphUri));
   }
 
-  pushOptional(quads, subject, CONTROL_PRIOR_VERSION, request.priorVersion, graphUri, literal);
-  pushOptional(quads, subject, CONTROL_SUB_GRAPH_NAME, request.subGraphName, graphUri, literal);
+  pushOptional(quads, subject, CONTROL_PRIOR_VERSION, lift.priorVersion, graphUri, literal);
+  pushOptional(quads, subject, CONTROL_SUB_GRAPH_NAME, lift.subGraphName, graphUri, literal);
   return quads;
 }
 
@@ -254,12 +271,22 @@ export function parseIntegerLiteral(value: string): number {
   return Number.parseInt(match[1] as string, 10);
 }
 
-export function createJobSlug(request: LiftRequest): string {
-  const contextGraph = slugPart(request.contextGraphId);
-  const scope = slugPart(request.scope);
-  const transition = request.transitionType.toLowerCase();
-  const operation = slugPart(request.shareOperationId);
-  const rootRange = createRootRangeSlug(request.roots);
+export function createJobSlug(request: LiftJobRequest): string {
+  if (request.jobType === 'knowledge-asset-vm-publish') {
+    const publish = request.knowledgeAssetVmPublish;
+    const contextGraph = slugPart(publish.contextGraphId);
+    const name = slugPart(publish.name);
+    const operation = slugPart(publish.shareOperationId);
+    const rootRange = createRootRangeSlug(publish.roots);
+    return [contextGraph, 'knowledge-assets', name, 'vm-publish', operation, rootRange].filter(Boolean).join('/');
+  }
+
+  const lift = request.lift;
+  const contextGraph = slugPart(lift.contextGraphId);
+  const scope = slugPart(lift.scope);
+  const transition = lift.transitionType.toLowerCase();
+  const operation = slugPart(lift.shareOperationId);
+  const rootRange = createRootRangeSlug(lift.roots);
   return [contextGraph, scope, transition, operation, rootRange].filter(Boolean).join('/');
 }
 
@@ -284,11 +311,22 @@ function rootTail(value: string): string {
 function slugPart(value: string): string {
   // Slugs are operator-facing labels, so normalize aggressively for stable,
   // shell-friendly output without affecting canonical identifiers elsewhere.
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+  let normalized = '';
+  let previousWasDash = false;
+  for (const ch of value.trim().toLowerCase()) {
+    const code = ch.charCodeAt(0);
+    const isAsciiAlnum =
+      (code >= 48 && code <= 57)
+      || (code >= 97 && code <= 122);
+    if (isAsciiAlnum) {
+      normalized += ch;
+      previousWasDash = false;
+    } else if (!previousWasDash && normalized.length > 0) {
+      normalized += '-';
+      previousWasDash = true;
+    }
+  }
+  if (previousWasDash) normalized = normalized.slice(0, -1);
   return normalized || 'unknown';
 }
 

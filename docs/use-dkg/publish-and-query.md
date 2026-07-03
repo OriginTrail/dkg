@@ -15,22 +15,33 @@ Working Memory -> Shared Working Memory -> Verifiable Memory
 
 Use Working Memory first when an agent is drafting or iterating. Share to Shared Working Memory when peers should see it. Publish to Verifiable Memory only when the knowledge needs durable on-chain finality, and the wallet has funds.
 
+```mermaid
+flowchart LR
+  WM["Working Memory draft"] --> Finalize["Finalize / seal"]
+  Finalize --> SWM["Share to Shared Working Memory"]
+  SWM --> VM["Publish to Verifiable Memory"]
+```
+
 ## CLI shape
 
 ```bash
 dkg context-graph create my-project
 CG="<agentAddress>/my-project"
-dkg assertion import-file notes -f ./notes.md -c "$CG"
-dkg assertion query notes -c "$CG"
+dkg ka import-file notes --input-file ./notes.md -c "$CG"
+dkg ka query notes -c "$CG"
 dkg context-graph register "$CG"
-dkg shared-memory publish "$CG" --name notes
+dkg ka finalize notes -c "$CG"
+dkg ka share notes -c "$CG"
+dkg ka publish-async notes -c "$CG"
 ```
 
 Bare context-graph IDs are scoped by the daemon before use. After `create`, use the `ID:` printed by the CLI for later commands; it has the form `<agentAddress>/my-project`.
 
-Use `dkg assertion promote notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
+Use `dkg ka create notes -c "$CG" --input-file ./notes.ttl --share` when the local source is RDF and you want one command to create, write, finalize, and share. This convenience stops at Shared Working Memory; it does not publish to Verifiable Memory.
 
-Use `dkg shared-memory publish "$CG" --name notes` for the high-level finalize → share → publish path. Publishing to Verifiable Memory requires an on-chain context graph, so run `dkg context-graph register "$CG"` before the publish step unless the context graph was already registered.
+Use `dkg ka share notes -c "$CG"` when you want to stop at Shared Working Memory without publishing to Verifiable Memory.
+
+Use `dkg ka publish-async notes -c "$CG"` to enqueue the Verifiable Memory publish after the KA has been finalized and fully shared to SWM. `dkg publisher publish-async "$CG" notes` remains an operational alias for the same async VM publish route. See [Async Publisher Wallets](async-publisher-wallets.md) for funding and optional attribution identity setup.
 
 ## Agent shape
 

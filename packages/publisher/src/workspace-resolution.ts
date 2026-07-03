@@ -1,7 +1,7 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
-import type { LiftRequest } from './lift-job.js';
+import type { LiftPublishSnapshotRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { agentDid, generateShareMetadata } from './metadata.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
@@ -228,7 +228,7 @@ export async function resolveWorkspaceOperation(params: {
 export async function resolveLiftWorkspaceSlice(params: {
   store: TripleStore;
   graphManager: GraphManager;
-  request: LiftRequest;
+  request: LiftPublishSnapshotRequest;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<LiftResolvedPublishSlice> {
   const request = params.request;

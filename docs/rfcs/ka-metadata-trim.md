@@ -5,7 +5,7 @@
 
 ## Ground truth (live dump, KA #122, `megagiga` CG)
 
-One `dkg shared-memory publish` of 1 user triple writes, resident:
+One named KA VM publish of 1 user triple writes, resident:
 
 | Graph | Quads | Content |
 |---|---|---|

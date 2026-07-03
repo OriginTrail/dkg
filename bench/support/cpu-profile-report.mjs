@@ -314,7 +314,7 @@ function labelForWidth(label, width) {
 }
 
 function formatValue(value, unit) {
-  if (unit === 'ms') return `${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: value < 10 ? 2 : 0 })} ms`;
+  if (unit === 'ms') return `${value.toLocaleString('en-US', { maximumFractionDigits: 2, minimumFractionDigits: value < 10 ? 2 : 0 })} ms`;
   return `${Math.round(value).toLocaleString()} samples`;
 }
 

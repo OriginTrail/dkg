@@ -20,7 +20,7 @@ Originally: `publishFromFinalizedAssertion` called `publishFromSharedMemory(cont
 
 **Where:** publisher / chain-adapter nonce management. The publisher's operational-wallet pool reads the on-chain nonce as `latest` rather than `pending`, and a second publish that lands on the same wallet inside the same block window can pick a stale value.
 
-**Reproduction (probabilistic, ~1 in 25 fresh-cluster publishes):** issue rapid-fire `POST /api/shared-memory/publish { assertionName }` calls into the same daemon. Some `token.approve` or KC-create transactions revert with `Nonce too low. Expected nonce to be N+1 but got N`, and the publish flips to `tentative kaId: "0"`.
+**Reproduction (probabilistic, ~1 in 25 fresh-cluster publishes):** issue rapid-fire `POST /api/knowledge-assets/:name/vm/publish` calls into the same daemon. Some `token.approve` or KC-create transactions revert with `Nonce too low. Expected nonce to be N+1 but got N`, and the publish flips to `tentative kaId: "0"`.
 
 **Why it doesn't always fire:** the pool rotates through op-wallets, so adjacent publishes usually hit different wallets. Hitting the same wallet within the stale window is what triggers it. Background work (gossip-publish reactions, worker sweeps) can also occupy a wallet behind the scenes, which is what we suspect occasionally beats the foreground request to a nonce.
 

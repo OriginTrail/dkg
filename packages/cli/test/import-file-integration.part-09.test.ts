@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, ExtractionPipelineRegistry, autoPartition, findReservedSubjectPrefix, FileStore, parseBoundary, extractFromMarkdown, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, ImportFileRouteError, makeMockAgent, getDataGraphQuads, BOUNDARY, CRLF, buildMultipart, type ExtractionPipeline, type ExtractionInput, type ConverterOutput, type ExtractionStatusRecord, type CapturedQuad, type MockAgent } from './import-file-test-helpers';
+import { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, ExtractionPipelineRegistry, autoPartition, findReservedSubjectPrefix, FileStore, parseBoundary, extractFromMarkdown, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, assertionScopedGraphUri, ImportFileRouteError, makeMockAgent, getDataGraphQuads, BOUNDARY, CRLF, buildMultipart, type ExtractionPipeline, type ExtractionInput, type ConverterOutput, type ExtractionStatusRecord, type CapturedQuad, type MockAgent } from './import-file-test-helpers';
 import { runImportFileOrchestration } from './import-file-orchestration.shared';
 
 describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §10.2)', () => {
@@ -143,6 +143,50 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       // re-insert fired. The state is unchanged so no rollback was
       // needed.
       expect(failAgent.insertCallCount).toBe(insertCountBefore);
+    });
+
+    it('Bug 22b: partial graph-family drop failure restores already-dropped child graphs', async () => {
+      const bodyV1 = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'file', name: 'file', filename: 'v1.md', contentType: 'text/markdown', content: Buffer.from('# V1\n\nHas child graph.\n', 'utf-8') },
+      ]);
+      const resultV1 = await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'bug22b-target',
+      });
+
+      const assertionGraph = resultV1.assertionUri;
+      const childGraph = assertionScopedGraphUri(assertionGraph, 'urn:test:graph:named-rollback');
+      const childQuad: CapturedQuad = {
+        subject: 'urn:test:entity:child',
+        predicate: 'http://schema.org/name',
+        object: '"Child Graph"',
+        graph: childGraph,
+      };
+      agent.insertedQuads.push(childQuad);
+
+      const failAgent = makeMockAgent('0xMockAgentPeerId', {
+        dropGraphErrorPredicate: (graphUri) =>
+          graphUri === assertionGraph ? new Error('simulated root graph drop outage') : null,
+      });
+      for (const q of agent.insertedQuads) {
+        failAgent.insertedQuads.push({ ...q });
+      }
+
+      const bodyV2 = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'file', name: 'file', filename: 'v2.md', contentType: 'text/markdown', content: Buffer.from('# V2\n\nWill fail after child drop.\n', 'utf-8') },
+      ]);
+      await expect(runImportFileOrchestration({
+        agent: failAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: bodyV2, boundary: BOUNDARY, assertionName: 'bug22b-target',
+      })).rejects.toThrow('simulated root graph drop outage');
+
+      expect(failAgent.droppedGraphs).toContain(childGraph);
+      expect(failAgent.droppedGraphs).not.toContain(assertionGraph);
+      expect(failAgent.insertedQuads).toEqual(expect.arrayContaining([
+        expect.objectContaining(childQuad),
+      ]));
     });
 
 

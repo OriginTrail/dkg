@@ -18,8 +18,8 @@ prefer running them before falling back to the manual recipes below.
 
 Phase 4 author override (RFC §4(b)) is now wired end-to-end via the
 agent-keystore: end-user agents register on a daemon (`POST
-/api/agent/register`) and publish through that daemon's
-`/api/shared-memory/publish` route. The route resolves the bearer
+/api/agent/register`) and publish through that daemon's named
+knowledge-asset lifecycle routes. The publish route resolves the bearer
 token to an `AgentKeyRecord`, looks up the custodial private key, and
 threads it into the publisher as `authorPrivateKey` so the on-chain
 `AuthorAttestation` is signed by the *agent*, not the daemon. See
@@ -172,23 +172,26 @@ AGENT_TOKEN=$(curl -s -X POST \
 # Action — end-user agent writes quads + publishes through core 2,
 # authenticating with its OWN bearer token. The daemon resolves the
 # token → agent → custodial privateKey → AuthorAttestation signer.
-curl -s http://127.0.0.1:9202/api/shared-memory/write \
+curl -s http://127.0.0.1:9202/api/knowledge-assets \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
         "contextGraphId": "<cgId>",
+        "name": "mode-b-agent-ka",
         "quads": [{
           "subject": "urn:test:mode-b:1",
           "predicate": "https://schema.org/name",
           "object": "\"mode-b\"",
           "graph": "did:dkg:context-graph:<cgId>"
-        }]
+        }],
+        "finalize": true,
+        "alsoShareSwm": true
       }'
 
-curl -s http://127.0.0.1:9202/api/shared-memory/publish \
+curl -s http://127.0.0.1:9202/api/knowledge-assets/mode-b-agent-ka/vm/publish \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "contextGraphId": "<cgId>", "selection": "all", "clearAfter": true }'
+  -d '{ "contextGraphId": "<cgId>", "options": { "clearAfter": true } }'
 ```
 
 Optional: register on core 2's PCA so the publish is discounted (this

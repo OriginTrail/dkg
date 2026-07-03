@@ -7,12 +7,12 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 
-function q(s: string, p: string, o: string): Quad {
+function q(s: string, p: string, o: string, graph = 'did:dkg:context-graph:test'): Quad {
   return {
     subject: s,
     predicate: p,
     object: o,
-    graph: 'did:dkg:context-graph:test',
+    graph,
   };
 }
 
@@ -65,5 +65,40 @@ describe('DKGPublisher compatibility aliases', () => {
       code: 'OVERSIZED_RDF_LITERAL',
       actualBytes: 60_002,
     });
+  });
+
+  it('uses onChainContextGraphId as the direct publish chain domain without remap intent', async () => {
+    const publisher = await makePublisher();
+    const seenPublisherAddressCgIds: Array<bigint | undefined> = [];
+    const signerAddress = '0x1111111111111111111111111111111111111111';
+    const internals = publisher as any;
+
+    internals.refreshChainV10Readiness = async () => true;
+    internals.resolvePublisherAddress = async (cgId?: bigint) => {
+      seenPublisherAddressCgIds.push(cgId);
+      return signerAddress;
+    };
+    internals.getPublisherSigner = async () => ({ address: signerAddress, source: 'test' });
+    internals.chain.getEvmChainId = async () => 31337n;
+    internals.chain.getKnowledgeAssetsLifecycleAddress = async () => '0x2222222222222222222222222222222222222222';
+    internals.chain.getRequiredPublishTokenAmount = async () => 1n;
+
+    await expect(
+      publisher.publish({
+        contextGraphId: 'product-cg',
+        onChainContextGraphId: '42',
+        publisherPeerId: 'test-peer',
+        quads: [
+          q(
+            'urn:compat:on-chain-binding',
+            'http://schema.org/name',
+            '"Binding"',
+            'did:dkg:context-graph:product-cg',
+          ),
+        ],
+      }),
+    ).rejects.toThrow(/V10 ACKs required for on-chain publish/);
+
+    expect(seenPublisherAddressCgIds[0]).toBe(42n);
   });
 });

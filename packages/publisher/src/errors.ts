@@ -153,7 +153,7 @@ export class MultiRootPublishNotAtomicError extends Error {
   readonly rootEntities: string[];
   constructor(contextGraphId: string, rootEntities: readonly string[]) {
     super(
-      `V10 shared-memory publish is single-root only for this operation. ` +
+      `V10 VM publish from SWM is single-root only for this operation. ` +
         `Resolved ${rootEntities.length} root entities; select exactly one root or use a durable multi-publish flow.`,
     );
     this.name = 'MultiRootPublishNotAtomicError';

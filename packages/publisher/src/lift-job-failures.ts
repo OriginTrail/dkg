@@ -34,6 +34,7 @@ export type LiftJobFailureResolution = (typeof LIFT_JOB_FAILURE_RESOLUTIONS)[num
 export const LIFT_JOB_FAILURE_CODES = [
   'workspace_unavailable',
   'workspace_slice_not_found',
+  'publish_intent_stale',
   'canonicalization_failed',
   'authority_unavailable',
   'authority_forbidden',
@@ -90,6 +91,7 @@ export interface LiftJobFailureMetadata {
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailurePolicy> = {
   workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
@@ -118,6 +120,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
 const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJobActiveState[]> = {
   workspace_unavailable: ['accepted', 'claimed', 'validated'],
   workspace_slice_not_found: ['accepted', 'claimed', 'validated'],
+  publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
   authority_forbidden: ['claimed', 'validated'],

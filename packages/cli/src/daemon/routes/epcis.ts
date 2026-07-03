@@ -188,8 +188,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
   oversizedRdfLiteralResponseBody,
   safeDecodeURIComponent,

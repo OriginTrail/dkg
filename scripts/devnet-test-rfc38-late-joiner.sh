@@ -79,6 +79,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -276,7 +279,7 @@ A_PAYLOAD=$(CG_ID="$CG_A" N=5 LABEL="A" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_A=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$A_PAYLOAD")
+WROTE_A=$(devnet_create_shared_ka "$CURATOR_NODE" "$A_PAYLOAD")
 TRIPLES_WROTE_A=$(parse_json "$WROTE_A" '.triplesWritten')
 [ "$TRIPLES_WROTE_A" = "5" ] || fail "expected 5 triplesWritten, got '$TRIPLES_WROTE_A' (response: $WROTE_A)"
 log "✓ curator wrote 5 triples"
@@ -354,7 +357,7 @@ B_PAYLOAD=$(CG_ID="$CG_B" N=7 LABEL="B" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_B=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$B_PAYLOAD")
+WROTE_B=$(devnet_create_shared_ka "$CURATOR_NODE" "$B_PAYLOAD")
 TRIPLES_WROTE_B=$(parse_json "$WROTE_B" '.triplesWritten')
 [ "$TRIPLES_WROTE_B" = "7" ] || fail "expected 7 triplesWritten, got '$TRIPLES_WROTE_B' (response: $WROTE_B)"
 log "✓ curator wrote 7 triples"
@@ -475,7 +478,7 @@ C_PAYLOAD=$(CG_ID="$CG_C" N=4 LABEL="C" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_C=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$C_PAYLOAD")
+WROTE_C=$(devnet_create_shared_ka "$CURATOR_NODE" "$C_PAYLOAD")
 TRIPLES_WROTE_C=$(parse_json "$WROTE_C" '.triplesWritten')
 [ "$TRIPLES_WROTE_C" = "4" ] || fail "expected 4 triplesWritten, got '$TRIPLES_WROTE_C' (response: $WROTE_C)"
 log "✓ curator wrote 4 triples"
@@ -589,7 +592,7 @@ D0_PAYLOAD=$(CG_ID="$CG_D" node -e '
     }],
   }));
 ')
-WROTE_D0=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$D0_PAYLOAD")
+WROTE_D0=$(devnet_create_shared_ka "$CURATOR_NODE" "$D0_PAYLOAD")
 TRIPLES_WROTE_D0=$(parse_json "$WROTE_D0" '.triplesWritten')
 [ "$TRIPLES_WROTE_D0" = "1" ] || fail "expected 1 triplesWritten for handshake, got '$TRIPLES_WROTE_D0' (response: $WROTE_D0)"
 log "✓ handshake write OK"
@@ -630,7 +633,7 @@ D5_PAYLOAD=$(CG_ID="$CG_D" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_D5=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$D5_PAYLOAD")
+WROTE_D5=$(devnet_create_shared_ka "$CURATOR_NODE" "$D5_PAYLOAD")
 TRIPLES_WROTE_D5=$(parse_json "$WROTE_D5" '.triplesWritten')
 [ "$TRIPLES_WROTE_D5" = "5" ] || fail "expected 5 triplesWritten, got '$TRIPLES_WROTE_D5' (response: $WROTE_D5)"
 log "✓ curator wrote 5 triples while member offline"
@@ -791,7 +794,7 @@ E0_PAYLOAD=$(CG_ID="$CG_E" node -e '
     }],
   }));
 ')
-WROTE_E0=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$E0_PAYLOAD")
+WROTE_E0=$(devnet_create_shared_ka "$CURATOR_NODE" "$E0_PAYLOAD")
 TRIPLES_WROTE_E0=$(parse_json "$WROTE_E0" '.triplesWritten')
 [ "$TRIPLES_WROTE_E0" = "1" ] || fail "expected 1 triplesWritten for E handshake, got '$TRIPLES_WROTE_E0' (response: $WROTE_E0)"
 log "✓ CG_E handshake write OK"
@@ -829,7 +832,7 @@ E5_PAYLOAD=$(CG_ID="$CG_E" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WROTE_E5=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$E5_PAYLOAD")
+WROTE_E5=$(devnet_create_shared_ka "$CURATOR_NODE" "$E5_PAYLOAD")
 TRIPLES_WROTE_E5=$(parse_json "$WROTE_E5" '.triplesWritten')
 [ "$TRIPLES_WROTE_E5" = "5" ] || fail "expected 5 triplesWritten on CG_E, got '$TRIPLES_WROTE_E5' (response: $WROTE_E5)"
 log "✓ curator wrote 5 triples to CG_E while member offline"

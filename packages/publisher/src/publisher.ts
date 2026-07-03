@@ -203,6 +203,11 @@ export interface PublishOptions {
    */
   publishContextGraphId?: string;
   /**
+   * Binding-only numeric on-chain context graph id. Unlike publishContextGraphId,
+   * this must not imply a remap/delete flow in the publisher.
+   */
+  onChainContextGraphId?: string | bigint;
+  /**
    * Internal/private-CG catalog path: exact generated catalog triples that ride
    * in the KC Merkle root but are not user KA manifest roots. Public callers
    * should not set this for arbitrary metadata.

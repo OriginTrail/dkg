@@ -16,6 +16,7 @@ import {
 import {
   DKGPublisher,
   AssertionNotPersistedError,
+  assertionScopedGraphUri,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
 } from '../src/index.js';
@@ -194,6 +195,155 @@ describe('Working Memory Assertion Lifecycle', () => {
     const subjects = new Set(quads.map((q: Quad) => q.subject));
     expect(subjects.has('urn:test:entity:alice')).toBe(true);
     expect(subjects.has('urn:test:entity:bob')).toBe(true);
+  });
+
+  it('preserves named graph metadata for mixed default/named graph writes', async () => {
+    const name = 'mixed-graph-draft';
+    const namedGraph = 'urn:test:graph:named';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:default',
+        predicate: 'http://schema.org/name',
+        object: '"Default Graph"',
+        graph: '',
+      },
+      {
+        subject: 'urn:test:entity:named',
+        predicate: 'http://schema.org/name',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const quads = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: 'urn:test:entity:default',
+        object: '"Default Graph"',
+        graph: '',
+      }),
+      expect.objectContaining({
+        subject: 'urn:test:entity:named',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      }),
+    ]));
+
+    const scopedNamedGraphs = (await store.listGraphs())
+      .filter((graph) => graph.includes('/_named_graph/'));
+    expect(scopedNamedGraphs.length).toBeGreaterThan(0);
+  });
+
+  it('rejects named-graph shares before duplicate SPOs can be flattened', async () => {
+    const name = 'named-graph-share-unsupported';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:one',
+      },
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:two',
+      },
+    ]);
+
+    const beforeShare = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(beforeShare).toEqual(expect.arrayContaining([
+      expect.objectContaining({ graph: 'urn:test:graph:one' }),
+      expect.objectContaining({ graph: 'urn:test:graph:two' }),
+    ]));
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: ['urn:test:graph:one', 'urn:test:graph:two'],
+    });
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(2);
+    const swmResult = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <urn:test:entity:duplicate-spo> <http://schema.org/name> "Same" } }`,
+    );
+    expect(swmResult.type === 'boolean' ? swmResult.value : true).toBe(false);
+  });
+
+  it('treats DKG physical graph input as default-graph assertion content', async () => {
+    const name = 'physical-graph-default';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:physical-default',
+        predicate: 'http://schema.org/name',
+        object: '"Physical Default"',
+        graph: `did:dkg:context-graph:${CG_ID}`,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:physical-default',
+        graph: '',
+      }),
+    ]);
+    const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
+    expect(promoted.promotedCount).toBe(1);
+  });
+
+  it('preserves non-physical DKG context graph DIDs as named graph identity', async () => {
+    const name = 'dkg-did-named-graph';
+    const namedGraph = 'did:dkg:context-graph:partner-catalog';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:dkg-did-named',
+        predicate: 'http://schema.org/name',
+        object: '"DKG DID Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:dkg-did-named',
+        graph: namedGraph,
+      }),
+    ]);
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: [namedGraph],
+    });
+  });
+
+  it('discard removes KA-scoped named graph draft content', async () => {
+    const name = 'named-graph-discard';
+    const namedGraph = 'urn:test:graph:discard-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:named-discard',
+        predicate: 'http://schema.org/name',
+        object: '"Discard Me"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, name);
+    const scopedNamedGraph = assertionScopedGraphUri(wmGraph, namedGraph);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:named-discard',
+        graph: namedGraph,
+      }),
+    ]);
+    expect(await store.listGraphs()).toContain(scopedNamedGraph);
+
+    await publisher.assertionDiscard(CG_ID, name, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+    expect(await store.listGraphs()).not.toContain(scopedNamedGraph);
   });
 
   it('query returns triples from the assertion only', async () => {
@@ -730,6 +880,43 @@ describe('Working Memory Assertion Lifecycle', () => {
       const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
       expect(swmSubjects.has('urn:test:entity:alice')).toBe(true);
       expect(swmSubjects.has('urn:test:entity:bob')).toBe(false);
+    }
+  });
+
+  it('promote with entity filter ignores unrelated named-graph draft content', async () => {
+    const name = 'subset-default-with-local-named-graph';
+    const localNamedGraph = 'urn:test:graph:local-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:selected', predicate: 'http://schema.org/name', object: '"Selected"' },
+      {
+        subject: 'urn:test:entity:local-only',
+        predicate: 'http://schema.org/name',
+        object: '"Local Only"',
+        graph: localNamedGraph,
+      },
+    ]);
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      entities: ['urn:test:entity:selected'],
+    });
+    expect(result.promotedCount).toBe(1);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:local-only',
+        graph: localNamedGraph,
+      }),
+    ]);
+
+    const swmResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
+    );
+    expect(swmResult.type).toBe('bindings');
+    if (swmResult.type === 'bindings') {
+      const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
+      expect(swmSubjects.has('urn:test:entity:selected')).toBe(true);
+      expect(swmSubjects.has('urn:test:entity:local-only')).toBe(false);
     }
   });
 

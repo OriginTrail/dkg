@@ -30,7 +30,8 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
+import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -123,6 +124,8 @@ publisherWalletCmd
       console.log(`  File:    ${publisherWalletsPath(dkgDir())}`);
       console.log(`  Wallets: ${result.wallets.length}`);
       console.log(`  Address: ${result.wallets[result.wallets.length - 1]?.address}`);
+      console.log('  Funding: add native gas for transactions; register as a PCA agent or fund TRAC for direct spend.');
+      console.log('  Identity: optional; attach a node identity only when publisher-node attribution is desired.');
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);
@@ -204,85 +207,25 @@ publisherCmd
     }
   });
 
-publisherCmd
-  .command('enqueue <context-graph>')
-  .description('Enqueue an async lift/publish job from shared memory')
-  .requiredOption('--root <entity...>', 'Root entities to include in the lift request')
-  .requiredOption('--namespace <value>', 'Namespace for the lifted publish')
-  .requiredOption('--scope <value>', 'Scope for the lifted publish')
-  .requiredOption('--authority-proof-ref <value>', 'Authority proof reference')
-  .option('--swm-id <value>', 'Shared memory id', 'swm-main')
-  .option('--workspace-id <value>', 'Legacy alias for --swm-id')
-  .option('--share-operation-id <value>', 'Share operation id')
-  .option('--transition-type <value>', 'Transition type (CREATE|MUTATE|REVOKE)', 'CREATE')
-  .option('--authority-type <value>', 'Authority type (owner|multisig|quorum|capability)', 'owner')
-  .option('--prior-version <value>', 'Prior version reference for MUTATE/REVOKE flows')
-  .option('--publish-epochs <count>', 'On-chain publish lifetime in epochs (default: 12; PCA-funded publishes may coerce to PCA lock duration)')
-  .action(async (contextGraph: string, opts: ActionOpts) => {
+addFinalizedPublishOptions(publisherCmd
+  .command('publish-async <context-graph> <name>')
+  .description('Enqueue a named knowledge asset VM publish job')
+  .option('--sub-graph <name>', 'Target sub-graph within the context graph'))
+  .action(async (contextGraph: string, name: string, opts: ActionOpts) => {
     try {
-      const shareOperationId = opts.shareOperationId;
-      if (!shareOperationId) {
-        console.error('Provide --share-operation-id.');
-        process.exit(1);
-      }
-      const roots = (opts.root as string[] | undefined)?.map((v) => v.trim()).filter(Boolean) ?? [];
-      if (roots.length === 0) {
-        console.error('Provide at least one --root.');
-        process.exit(1);
-      }
-      const transitionType = String(opts.transitionType ?? 'CREATE').toUpperCase();
-      if (!['CREATE', 'MUTATE', 'REVOKE'].includes(transitionType)) {
-        console.error('Invalid --transition-type. Use CREATE, MUTATE, or REVOKE.');
-        process.exit(1);
-      }
-      const authorityType = String(opts.authorityType ?? 'owner');
-      if (!['owner', 'multisig', 'quorum', 'capability'].includes(authorityType)) {
-        console.error('Invalid --authority-type. Use owner, multisig, quorum, or capability.');
-        process.exit(1);
-      }
-      const publishEpochs = opts.publishEpochs !== undefined
-        ? parsePositiveIntegerOption(String(opts.publishEpochs), '--publish-epochs')
-        : undefined;
+      const publishOptions = parseFinalizedPublishOptions(opts);
 
-      const enqueueFields = {
-        swmId: opts.swmId ?? opts.workspaceId ?? 'swm-main',
-        shareOperationId,
-        roots,
-        contextGraphId: contextGraph,
-        namespace: String(opts.namespace),
-        scope: String(opts.scope),
-        transitionType: transitionType as 'CREATE' | 'MUTATE' | 'REVOKE',
-        authorityType: authorityType as 'owner' | 'multisig' | 'quorum' | 'capability',
-        authorityProofRef: String(opts.authorityProofRef),
-        priorVersion: opts.priorVersion ? String(opts.priorVersion) : undefined,
-        publishEpochs,
-      };
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetPublishAsync(contextGraph, name, {
+        ...(opts.subGraph ? { subGraphName: String(opts.subGraph) } : {}),
+        ...publishOptions,
+      });
 
-      let jobId: string;
-      try {
-        const client = await ApiClient.connect();
-        const result = await client.publisherEnqueue(enqueueFields);
-        jobId = result.jobId;
-      } catch (err) {
-        if (!isDaemonUnreachable(err)) throw err;
-        const config = await loadConfig();
-        const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
-        try {
-          jobId = await inspector.publisher.lift({
-            ...enqueueFields,
-            authority: { type: enqueueFields.authorityType, proofRef: enqueueFields.authorityProofRef },
-          } as any);
-        } finally {
-          await inspector.stop();
-        }
-      }
-
-      console.log('Async publisher job enqueued:');
-      console.log(`  Job ID:     ${jobId}`);
+      console.log('Knowledge asset publish job accepted:');
+      console.log(`  Job ID:     ${result.jobId}`);
       console.log(`  Context:    ${contextGraph}`);
-      console.log(`  Share op:   ${shareOperationId}`);
-      console.log(`  Roots:      ${roots.length}`);
+      console.log(`  Name:       ${name}`);
+      console.log(`  Status:     ${result.status}`);
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

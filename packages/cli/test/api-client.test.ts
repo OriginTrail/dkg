@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ApiClient } from '../src/api-client.js';
+import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
 const originalDkgHome = process.env.DKG_HOME;
@@ -67,6 +68,20 @@ describe('ApiClient', () => {
   let client: ApiClient;
   const originalFetch = globalThis.fetch;
   let tempDir: string;
+
+  it('keeps finalized publish option types importable from api-client', () => {
+    const options: KnowledgeAssetFinalizedPublishOptions = {
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    };
+
+    expect(options).toMatchObject({
+      clearAfter: true,
+      publishEpochs: 1,
+      publisherNodeIdentityIdOverride: 0n,
+    });
+  });
 
   beforeEach(async () => {
     client = new ApiClient(PORT, 'test-token');
@@ -247,29 +262,8 @@ describe('ApiClient', () => {
       expect(body).toEqual({ to: 'peer1', text: 'hello' });
     });
 
-    it('publish() sends explicit quads to the direct publish route', async () => {
-      const expected = { kaId: 'kc1', status: 'tentative', kas: [] };
-      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: expected });
-      globalThis.fetch = fetch;
-      const quads = [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: 'urn:g' }];
-      const privateQuads = [{ subject: 'urn:s', predicate: 'urn:secret', object: '"secret"', graph: 'urn:g' }];
-      const result = await client.publish('test-contextGraph', quads, privateQuads, {
-        accessPolicy: 'allowList',
-        allowedPeers: ['12D3peer1'],
-        publishEpochs: 7,
-        publisherNodeIdentityIdOverride: 0n,
-      });
-      expect(result.kaId).toBe('kc1');
-
-      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/knowledge-assets/publish`);
-      const body = JSON.parse(calls[0].opts.body as string);
-      expect(body.contextGraphId).toBe('test-contextGraph');
-      expect(body.quads).toHaveLength(1);
-      expect(body.privateQuads).toHaveLength(1);
-      expect(body.accessPolicy).toBe('allowList');
-      expect(body.allowedPeers).toEqual(['12D3peer1']);
-      expect(body.publishEpochs).toBe(7);
-      expect(body.publisherNodeIdentityIdOverride).toBe('0');
+    it('does not expose the retired direct explicit-quads publish helper', () => {
+      expect((client as any).publish).toBeUndefined();
     });
 
     it('createKnowledgeAsset() forwards finalize:false for a draft-only write', async () => {
@@ -640,6 +634,39 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(sent.quads).toHaveLength(1);
   });
 
+  it('createAssertion delegates to the canonical KA create serializer', async () => {
+    const calls = track({ assertionUri: 'did:dkg:context-graph:cg/assertion/legacy' });
+    const result = await client.createAssertion('cg', 'legacy', {
+      subGraphName: 'notes',
+      quads: [{ subject: 's', predicate: 'p', object: 'o', graph: '' }],
+      finalize: true,
+      alsoShareSwm: true,
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 2,
+    });
+    expect(result.assertionUri).toBe('did:dkg:context-graph:cg/assertion/legacy');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
+    const sent = JSON.parse(calls[0].opts.body as string);
+    expect(sent).toMatchObject({
+      contextGraphId: 'cg',
+      name: 'legacy',
+      subGraphName: 'notes',
+      finalize: true,
+      alsoShareSwm: true,
+      authorAgentAddress: '0x1111111111111111111111111111111111111111',
+      schemeVersion: 2,
+    });
+    expect(sent.quads).toHaveLength(1);
+    expect(sent.alsoPublishVm).toBeUndefined();
+  });
+
+  it('createAssertion validates the legacy assertionUri response contract', async () => {
+    const calls = track({ name: 'legacy', status: 'wm-sealed' });
+    await expect(client.createAssertion('cg', 'legacy')).rejects
+      .toThrow('Knowledge asset create response missing assertionUri for assertion compatibility');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
+  });
+
   it('createKnowledgeAsset normalizes finalized publish and author seal options', async () => {
     const calls = track({ name: 'f', status: 'vm-confirmed' });
     const preSignedAuthorAttestation = {
@@ -685,6 +712,17 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await expect(client.createKnowledgeAsset('cg', 'f', {
       alsoPublishVm: { publishEpoch: 3 },
     } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('createKnowledgeAsset rejects daemon-only alsoPublishVm aliases before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: { epochs: 3 },
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): epochs');
+    await expect(client.createKnowledgeAsset('cg', 'f', {
+      alsoPublishVm: { clearSharedMemoryAfter: true },
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): clearSharedMemoryAfter');
     expect(calls).toHaveLength(0);
   });
 
@@ -739,8 +777,20 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
 
   it('knowledgeAssetShare → swm/share, knowledgeAssetPublish → vm/publish', async () => {
     let calls = track({ swmShared: true, promotedCount: 2 });
-    await client.knowledgeAssetShare('cg', 'f');
+    await client.knowledgeAssetShare('cg', 'f', {
+      subGraphName: 'notes',
+      entities: ['urn:entity:1'],
+      awaitCuratorAck: true,
+      skipSeal: true,
+    });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      entities: ['urn:entity:1'],
+      awaitCuratorAck: true,
+      skipSeal: true,
+    });
 
     calls = track({ kaId: '7', status: 'confirmed' });
     await client.knowledgeAssetPublish('cg', 'f', {
@@ -750,7 +800,8 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       publisherNodeIdentityIdOverride: 123n,
     });
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish`);
-    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+    const publishBody = JSON.parse(calls[0].opts.body as string);
+    expect(publishBody).toMatchObject({
       contextGraphId: 'cg',
       subGraphName: 'notes',
       options: {
@@ -759,6 +810,85 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
         publisherNodeIdentityIdOverride: '123',
       },
     });
+    expect(publishBody.options).not.toHaveProperty('subGraphName');
+
+    calls = track({ jobId: 'job-1', status: 'accepted' });
+    await client.knowledgeAssetPublishAsync('cg', 'f', {
+      subGraphName: 'notes',
+      clearAfter: true,
+      publishEpochs: 12,
+      publisherNodeIdentityIdOverride: 123n,
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/vm/publish-async`);
+    const publishAsyncBody = JSON.parse(calls[0].opts.body as string);
+    expect(publishAsyncBody).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      options: {
+        clearSharedMemoryAfter: true,
+        publishEpochs: 12,
+        publisherNodeIdentityIdOverride: '123',
+      },
+    });
+    expect(publishAsyncBody.options).not.toHaveProperty('subGraphName');
+  });
+
+  it('knowledgeAssetFinalize can target WM or SWM layer', async () => {
+    const calls = track({ merkleRoot: '0xabc', eip712Digest: '0xdig' });
+    await client.knowledgeAssetFinalize('cg', 'f', { layer: 'swm', subGraphName: 'notes' });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/wm/finalize`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      layer: 'swm',
+      subGraphName: 'notes',
+    });
+  });
+
+  it('knowledgeAssetShareAsync and share job helpers use lifecycle routes', async () => {
+    let calls = track({ jobId: 'share-job-1', state: 'queued' });
+    await client.knowledgeAssetShareAsync('cg', 'f', {
+      subGraphName: 'notes',
+      entities: ['urn:entity:1'],
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f/swm/share-async`);
+    expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
+      contextGraphId: 'cg',
+      subGraphName: 'notes',
+      entities: ['urn:entity:1'],
+    });
+
+    calls = track({ jobs: [] });
+    await client.knowledgeAssetShareJobs({
+      contextGraphId: 'cg',
+      state: ['queued', 'failed_retrying'],
+      limit: 5,
+    });
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs?contextGraphId=cg&state=queued%2Cfailed_retrying&limit=5`);
+
+    calls = track({ jobId: 'share-job-1', state: 'queued' });
+    await client.knowledgeAssetShareJob('share/job 1');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201`);
+
+    calls = track({ jobId: 'share-job-1', state: 'failed' });
+    await client.knowledgeAssetCancelShareJob('share/job 1');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201`);
+    expect(calls[0].opts.method).toBe('DELETE');
+
+    calls = track({ jobId: 'share-job-1', state: 'queued' });
+    await client.knowledgeAssetRecoverShareJob('share/job 1');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/swm/share-jobs/share%2Fjob%201/recover`);
+    expect(calls[0].opts.method).toBe('POST');
+  });
+
+  it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
+    const calls = track({ jobId: 'should-not-reach', state: 'queued' });
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      skipSeal: true,
+    } as any)).rejects.toThrow('skipSeal is not supported for async share');
+    await expect(client.knowledgeAssetShareAsync('cg', 'f', {
+      awaitCuratorAck: true,
+    } as any)).rejects.toThrow('awaitCuratorAck is not supported for async share');
+    expect(calls).toHaveLength(0);
   });
 
   it('knowledgeAssetPublish rejects unsupported option keys before HTTP serialization', async () => {
@@ -766,6 +896,25 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await expect(client.knowledgeAssetPublish('cg', 'f', {
       publishEpoch: 3,
     } as any)).rejects.toThrow('Unsupported finalized publish option(s): publishEpoch');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetPublish rejects daemon-only option aliases before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      epochs: 3,
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): epochs');
+    await expect(client.knowledgeAssetPublishAsync('cg', 'f', {
+      clearSharedMemoryAfter: true,
+    } as any)).rejects.toThrow('Unsupported finalized publish option(s): clearSharedMemoryAfter');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('knowledgeAssetPublish rejects publisher identity overrides above uint72 before HTTP serialization', async () => {
+    const calls = track({ ok: true });
+    await expect(client.knowledgeAssetPublish('cg', 'f', {
+      publisherNodeIdentityIdOverride: 4722366482869645213696n,
+    })).rejects.toThrow('publisherNodeIdentityIdOverride');
     expect(calls).toHaveLength(0);
   });
 
@@ -778,8 +927,8 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
 
   it('getKnowledgeAsset GETs .../:name?contextGraphId=', async () => {
     const calls = track({ state: 'created' });
-    await client.getKnowledgeAsset('cg', 'f');
-    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f?contextGraphId=cg`);
+    await client.getKnowledgeAsset('cg', 'f', 'notes', '0x1111111111111111111111111111111111111111');
+    expect(calls[0].url).toBe(`${base}/api/knowledge-assets/f?contextGraphId=cg&subGraphName=notes&agentAddress=0x1111111111111111111111111111111111111111`);
   });
 
   // #1087 migration guard: the compatibility wrapper used by `dkg shared-memory
@@ -813,13 +962,13 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
       { clearAfter: false, subGraphName: 'sg2' },
     );
-    // 1st call creates (finalize+promote); the sequence ENDS at the per-KA vm/publish route
+    // 1st call creates (finalize+share to SWM); the sequence ENDS at the per-KA vm/publish route
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets`);
     expect(JSON.parse(calls[0].opts.body as string)).toMatchObject({
       contextGraphId: 'cg',
       name: 'asset2',
       finalize: true,
-      promote: true,
+      alsoShareSwm: true,
     });
     const last = calls[calls.length - 1];
     expect(last.url).toBe(`${base}/api/knowledge-assets/asset2/vm/publish`);

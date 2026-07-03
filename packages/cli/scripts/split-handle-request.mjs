@@ -104,9 +104,6 @@ const BLOCKS = [
   [1223, 'openclaw', '/api/openclaw-channel/health'], // GET /api/openclaw-channel/health
   [1228, 'agent-chat', '/api/connect'], // POST /api/connect
   [1243, 'agent-chat', '/api/update'], // POST /api/update
-  [1318, 'memory', '/api/shared-memory/write'], // POST /api/shared-memory/write
-  [1378, 'memory', '/api/shared-memory/publish'], // POST /api/shared-memory/publish
-  [1463, 'publisher', '/api/publisher/enqueue'], // POST /api/publisher/enqueue
   [1515, 'publisher', '/api/publisher/jobs'], // GET /api/publisher/jobs
   [1527, 'publisher', '"/api/publisher/job"'], // GET /api/publisher/job (quote-anchored to disambiguate from /jobs and /job-payload)
   [1539, 'publisher', '/api/publisher/job-payload'], // GET /api/publisher/job-payload
@@ -129,7 +126,6 @@ const BLOCKS = [
   [2207, 'assertion', '/api/assertion/|/import-file'], // multi-line if — assertion import-file
   [3116, 'assertion', '/api/assertion/|/extraction-status'], // late fallthrough — extraction-status
   [3169, 'assertion', '/api/file/'], // GET /api/file/*
-  [3209, 'memory', '/api/shared-memory/conditional-write'], // multi-line if
   [3254, 'query', '/api/query'], // POST /api/query
   [3477, 'query', '/api/genui/render'], // POST /api/genui/render
   [3659, 'query', '/api/query-remote'], // POST /api/query-remote
@@ -410,8 +406,8 @@ const GROUP_DOC = {
   'status': 'status, info, connections, host, wallet, chain, identity, integrations, shutdown',
   'agent-chat': 'agent registration/identity/listing, skills, chat, messages, connect, update',
   'openclaw': 'OpenClaw agent listing, chat, channel send/stream/persist-turn/health',
-  'memory': 'shared-memory / workspace write + publish + conditional-write, memory turn/search',
-  'publisher': 'publisher enqueue / jobs / stats / cancel / retry / clear',
+  'memory': 'workspace write, memory turn/search',
+  'publisher': 'publisher jobs / stats / cancel / retry / clear',
   'context-graph': 'context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install',
   'assertion': 'assertion CRUD + import + file download',
   'query': 'SPARQL query, GenUI render, catchup-status, verify, endorse, CCL policy + eval',

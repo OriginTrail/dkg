@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -11,7 +11,13 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
+  readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
+}
+
+export interface PublisherRuntimeWallet {
+  readonly address: string;
+  readonly identityId: bigint;
 }
 
 export interface PublisherInspector {
@@ -32,6 +38,10 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
   | Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>
   | undefined;
 
+interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
+  readonly publisher: DKGPublisher;
+}
+
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
   config: DkgConfig;
@@ -47,6 +57,8 @@ export async function startPublisherRuntimeIfEnabled(args: {
   log: (message: string) => void;
   ackTransportFactory?: () => ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime | null> {
   if (!args.config.publisher?.enabled) {
     return null;
@@ -64,8 +76,11 @@ export async function startPublisherRuntimeIfEnabled(args: {
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
+      knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+      knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
+    logPublisherWalletAttribution(runtime.wallets, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
@@ -96,6 +111,8 @@ interface PublisherRuntimeBaseArgs {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   closeStoreOnStop: boolean;
 }
@@ -186,6 +203,8 @@ export async function createPublisherRuntimeFromAgent(args: {
   ackTransportFactory?: () => ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
+  knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
+  knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
 }): Promise<PublisherRuntime> {
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
@@ -198,6 +217,8 @@ export async function createPublisherRuntimeFromAgent(args: {
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     publicSnapshotStore: createPublicSnapshotStore(args.dataDir, args.config),
     closeStoreOnStop: false,
   });
@@ -210,8 +231,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   const eventBus = new TypedEventBus();
-  const publishers = new Map<string, DKGPublisher>();
-  const invalidWallets: string[] = [];
+  const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -226,13 +246,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    if (args.chainBase && identityId === 0n) {
-      invalidWallets.push(wallet.address);
-      continue;
-    }
-    publishers.set(
-      wallet.address,
-      new DKGPublisher({
+    wallets.push({
+      address: wallet.address,
+      identityId,
+      publisher: new DKGPublisher({
         store: args.store,
         chain,
         eventBus,
@@ -241,24 +258,12 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
       }),
-    );
+    });
   }
 
-  if (invalidWallets.length > 0) {
-    if (publishers.size === 0) {
-      const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
-      throw new Error(
-        `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-        'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
-      );
-    }
-    const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';
-    console.warn(
-      `[publisher] Skipping ${invalidWallets.length} ${noun} missing on-chain identity: ${invalidWallets.join(', ')}. ` +
-      `Continuing with ${publishers.size} valid wallet(s).`,
-    );
-  }
-
+  const publishers = new Map<string, DKGPublisher>(
+    wallets.map((wallet) => [wallet.address, wallet.publisher]),
+  );
   const hasChainRecovery = [...publishers.values()].some((p) => {
     const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
     return typeof chain?.resolvePublishByTxHash === 'function';
@@ -268,6 +273,24 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     chainRecoveryResolver: hasChainRecovery ? createChainRecoveryResolver(publishers) : undefined,
     maxRetries: args.maxRetries,
     publicSnapshotStore: args.publicSnapshotStore,
+    knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishPreflight!({ ...input, publisher });
+        }
+      : undefined,
+    knowledgeAssetVmPublishExecutor: args.knowledgeAssetVmPublishExecutor
+      ? async (input) => {
+          const publisher = publishers.get(input.walletId);
+          if (!publisher) {
+            throw new Error(`No publisher configured for wallet ${input.walletId}`);
+          }
+          return args.knowledgeAssetVmPublishExecutor!({ ...input, publisher });
+        }
+      : undefined,
     publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
       const publisher = publishers.get(walletId);
       if (!publisher) {
@@ -322,6 +345,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
+    wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
@@ -329,6 +353,32 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       }
     },
   };
+}
+
+function logPublisherWalletAttribution(
+  wallets: readonly PublisherRuntimeWallet[],
+  log: (message: string) => void,
+): void {
+  const attributedWallets = wallets
+    .filter((wallet) => wallet.identityId !== 0n)
+    .map((wallet) => `${wallet.address} (identityId=${wallet.identityId.toString()})`);
+  const noAttributionWallets = wallets
+    .filter((wallet) => wallet.identityId === 0n)
+    .map((wallet) => wallet.address);
+
+  if (attributedWallets.length > 0) {
+    const verb = attributedWallets.length === 1 ? 'has' : 'have';
+    log(
+      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
+      `${verb} node attribution: ${attributedWallets.join(', ')}`,
+    );
+  }
+  if (noAttributionWallets.length > 0) {
+    log(
+      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
+      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
+    );
+  }
 }
 
 function createV10ACKProviderForPublisher(
@@ -504,22 +554,6 @@ function createChainRecoveryResolver(
       },
     };
   };
-}
-
-export function parsePositiveMsOption(value: string, optionName: '--poll-interval' | '--error-backoff'): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer in milliseconds`);
-  }
-  return parsed;
-}
-
-export function parsePositiveIntegerOption(value: string, optionName: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer`);
-  }
-  return parsed;
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

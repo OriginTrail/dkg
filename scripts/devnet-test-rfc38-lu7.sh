@@ -25,6 +25,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -106,7 +109,7 @@ PUB_QUADS=$(node -e "
   }
   console.log(JSON.stringify({ contextGraphId: '$PUB_CG', quads }));
 ")
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$PUB_QUADS")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$PUB_QUADS")
 [ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "10" ] || fail "expected 10 triples written, got $(parse_json "$WRITE_RESP" '.triplesWritten') ($WRITE_RESP)"
 log "✓ 10 triples written to curator's SWM"
 
@@ -193,7 +196,7 @@ CUR_QUADS=$(node -e "
   }
   console.log(JSON.stringify({ contextGraphId: '$CUR_CG', quads }));
 ")
-CUR_WRITE=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$CUR_QUADS")
+CUR_WRITE=$(devnet_create_shared_ka "$CURATOR_NODE" "$CUR_QUADS")
 log "curated SWM write: $CUR_WRITE"
 
 # A failed swm-sender-key setup here would have rejected with a non-200;

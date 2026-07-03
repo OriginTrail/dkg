@@ -930,9 +930,8 @@ describe('Diagram 11 — Phase 5 precomputedAttestation (sign-at-creation)', () 
     // RFC-001 §9.x — Phase C — the publisher refuses to broadcast when
     // the seal is missing. RC11 / PR2: the publisher no longer catches
     // and downgrades; missing-seal on an on-chain publish now throws
-    // verbatim. Production call sites (agent.publish,
-    // /api/shared-memory/publish) always supply a seal, so they cannot
-    // land in this branch.
+    // verbatim. Production call sites (agent.publish and lifecycle VM
+    // publish routes) always supply a seal, so they cannot land in this branch.
     const publisher = makePublisher();
     await expect(
       publisher.publish({

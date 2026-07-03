@@ -214,7 +214,7 @@ export async function createWmAssertion(opts: {
   contextGraphId: string;
   name: string;
   quads: PublishQuads[];
-  promote?: boolean;
+  alsoShareSwm?: boolean;
   subGraphName?: string;
   nodeNum?: number;
 }): Promise<{ ok: boolean; status: number; body: string }> {
@@ -228,7 +228,7 @@ export async function createWmAssertion(opts: {
       finalize: true,
       // rc.17 KA-routes-unification: the inline SWM-promote flag is `alsoShareSwm`
       // (the old `promote` is silently ignored → the assertion never reaches SWM).
-      alsoShareSwm: opts.promote ?? false,
+      alsoShareSwm: opts.alsoShareSwm ?? false,
       ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
     }),
   });
@@ -332,7 +332,7 @@ export async function runWmSwmVmPipeline(opts: {
       contextGraphId: opts.contextGraphId,
       name: assertionName,
       quads,
-      promote: false,
+      alsoShareSwm: false,
       nodeNum: opts.nodeNum,
     });
     if (!wm.ok) throw new Error(`WM create failed: ${wm.status} ${wm.body}`);

@@ -919,6 +919,47 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(es.body.status).toBe('completed');
     });
 
+    it('replaces stale KA-scoped named graph draft content on same-name import', async () => {
+      const name = `imp-replace-mixed-${Date.now().toString(36)}`;
+      const namedGraph = 'urn:test:graph:stale-import-replace';
+      const createRes = await createKa(LOCAL, name);
+      expect([200, 201]).toContain(createRes.status);
+
+      const writeRes = await write(LOCAL, name, [
+        {
+          subject: 'urn:test:entity:old-default',
+          predicate: 'http://schema.org/name',
+          object: '"Old Default"',
+          graph: '',
+        },
+        {
+          subject: 'urn:test:entity:old-named',
+          predicate: 'http://schema.org/name',
+          object: '"Old Named"',
+          graph: namedGraph,
+        },
+      ]);
+      expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
+
+      const before = await wmQuads(LOCAL, name);
+      expect(before.status, `before query: ${JSON.stringify(before.body)}`).toBe(200);
+      expect(before.body.quads).toEqual(expect.arrayContaining([
+        expect.objectContaining({ subject: 'urn:test:entity:old-named', graph: namedGraph }),
+      ]));
+
+      const res = await postMultipart(daemon, `/api/knowledge-assets/${name}/wm/import-file`, [
+        { name: 'contextGraphId', value: LOCAL },
+        { name: 'file', filename: 'replacement.md', contentType: 'text/markdown', value: '# Replacement\n\nFresh body.\n' },
+      ]);
+      expect(res.status, `import-file: ${JSON.stringify(res.body)}`).toBe(200);
+
+      const after = await wmQuads(LOCAL, name);
+      expect(after.status, `after query: ${JSON.stringify(after.body)}`).toBe(200);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-default')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-named')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.graph === namedGraph)).toBe(false);
+    });
+
     it('returns the import-file-specific 400 when the file part is missing (not JSON-parsed)', async () => {
       const res = await postMultipart(daemon, '/api/knowledge-assets/imp-nofile/wm/import-file', [
         { name: 'contextGraphId', value: LOCAL },
@@ -1035,64 +1076,16 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
     expect(res.status).toBe(404);
   });
 
-  // ── POST /api/knowledge-assets/publish — explicit-quads one-shot publish ──
-  // The direct-publish route (added in main's #1181/#1182 publish-routing work)
-  // validates the request and resolves the write context graph BEFORE calling
-  // agent.publish. Every guard below is reproduced as a real HTTP round-trip
-  // against the real daemon — no fabricated agent.
-  //
-  // DEVNET-TIER (not single-edge-daemon, documented in the block at the bottom):
-  // the CONFIRMED happy path (200 + positive kaId + on-chain manifest), the 207
-  // mint-but-binding-fails partial, and the 502 tentative-publish cases all need
-  // a real on-chain mint + StorageACK quorum from ≥3 core peers, which an edge
-  // daemon cannot provide — they belong in the devnet tier alongside vm/publish.
-  describe('POST /api/knowledge-assets/publish (direct explicit-quads)', () => {
-    const QUADS = [{ subject: 'ex:A', predicate: 'ex:p', object: '"v"', graph: '' }];
-
-    it('rejects an empty quad array with 400 before publishing', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', { contextGraphId: LOCAL, quads: [] });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/Missing or invalid "quads"/);
-    });
-
-    it('rejects a bare (non-literal, non-IRI) object term with 400 before core SPARQL', async () => {
+  // ── POST /api/knowledge-assets/publish — retired direct publish surface ──
+  describe('POST /api/knowledge-assets/publish (removed)', () => {
+    it('returns a clear 404 pointing callers at the named KA lifecycle', async () => {
       const res = await postJson(daemon, '/api/knowledge-assets/publish', {
         contextGraphId: LOCAL,
-        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'bare string', graph: '' }],
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: '' }],
       });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/RDF object must be a quoted literal term or absolute IRI/);
-    });
-
-    it('rejects a malformed onChainContextGraphId with 400 before direct publish', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: LOCAL,
-        quads: QUADS,
-        onChainContextGraphId: 'not-a-number',
-      });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/Invalid "onChainContextGraphId"/);
-    });
-
-    it('rejects an onChainContextGraphId with no trusted positive on-chain mapping (fail-closed)', async () => {
-      // LOCAL is a locally-created CG that was never registered on-chain, so the
-      // daemon has no trusted positive mapping to validate the override against.
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: LOCAL,
-        quads: QUADS,
-        onChainContextGraphId: '7',
-      });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/no trusted positive on-chain mapping/);
-    });
-
-    it('fails closed with CONTEXT_GRAPH_NOT_FOUND when the write preflight cannot resolve the CG', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: 'no-such-publish-cg',
-        quads: QUADS,
-      });
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
+      expect(String(res.body.error)).toContain('/api/knowledge-assets/:name/vm/publish');
     });
   });
 });

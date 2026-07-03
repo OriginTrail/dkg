@@ -134,8 +134,8 @@ async function benchmarkSessionList(sessionCount: number): Promise<SessionBenchR
         if (sparql.includes('VALUES ?session')) return { bindings: messages };
         return { bindings: [] };
       },
-      writeToWorkspace: async () => ({}),
-      publishFromSharedMemory: async () => ({}),
+      createAssertion: async () => ({ assertionUri: 'urn:bench:assertion', alreadyExists: true }),
+      writeAssertion: async (_contextGraphId: string, _name: string, quads: any[]) => ({ written: quads.length }),
       createContextGraph: async () => undefined,
       listContextGraphs: async () => [{ id: MEMORY_CONTEXT_GRAPH, name: 'Agent Memory' }],
     },

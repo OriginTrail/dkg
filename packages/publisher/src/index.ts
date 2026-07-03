@@ -3,6 +3,14 @@ export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } fro
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export {
+  ASSERTION_NAMED_GRAPH_PREFIX,
+  assertionOriginalGraph,
+  assertionScopedGraphUri,
+  listAssertionScopedGraphUris,
+  listGraphsByPrefix,
+  type AssertionScopedGraphRootMode,
+} from './assertion-scoped-graphs.js';
+export {
   canonicalPublishPayload,
   type CanonicalPublishPayload,
   type CanonicalManifestEntry,
@@ -118,9 +126,12 @@ export {
   type LiftJobChainRecoverableState,
   type LiftJobHex,
   type LiftJobBigInt,
+  type KnowledgeAssetVmPublishRequest,
   type LiftJobTimeoutMetadata,
   type LiftJobFailurePolicy,
   type LiftAuthorityProof,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
   type LiftRequest,
   type LiftRequestAuthorSeal,
   type LiftJobTimestamps,
@@ -166,9 +177,13 @@ export {
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
 export {
+  AsyncLiftJobConflictError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishPreflightInput,
+  type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
@@ -223,6 +238,10 @@ export {
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
+export {
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+} from './async-lift-publisher-utils.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,
