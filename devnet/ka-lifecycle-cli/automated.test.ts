@@ -9,9 +9,13 @@
  *   3. Stepwise `create -> write -> finalize -> share-async` drains through the
  *      SWM share-job surface, then `pull-from/query/discard` works on the
  *      reopened WM draft.
- *   4. `dkg publisher publish-async <context-graph> <name>` remains an
+ *   4. An SWM-only KA can be reopened from SWM, edited, finalized, and
+ *      re-shared without VM publishing.
+ *   5. A VM-published KA can be reopened from VM, edited, finalized, re-shared,
+ *      and published again as an update.
+ *   6. `dkg publisher publish-async <context-graph> <name>` remains an
  *      operational alias for async VM publish.
- *   5. Removed direct/legacy surfaces stay removed.
+ *   7. Removed direct/legacy surfaces stay removed.
  *
  * Preconditions:
  *   pnpm run build
@@ -260,6 +264,29 @@ async function waitForPublisherJobFinalized(
   return job;
 }
 
+async function publishKnowledgeAssetAsyncAndWait(
+  node: DevnetNode,
+  contextGraphId: string,
+  name: string,
+  label: string,
+  subGraphName?: string,
+): Promise<PublisherJobView> {
+  const args = ['ka', 'publish-async', name, '-c', contextGraphId, '--json'];
+  if (subGraphName) args.push('--sub-graph-name', subGraphName);
+
+  const publish = await runDkgCli(node, args, 60_000);
+  expectCliOk(publish, label);
+  const body = parseLastJsonBlock(publish.stdout, `${label} stdout`);
+  expect(body.jobId, `${label} response: ${publish.stdout}`).toBeTruthy();
+  expect(body.status).toBe('accepted');
+
+  return waitForPublisherJobFinalized(node, String(body.jobId), {
+    contextGraphId,
+    name,
+    ...(subGraphName ? { subGraphName } : {}),
+  });
+}
+
 function queryResultHasSubject(result: KnowledgeAssetQueryResult | null, subject: string): boolean {
   return (result?.quads ?? []).some((quad) => quad.subject === subject);
 }
@@ -383,31 +410,7 @@ describe('KA lifecycle CLI on devnet', () => {
       subGraphName,
     });
 
-    const publish = await runDkgCli(
-      node,
-      [
-        'ka',
-        'publish-async',
-        name,
-        '--context-graph-id',
-        contextGraphId,
-        '--sub-graph-name',
-        subGraphName,
-        '--json',
-      ],
-      60_000,
-    );
-    expectCliOk(publish, 'ka publish-async');
-    const body = parseLastJsonBlock(publish.stdout, 'ka publish-async stdout');
-    expect(body.jobId, `publish-async response: ${publish.stdout}`).toBeTruthy();
-    expect(body.status).toBe('accepted');
-    const publishJobId = String(body.jobId);
-
-    await waitForPublisherJobFinalized(node, publishJobId, {
-      contextGraphId,
-      name,
-      subGraphName,
-    });
+    await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async', subGraphName);
     await assertVerifiableSubject(node, contextGraphId, subject, 'one-shot shared', subGraphName);
   });
 
@@ -473,6 +476,102 @@ describe('KA lifecycle CLI on devnet', () => {
     expectCliOk(discarded, 'ka discard');
     expect(parseLastJsonBlock(discarded.stdout, 'ka discard stdout').discarded).toBe(true);
     await assertWorkingMemorySubjectAbsent(node, contextGraphId, name, subject, 'ka query after final discard');
+  });
+
+  it('updates an SWM-only KA by reopening from SWM and re-sharing the edited WM draft', async () => {
+    const { node, contextGraphId } = suite;
+    const name = unique('swm-update');
+    const initial = writeNtFixture(name, 'swm update initial');
+    const update = writeNtFixture(`${name}-update`, 'swm update edited');
+
+    expectCliOk(
+      await runDkgCli(
+        node,
+        ['ka', 'create', name, '-c', contextGraphId, '--input-file', initial.filePath, '--share'],
+        180_000,
+      ),
+      'ka create --share for SWM update',
+    );
+    await assertSharedSubject(node, contextGraphId, initial.subject, 'swm update initial');
+    await assertSubjectNotVisible(node, contextGraphId, update.subject, {
+      view: 'verifiable-memory',
+      label: 'VM before SWM-only update publish',
+    });
+
+    expectCliOk(
+      await runDkgCli(
+        node,
+        ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', 'swm', '--on-conflict', 'replace', '--json'],
+        60_000,
+      ),
+      'ka pull-from swm for SWM update',
+    );
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, initial.subject, 'SWM update WM after pull-from');
+
+    expectCliOk(
+      await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
+      'ka write SWM update',
+    );
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, update.subject, 'SWM update WM after edit');
+
+    expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), 'ka finalize SWM update');
+    expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), 'ka share SWM update');
+
+    await assertSharedSubject(node, contextGraphId, update.subject, 'swm update edited');
+    await assertSubjectNotVisible(node, contextGraphId, update.subject, {
+      view: 'verifiable-memory',
+      label: 'VM after SWM-only update',
+    });
+  });
+
+  it('updates a VM-published KA by reopening from VM and publishing the edited version', async () => {
+    const { node, contextGraphId } = suite;
+    const name = unique('vm-update');
+    const initial = writeNtFixture(name, 'vm update initial');
+    const update = writeNtFixture(`${name}-update`, 'vm update edited');
+
+    expectCliOk(
+      await runDkgCli(
+        node,
+        ['ka', 'create', name, '-c', contextGraphId, '--input-file', initial.filePath, '--share'],
+        180_000,
+      ),
+      'ka create --share for VM update',
+    );
+    await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async initial VM update');
+    await assertVerifiableSubject(node, contextGraphId, initial.subject, 'vm update initial');
+    await assertSubjectNotVisible(node, contextGraphId, update.subject, {
+      view: 'verifiable-memory',
+      label: 'VM before edited publish',
+    });
+
+    expectCliOk(
+      await runDkgCli(
+        node,
+        ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', 'vm', '--on-conflict', 'replace', '--json'],
+        60_000,
+      ),
+      'ka pull-from vm for VM update',
+    );
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, initial.subject, 'VM update WM after pull-from');
+
+    expectCliOk(
+      await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
+      'ka write VM update',
+    );
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, update.subject, 'VM update WM after edit');
+
+    expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), 'ka finalize VM update');
+    expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), 'ka share VM update');
+
+    await assertSharedSubject(node, contextGraphId, update.subject, 'vm update edited');
+    await assertSubjectNotVisible(node, contextGraphId, update.subject, {
+      view: 'verifiable-memory',
+      label: 'VM before edited publish after re-share',
+    });
+
+    await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async edited VM update');
+    await assertVerifiableSubject(node, contextGraphId, update.subject, 'vm update edited');
   });
 
   it('publisher publish-async remains an operational alias for named KA VM publish', async () => {
