@@ -331,6 +331,48 @@ async function assertWorkingMemorySubjectAbsent(
   expect(queryResultHasSubject(result, subject), `${label} query output: ${JSON.stringify(result)}`).toBe(false);
 }
 
+async function reopenEditFinalizeAndShare(
+  node: DevnetNode,
+  contextGraphId: string,
+  name: string,
+  layer: 'swm' | 'vm',
+  initialSubject: string,
+  update: { filePath: string; subject: string },
+  opts: { flowLabel: string; updateValue: string },
+): Promise<void> {
+  expectCliOk(
+    await runDkgCli(
+      node,
+      ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', layer, '--on-conflict', 'replace', '--json'],
+      60_000,
+    ),
+    `ka pull-from ${layer} for ${opts.flowLabel}`,
+  );
+  await assertWorkingMemorySubjectPresent(
+    node,
+    contextGraphId,
+    name,
+    initialSubject,
+    `${opts.flowLabel} WM after pull-from`,
+  );
+
+  expectCliOk(
+    await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
+    `ka write ${opts.flowLabel}`,
+  );
+  await assertWorkingMemorySubjectPresent(
+    node,
+    contextGraphId,
+    name,
+    update.subject,
+    `${opts.flowLabel} WM after edit`,
+  );
+
+  expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), `ka finalize ${opts.flowLabel}`);
+  expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), `ka share ${opts.flowLabel}`);
+  await assertSharedSubject(node, contextGraphId, update.subject, opts.updateValue);
+}
+
 beforeAll(async () => {
   const detected = await detectDevnet(6);
   if (!detected) {
@@ -493,31 +535,15 @@ describe('KA lifecycle CLI on devnet', () => {
       'ka create --share for SWM update',
     );
     await assertSharedSubject(node, contextGraphId, initial.subject, 'swm update initial');
-    await assertSubjectNotVisible(node, contextGraphId, update.subject, {
+    await assertSubjectNotVisible(node, contextGraphId, initial.subject, {
       view: 'verifiable-memory',
-      label: 'VM before SWM-only update publish',
+      label: 'VM after initial SWM-only share',
     });
 
-    expectCliOk(
-      await runDkgCli(
-        node,
-        ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', 'swm', '--on-conflict', 'replace', '--json'],
-        60_000,
-      ),
-      'ka pull-from swm for SWM update',
-    );
-    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, initial.subject, 'SWM update WM after pull-from');
-
-    expectCliOk(
-      await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
-      'ka write SWM update',
-    );
-    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, update.subject, 'SWM update WM after edit');
-
-    expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), 'ka finalize SWM update');
-    expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), 'ka share SWM update');
-
-    await assertSharedSubject(node, contextGraphId, update.subject, 'swm update edited');
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'swm', initial.subject, update, {
+      flowLabel: 'SWM update',
+      updateValue: 'swm update edited',
+    });
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM after SWM-only update',
@@ -545,26 +571,10 @@ describe('KA lifecycle CLI on devnet', () => {
       label: 'VM before edited publish',
     });
 
-    expectCliOk(
-      await runDkgCli(
-        node,
-        ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', 'vm', '--on-conflict', 'replace', '--json'],
-        60_000,
-      ),
-      'ka pull-from vm for VM update',
-    );
-    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, initial.subject, 'VM update WM after pull-from');
-
-    expectCliOk(
-      await runDkgCli(node, ['ka', 'write', name, '-c', contextGraphId, '--input-file', update.filePath], 60_000),
-      'ka write VM update',
-    );
-    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, update.subject, 'VM update WM after edit');
-
-    expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), 'ka finalize VM update');
-    expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), 'ka share VM update');
-
-    await assertSharedSubject(node, contextGraphId, update.subject, 'vm update edited');
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'vm', initial.subject, update, {
+      flowLabel: 'VM update',
+      updateValue: 'vm update edited',
+    });
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM before edited publish after re-share',
