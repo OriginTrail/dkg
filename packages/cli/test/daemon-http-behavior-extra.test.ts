@@ -1004,9 +1004,15 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   async function runRegisterRouteCaptureOpts(
     body: Record<string, unknown>,
     agentOverrides: Record<string, any>,
-  ): Promise<{ status: number; json: any; registerOpts: any }> {
+  ): Promise<{ status: number; json: any; registerOpts: any; resolverCalls: Array<[string, any]> }> {
     const contextGraphId = String(body.id ?? body.contextGraphId);
     let registerOpts: any = null;
+    const resolverCalls: Array<[string, any]> = [];
+    // Wrap any per-case resolver override so we always capture the (cgId, opts)
+    // the route feeds `resolveRegistrationOptions` — proving it passes the
+    // resolved CG id + the body publishPolicy (dropping either is the #1085
+    // policy-drop regression), not merely reacting to a canned result.
+    const { resolveRegistrationOptions: overrideResolver, ...restOverrides } = agentOverrides;
     const agent: any = {
       listContextGraphs: async () => [{
         id: contextGraphId,
@@ -1019,18 +1025,21 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         registerOpts = opts;
         return { onChainId: '42', txHash: '0x' + 'ab'.repeat(32) };
       },
-      // PR #1423 R3 — the route resolves the effective registration options on
-      // the typed facade (`resolveRegistrationOptions`). These ROUTE tests stub
-      // that facade DIRECTLY (each case injects a canned result via
-      // `agentOverrides`) so they assert ROUTE behavior against the resolver's
-      // output — they do NOT re-implement the stored-policy read. The resolver's
-      // own semantics (body-wins, rehydrate-on-omit, warn-on-read-error) are
-      // unit-tested at the agent layer in pca-v10-facade.test.ts.
-      resolveRegistrationOptions: async () => ({
-        publishPolicy: undefined,
-        publishAuthorityAccountId: undefined,
-      }),
-      ...agentOverrides,
+      ...restOverrides,
+      // PR #1423 R3/R6 — the route resolves the effective registration options
+      // on the typed facade (`resolveRegistrationOptions`); these ROUTE tests
+      // stub that facade DIRECTLY (per-case canned result) AND record its args,
+      // so they assert ROUTE behavior against the resolver's output without
+      // re-implementing the stored-policy read (whose own body-wins /
+      // rehydrate-on-omit / warn-on-read-error semantics live in
+      // pca-v10-facade.test.ts). The wrapper stays AFTER `...restOverrides` so
+      // a case override cannot drop the arg capture.
+      resolveRegistrationOptions: async (cgId: string, opts?: any) => {
+        resolverCalls.push([cgId, opts]);
+        return overrideResolver
+          ? overrideResolver(cgId, opts)
+          : { publishPolicy: undefined, publishAuthorityAccountId: undefined };
+      },
     };
     const routeServer = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -1057,7 +1066,7 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      return { status: resp.status, json: await resp.json(), registerOpts };
+      return { status: resp.status, json: await resp.json(), registerOpts, resolverCalls };
     } finally {
       await new Promise<void>((resolve, reject) => routeServer.close((e) => (e ? reject(e) : resolve())));
     }
@@ -1076,6 +1085,22 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     expect(registerOpts.publishPolicy).toBe(0);
     // pcaAccountId is explicit-only — nothing from the resolver is forwarded.
     expect(registerOpts.publishAuthorityAccountId).toBeUndefined();
+  });
+
+  it('#1085 /register feeds the resolver the resolved cgId + body publishPolicy (neither dropped)', async () => {
+    const { status, resolverCalls, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'body-policy-cg', publishPolicy: 1 },
+      // Echo the body policy the route hands us, proving it was actually passed
+      // through (not the raw body value read a second time).
+      { resolveRegistrationOptions: async (_cg: string, opts: any) => ({ publishPolicy: opts?.bodyPublishPolicy, publishAuthorityAccountId: undefined }) },
+    );
+    expect(status).toBe(200);
+    // The route MUST feed the resolver the resolved CG id AND the request body's
+    // publishPolicy. A regression calling resolveRegistrationOptions(cgId, {}) —
+    // the exact #1085 policy-drop — or querying the wrong CG fails here.
+    expect(resolverCalls).toEqual([['body-policy-cg', { bodyPublishPolicy: 1 }]]);
+    // …and that effective policy then reaches the chain layer.
+    expect(registerOpts.publishPolicy).toBe(1);
   });
 
   it('#1085 explicit pcaAccountId + effective OPEN policy → 400 before registerContextGraph', async () => {

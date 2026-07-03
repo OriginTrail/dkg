@@ -42,18 +42,27 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
     expect(registerCalls.length).toBe(0); // idempotent — no second mint
   });
 
-  it('(a) forwards the stored publishPolicy / publishAuthorityAccountId + callerAgentAddress into registerContextGraph', async () => {
+  it('(a) asks the resolver about the PUBLISH cg id with NO body policy, then forwards its publishPolicy / publishAuthorityAccountId + callerAgentAddress into registerContextGraph', async () => {
     const registerCalls: Array<[string, any]> = [];
+    const resolverCalls: any[][] = [];
     const stub = makeStub({
       getContextGraphOnChainId: async () => null, // not yet registered
-      resolveRegistrationOptions: async () => ({
-        publishPolicy: 1,
-        publishAuthorityAccountId: '0x00000000000000000000000000000000000000ab',
-      }),
+      resolveRegistrationOptions: async (...a: any[]) => {
+        resolverCalls.push(a);
+        return {
+          publishPolicy: 1,
+          publishAuthorityAccountId: '0x00000000000000000000000000000000000000ab',
+        };
+      },
       registerContextGraph: async (cgId: string, regOpts: any) => { registerCalls.push([cgId, regOpts]); },
     });
 
     await callEnsure(stub, 'cg-stored', { callerAgentAddress: '0x00000000000000000000000000000000000000c1' });
+
+    // The publish path has no request body, so it must ask the resolver about
+    // the exact publish contextGraphId and pass NO body policy — a regression
+    // that queried the wrong CG (or injected a body policy) fails here.
+    expect(resolverCalls).toEqual([['cg-stored']]);
 
     expect(registerCalls.length).toBe(1);
     const [cgId, regOpts] = registerCalls[0];
