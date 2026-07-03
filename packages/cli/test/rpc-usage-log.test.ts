@@ -51,8 +51,8 @@ describe('composite daemon source — agent + publisher-runtime windows merged a
     // the undercount the review flagged (per-wallet publisher adapters were
     // never drained).
     let runtime: { drainRpcUsage: () => { byMethod: Record<string, number>; total: number; lifetimeTotal: number } | undefined } | null = null;
-    const agentLike = { drainChainRpcUsage: () => ({ byMethod: { eth_call: 2 }, total: 2, lifetimeTotal: 2 }) };
-    const source = { drainChainRpcUsage: () => mergeRpcUsageWindows(agentLike.drainChainRpcUsage(), runtime?.drainRpcUsage()) };
+    const agentLike = { drainRpcUsage: () => ({ byMethod: { eth_call: 2 }, total: 2, lifetimeTotal: 2 }) };
+    const source = { drainRpcUsage: () => mergeRpcUsageWindows(agentLike.drainRpcUsage(), runtime?.drainRpcUsage()) };
 
     const before: string[] = [];
     emitRpcUsage(source, (l) => before.push(l), 60, 'base:8453');
@@ -72,7 +72,7 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
   it('drains the agent source and emits one line per method', () => {
     const emitted: string[] = [];
     const agentLike = {
-      drainChainRpcUsage: () => ({ byMethod: { eth_call: 12, eth_getLogs: 3 }, total: 15, lifetimeTotal: 15 }),
+      drainRpcUsage: () => ({ byMethod: { eth_call: 12, eth_getLogs: 3 }, total: 15, lifetimeTotal: 15 }),
     };
     const n = emitRpcUsage(agentLike, (l) => emitted.push(l), 60, 'base:8453');
     expect(n).toBe(2);
@@ -82,18 +82,18 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
 
   it('emits nothing for an empty window, a missing capability, or no source', () => {
     const emitted: string[] = [];
-    expect(emitRpcUsage({ drainChainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 9 }) }, (l) => emitted.push(l), 60)).toBe(0);
-    expect(emitRpcUsage({ drainChainRpcUsage: () => undefined }, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitRpcUsage({ drainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 9 }) }, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitRpcUsage({ drainRpcUsage: () => undefined }, (l) => emitted.push(l), 60)).toBe(0);
     expect(emitRpcUsage({}, (l) => emitted.push(l), 60)).toBe(0); // adapter without the capability
     expect(emitRpcUsage(undefined, (l) => emitted.push(l), 60)).toBe(0);
     expect(emitted).toEqual([]);
   });
 
   it('never throws — a throwing drain or emitter is swallowed (accounting must not break the node)', () => {
-    expect(emitRpcUsage({ drainChainRpcUsage: () => { throw new Error('boom'); } }, () => {}, 60)).toBe(0);
+    expect(emitRpcUsage({ drainRpcUsage: () => { throw new Error('boom'); } }, () => {}, 60)).toBe(0);
     expect(
       emitRpcUsage(
-        { drainChainRpcUsage: () => ({ byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 }) },
+        { drainRpcUsage: () => ({ byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 }) },
         () => { throw new Error('sink down'); },
         60,
       ),
@@ -101,17 +101,17 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
   });
 });
 
-describe('emitRpcUsage ← DKGAgent.drainChainRpcUsage — the REAL daemon boundary end-to-end', () => {
+describe('emitRpcUsage ← DKGAgent.drainRpcUsage — the REAL daemon boundary end-to-end', () => {
   it('adapter window → real agent delegation → rpc_usage lines', async () => {
     // The exact wiring the daemon uses: the source is a DKGAgent whose
-    // drainChainRpcUsage (REAL inherited method, prototype-invoked with a
+    // drainRpcUsage (REAL inherited method, prototype-invoked with a
     // chain-bearing `this`) delegates to the adapter capability. A broken
     // delegation would emit zero lines here and fail this test — closing the
     // gap where chain-side and formatter tests both pass but the daemon signal
     // is silently dead.
     const { DKGAgent } = await import('@origintrail-official/dkg-agent');
     const chain = { drainRpcUsage: () => ({ byMethod: { eth_call: 11 }, total: 11, lifetimeTotal: 11 }) };
-    const agentLike = { drainChainRpcUsage: () => DKGAgent.prototype.drainChainRpcUsage.call({ chain } as never) };
+    const agentLike = { drainRpcUsage: () => DKGAgent.prototype.drainRpcUsage.call({ chain } as never) };
     const emitted: string[] = [];
     const n = emitRpcUsage(agentLike, (l) => emitted.push(l), 60, 'base:8453');
     expect(n).toBe(1);
@@ -127,7 +127,7 @@ describe('startRpcUsageTelemetry — the full scheduling lifecycle (timer + shut
     const emitted: string[] = [];
     let next = { byMethod: { eth_call: 5 }, total: 5, lifetimeTotal: 5 };
     const handle = startRpcUsageTelemetry({
-      source: { drainChainRpcUsage: () => next },
+      source: { drainRpcUsage: () => next },
       emit: (l) => emitted.push(l),
       chainId: 'base:8453',
       windowSeconds: 60,
@@ -153,7 +153,7 @@ describe('startRpcUsageTelemetry — the full scheduling lifecycle (timer + shut
     vi.useFakeTimers();
     const emitted: string[] = [];
     const handle = startRpcUsageTelemetry({
-      source: { drainChainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 3 }) },
+      source: { drainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 3 }) },
       emit: (l) => emitted.push(l),
       windowSeconds: 60,
     });

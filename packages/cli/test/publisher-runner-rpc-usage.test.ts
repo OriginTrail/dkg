@@ -19,9 +19,14 @@ import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
 
-// Hardhat dev key #0 — loopback only, never touches a real network.
-const WALLET_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-const WALLET_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
+// Hardhat dev keys #0 and #1 — loopback only, never touch a real network.
+// TWO wallets so the merge across ALL per-wallet adapters is what's proven:
+// a regression to draining only chainAdapters[0] undercounts and fails the
+// server-hit equality below.
+const WALLETS = [
+  { address: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266', privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80' },
+  { address: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', privateKey: '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d' },
+];
 const HUB = '0x0000000000000000000000000000000000000001';
 // eth_call answer: 32 bytes that decode BOTH as a non-zero address (Hub
 // contract resolution during adapter init must not see ZeroAddress) and as a
@@ -75,12 +80,12 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     runtime = null; store = null; loopback = null; dataDir = null;
   });
 
-  it('exposes the per-wallet adapters’ raw request counts (== loopback hits); drain resets', async () => {
+  it('merges BOTH per-wallet adapters’ raw request counts (== loopback hits); drain resets', async () => {
     loopback = await startLoopback();
     dataDir = await mkdtemp(join(tmpdir(), 'pub-rpc-usage-'));
     await writeFile(
       join(dataDir, 'publisher-wallets.json'),
-      JSON.stringify({ wallets: [{ address: WALLET_ADDR, privateKey: WALLET_PK }] }),
+      JSON.stringify({ wallets: WALLETS }),
     );
     store = await createTripleStore({ backend: 'oxigraph' });
 
@@ -91,12 +96,15 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
       chainBase: { rpcUrl: loopback.url, hubAddress: HUB, chainId: 'evm:31337' },
     });
 
-    // Constructing the runtime performed real RPC through the per-wallet
-    // adapter (identity lookup et al). The drained window must EQUAL what the
-    // loopback actually received — total and per method.
+    // Constructing the runtime performed real RPC through BOTH per-wallet
+    // adapters (identity lookup et al). The drained window must EQUAL what
+    // the loopback actually received — total and per method — which only
+    // holds if EVERY adapter's tracker is merged (each wallet's identity
+    // lookups bill separately).
+    expect(runtime.walletIds).toHaveLength(WALLETS.length);
     const usage = runtime.drainRpcUsage();
     expect(usage).toBeDefined();
-    expect(usage!.total).toBeGreaterThanOrEqual(1); // non-vacuous
+    expect(usage!.total).toBeGreaterThanOrEqual(2); // non-vacuous: both adapters made calls
     expect(usage!.total).toBe(loopback.totalHits());
     for (const [method, count] of Object.entries(usage!.byMethod)) {
       expect(loopback.hits(method), `method ${method}`).toBe(count);

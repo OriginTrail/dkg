@@ -88,6 +88,16 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
 }
 
 /**
+ * THE drain contract — one name for one concept, wherever a usage window can
+ * be drained from: a chain adapter (optional capability), an agent (delegates
+ * to its adapter), a publisher runtime (merges its per-wallet adapters), or
+ * the daemon's composite source. Deltas since the previous drain.
+ */
+export interface RpcUsageDrainable {
+  drainRpcUsage(): RpcUsageWindow | undefined;
+}
+
+/**
  * Merge usage windows from multiple trackers into one (pure model operation:
  * per-method sums, summed totals, summed lifetimes). A process can own several
  * chain adapters with independent trackers — one per configured RPC consumer

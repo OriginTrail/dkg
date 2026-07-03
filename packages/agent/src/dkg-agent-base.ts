@@ -1407,14 +1407,12 @@ export class DKGAgentBase {
   }
 
   /**
-   * Drain the chain adapter's raw JSON-RPC usage window (delta since the
-   * previous drain — the provider-billing unit). Returns undefined when the
-   * adapter lacks the optional `drainRpcUsage` capability. This is the explicit
-   * boundary the daemon's minutely `rpc_usage` telemetry log line consumes —
-   * it keeps `chain` protected instead of the daemon reaching through a cast
-   * to an adapter-internal method.
+   * RpcUsageDrainable: drain the chain adapter's raw JSON-RPC usage window
+   * (delta since the previous drain — the provider-billing unit). Returns
+   * undefined when the adapter lacks the optional capability. Keeps `chain`
+   * protected instead of the daemon reaching through a cast.
    */
-  drainChainRpcUsage(): RpcUsageWindow | undefined {
+  drainRpcUsage(): RpcUsageWindow | undefined {
     return this.chain.drainRpcUsage?.();
   }
 }

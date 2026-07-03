@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Review coverage gap (PR #1409): the agent's `drainChainRpcUsage()` is THE
+ * Review coverage gap (PR #1409): the agent's `drainRpcUsage()` is THE
  * boundary the daemon telemetry consumes (`startRpcUsageTelemetry({ source:
  * agent })`), and a delegation regression here would silence every rpc_usage
  * log while the chain-side and cli-side tests stayed green. These drive the
@@ -13,9 +13,9 @@ import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
-const drain = DKGAgentBase.prototype.drainChainRpcUsage;
+const drain = DKGAgentBase.prototype.drainRpcUsage;
 
-describe('DKGAgent.drainChainRpcUsage — the adapter→agent telemetry boundary', () => {
+describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', () => {
   it('delegates to the adapter and passes the window through VERBATIM', () => {
     const window = { byMethod: { eth_call: 42, eth_getLogs: 7 }, total: 49, lifetimeTotal: 49 };
     const out = drain.call({ chain: { drainRpcUsage: () => window } } as never);
@@ -36,9 +36,9 @@ describe('DKGAgent.drainChainRpcUsage — the adapter→agent telemetry boundary
   it('is inherited by the composed DKGAgent class (the daemon consumes agent, not the base)', () => {
     // The daemon passes the DKGAgent instance as the telemetry source — the
     // method must exist on the composed class's prototype chain.
-    expect(typeof DKGAgent.prototype.drainChainRpcUsage).toBe('function');
+    expect(typeof DKGAgent.prototype.drainRpcUsage).toBe('function');
     const window = { byMethod: { eth_sendRawTransaction: 3 }, total: 3, lifetimeTotal: 3 };
-    const out = DKGAgent.prototype.drainChainRpcUsage.call({ chain: { drainRpcUsage: () => window } } as never);
+    const out = DKGAgent.prototype.drainRpcUsage.call({ chain: { drainRpcUsage: () => window } } as never);
     expect(out).toBe(window);
   });
 });

@@ -1,21 +1,15 @@
 /**
- * Formats the minutely `rpc_usage` telemetry log lines — the "RPC credit burn"
- * signal (incident: a node spent ~$200 of RPC credits in a day with nothing
- * measuring it). The chain adapter counts every RAW JSON-RPC request at the
- * transport choke-point (the provider-billing unit); the daemon drains that
- * window every minute and emits ONE logfmt line PER METHOD through the normal
- * Logger → redacted-OTLP → Alloy → Loki path, so Grafana can chart RPC usage
- * per node and per method with EXACT sums (each line carries the DELTA for its
- * window, so `sum_over_time` over any range is the true request count).
+ * Formats + schedules the minutely `rpc_usage` telemetry log lines. Invariants
+ * here: one logfmt line per method, DELTA counts (so `sum_over_time` over any
+ * range is the true request count), logfmt-token safety, idle windows emit
+ * nothing. WHY the accounting exists and how it counts lives in ONE place:
+ * packages/chain/src/rpc-usage.ts (module overview).
  *
- * Line shape (logfmt, parsed in LogQL via `| json | line_format "{{.body}}" | logfmt`):
+ * Line shape (parsed in LogQL with `| logfmt` on the log body):
  *   rpc_usage method=eth_call count=42 window_s=60 chain=base:8453
- *
- * Extracted from lifecycle.ts so the format contract the Grafana dashboards
- * depend on is unit-testable.
  */
 
-import type { RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import type { RpcUsageDrainable, RpcUsageWindow } from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
@@ -42,10 +36,8 @@ export function formatRpcUsageLines(
   return lines;
 }
 
-/** The drain capability the daemon consumes (DKGAgent.drainChainRpcUsage). */
-export interface RpcUsageSource {
-  drainChainRpcUsage?: () => RpcUsageWindow | undefined;
-}
+/** What the daemon drains: anything (partially) implementing the shared contract. */
+export type RpcUsageSource = Partial<RpcUsageDrainable>;
 
 /**
  * Drain the source's RPC-usage window and emit one `rpc_usage` line per method
@@ -61,7 +53,7 @@ export function emitRpcUsage(
   chainId?: string,
 ): number {
   try {
-    const usage = source?.drainChainRpcUsage?.();
+    const usage = source?.drainRpcUsage?.();
     if (!usage || usage.total <= 0) return 0;
     const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
     for (const line of lines) emit(line);

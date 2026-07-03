@@ -13,12 +13,7 @@ export interface PublisherRuntime {
   readonly walletIds: string[];
   readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
-  /**
-   * Drain the merged raw-RPC usage window across every per-wallet chain
-   * adapter this runtime owns. The daemon merges this with the agent
-   * adapter's window so publish-transaction RPC (the highest credit-burn
-   * path) is included in the minutely rpc_usage accounting.
-   */
+  /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
   readonly drainRpcUsage: () => RpcUsageWindow | undefined;
 }
 
