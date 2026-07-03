@@ -6,7 +6,7 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { PcaAgentConfirmation } from '@origintrail-official/dkg-agent';
+import type { PcaAgentConfirmation } from './pca-confirmation-wire.js';
 
 /**
  * #1346 — the register-agent advisory fields on the wire. A CURRENT daemon

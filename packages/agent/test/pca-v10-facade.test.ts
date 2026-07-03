@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { DKGAgent, pcaConfirmationToWire } from '../src/index.js';
+import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter, NoChainAdapter, PcaUnavailableError } from '@origintrail-official/dkg-chain';
 
 async function makeAgent(chain: MockChainAdapter | NoChainAdapter): Promise<DKGAgent> {
@@ -211,8 +211,22 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory outcom
     return { agent: await makeAgent(chain), probes: () => n, calls: () => calls };
   }
 
-  const confirm = (agent: DKGAgent) =>
-    agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR);
+  // R9 (9-C) — drive the confirm through FAKE timers so the private bounded
+  // backoff (300ms) doesn't add real wall-clock: the outcome transition matrix
+  // is exercised with controlled time, while the facade still exposes no timing
+  // knobs. The agent is created (real timers) before we fake, so only the
+  // confirm's own setTimeout is advanced; a `confirmed`/`unsupported` outcome
+  // returns on the first probe (no pending timer → the advance is a no-op).
+  const confirm = async (agent: DKGAgent): Promise<string> => {
+    vi.useFakeTimers();
+    try {
+      const p = agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR);
+      await vi.advanceTimersByTimeAsync(1000); // flush the ≤2 bounded backoffs + interleaved microtasks
+      return await p;
+    } finally {
+      vi.useRealTimers();
+    }
+  };
 
   it('probe true → "confirmed" in a single probe, with the EXACT (accountId, agent)', async () => {
     const { agent, probes, calls } = await makeProbeAgent([true]);
@@ -266,16 +280,5 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory outcom
   it('no probe surface (real NoChainAdapter) → "unsupported"', async () => {
     const agent = await makeAgent(new NoChainAdapter());
     expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR)).toBe('unsupported');
-  });
-});
-
-// R8 (8-B) — the wire advisory fields are DERIVED from the single outcome at the
-// HTTP boundary; pin that exhaustive mapping directly.
-describe('pcaConfirmationToWire (outcome → wire advisory fields)', () => {
-  it('maps each outcome to its coherent wire shape', () => {
-    expect(pcaConfirmationToWire('confirmed')).toEqual({ adapterSupported: true, verified: true });
-    expect(pcaConfirmationToWire('not_observed')).toEqual({ adapterSupported: true, verified: false });
-    expect(pcaConfirmationToWire('inconclusive')).toEqual({ adapterSupported: true, verified: null });
-    expect(pcaConfirmationToWire('unsupported')).toEqual({ adapterSupported: false, verified: null });
   });
 });

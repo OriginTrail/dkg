@@ -27,6 +27,10 @@ export default defineConfig({
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
           'test/daemon-context-graph-register.test.ts',
+          // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
+          // rendering (in-process, mocked ApiClient). No hardhat/daemon.
+          'test/pca-confirmation-wire.test.ts',
+          'test/pca-command-render.test.ts',
           'test/auth.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of

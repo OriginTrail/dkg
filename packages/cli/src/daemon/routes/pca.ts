@@ -18,7 +18,7 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
-import { pcaConfirmationToWire } from '@origintrail-official/dkg-agent';
+import { pcaConfirmationToWire } from '../../pca-confirmation-wire.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';

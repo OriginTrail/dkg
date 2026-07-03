@@ -394,6 +394,35 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+/**
+ * #1085 — resolve the effective register-time publishPolicy for the standalone
+ * `/api/context-graph/register` route. Route-LOCAL (deliberately not on the
+ * agent facade): an explicit body value wins; an omitted policy rehydrates the
+ * create-time policy from the canonical `getStoredContextGraphRegistrationOptions`
+ * store reader, read LAZILY (no read when the body already decided it). The read
+ * is BEST-EFFORT at this route boundary — a failure must not fail the
+ * registration, so it warns and falls back to the request/default policy.
+ * (The publish auto-register path reads the same store reader directly and
+ * stays FAIL-LOUD — it must never register under the wrong on-chain policy.)
+ * The stored PCA id is deliberately not consulted here: pcaAccountId is
+ * explicit-only for `/register`.
+ */
+async function resolveRegisterPublishPolicy(
+  agent: { getStoredContextGraphRegistrationOptions(contextGraphId: string): Promise<{ publishPolicy?: number }> },
+  contextGraphId: string,
+  explicitPublishPolicy: number | undefined,
+): Promise<number | undefined> {
+  if (explicitPublishPolicy !== undefined) return explicitPublishPolicy; // body wins — no read
+  try {
+    return (await agent.getStoredContextGraphRegistrationOptions(contextGraphId)).publishPolicy;
+  } catch (err) {
+    console.warn(
+      `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${contextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+    );
+    return explicitPublishPolicy;
+  }
+}
+
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -659,28 +688,15 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
-      // #1085 — effective register-time publishPolicy: an explicit body value
-      // wins; an omitted policy rehydrates the create-time policy persisted by
-      // createContextGraph, read LAZILY from the canonical store reader (no read
-      // when the body already decided the policy). The read is best-effort at
-      // THIS call site — a failure must not fail the registration, so we warn
-      // and fall back to the request/default policy. (The publish auto-register
-      // path reads the same store reader but stays fail-loud instead — it must
-      // never register a CG under the wrong on-chain policy.) The stored PCA id
-      // is deliberately NOT consulted here: pcaAccountId is explicit-only for
-      // /register.
-      let effectivePublishPolicy = publishPolicy;
-      if (publishPolicy === undefined) {
-        try {
-          const stored = await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId);
-          effectivePublishPolicy = stored.publishPolicy;
-        } catch (err) {
-          console.warn(
-            `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
-          );
-          effectivePublishPolicy = publishPolicy;
-        }
-      }
+      // #1085 — effective register-time publishPolicy behind a named route-local
+      // boundary (body-wins, lazy store rehydrate, best-effort fallback). See
+      // resolveRegisterPublishPolicy above; the publish auto-register path reads
+      // the same store reader but stays fail-loud.
+      const effectivePublishPolicy = await resolveRegisterPublishPolicy(
+        agent,
+        resolvedContextGraphId,
+        publishPolicy,
+      );
       // The pcaAccountId request-validation stays at the route boundary:
       // pcaAccountId is curated-only, so reject it against the EFFECTIVE
       // (post-rehydration) policy.

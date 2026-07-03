@@ -389,32 +389,11 @@ import type { DKGAgent } from './dkg-agent.js';
  *   - `not_observed` — the probe read but did not (yet) observe it (follower-RPC lag).
  *   - `inconclusive` — the probe surface exists but every read threw.
  *   - `unsupported`  — no on-chain probe surface (the chain adapter lacks the read).
- * The HTTP boundary derives the wire fields from this via {@link pcaConfirmationToWire}.
+ * This is the agent's DOMAIN result; the daemon/CLI boundary derives the wire
+ * `{ verified, adapterSupported }` from it (see the cli `pca-confirmation-wire`
+ * module) — the wire representation deliberately does not live in the agent.
  */
 export type PcaConfirmationOutcome = 'confirmed' | 'not_observed' | 'inconclusive' | 'unsupported';
-
-/**
- * #1346 — the WIRE shape of the advisory confirmation, DERIVED from a
- * {@link PcaConfirmationOutcome} at the HTTP boundary. A discriminated union so
- * the illegal `{adapterSupported:false, verified:false|true}` combos stay
- * unrepresentable for wire/client consumers:
- *   - `{ adapterSupported: false; verified: null }` — unsupported (no probe surface).
- *   - `{ adapterSupported: true; verified: boolean | null }` — surface exists;
- *     `verified` is true (confirmed) | false (not observed / lag) | null (inconclusive).
- */
-export type PcaAgentConfirmation =
-  | { adapterSupported: false; verified: null }
-  | { adapterSupported: true; verified: boolean | null };
-
-/** Derive the wire advisory fields from the single confirmation outcome. */
-export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {
-  switch (outcome) {
-    case 'confirmed':    return { adapterSupported: true, verified: true };
-    case 'not_observed': return { adapterSupported: true, verified: false };
-    case 'inconclusive': return { adapterSupported: true, verified: null };
-    case 'unsupported':  return { adapterSupported: false, verified: null };
-  }
-}
 
 // #1346 — production confirmation policy: a bounded post-mine probe. These are
 // fixed domain constants, NOT caller-tunable knobs (implementation detail of
@@ -1591,9 +1570,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   // #1346 — Best-effort on-chain confirmation of a just-mined agent
   // registration. The tx receipt is already authoritative for `registered:true`;
-  // this only refines the ADVISORY picture, returned as a single
-  // `PcaConfirmationOutcome` (the HTTP boundary derives the wire
-  // `{ verified, adapterSupported }` via `pcaConfirmationToWire`). A lagging or
+  // this only refines the ADVISORY picture, returned as a single domain
+  // `PcaConfirmationOutcome` (the daemon/CLI boundary derives the wire
+  // `{ verified, adapterSupported }` from it). A lagging or
   // throwing read stays advisory and NEVER flips the authoritative
   // registration. The retry policy is a private production constant —
   // deliberately NOT a caller-tunable option on the public facade — so this
