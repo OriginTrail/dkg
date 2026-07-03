@@ -11,14 +11,16 @@ import type { PcaAgentConfirmation } from '@origintrail-official/dkg-agent';
 /**
  * #1346 — the register-agent advisory fields on the wire. A CURRENT daemon
  * emits a coherent `PcaAgentConfirmation` (the discriminated union keeps
- * `adapterSupported`/`verified` in lock-step); an OLDER daemon omits both.
- * Modeled as an explicit legacy variant rather than loosening the coherent
- * shape with `Partial`, so a consumer that sees `adapterSupported` can trust
- * `verified` is coherent with it and "absent" is a distinct, documented state.
+ * `adapterSupported`/`verified` in lock-step). A PRE-#1346 daemon emitted
+ * `adapterSupported` (as `verified !== null`) but NO `verified` field — so the
+ * legacy variant carries `adapterSupported` with `verified` absent, matching
+ * the actual previous wire shape (not a both-absent shape older daemons never
+ * sent). Modeled explicitly rather than with `Partial`, so a consumer that sees
+ * a coherent `verified` can trust it and version-skew is represented honestly.
  */
 type RegisterPcaAgentAdvisory =
   | PcaAgentConfirmation
-  | { verified?: undefined; adapterSupported?: undefined };
+  | { adapterSupported: boolean; verified?: undefined };
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 

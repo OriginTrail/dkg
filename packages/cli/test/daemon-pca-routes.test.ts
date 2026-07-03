@@ -201,15 +201,19 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(called).toBe(false);
   });
 
-  it('POST /api/pca/:id/agent registers an agent → 200 with txHash', async () => {
+  it('POST /api/pca/:id/agent registers an agent → 200 with txHash, confirming the SAME (accountId, agent)', async () => {
     let registered: { id: bigint; agent: string } | null = null;
+    let confirmArgs: [bigint, string] | null = null;
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async (id: bigint, a: string) => {
         registered = { id, agent: a };
         return { hash: '0xreg', blockNumber: 9, success: true };
       },
-      confirmPublishingConvictionAgentRegistration: async () => ({ verified: true, adapterSupported: true }),
+      confirmPublishingConvictionAgentRegistration: async (id: bigint, a: string) => {
+        confirmArgs = [id, a];
+        return { verified: true, adapterSupported: true };
+      },
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -219,6 +223,10 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(body.registered).toBe(true);
     expect(body.verified).toBe(true);
     expect(registered).toEqual({ id: 1n, agent: addr });
+    // #1346 (R7) — the advisory confirmation must describe the SAME PCA + agent
+    // that were just registered; a hard-coded 0n / swapped arg would mislabel
+    // `verified`. Pins the route→facade argument wiring.
+    expect(confirmArgs).toEqual([1n, addr]);
   });
 
   // #1346 / PR #1423 R2 — the mined tx is authoritative, so a lagging/throwing
@@ -296,6 +304,26 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(body.registered).toBe(true);
     expect(body.verified).toBe(false);
     expect(body.adapterSupported).toBe(true);
+  });
+
+  // #1346 (R7) — a mined-but-FAILED registration tx (TxResult.success:false)
+  // must NOT be reported as a registered agent, and must not reach the advisory
+  // confirmation. The built-in adapter throws on a status=0 receipt, but the
+  // shared TxResult contract lets an adapter surface success:false.
+  it('register: mined tx with success:false → 502, not registered, and no confirm', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    let confirmCalled = false;
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xdead', blockNumber: 10, success: false }),
+      confirmPublishingConvictionAgentRegistration: async () => { confirmCalled = true; return { verified: null, adapterSupported: true }; },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBeUndefined();
+    expect(body.error).toMatch(/did not succeed/i);
+    expect(confirmCalled).toBe(false); // never confirm a failed registration
   });
 
   it('DELETE /api/pca/:id/agent/:address deregisters an agent → 200', async () => {

@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { confirmPcaAgentRegistration } from '../src/dkg-agent-registry.js';
 import { MockChainAdapter, NoChainAdapter, PcaUnavailableError } from '@origintrail-official/dkg-chain';
 
 async function makeAgent(chain: MockChainAdapter | NoChainAdapter): Promise<DKGAgent> {
@@ -179,161 +178,89 @@ describe('DKGAgent V10 PCA facade', () => {
   });
 });
 
-// PR #1423 R2-B/R2-C/R4 — the register-agent confirmation state machine is a
-// PURE helper (`confirmPcaAgentRegistration`), so the retry policy stays PRIVATE
-// (production constants, not public facade opts — R4) and tests drive the full
-// advisory matrix fast via an injected no-op `sleep` + a scripted `probe`. The
-// route/facade stay thin serializers of the result.
-describe('confirmPcaAgentRegistration (PR #1423 advisory state machine)', () => {
-  const NOOP_SLEEP = async () => {}; // no real backoff wait — the whole matrix runs instantly
-
-  // A `probe` that replays `script` (one entry per call; the last entry repeats
-  // for any further calls): a boolean/null is returned, `'throw'` raises an
-  // RPC-style error. `null` is the typed facade's "no probe surface" signal.
-  function makeProbe(
-    script: Array<boolean | null | 'throw'>,
-  ): { probe: () => Promise<boolean | null>; probes: () => number } {
-    let calls = 0;
-    const probe = async (): Promise<boolean | null> => {
-      const action = script[Math.min(calls, script.length - 1)];
-      calls += 1;
-      if (action === 'throw') throw new Error('probe RPC blip');
-      return action;
-    };
-    return { probe, probes: () => calls };
-  }
-
-  it('probe true → { verified:true, adapterSupported:true } in a single probe', async () => {
-    const { probe, probes } = makeProbe([true]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
-    expect(probes()).toBe(1); // confirms on the first read — no retry
-  });
-
-  it('probe false then true → { verified:true, adapterSupported:true } (backoff retry confirms)', async () => {
-    const { probe, probes } = makeProbe([false, true]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
-    expect(probes()).toBeGreaterThanOrEqual(2);
-  });
-
-  // R2-C — the missing case: a THROWN probe (RPC blip) followed by a healthy
-  // read must recover to a confirmed result, not stay inconclusive.
-  it('probe throw then true → { verified:true, adapterSupported:true } (throw→true retry recovery, R2-C)', async () => {
-    const { probe, probes } = makeProbe(['throw', true]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
-    expect(probes()).toBeGreaterThanOrEqual(2);
-  });
-
-  it('probe false ×3 (default attempts) → { verified:false, adapterSupported:true } (advisory-false, surface exists)', async () => {
-    const { probe, probes } = makeProbe([false]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
-    expect(probes()).toBe(3); // exhausts the default 3 attempts
-  });
-
-  it('probe throw ×3 → { verified:null, adapterSupported:true } (inconclusive, surface exists)', async () => {
-    const { probe, probes } = makeProbe(['throw']);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: null, adapterSupported: true });
-    expect(probes()).toBe(3);
-  });
-
-  // T5-B — a definitive `false` read must NOT be erased by a LATER throw. The
-  // surface reported not-yet-registered, so a subsequent RPC blip leaves the
-  // advisory outcome `false` (not `null`); contrast with throw×3 above, which
-  // stays `null`. Only a later `true` upgrades it.
-  it('probe false then throw ×2 → { verified:false, adapterSupported:true } (a later throw does NOT erase a prior false)', async () => {
-    const { probe, probes } = makeProbe([false, 'throw', 'throw']);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
-    expect(probes()).toBe(3);
-  });
-
-  it('probe throw then false → { verified:false, adapterSupported:true } (a false after a throw is still a definitive read)', async () => {
-    const { probe } = makeProbe(['throw', false]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
-  });
-
-  it('probe null (no probe surface) → { verified:null, adapterSupported:false } in a single probe, no retry', async () => {
-    const { probe, probes } = makeProbe([null]);
-    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: null, adapterSupported: false });
-    expect(probes()).toBe(1); // unsupported signal short-circuits — no retry
-  });
-});
-
-// R4/R5 — the public facade drops the retry knobs and simply wires the typed
-// probe (`chain.isPublishingConvictionAgent`) into the pure helper. Pin that
-// delegation end-to-end AND assert the EXACT (accountId, agent) flow through
-// (T5-B: an arg-insensitive probe would green-light a regression that confirmed
-// the wrong PCA/agent, e.g. a hard-coded 0n). A `true`/`null` probe returns on
-// the first attempt so there is no real-sleep backoff wait.
-describe('DKGAgent.confirmPublishingConvictionAgentRegistration (facade delegation)', () => {
+// PR #1423 R2-B/R2-C/R4/R7 — the register-agent confirmation state machine is a
+// MODULE-PRIVATE helper; the ONLY public surface is the facade method
+// `confirmPublishingConvictionAgentRegistration`, so the retry policy is never a
+// deep-importable knob (R7). The full advisory matrix is therefore exercised
+// THROUGH the facade with a scripted `chain.isPublishingConvictionAgent`. Retry
+// cases pay the real (private, bounded ~300ms) backoff; true/null short-circuit
+// with no wait. Each probe records its (accountId, agent) so the matrix also
+// pins that the EXACT request args flow through (a hard-coded 0n would fail).
+describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory matrix, via facade)', () => {
   const ACCOUNT_ID = 7n;
   const AGENT_ADDR = ethers.Wallet.createRandom().address;
 
-  // The chain probe records every (accountId, agent) it is called with, so the
-  // assertion pins the delegated arguments, not just the result shape.
-  async function capturingAgent(
-    reply: boolean | null,
-  ): Promise<{ agent: DKGAgent; calls: () => Array<[bigint, string]> }> {
+  // Build an agent whose chain probe replays `script` (one entry per call; the
+  // last entry repeats) and records the (accountId, agent) of every call. A
+  // boolean/null is returned; 'throw' raises an RPC-style error. `null` is the
+  // "no probe surface" signal.
+  async function makeProbeAgent(
+    script: Array<boolean | null | 'throw'>,
+  ): Promise<{ agent: DKGAgent; probes: () => number; calls: () => Array<[bigint, string]> }> {
     const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    let n = 0;
     const calls: Array<[bigint, string]> = [];
     (chain as any).isPublishingConvictionAgent = async (accountId: bigint, agent: string) => {
       calls.push([accountId, agent]);
-      return reply;
+      const action = script[Math.min(n, script.length - 1)];
+      n += 1;
+      if (action === 'throw') throw new Error('probe RPC blip');
+      return action;
     };
-    return { agent: await makeAgent(chain), calls: () => calls };
+    return { agent: await makeAgent(chain), probes: () => n, calls: () => calls };
   }
 
-  it('wires the EXACT (accountId, agent) through to chain.isPublishingConvictionAgent (no hard-coded args)', async () => {
-    const { agent, calls } = await capturingAgent(true);
-    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR))
-      .toEqual({ verified: true, adapterSupported: true });
-    expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]); // exact account + agent, probed once
+  const confirm = (agent: DKGAgent) =>
+    agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR);
+
+  it('probe true → confirmed in a single probe, with the EXACT (accountId, agent)', async () => {
+    const { agent, probes, calls } = await makeProbeAgent([true]);
+    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(probes()).toBe(1); // confirms on the first read — no retry
+    expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]); // no hard-coded 0n / swapped args
   });
 
-  it('null probe surface → { verified:null, adapterSupported:false } (still with the exact args)', async () => {
-    const { agent, calls } = await capturingAgent(null);
-    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR))
-      .toEqual({ verified: null, adapterSupported: false });
+  it('probe false then true → confirmed (backoff retry upgrades)', async () => {
+    const { agent, probes } = await makeProbeAgent([false, true]);
+    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(probes()).toBeGreaterThanOrEqual(2);
+  });
+
+  // R2-C — a THROWN probe (RPC blip) then a healthy read must recover to confirmed.
+  it('probe throw then true → confirmed (throw→true retry recovery)', async () => {
+    const { agent, probes } = await makeProbeAgent(['throw', true]);
+    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(probes()).toBeGreaterThanOrEqual(2);
+  });
+
+  it('probe false ×3 → { verified:false, adapterSupported:true } (advisory-false, surface exists)', async () => {
+    const { agent, probes } = await makeProbeAgent([false]);
+    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+    expect(probes()).toBe(3);
+  });
+
+  it('probe throw ×3 → { verified:null, adapterSupported:true } (inconclusive, surface exists)', async () => {
+    const { agent, probes } = await makeProbeAgent(['throw']);
+    expect(await confirm(agent)).toEqual({ verified: null, adapterSupported: true });
+    expect(probes()).toBe(3);
+  });
+
+  // T5-B — a definitive `false` is NOT erased by a later throw (contrast throw×3 → null).
+  it('probe false then throw ×2 → { verified:false, adapterSupported:true } (a later throw does NOT erase a prior false)', async () => {
+    const { agent, probes } = await makeProbeAgent([false, 'throw', 'throw']);
+    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+    expect(probes()).toBe(3);
+  });
+
+  it('probe throw then false → { verified:false, adapterSupported:true } (a false after a throw is still definitive)', async () => {
+    const { agent } = await makeProbeAgent(['throw', false]);
+    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+  });
+
+  it('probe null (no surface) → { verified:null, adapterSupported:false }, no retry, exact args', async () => {
+    const { agent, probes, calls } = await makeProbeAgent([null]);
+    expect(await confirm(agent)).toEqual({ verified: null, adapterSupported: false });
+    expect(probes()).toBe(1); // unsupported short-circuits
     expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]);
-  });
-});
-
-// PR #1423 R3 — `resolveRegistrationOptions` is the SINGLE register-time options
-// resolver shared by BOTH the `/api/context-graph/register` daemon route AND the
-// transparent publish auto-register (`ensureRegisteredForPublish`). It is a PURE
-// reader: body-policy wins, else rehydrate the stored create-time policy, and a
-// stored-read error PROPAGATES — each caller owns its error policy (the route
-// falls back best-effort + warns; the publish path stays fail-loud so it never
-// registers a wrong on-chain policy). A fake getStoredContextGraphRegistrationOptions
-// drives the branches directly at the agent layer.
-describe('DKGAgent.resolveRegistrationOptions (#1085 shared register resolver)', () => {
-  async function makeResolverAgent(
-    stored: () => Promise<{ publishPolicy?: number; publishAuthorityAccountId?: bigint }>,
-  ): Promise<DKGAgent> {
-    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
-    const agent = await makeAgent(chain);
-    // Isolate the resolver from the SPARQL store — the stored-read parsing is
-    // covered by getStoredContextGraphRegistrationOptions' own tests.
-    (agent as any).getStoredContextGraphRegistrationOptions = stored;
-    return agent;
-  }
-
-  it('body wins — returns the body publishPolicy, still surfaces the raw stored PCA', async () => {
-    const agent = await makeResolverAgent(async () => ({ publishPolicy: 0, publishAuthorityAccountId: 7n }));
-    const r = await agent.resolveRegistrationOptions('cg', { bodyPublishPolicy: 1 });
-    expect(r.publishPolicy).toBe(1); // explicit body wins over the stored 0
-    expect(r.publishAuthorityAccountId).toBe(7n); // one read backs both outputs
-  });
-
-  it('omit → rehydrate — returns the stored create-time policy + stored PCA', async () => {
-    const agent = await makeResolverAgent(async () => ({ publishPolicy: 0, publishAuthorityAccountId: 7n }));
-    const r = await agent.resolveRegistrationOptions('cg');
-    expect(r).toEqual({ publishPolicy: 0, publishAuthorityAccountId: 7n });
-  });
-
-  it('stored-read throw → propagates (pure reader; the error policy is the caller\'s)', async () => {
-    const agent = await makeResolverAgent(async () => { throw new Error('store down'); });
-    // No swallow, no logging: the resolver rethrows so the /register route can
-    // fall back best-effort while the publish path stays fail-loud.
-    await expect(agent.resolveRegistrationOptions('cg', { bodyPublishPolicy: 1 }))
-      .rejects.toThrow('store down');
   });
 });

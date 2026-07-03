@@ -14,14 +14,14 @@ import { DKGAgent } from '../src/dkg-agent.js';
 type Stub = Record<string, any>;
 
 /** Minimal stub: only the dependencies ensureRegisteredForPublish actually calls.
- * #1085 (R4) — the publish auto-register path now depends on the SHARED
- * `resolveRegistrationOptions` (not the raw `getStoredContextGraphRegistrationOptions`
- * read), so that is the boundary these tests stub. The resolver's own
- * body-vs-stored behavior is pinned separately in `pca-v10-facade.test.ts`. */
+ * #1085 (R7) — the publish auto-register path reads the create-time policy + PCA
+ * directly from the canonical `getStoredContextGraphRegistrationOptions` reader
+ * (the caller-shaped shared resolver was removed), so that is the boundary these
+ * tests stub. It forwards BOTH stored fields and stays fail-loud. */
 function makeStub(overrides: Stub = {}): Stub {
   return {
     getContextGraphOnChainId: async () => null,
-    resolveRegistrationOptions: async () => ({}),
+    getStoredContextGraphRegistrationOptions: async () => ({}),
     registerContextGraph: async () => undefined,
     ...overrides,
   };
@@ -42,13 +42,13 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
     expect(registerCalls.length).toBe(0); // idempotent — no second mint
   });
 
-  it('(a) asks the resolver about the PUBLISH cg id with NO body policy, then forwards its publishPolicy / publishAuthorityAccountId + callerAgentAddress into registerContextGraph', async () => {
+  it('(a) reads stored options for the EXACT publish cg id, then forwards its publishPolicy / publishAuthorityAccountId + callerAgentAddress into registerContextGraph', async () => {
     const registerCalls: Array<[string, any]> = [];
-    const resolverCalls: any[][] = [];
+    const storedReads: any[][] = [];
     const stub = makeStub({
       getContextGraphOnChainId: async () => null, // not yet registered
-      resolveRegistrationOptions: async (...a: any[]) => {
-        resolverCalls.push(a);
+      getStoredContextGraphRegistrationOptions: async (...a: any[]) => {
+        storedReads.push(a);
         return {
           publishPolicy: 1,
           publishAuthorityAccountId: '0x00000000000000000000000000000000000000ab',
@@ -59,10 +59,9 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
 
     await callEnsure(stub, 'cg-stored', { callerAgentAddress: '0x00000000000000000000000000000000000000c1' });
 
-    // The publish path has no request body, so it must ask the resolver about
-    // the exact publish contextGraphId and pass NO body policy — a regression
-    // that queried the wrong CG (or injected a body policy) fails here.
-    expect(resolverCalls).toEqual([['cg-stored']]);
+    // The publish path reads stored options for the EXACT publish contextGraphId
+    // (no body policy exists here) — a regression that queried the wrong CG fails.
+    expect(storedReads).toEqual([['cg-stored']]);
 
     expect(registerCalls.length).toBe(1);
     const [cgId, regOpts] = registerCalls[0];
@@ -75,7 +74,7 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
   it('(a) omits stored fields that are undefined (does not forward absent options)', async () => {
     const registerCalls: Array<[string, any]> = [];
     const stub = makeStub({
-      resolveRegistrationOptions: async () => ({}), // nothing stored
+      getStoredContextGraphRegistrationOptions: async () => ({}), // nothing stored
       registerContextGraph: async (cgId: string, regOpts: any) => { registerCalls.push([cgId, regOpts]); },
     });
     await callEnsure(stub, 'cg-bare');
@@ -86,11 +85,11 @@ describe('DKGAgent.ensureRegisteredForPublish', () => {
     expect('callerAgentAddress' in regOpts).toBe(false);
   });
 
-  it('(a) FAIL-LOUD: a resolver read failure PROPAGATES and does NOT register (never mints under a default policy — #1085)', async () => {
+  it('(a) FAIL-LOUD: a stored-options read failure PROPAGATES and does NOT register (never mints under a default policy — #1085)', async () => {
     const registerCalls: any[] = [];
     const stub = makeStub({
-      getContextGraphOnChainId: async () => null, // not yet registered → proceeds to resolve
-      resolveRegistrationOptions: async () => { throw new Error('stored registration-options read failed'); },
+      getContextGraphOnChainId: async () => null, // not yet registered → proceeds to read stored
+      getStoredContextGraphRegistrationOptions: async () => { throw new Error('stored registration-options read failed'); },
       registerContextGraph: async (...a: any[]) => { registerCalls.push(a); },
     });
     // The publish path is fail-loud: a store-read error must surface, not

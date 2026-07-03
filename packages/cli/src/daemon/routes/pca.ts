@@ -515,7 +515,15 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     try {
       const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
       if (result === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      // #1346 — The tx is mined, so registration is AUTHORITATIVE
+      // #1346 — A mined tx is only authoritative if it actually succeeded. The
+      // built-in EVM adapter throws on a status=0 receipt, but the shared
+      // `TxResult` contract carries `success`, so an adapter (or a future path)
+      // can surface a mined-but-reverted tx as `success:false` — never report
+      // that as a registered agent.
+      if (result.success === false) {
+        return jsonResponse(res, 502, { error: 'PCA agent registration transaction was mined but did not succeed on-chain' });
+      }
+      // The tx is mined AND successful, so registration is AUTHORITATIVE
       // (`registered:true`). The on-chain read below is a best-effort
       // ADVISORY confirmation with a short bounded backoff; a lagging or
       // throwing read must never flip a successful registration to false.

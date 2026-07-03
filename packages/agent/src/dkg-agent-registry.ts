@@ -405,29 +405,28 @@ const PCA_CONFIRM_ATTEMPTS = 3;
 const PCA_CONFIRM_BACKOFF_MS = 300;
 
 /**
- * Pure advisory-confirmation state machine, extracted from the DKGAgent facade
- * so the retry policy stays private AND tests can drive it fast by injecting a
- * no-op `sleep` + a scripted `probe` — without exposing retry tuning on the
- * public DKGAgent surface. `probe` yields the typed registration read: `true`
- * (registered) | `false` (not yet — follower-RPC lag → retry) | `null` (no
- * probe surface → unsupported, short-circuit). `null` is a per-adapter-STABLE
- * capability signal (the facade returns it iff the chain method is absent), so
- * it legitimately halts regardless of earlier reads — a `false`-then-`null`
- * sequence is unreachable from a real adapter.
+ * Advisory-confirmation state machine, kept as a MODULE-PRIVATE helper (NOT
+ * exported — the only public surface is the facade method
+ * `confirmPublishingConvictionAgentRegistration`) so the bounded-probe retry
+ * policy is a fixed internal constant, never a deep-importable tuning knob.
+ * `probe` yields the typed registration read: `true` (registered) | `false`
+ * (not yet — follower-RPC lag → retry) | `null` (no probe surface →
+ * unsupported, short-circuit). `null` is a per-adapter-STABLE capability signal
+ * (the facade returns it iff the chain method is absent), so it legitimately
+ * halts regardless of earlier reads — a `false`-then-`null` sequence is
+ * unreachable from a real adapter.
  *
  * A definitive `false` read is NEVER erased by a later throw: once the surface
  * has reported not-yet-registered, an RPC blip on a subsequent attempt leaves
  * the advisory outcome `false` (not `null`) — only a later `true` upgrades it.
+ * The full retry matrix is exercised through the facade in pca-v10-facade.test.ts.
  */
-export async function confirmPcaAgentRegistration(
+async function confirmPcaAgentRegistration(
   probe: () => Promise<boolean | null>,
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
-  attempts: number = PCA_CONFIRM_ATTEMPTS,
-  backoffMs: number = PCA_CONFIRM_BACKOFF_MS,
 ): Promise<PcaAgentConfirmation> {
   let surfaceExists = false;
   let verified: boolean | null = null; // advisory outcome once the surface is known
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
     try {
       const result = await probe();
       if (result === null) return { adapterSupported: false, verified: null };
@@ -440,10 +439,10 @@ export async function confirmPcaAgentRegistration(
       // survives a later blip (only a `true` upgrades it).
       surfaceExists = true;
     }
-    if (i < attempts - 1) await sleep(backoffMs);
+    if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
   }
-  // `surfaceExists` is false only when no probe ever ran (attempts <= 0) —
-  // indistinguishable from "no surface"; every real attempt sets it true.
+  // Unreachable while PCA_CONFIRM_ATTEMPTS >= 1 (every attempt sets surfaceExists);
+  // the branch keeps the return a provable union member without a cast.
   return surfaceExists
     ? { adapterSupported: true, verified }
     : { adapterSupported: false, verified: null };
