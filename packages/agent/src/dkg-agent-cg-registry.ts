@@ -781,33 +781,40 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * #1085 — canonical "body wins, else rehydrate stored" resolver for the
-   * effective register-time `publishPolicy`. An explicit body value wins; an
-   * omitted policy best-effort rehydrates the create-time policy persisted by
-   * `createContextGraph` (via {@link getStoredContextGraphRegistrationOptions}).
-   * A stored-read error is warned, never fatal — the caller proceeds with the
-   * request/default policy, mirroring the publish auto-register path.
+   * #1085 — canonical PURE resolver for the effective register-time
+   * registration options, genuinely shared by BOTH register paths: the
+   * standalone `/api/context-graph/register` daemon route AND the transparent
+   * publish auto-register (`ensureRegisteredForPublish`).
+   *
+   * A single {@link getStoredContextGraphRegistrationOptions} read backs both
+   * outputs:
+   *   - `publishPolicy`: an explicit body value wins; an omitted policy
+   *     rehydrates the create-time policy persisted by `createContextGraph`.
+   *   - `publishAuthorityAccountId`: the raw stored create-time PCA id. The
+   *     publish path forwards it; the daemon route deliberately ignores it
+   *     (pcaAccountId is explicit-only there).
+   *
+   * This is a pure reader: a stored-read error PROPAGATES — the resolver owns
+   * no error policy. Each caller decides: the `/register` route falls back
+   * best-effort (warn + request/default policy), while the publish
+   * auto-register path stays fail-loud so it never registers a CG under the
+   * wrong on-chain policy (dropping the create-time policy is the #1085
+   * regression, and hard to reverse).
    *
    * The pca-only-with-curated request validation stays at the route boundary
-   * (it validates the request body's `pcaAccountId`); this resolver only
-   * computes the effective policy so the daemon route and the transparent
-   * publish auto-register (`ensureRegisteredForPublish`) share one source of
-   * truth.
+   * (it validates the request body's `pcaAccountId` against the effective
+   * policy); this resolver only computes the effective options so both paths
+   * share one source of truth.
    */
-  async resolveRegistrationPublishPolicy(this: DKGAgent,
+  async resolveRegistrationOptions(this: DKGAgent,
     contextGraphId: string,
-    bodyPublishPolicy?: number,
-  ): Promise<number | undefined> {
-    if (bodyPublishPolicy !== undefined) return bodyPublishPolicy;
-    try {
-      const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
-      return stored.publishPolicy;
-    } catch (err) {
-      console.warn(
-        `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${contextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
-      );
-      return undefined;
-    }
+    opts?: { bodyPublishPolicy?: number },
+  ): Promise<{ publishPolicy: number | undefined; publishAuthorityAccountId: bigint | undefined }> {
+    const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
+    return {
+      publishPolicy: opts?.bodyPublishPolicy ?? stored.publishPolicy,
+      publishAuthorityAccountId: stored.publishAuthorityAccountId,
+    };
   }
 
   /**

@@ -250,3 +250,45 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (PR #1423 R2)', 
     expect(probes()).toBe(1); // unsupported signal short-circuits — no retry
   });
 });
+
+// PR #1423 R3 — `resolveRegistrationOptions` is the SINGLE register-time options
+// resolver shared by BOTH the `/api/context-graph/register` daemon route AND the
+// transparent publish auto-register (`ensureRegisteredForPublish`). It is a PURE
+// reader: body-policy wins, else rehydrate the stored create-time policy, and a
+// stored-read error PROPAGATES — each caller owns its error policy (the route
+// falls back best-effort + warns; the publish path stays fail-loud so it never
+// registers a wrong on-chain policy). A fake getStoredContextGraphRegistrationOptions
+// drives the branches directly at the agent layer.
+describe('DKGAgent.resolveRegistrationOptions (#1085 shared register resolver)', () => {
+  async function makeResolverAgent(
+    stored: () => Promise<{ publishPolicy?: number; publishAuthorityAccountId?: bigint }>,
+  ): Promise<DKGAgent> {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const agent = await makeAgent(chain);
+    // Isolate the resolver from the SPARQL store — the stored-read parsing is
+    // covered by getStoredContextGraphRegistrationOptions' own tests.
+    (agent as any).getStoredContextGraphRegistrationOptions = stored;
+    return agent;
+  }
+
+  it('body wins — returns the body publishPolicy, still surfaces the raw stored PCA', async () => {
+    const agent = await makeResolverAgent(async () => ({ publishPolicy: 0, publishAuthorityAccountId: 7n }));
+    const r = await agent.resolveRegistrationOptions('cg', { bodyPublishPolicy: 1 });
+    expect(r.publishPolicy).toBe(1); // explicit body wins over the stored 0
+    expect(r.publishAuthorityAccountId).toBe(7n); // one read backs both outputs
+  });
+
+  it('omit → rehydrate — returns the stored create-time policy + stored PCA', async () => {
+    const agent = await makeResolverAgent(async () => ({ publishPolicy: 0, publishAuthorityAccountId: 7n }));
+    const r = await agent.resolveRegistrationOptions('cg');
+    expect(r).toEqual({ publishPolicy: 0, publishAuthorityAccountId: 7n });
+  });
+
+  it('stored-read throw → propagates (pure reader; the error policy is the caller\'s)', async () => {
+    const agent = await makeResolverAgent(async () => { throw new Error('store down'); });
+    // No swallow, no logging: the resolver rethrows so the /register route can
+    // fall back best-effort while the publish path stays fail-loud.
+    await expect(agent.resolveRegistrationOptions('cg', { bodyPublishPolicy: 1 }))
+      .rejects.toThrow('store down');
+  });
+});

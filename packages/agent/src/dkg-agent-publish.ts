@@ -3389,18 +3389,20 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     const existingOnChainId = await this.getContextGraphOnChainId(contextGraphId);
     if (existingOnChainId) return;
-    const storedOpts = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
+    // #1085 — the publish path has no request-body policy, so the shared
+    // resolver (dkg-agent-cg-registry.ts) returns the stored create-time
+    // policy + PCA. Deliberately NOT wrapped in a catch: a stored-read failure
+    // must propagate (fail-loud) rather than silently register the CG under
+    // the default policy — dropping the create-time policy on-chain is exactly
+    // the #1085 regression, and hard to reverse. (The /register route owns the
+    // best-effort fall-back for its own interactive call site.)
+    const { publishPolicy, publishAuthorityAccountId } = await this.resolveRegistrationOptions(contextGraphId);
     try {
       await this.registerContextGraph(contextGraphId, {
         ...(opts?.callerAgentAddress != null ? { callerAgentAddress: opts.callerAgentAddress } : {}),
-        // #1085 — there is no request-body policy on the publish path, so the
-        // effective publishPolicy is exactly the stored create-time value. That
-        // is precisely what the canonical `resolveRegistrationPublishPolicy`
-        // (dkg-agent-cg-registry.ts) returns for an undefined body; we reuse the
-        // `storedOpts` already read above rather than re-query the store.
-        ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
-        ...(storedOpts.publishAuthorityAccountId !== undefined
-          ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
+        ...(publishPolicy !== undefined ? { publishPolicy } : {}),
+        ...(publishAuthorityAccountId !== undefined
+          ? { publishAuthorityAccountId }
           : {}),
       });
     } catch (err: any) {

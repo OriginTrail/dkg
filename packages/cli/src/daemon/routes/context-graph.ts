@@ -660,14 +660,27 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
       // #1085 — resolve the effective publishPolicy on the typed facade
-      // (body wins, else rehydrate the create-time policy stored by
-      // createContextGraph). The pcaAccountId request-validation stays at the
-      // route boundary: pcaAccountId is curated-only, so reject it against the
-      // EFFECTIVE (post-rehydration) policy.
-      const effectivePublishPolicy = await agent.resolveRegistrationPublishPolicy(
-        resolvedContextGraphId,
-        publishPolicy,
-      );
+      // (pure reader: body wins, else rehydrate the create-time policy stored
+      // by createContextGraph). The stored-read is best-effort at THIS call
+      // site: a read failure must not fail the registration, so we warn and
+      // fall back to the request/default policy. This route-owned error policy
+      // is deliberate — the publish auto-register path stays fail-loud instead
+      // (it must never register a CG under the wrong on-chain policy).
+      let effectivePublishPolicy: number | undefined;
+      try {
+        ({ publishPolicy: effectivePublishPolicy } = await agent.resolveRegistrationOptions(
+          resolvedContextGraphId,
+          { bodyPublishPolicy: publishPolicy },
+        ));
+      } catch (err) {
+        console.warn(
+          `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+        );
+        effectivePublishPolicy = publishPolicy;
+      }
+      // The pcaAccountId request-validation stays at the route boundary:
+      // pcaAccountId is curated-only, so reject it against the EFFECTIVE
+      // (post-rehydration) policy.
       if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
         return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
       }
