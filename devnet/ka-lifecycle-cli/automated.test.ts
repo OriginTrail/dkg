@@ -202,13 +202,12 @@ async function assertVerifiableSubject(
 
 function publisherJobTargetsKnowledgeAsset(
   job: PublisherJobView,
-  expected: { contextGraphId: string; name: string; subGraphName?: string },
+  expected: { contextGraphId: string; name: string },
 ): boolean {
   const request = job.request?.knowledgeAssetVmPublish;
   return job.request?.jobType === 'knowledge-asset-vm-publish' &&
     request?.contextGraphId === expected.contextGraphId &&
-    request?.name === expected.name &&
-    (expected.subGraphName === undefined || request?.subGraphName === expected.subGraphName);
+    request?.name === expected.name;
 }
 
 async function assertNoPublisherJobForKnowledgeAsset(

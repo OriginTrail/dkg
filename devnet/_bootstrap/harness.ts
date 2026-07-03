@@ -103,7 +103,7 @@ export function parseLastJsonBlock<T extends Record<string, unknown> = Record<st
   stdout: string,
   label = 'CLI stdout',
 ): T {
-  for (let i = stdout.lastIndexOf('\n{'); i >= 0; i = stdout.lastIndexOf('\n{', i - 1)) {
+  for (let i = stdout.lastIndexOf('\n{'); i >= 0; i = i === 0 ? -1 : stdout.lastIndexOf('\n{', i - 1)) {
     const candidate = stdout.slice(i).trim();
     try {
       return JSON.parse(candidate) as T;
