@@ -61,7 +61,6 @@
   },
   "panels": [
     {
-      "type": "text",
       "title": "",
       "gridPos": {
         "h": 3,
@@ -69,6 +68,7 @@
         "x": 0,
         "y": 0
       },
+      "type": "text",
       "options": {
         "mode": "markdown",
         "content": "**Requires node metric export.** These panels read OTel metrics from dkg-node; a node ships them when it resolves a metrics endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.metrics.endpoint`) and the collector routes metrics → VictoriaMetrics. Empty panels mean no node currently exports metrics — see RUNBOOK.md for rollout state and enablement steps. The **Pipeline health** row reads the collector's self-monitoring and works independently of node export."
@@ -76,7 +76,6 @@
       "transparent": true
     },
     {
-      "type": "row",
       "title": "Publishing",
       "gridPos": {
         "h": 1,
@@ -84,14 +83,10 @@
         "x": 0,
         "y": 3
       },
+      "type": "row",
       "collapsed": false
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Publish rate by outcome",
       "gridPos": {
         "h": 8,
@@ -99,6 +94,11 @@
         "x": 0,
         "y": 4
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -118,11 +118,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Publish duration p50/p95",
       "gridPos": {
         "h": 8,
@@ -130,6 +125,11 @@
         "x": 12,
         "y": 4
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -158,11 +158,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "ACK quorum outcomes",
       "gridPos": {
         "h": 8,
@@ -170,6 +165,11 @@
         "x": 0,
         "y": 12
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -189,11 +189,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "ACK peer results (publisher side)",
       "gridPos": {
         "h": 8,
@@ -201,6 +196,11 @@
         "x": 8,
         "y": 12
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -220,11 +220,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "ACK declines by code + handler outcomes",
       "gridPos": {
         "h": 8,
@@ -232,6 +227,11 @@
         "x": 16,
         "y": 12
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -260,7 +260,6 @@
       ]
     },
     {
-      "type": "row",
       "title": "Chain / RPC",
       "gridPos": {
         "h": 1,
@@ -268,14 +267,10 @@
         "x": 0,
         "y": 20
       },
+      "type": "row",
       "collapsed": false
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Raw RPC requests by method (billing unit — post-#1409 node builds)",
       "gridPos": {
         "h": 8,
@@ -283,6 +278,11 @@
         "x": 0,
         "y": 21
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "reqps"
@@ -302,11 +302,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Raw RPC requests per node (post-#1409 node builds)",
       "gridPos": {
         "h": 8,
@@ -314,6 +309,11 @@
         "x": 12,
         "y": 21
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "reqps"
@@ -333,11 +333,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Logical chain ops by method/outcome",
       "gridPos": {
         "h": 8,
@@ -345,6 +340,11 @@
         "x": 0,
         "y": 29
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -364,11 +364,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Chain RPC p95 latency by method",
       "gridPos": {
         "h": 8,
@@ -376,6 +371,11 @@
         "x": 8,
         "y": 29
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ms"
@@ -395,11 +395,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "RPC endpoint failover exhaustion",
       "gridPos": {
         "h": 8,
@@ -407,6 +402,11 @@
         "x": 16,
         "y": 29
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -426,7 +426,6 @@
       ]
     },
     {
-      "type": "row",
       "title": "P2P / Sync",
       "gridPos": {
         "h": 1,
@@ -434,14 +433,10 @@
         "x": 0,
         "y": 37
       },
+      "type": "row",
       "collapsed": false
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Sync requests & responses by outcome",
       "gridPos": {
         "h": 8,
@@ -449,6 +444,11 @@
         "x": 0,
         "y": 38
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -477,11 +477,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Protocol send rate + p95 by protocol",
       "gridPos": {
         "h": 8,
@@ -489,6 +484,11 @@
         "x": 12,
         "y": 38
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -517,7 +517,6 @@
       ]
     },
     {
-      "type": "row",
       "title": "Pipeline health (collector — live now)",
       "gridPos": {
         "h": 1,
@@ -525,14 +524,10 @@
         "x": 0,
         "y": 46
       },
+      "type": "row",
       "collapsed": false
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Collector log records/s: accepted vs exported",
       "gridPos": {
         "h": 8,
@@ -540,6 +535,11 @@
         "x": 0,
         "y": 47
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "ops"
@@ -577,11 +577,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Collector exporter queue",
       "gridPos": {
         "h": 8,
@@ -589,6 +584,11 @@
         "x": 8,
         "y": 47
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -617,11 +617,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${vm}"
-      },
-      "type": "timeseries",
       "title": "Collector CPU / memory",
       "gridPos": {
         "h": 8,
@@ -629,6 +624,11 @@
         "x": 16,
         "y": 47
       },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${vm}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"

@@ -65,7 +65,6 @@
   },
   "panels": [
     {
-      "type": "text",
       "title": "",
       "gridPos": {
         "h": 3,
@@ -73,6 +72,7 @@
         "x": 0,
         "y": 0
       },
+      "type": "text",
       "options": {
         "mode": "markdown",
         "content": "**Requires node trace export.** These panels read Tempo traces from dkg-node; a node ships them when it resolves a traces endpoint (env `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318` or config `telemetry.traces.endpoint`) and the collector routes traces → Tempo. Empty panels mean no node currently exports traces — see RUNBOOK.md for rollout state and enablement steps. One trace per publish / ACK round / chain transaction / sync; click any Trace ID for the full timeline."
@@ -80,11 +80,6 @@
       "transparent": true
     },
     {
-      "datasource": {
-        "type": "tempo",
-        "uid": "${tempo}"
-      },
-      "type": "table",
       "title": "Recent traces",
       "gridPos": {
         "h": 9,
@@ -92,6 +87,11 @@
         "x": 0,
         "y": 3
       },
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
       "targets": [
         {
           "datasource": {
@@ -108,11 +108,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "tempo",
-        "uid": "${tempo}"
-      },
-      "type": "table",
       "title": "Errored operations",
       "gridPos": {
         "h": 9,
@@ -120,6 +115,11 @@
         "x": 0,
         "y": 12
       },
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
       "targets": [
         {
           "datasource": {
@@ -136,11 +136,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "tempo",
-        "uid": "${tempo}"
-      },
-      "type": "table",
       "title": "Slow publishes (>5s)",
       "gridPos": {
         "h": 9,
@@ -148,6 +143,11 @@
         "x": 12,
         "y": 12
       },
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
       "targets": [
         {
           "datasource": {
@@ -164,11 +164,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "tempo",
-        "uid": "${tempo}"
-      },
-      "type": "table",
       "title": "Slow chain ops (>2s)",
       "gridPos": {
         "h": 9,
@@ -176,6 +171,11 @@
         "x": 0,
         "y": 21
       },
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
       "targets": [
         {
           "datasource": {
@@ -192,11 +192,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "tempo",
-        "uid": "${tempo}"
-      },
-      "type": "table",
       "title": "ACK collection rounds",
       "gridPos": {
         "h": 9,
@@ -204,6 +199,11 @@
         "x": 12,
         "y": 21
       },
+      "datasource": {
+        "type": "tempo",
+        "uid": "${tempo}"
+      },
+      "type": "table",
       "targets": [
         {
           "datasource": {

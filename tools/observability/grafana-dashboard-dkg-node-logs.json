@@ -75,11 +75,6 @@
   },
   "panels": [
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "logs",
       "title": "Logs — $node",
       "gridPos": {
         "h": 20,
@@ -87,6 +82,11 @@
         "x": 0,
         "y": 0
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "logs",
       "options": {
         "showTime": true,
         "sortOrder": "Descending",
@@ -105,11 +105,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "Log volume by level — $node",
       "gridPos": {
         "h": 6,
@@ -117,6 +112,11 @@
         "x": 0,
         "y": 20
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -136,11 +136,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "RPC requests by method — $node",
       "gridPos": {
         "h": 8,
@@ -148,6 +143,11 @@
         "x": 0,
         "y": 26
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -167,11 +167,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "stat",
       "title": "RPC requests — $node (selected range)",
       "gridPos": {
         "h": 8,
@@ -179,6 +174,11 @@
         "x": 18,
         "y": 26
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "stat",
       "fieldConfig": {
         "defaults": {
           "unit": "short"

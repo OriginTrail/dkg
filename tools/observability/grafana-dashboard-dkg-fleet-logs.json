@@ -58,11 +58,6 @@
   },
   "panels": [
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "stat",
       "title": "Nodes reporting (last 10m)",
       "gridPos": {
         "h": 5,
@@ -70,6 +65,11 @@
         "x": 0,
         "y": 0
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "stat",
       "fieldConfig": {
         "defaults": {
           "unit": "none"
@@ -90,11 +90,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "Log volume per node",
       "gridPos": {
         "h": 9,
@@ -102,6 +97,11 @@
         "x": 6,
         "y": 0
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -121,11 +121,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "Errors per node",
       "gridPos": {
         "h": 8,
@@ -133,6 +128,11 @@
         "x": 0,
         "y": 9
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -152,11 +152,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "logs",
       "title": "Recent errors (all nodes)",
       "gridPos": {
         "h": 10,
@@ -164,6 +159,11 @@
         "x": 0,
         "y": 17
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "logs",
       "options": {
         "showTime": true,
         "sortOrder": "Descending",
@@ -182,11 +182,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "RPC requests per node",
       "gridPos": {
         "h": 9,
@@ -194,6 +189,11 @@
         "x": 0,
         "y": 27
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -213,11 +213,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "timeseries",
       "title": "RPC requests by method (fleet)",
       "gridPos": {
         "h": 9,
@@ -225,6 +220,11 @@
         "x": 12,
         "y": 27
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "timeseries",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -244,11 +244,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "stat",
       "title": "Total RPC requests (selected range)",
       "gridPos": {
         "h": 7,
@@ -256,6 +251,11 @@
         "x": 0,
         "y": 36
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "stat",
       "fieldConfig": {
         "defaults": {
           "unit": "short"
@@ -283,11 +283,6 @@
       ]
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "type": "bargauge",
       "title": "Top nodes by RPC requests (selected range) — credit burners",
       "gridPos": {
         "h": 7,
@@ -295,6 +290,11 @@
         "x": 6,
         "y": 36
       },
+      "datasource": {
+        "type": "loki",
+        "uid": "${loki}"
+      },
+      "type": "bargauge",
       "options": {
         "displayMode": "gradient",
         "orientation": "horizontal",

@@ -2,13 +2,24 @@
 // ALERT_SPECS model plus its ONE derivation: Grafana provisioning payloads.
 // The markdown documentation rendering of the same specs lives in docs.mjs;
 // CLI handling and --check live in ../generate-observability.mjs.
-// The datasource enum for alert specs as an explicit, validated registry —
-// a typoed `ds:` value fails generation loudly instead of silently rendering
-// a Prometheus-shaped rule against the VM UID. docs.mjs shares this registry
-// for display names.
+import { dkgLogStream, severityIs, RPC_USAGE_PIPELINE, sumByLokiNode, countByLokiNode } from './queries.mjs';
+
+// The datasource registry OWNS each datasource's full rendering contract —
+// display name (docs.mjs), UID selection, and the Grafana query-model shape.
+// specToRule dispatches through this registry, so adding a datasource is one
+// self-contained entry here with no adjacent conditional that can drift
+// (a typoed `ds:` value still fails generation loudly).
 export const ALERT_DATASOURCES = {
-  loki: { name: 'Loki' },
-  vm: { name: 'VictoriaMetrics' },
+  loki: {
+    name: 'Loki',
+    uid: ({ LOKI_UID }) => LOKI_UID,
+    model: (s, uid) => ({ refId: 'A', expr: s.expr, queryType: 'range', intervalMs: 60000, maxDataPoints: s.maxDataPoints ?? 100, datasource: { type: 'loki', uid } }),
+  },
+  vm: {
+    name: 'VictoriaMetrics',
+    uid: ({ VM_UID }) => VM_UID,
+    model: (s, uid) => ({ refId: 'A', expr: s.expr, range: true, instant: false, intervalMs: 60000, maxDataPoints: 100, datasource: { type: 'prometheus', uid } }),
+  },
 };
 export const alertDatasource = (spec) => {
   const d = ALERT_DATASOURCES[spec.ds];
@@ -25,27 +36,27 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
   const ALERT_SPECS = [
     { title: 'Node silent — seen in last 3h, quiet 15m (per node)', signal: 'logs',
       ds: 'loki', windowSec: 600, maxDataPoints: 50,
-      expr: 'count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[15m]))',
+      expr: `${countByLokiNode(`count_over_time(${dkgLogStream()}[3h] offset 15m)`)} unless ${countByLokiNode(`count_over_time(${dkgLogStream()}[15m])`)}`,
       condition: { op: '>', value: 0 }, forDur: '5m', noData: 'OK',
       summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving.' },
     { title: 'Fleet blackout — NO node logs reaching Loki', signal: 'logs',
       ds: 'loki', windowSec: 600, maxDataPoints: 50,
-      expr: 'count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m])))',
+      expr: `count(sum by (service_instance_id) (count_over_time(${dkgLogStream()}[15m])))`,
       condition: { op: '<', value: 1 }, forDur: '5m', noData: 'Alerting',
       summary: 'Zero nodes have shipped any logs in 15m — the whole fleet or the ingest pipeline (collector/Loki) is down.' },
     { title: 'Error spike on a node (>10 ERROR / 10m)', signal: 'logs',
       ds: 'loki', windowSec: 600,
-      expr: 'sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))',
+      expr: sumByLokiNode(`count_over_time(${dkgLogStream()}${severityIs('ERROR')} [10m])`),
       condition: { op: '>', value: 10 }, forDur: '5m', noData: 'OK',
       summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} ERRORs in 10m.' },
     { title: 'Warn spike on a node (>150 WARN / 10m)', signal: 'logs',
       ds: 'loki', windowSec: 600,
-      expr: 'sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))',
+      expr: sumByLokiNode(`count_over_time(${dkgLogStream()}${severityIs('WARN')} [10m])`),
       condition: { op: '>', value: 150 }, forDur: '10m', noData: 'OK',
       summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues).' },
     { title: 'RPC credit burn spike (armed — needs nodes on a post-#1409 build)', signal: 'metrics',
       ds: 'loki', windowSec: 3600,
-      expr: 'sum by (service_instance_id, deployment_environment) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))',
+      expr: sumByLokiNode(`sum_over_time(${dkgLogStream()}${RPC_USAGE_PIPELINE}[1h])`),
       condition: { op: '>', value: 6000 }, forDur: '5m', noData: 'OK',
       summary: 'Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build.' },
     { title: 'Log pipeline export failing (collector cannot ship to Loki)', signal: 'metrics',
@@ -77,11 +88,12 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
 
   const EXPR = '__expr__';
   const specToRule = (s) => {
-    alertDatasource(s); // loud failure on a typoed enum before any rendering
-    const dsUid = s.ds === 'loki' ? LOKI_UID : VM_UID;
-    const queryModel = s.ds === 'loki'
-      ? { refId: 'A', expr: s.expr, queryType: 'range', intervalMs: 60000, maxDataPoints: s.maxDataPoints ?? 100, datasource: { type: 'loki', uid: dsUid } }
-      : { refId: 'A', expr: s.expr, range: true, instant: false, intervalMs: 60000, maxDataPoints: 100, datasource: { type: 'prometheus', uid: dsUid } };
+    // The registry entry owns UID selection AND the query-model shape —
+    // a loud failure on a typoed enum, and no Loki-vs-everything-else branch
+    // here that could drift from the registry.
+    const ds = alertDatasource(s);
+    const dsUid = ds.uid({ VM_UID, LOKI_UID });
+    const queryModel = ds.model(s, dsUid);
     return {
       orgID: 1, folderUID: 'dkg-observability', ruleGroup: 'dkg-node-telemetry', title: s.title,
       condition: 'C',

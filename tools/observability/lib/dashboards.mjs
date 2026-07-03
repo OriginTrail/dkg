@@ -4,6 +4,8 @@
 // helpers (row layout, panel constructors, node-identity discovery model)
 // live at module scope. Rendering, CLI handling and --check live in
 // ../generate-observability.mjs.
+import { dkgLogStream, severityIs, severityMatches, RPC_USAGE_PIPELINE } from './queries.mjs';
+
 const LOKI = { type: 'loki', uid: '${loki}' };
 const VM = { type: 'prometheus', uid: '${vm}' };
 const TEMPO = { type: 'tempo', uid: '${tempo}' };
@@ -24,26 +26,34 @@ const nodeVarMulti = (identity) => ({ name: 'node', label: 'Node', type: 'query'
 // Layout: dashboards are defined as ROWS of sized panels; x/y are computed
 // (x accumulates widths within a row, y advances by the tallest panel of the
 // row), so inserting or resizing a panel never requires recalculating any
-// other panel's coordinates. Builders take (w, h) and carry a gridPos
-// placeholder so the stamped key keeps its position in the rendered JSON.
-// Stamping is PURE and layout is the ONLY owner of gridPos: panel defs are
-// plain, complete data (no placeholder fields), and layout() copies each def
-// inserting the computed gridPos immediately after `title` — the canonical
-// position Grafana exports use — so the rendered JSON stays byte-stable.
+// other panel's coordinates.
+// The layout item shape is explicit — { w, h, def } where def is a plain,
+// complete panel object — and layout() is the ONLY owner of gridPos: it
+// VALIDATES each item at the layout boundary (a def that already carries
+// gridPos, or lacks a string title, fails generation loudly instead of
+// silently rendering a panel without coordinates) and constructs the output
+// object explicitly as { title, gridPos, ...rest }; nothing depends on source
+// key order or on finding a magic key while copying arbitrary objects.
 const layout = (rows) => {
   const panels = [];
   let y = 0;
   for (const row of rows) {
     let x = 0, rowH = 0;
     for (const item of row) {
-      const stamped = {};
-      for (const [k, v] of Object.entries(item.def)) {
-        stamped[k] = v;
-        if (k === 'title') stamped.gridPos = { h: item.h, w: item.w, x, y };
+      const { w, h, def } = item;
+      if (!Number.isFinite(w) || !Number.isFinite(h) || !def || typeof def !== 'object') {
+        throw new Error(`layout: item must be { w, h, def } with numeric sizes — got ${JSON.stringify(item)?.slice(0, 120)}`);
       }
-      panels.push(stamped);
-      x += item.w;
-      rowH = Math.max(rowH, item.h);
+      if ('gridPos' in def) {
+        throw new Error(`layout: panel "${def.title}" already carries gridPos — layout() is the only owner of coordinates`);
+      }
+      if (typeof def.title !== 'string') {
+        throw new Error(`layout: panel def (type ${def.type}) needs a string title (may be empty) — a missing title must fail here, not silently drop from the rendered JSON`);
+      }
+      const { title, ...rest } = def;
+      panels.push({ title, gridPos: { h, w, x, y }, ...rest });
+      x += w;
+      rowH = Math.max(rowH, h);
     }
     y += rowH;
   }
@@ -59,8 +69,12 @@ const LOGSP = (w, h, title, expr) => ({ w, h, def: { datasource: LOKI, type: 'lo
 const TEXT = (content) => ({ w: 24, h: 3, def: { type: 'text', title: '', options: { mode: 'markdown', content }, transparent: true } });
 const ROW = (title) => ({ w: 24, h: 1, def: { type: 'row', title, collapsed: false } });
 
-const FE = '{service_name="dkg-node", deployment_environment=~"${env:regex}"}';
-const RPCPIPE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
+// Loki query building blocks come from the shared contract (lib/queries.mjs)
+// — the same module alerts.mjs composes from, so the stream selector,
+// severity filter shape and rpc_usage pipeline cannot drift between the
+// dashboards and the alert rules.
+const FE = dkgLogStream('deployment_environment=~"${env:regex}"');
+const RPCPIPE = RPC_USAGE_PIPELINE;
 
 const buildFleetLogsDashboard = () => ({
   uid: 'dkg-fleet-logs', title: 'DKG Fleet — Logs Overview', timezone: 'browser', refresh: '1m',
@@ -76,8 +90,8 @@ const buildFleetLogsDashboard = () => ({
           expr: `count(count by (service_instance_id) (count_over_time(${FE} [10m])))` }] } },
       TS(18, 9, LOKI, 'Log volume per node', [{ expr: `sum by (service_instance_id) (count_over_time(${FE} [$__auto]))`, legend: '{{service_instance_id}}' }]),
     ],
-    [ TS(24, 8, LOKI, 'Errors per node', [{ expr: `sum by (service_instance_id) (count_over_time(${FE} | severity_text=\`ERROR\` [$__auto]))`, legend: '{{service_instance_id}}' }]) ],
-    [ LOGSP(24, 10, 'Recent errors (all nodes)', `${FE} | severity_text=\`ERROR\``) ],
+    [ TS(24, 8, LOKI, 'Errors per node', [{ expr: `sum by (service_instance_id) (count_over_time(${FE}${severityIs('ERROR')} [$__auto]))`, legend: '{{service_instance_id}}' }]) ],
+    [ LOGSP(24, 10, 'Recent errors (all nodes)', `${FE}${severityIs('ERROR')}`) ],
     [
       TS(12, 9, LOKI, 'RPC requests per node', [{ expr: `sum by (service_instance_id) (sum_over_time(${FE}${RPCPIPE}[$__auto]))`, legend: '{{service_instance_id}}' }]),
       TS(12, 9, LOKI, 'RPC requests by method (fleet)', [{ expr: `sum by (method) (sum_over_time(${FE}${RPCPIPE}[$__auto]))`, legend: '{{method}}' }]),
@@ -105,8 +119,8 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
     { name: 'search', label: 'Filter (regex)', type: 'textbox', query: '', current: { text: '', value: '' } },
   ]},
   panels: layout([
-    [ LOGSP(24, 20, 'Logs — $node', `${NB} | severity_text=~\`\${level:regex}\` |~ \`(?i)$search\``) ],
-    [ TS(24, 6, LOKI, 'Log volume by level — $node', [{ expr: `sum by (severity_text) (count_over_time(${NB} | severity_text=~\`\${level:regex}\` |~ \`(?i)$search\` [$__auto]))`, legend: '{{severity_text}}' }]) ],
+    [ LOGSP(24, 20, 'Logs — $node', `${NB}${severityMatches('${level:regex}')} |~ \`(?i)$search\``) ],
+    [ TS(24, 6, LOKI, 'Log volume by level — $node', [{ expr: `sum by (severity_text) (count_over_time(${NB}${severityMatches('${level:regex}')} |~ \`(?i)$search\` [$__auto]))`, legend: '{{severity_text}}' }]) ],
     [
       TS(18, 8, LOKI, 'RPC requests by method — $node', [{ expr: `sum by (method) (sum_over_time(${NB}${RPCPIPE}[$__auto]))`, legend: '{{method}}' }]),
       { w: 6, h: 8, def: { datasource: LOKI, type: 'stat', title: 'RPC requests — $node (selected range)',

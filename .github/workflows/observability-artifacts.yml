@@ -42,22 +42,18 @@ jobs:
       - name: Verify committed artifacts match the generator
         run: node tools/observability/generate-observability.mjs --check
 
-      - name: Smoke-test the operator render mode (concrete UIDs + node-label profile)
+      # verify-profile-render.mjs PARSES the rendered JSON and asserts the
+      # whole profile-sensitive surface (every metrics target, the $node
+      # variable, per-node alert exprs + summaries, notification group-bys,
+      # datasourceUid/model.datasource.uid consistency, placeholder hygiene) —
+      # a sampling grep cannot prove the operator render mode, a full walk can.
+      - name: Verify the committed artifacts against the default node-label profile
+        run: node tools/observability/verify-profile-render.mjs tools/observability --prom-node-label instance
+
+      - name: Verify the operator render mode (concrete UIDs + alternate node-label profile)
         run: |
           set -euo pipefail
           node tools/observability/generate-observability.mjs /tmp/render \
             --vm-uid test-vm-uid --loki-uid test-loki-uid --prom-node-label service_instance_id
-          cd /tmp/render
-          fail() { echo "SMOKE FAIL: $1"; exit 1; }
-          # placeholder must be fully substituted in FIELD VALUES (the _readme
-          # prose legitimately mentions the placeholder by name, so match the
-          # quoted-value form only)
-          if grep -q '"<VM_DATASOURCE_UID>"' alert-rules.provisioning.json; then fail 'placeholder survived --vm-uid render'; fi
-          # concrete datasource UIDs must land in the rule payloads
-          grep -q '"datasourceUid": "test-vm-uid"' alert-rules.provisioning.json || fail 'vm uid missing from rule payloads'
-          grep -q '"datasourceUid": "test-loki-uid"' alert-rules.provisioning.json || fail 'loki uid missing from rule payloads'
-          # node-label profile must drive metrics selectors, group-bys and alert exprs
-          if grep -q '{instance=~' grafana-dashboard-dkg-node-metrics.json; then fail 'default node label leaked into profiled render'; fi
-          grep -q 'service_instance_id=~' grafana-dashboard-dkg-node-metrics.json || fail 'profiled node label missing from dashboard'
-          grep -q 'sum by (service_instance_id) (rate(dkg_publish_total' alert-rules.provisioning.json || fail 'profile not applied to alert expressions'
-          echo "operator render mode OK"
+          node tools/observability/verify-profile-render.mjs /tmp/render \
+            --prom-node-label service_instance_id --vm-uid test-vm-uid --loki-uid test-loki-uid
