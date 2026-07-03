@@ -67,7 +67,12 @@ interface PublisherJobView extends Record<string, unknown> {
   error?: unknown;
 }
 
-const suite: Partial<Suite> = {};
+interface KnowledgeAssetQueryResult extends Record<string, unknown> {
+  count?: number | string;
+  quads?: Array<{ subject?: string }>;
+}
+
+let suite: Suite;
 let fileCounter = 0;
 
 const unique = (prefix: string): string =>
@@ -105,6 +110,64 @@ function writeNtFixture(name: string, value: string): { filePath: string; subjec
   return { filePath, subject };
 }
 
+async function assertSubjectVisible(
+  node: DevnetNode,
+  contextGraphId: string,
+  subject: string,
+  value: string,
+  opts: {
+    view: 'shared-working-memory' | 'verifiable-memory';
+    label: string;
+    timeoutMs: number;
+    intervalMs: number;
+    subGraphName?: string;
+  },
+): Promise<void> {
+  const rows = await waitFor(
+    `subject ${subject} visible in ${opts.label}${opts.subGraphName ? ` subgraph ${opts.subGraphName}` : ''}`,
+    opts.timeoutMs,
+    opts.intervalMs,
+    async () => {
+      const bindings = await queryNode(
+        node,
+        `SELECT ?o WHERE { GRAPH ?g { <${subject}> <${PREDICATE}> ?o } }`,
+        {
+          contextGraphId,
+          view: opts.view,
+          ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+        },
+      );
+      return bindings.some((row) => lexical(row.o) === value) ? bindings : null;
+    },
+  );
+  expect(rows.length).toBeGreaterThan(0);
+}
+
+async function assertSubjectNotVisible(
+  node: DevnetNode,
+  contextGraphId: string,
+  subject: string,
+  opts: {
+    view: 'shared-working-memory' | 'verifiable-memory';
+    label: string;
+    subGraphName?: string;
+  },
+): Promise<void> {
+  const bindings = await queryNode(
+    node,
+    `SELECT ?p ?o WHERE { GRAPH ?g { <${subject}> ?p ?o } }`,
+    {
+      contextGraphId,
+      view: opts.view,
+      ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+    },
+  );
+  expect(
+    bindings.length,
+    `subject ${subject} unexpectedly visible in ${opts.label}`,
+  ).toBe(0);
+}
+
 async function assertSharedSubject(
   node: DevnetNode,
   contextGraphId: string,
@@ -112,24 +175,13 @@ async function assertSharedSubject(
   value: string,
   subGraphName?: string,
 ): Promise<void> {
-  const rows = await waitFor(
-    `subject ${subject} visible in SWM${subGraphName ? ` subgraph ${subGraphName}` : ''}`,
-    120_000,
-    3_000,
-    async () => {
-      const bindings = await queryNode(
-        node,
-        `SELECT ?o WHERE { GRAPH ?g { <${subject}> <${PREDICATE}> ?o } }`,
-        {
-          contextGraphId,
-          view: 'shared-working-memory',
-          ...(subGraphName ? { subGraphName } : {}),
-        },
-      );
-      return bindings.some((row) => lexical(row.o) === value) ? bindings : null;
-    },
-  );
-  expect(rows.length).toBeGreaterThan(0);
+  await assertSubjectVisible(node, contextGraphId, subject, value, {
+    view: 'shared-working-memory',
+    label: 'SWM',
+    timeoutMs: 120_000,
+    intervalMs: 3_000,
+    subGraphName,
+  });
 }
 
 async function assertVerifiableSubject(
@@ -139,24 +191,38 @@ async function assertVerifiableSubject(
   value: string,
   subGraphName?: string,
 ): Promise<void> {
-  const rows = await waitFor(
-    `subject ${subject} visible in VM${subGraphName ? ` subgraph ${subGraphName}` : ''}`,
-    180_000,
-    5_000,
-    async () => {
-      const bindings = await queryNode(
-        node,
-        `SELECT ?o WHERE { GRAPH ?g { <${subject}> <${PREDICATE}> ?o } }`,
-        {
-          contextGraphId,
-          view: 'verifiable-memory',
-          ...(subGraphName ? { subGraphName } : {}),
-        },
-      );
-      return bindings.some((row) => lexical(row.o) === value) ? bindings : null;
-    },
-  );
-  expect(rows.length).toBeGreaterThan(0);
+  await assertSubjectVisible(node, contextGraphId, subject, value, {
+    view: 'verifiable-memory',
+    label: 'VM',
+    timeoutMs: 180_000,
+    intervalMs: 5_000,
+    subGraphName,
+  });
+}
+
+function publisherJobTargetsKnowledgeAsset(
+  job: PublisherJobView,
+  expected: { contextGraphId: string; name: string; subGraphName?: string },
+): boolean {
+  const request = job.request?.knowledgeAssetVmPublish;
+  return job.request?.jobType === 'knowledge-asset-vm-publish' &&
+    request?.contextGraphId === expected.contextGraphId &&
+    request?.name === expected.name &&
+    (expected.subGraphName === undefined || request?.subGraphName === expected.subGraphName);
+}
+
+async function assertNoPublisherJobForKnowledgeAsset(
+  node: DevnetNode,
+  expected: { contextGraphId: string; name: string; subGraphName?: string },
+): Promise<void> {
+  const jobs = await runDkgCli(node, ['publisher', 'jobs'], 60_000);
+  expectCliOk(jobs, 'publisher jobs');
+  const parsed = JSON.parse(jobs.stdout.trim()) as PublisherJobView[];
+  expect(Array.isArray(parsed), `publisher jobs output: ${jobs.stdout}`).toBe(true);
+  expect(
+    parsed.some((job) => publisherJobTargetsKnowledgeAsset(job, expected)),
+    `publisher jobs unexpectedly contained a VM publish for ${expected.name}: ${jobs.stdout}`,
+  ).toBe(false);
 }
 
 async function waitForPublisherJobFinalized(
@@ -193,6 +259,50 @@ async function waitForPublisherJobFinalized(
   expect(request?.intentKey, `publisher job ${jobId} request: ${JSON.stringify(job.request)}`)
     .toBeTruthy();
   return job;
+}
+
+function queryResultHasSubject(result: KnowledgeAssetQueryResult | null, subject: string): boolean {
+  return (result?.quads ?? []).some((quad) => quad.subject === subject);
+}
+
+async function queryWorkingMemory(
+  node: DevnetNode,
+  contextGraphId: string,
+  name: string,
+  label: string,
+): Promise<KnowledgeAssetQueryResult | null> {
+  const result = await runDkgCli(node, ['ka', 'query', name, '-c', contextGraphId, '--json'], 60_000);
+  if (result.code !== 0) {
+    expect(
+      `${result.stdout}\n${result.stderr}`,
+      `${label} query failed unexpectedly`,
+    ).toMatch(/not found|no quads|missing|404|does not exist|draft/i);
+    return null;
+  }
+  return parseLastJsonBlock<KnowledgeAssetQueryResult>(result.stdout, `${label} stdout`);
+}
+
+async function assertWorkingMemorySubjectPresent(
+  node: DevnetNode,
+  contextGraphId: string,
+  name: string,
+  subject: string,
+  label: string,
+): Promise<void> {
+  const result = await queryWorkingMemory(node, contextGraphId, name, label);
+  expect(result, `${label} query returned no result`).toBeTruthy();
+  expect(queryResultHasSubject(result, subject), `${label} query output: ${JSON.stringify(result)}`).toBe(true);
+}
+
+async function assertWorkingMemorySubjectAbsent(
+  node: DevnetNode,
+  contextGraphId: string,
+  name: string,
+  subject: string,
+  label: string,
+): Promise<void> {
+  const result = await queryWorkingMemory(node, contextGraphId, name, label);
+  expect(queryResultHasSubject(result, subject), `${label} query output: ${JSON.stringify(result)}`).toBe(false);
 }
 
 beforeAll(async () => {
@@ -233,14 +343,12 @@ beforeAll(async () => {
   );
   expectCliOk(sub, 'context-graph create-sub-graph');
 
-  suite.node = node;
-  suite.contextGraphId = contextGraphId;
-  suite.subGraphName = subGraphName;
+  suite = { node, contextGraphId, subGraphName };
 }, 240_000);
 
 describe('KA lifecycle CLI on devnet', () => {
   it('one-shot create/share reaches sub-graph SWM and async VM publish finalizes the named KA', async () => {
-    const { node, contextGraphId, subGraphName } = suite as Suite;
+    const { node, contextGraphId, subGraphName } = suite;
     const name = unique('one-shot');
     const { filePath, subject } = writeNtFixture(name, 'one-shot shared');
 
@@ -265,6 +373,16 @@ describe('KA lifecycle CLI on devnet', () => {
     expect(created.stdout).not.toMatch(/\b(UAL|KA ID):/);
 
     await assertSharedSubject(node, contextGraphId, subject, 'one-shot shared', subGraphName);
+    await assertSubjectNotVisible(node, contextGraphId, subject, {
+      view: 'verifiable-memory',
+      label: 'VM before explicit publish',
+      subGraphName,
+    });
+    await assertNoPublisherJobForKnowledgeAsset(node, {
+      contextGraphId,
+      name,
+      subGraphName,
+    });
 
     const publish = await runDkgCli(
       node,
@@ -295,7 +413,7 @@ describe('KA lifecycle CLI on devnet', () => {
   });
 
   it('stepwise lifecycle drains share-async, then pull-from/query/discard works', async () => {
-    const { node, contextGraphId } = suite as Suite;
+    const { node, contextGraphId } = suite;
     const name = unique('stepwise');
     const { filePath, subject } = writeNtFixture(name, 'stepwise shared');
 
@@ -312,14 +430,7 @@ describe('KA lifecycle CLI on devnet', () => {
       'ka write',
     );
 
-    const wmBeforeFinalize = await runDkgCli(
-      node,
-      ['ka', 'query', name, '-c', contextGraphId, '--json'],
-      60_000,
-    );
-    expectCliOk(wmBeforeFinalize, 'ka query before finalize');
-    expect(Number(parseLastJsonBlock(wmBeforeFinalize.stdout, 'ka query before finalize stdout').count ?? 0))
-      .toBeGreaterThan(0);
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, subject, 'ka query before finalize');
 
     expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), 'ka finalize');
 
@@ -350,27 +461,27 @@ describe('KA lifecycle CLI on devnet', () => {
     ) as Array<{ jobId?: string }>;
     expect(listed.some((job) => job.jobId === jobId), `share-jobs output: ${jobs.stdout}`).toBe(true);
 
+    const clearedBeforePull = await runDkgCli(node, ['ka', 'discard', name, '-c', contextGraphId, '--json'], 60_000);
+    expectCliOk(clearedBeforePull, 'ka discard before pull-from');
+    expect(parseLastJsonBlock(clearedBeforePull.stdout, 'ka discard before pull-from stdout').discarded).toBe(true);
+    await assertWorkingMemorySubjectAbsent(node, contextGraphId, name, subject, 'ka query after pre-pull discard');
+
     const pulled = await runDkgCli(
       node,
       ['ka', 'pull-from', name, '-c', contextGraphId, '--layer', 'swm', '--on-conflict', 'replace', '--json'],
       60_000,
     );
     expectCliOk(pulled, 'ka pull-from');
-
-    const wmAfterPull = await runDkgCli(node, ['ka', 'query', name, '-c', contextGraphId, '--json'], 60_000);
-    expectCliOk(wmAfterPull, 'ka query after pull-from');
-    const quads = (
-      parseLastJsonBlock(wmAfterPull.stdout, 'ka query after pull-from stdout').quads ?? []
-    ) as Array<{ subject?: string }>;
-    expect(quads.some((quad) => quad.subject === subject), `query output: ${wmAfterPull.stdout}`).toBe(true);
+    await assertWorkingMemorySubjectPresent(node, contextGraphId, name, subject, 'ka query after pull-from');
 
     const discarded = await runDkgCli(node, ['ka', 'discard', name, '-c', contextGraphId, '--json'], 60_000);
     expectCliOk(discarded, 'ka discard');
     expect(parseLastJsonBlock(discarded.stdout, 'ka discard stdout').discarded).toBe(true);
+    await assertWorkingMemorySubjectAbsent(node, contextGraphId, name, subject, 'ka query after final discard');
   });
 
   it('publisher publish-async remains an operational alias for named KA VM publish', async () => {
-    const { node, contextGraphId } = suite as Suite;
+    const { node, contextGraphId } = suite;
     const name = unique('publisher-alias');
     const { filePath, subject } = writeNtFixture(name, 'publisher alias shared');
 
@@ -397,7 +508,7 @@ describe('KA lifecycle CLI on devnet', () => {
   });
 
   it('deleted direct publish and legacy SWM routes remain unavailable', async () => {
-    const { node, contextGraphId } = suite as Suite;
+    const { node, contextGraphId } = suite;
     const { filePath } = writeNtFixture('legacy-top-level', 'legacy route guard');
 
     const legacyCli = await runDkgCli(node, ['publish', contextGraphId, '--file', filePath], 30_000);
