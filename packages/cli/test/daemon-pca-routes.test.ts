@@ -229,6 +229,25 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(confirmArgs).toEqual([1n, addr]);
   });
 
+  // R19 — the success response IDENTITY fields (accountId, agent) are assembled
+  // by the route; pin them. accountId is canonicalized from the path (a
+  // non-canonical '007' → '7'), and agent echoes the submitted address.
+  it('register: success response echoes canonical accountId + the submitted agent', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'confirmed',
+    };
+    const { res, done } = runCtx('POST', '/api/pca/007/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.accountId).toBe('7'); // canonicalized from '007'
+    expect(body.agent).toBe(addr);
+    expect(body.txHash).toBe('0xreg');
+    expect(body.blockNumber).toBe(9);
+  });
+
   // #1346 / PR #1423 R2 — the mined tx is authoritative, so a lagging/throwing
   // on-chain read must NEVER flip `registered` to false. The retry/probe logic
   // now lives on the typed facade

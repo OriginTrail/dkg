@@ -1,4 +1,3 @@
-import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 import type { PcaConfirmationOutcome } from '@origintrail-official/dkg-agent';
 
 /** The minimal agent surface the register-agent orchestration needs. */
@@ -14,22 +13,22 @@ type PcaRegisterAgentPort = {
 };
 
 /**
- * The DOMAIN outcome of a register-agent attempt (no HTTP concepts — the route
- * maps these to responses):
+ * The DOMAIN result of a register-agent attempt — no HTTP status and no wire
+ * response body (the route maps and serializes these):
  *   - `unavailable` — the chain adapter exposes no publishing-conviction surface.
  *   - `reverted`    — the registration tx mined but reverted; never a registration.
- *   - `registered`  — the tx mined successfully; `body` is the coherent wire response
- *                     (`registered:true` + the advisory derived from the confirmation).
+ *   - `registered`  — mined successfully; carries the mined tx (hash/block) and
+ *                     the advisory confirmation outcome.
  */
 export type RegisterPcaAgentOutcome =
   | { kind: 'unavailable' }
   | { kind: 'reverted' }
-  | { kind: 'registered'; body: RegisterPcaAgentResponse };
+  | { kind: 'registered'; txHash: string; blockNumber: number; confirmation: PcaConfirmationOutcome };
 
 /**
- * Register `agentAddr` as a conviction agent on PCA `accountId`, then derive the
- * advisory confirmation. A pure orchestration over the agent facade: it performs
- * the chain call and confirmation, but classifies only domain outcomes.
+ * Register `agentAddr` as a conviction agent on PCA `accountId`, then confirm it.
+ * A pure orchestration over the agent facade: it performs the chain call and
+ * confirmation and returns only domain data.
  */
 export async function resolveRegisterPcaAgent(
   agent: PcaRegisterAgentPort,
@@ -39,20 +38,6 @@ export async function resolveRegisterPcaAgent(
   const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
   if (result === null) return { kind: 'unavailable' };
   if (result.success === false) return { kind: 'reverted' };
-  // Spread the advisory object (do NOT destructure) so its discriminated-union
-  // correlation between `verified` and `adapterSupported` is preserved on the body.
-  const advisory = pcaConfirmationToWire(
-    await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr),
-  );
-  return {
-    kind: 'registered',
-    body: {
-      accountId: accountId.toString(),
-      agent: agentAddr,
-      registered: true,
-      ...advisory,
-      txHash: result.hash,
-      blockNumber: result.blockNumber,
-    },
-  };
+  const confirmation = await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr);
+  return { kind: 'registered', txHash: result.hash, blockNumber: result.blockNumber, confirmation };
 }

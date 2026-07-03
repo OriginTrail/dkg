@@ -19,6 +19,7 @@ import {
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 import { resolveRegisterPcaAgent } from './pca-register-agent.js';
+import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
@@ -522,7 +523,16 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       if (outcome.kind === 'reverted') {
         return jsonResponse(res, 502, { error: 'PCA agent registration transaction was mined but did not succeed on-chain' });
       }
-      return jsonResponse(res, 200, outcome.body);
+      // The route owns the wire response body; the module returned pure domain data.
+      const body: RegisterPcaAgentResponse = {
+        accountId: accountId.toString(),
+        agent: agentAddr,
+        registered: true,
+        ...pcaConfirmationToWire(outcome.confirmation),
+        txHash: outcome.txHash,
+        blockNumber: outcome.blockNumber,
+      };
+      return jsonResponse(res, 200, body);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
