@@ -1517,16 +1517,16 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // registration. The tx receipt is already authoritative for `registered:true`;
   // this only refines the ADVISORY picture, returned as a single domain
   // `PcaConfirmationOutcome` (the daemon/CLI boundary derives the wire
-  // `{ verified, adapterSupported }` from it). A lagging or
-  // throwing read stays advisory and NEVER flips the authoritative
-  // registration. The retry policy is a private production constant —
-  // deliberately NOT a caller-tunable option on the public facade — so this
-  // method exposes only the domain operation: confirm this mined registration.
+  // `{ verified, adapterSupported }` from it). A lagging or throwing read stays
+  // advisory and NEVER flips the authoritative registration. The STATIC adapter
+  // capability gap (`unsupported`) is decided HERE, once, so the retry state
+  // machine only reasons about boolean reads (it never sees a `null`).
   async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
     accountId: bigint,
     agent: string,
   ): Promise<PcaConfirmationOutcome> {
-    return confirmPcaAgentRegistration(() => this.isPublishingConvictionAgent(accountId, agent));
+    if (typeof this.chain.isPublishingConvictionAgent !== 'function') return 'unsupported';
+    return confirmPcaAgentRegistration(() => this.chain.isPublishingConvictionAgent!(accountId, agent));
   }
 
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {

@@ -22,26 +22,41 @@ export type PcaAgentConfirmation =
  * The advisory portion of a register-agent response on the wire: a CURRENT
  * coherent `PcaAgentConfirmation`, or the pre-#1346 legacy shape
  * (`adapterSupported` present, `verified` absent — the old route emitted
- * `adapterSupported: verified !== null` with no `verified` field).
+ * `adapterSupported: verified !== null` with no `verified` field). This is the
+ * CONSUMER-side tolerance (decoder / client), NOT what a current daemon emits.
  */
 export type RegisterPcaAgentAdvisory =
   | PcaAgentConfirmation
   | { adapterSupported: boolean; verified?: undefined };
 
-/**
- * The FULL register-agent response body (daemon → client) — the SINGLE source of
- * truth for this route's wire contract, consumed by the daemon route
- * (`registerPcaAgentResponse`), the `ApiClient.registerPcaAgent` return type, and
- * `decodeRegisterAgentAdvisory`. Keeping one type here prevents the route from
- * emitting a shape the client/decoder don't model.
- */
-export type RegisterPcaAgentResponse = {
+type RegisterPcaAgentResponseBase = {
   accountId: string;
   agent: string;
   registered: boolean;
   txHash: string;
   blockNumber: number;
-} & RegisterPcaAgentAdvisory;
+};
+
+/**
+ * What the CURRENT daemon EMITS — STRICT: the coherent `PcaAgentConfirmation`
+ * advisory is required. The daemon route (`registerPcaAgentResponse`) returns
+ * this, so a future edit that drops `verified`/`adapterSupported` fails to
+ * compile — the producer keeps type pressure to emit the coherent wire shape.
+ */
+export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & PcaAgentConfirmation;
+
+/** The pre-#1346 legacy wire shape (adapterSupported present, verified absent). */
+export type LegacyRegisterPcaAgentResponse = RegisterPcaAgentResponseBase & {
+  adapterSupported: boolean;
+  verified?: undefined;
+};
+
+/**
+ * What a CLIENT must TOLERATE under CLI/daemon version skew — current OR legacy.
+ * `ApiClient.registerPcaAgent` returns this wider union; the strict
+ * `RegisterPcaAgentResponse` stays the producer's contract.
+ */
+export type AnyRegisterPcaAgentResponse = RegisterPcaAgentResponse | LegacyRegisterPcaAgentResponse;
 
 /** Derive the wire advisory fields from the agent's single confirmation outcome. */
 export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {

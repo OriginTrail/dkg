@@ -6,7 +6,7 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResponse } from './pca-confirmation-wire.js';
+import type { AnyRegisterPcaAgentResponse } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -989,10 +989,10 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  // #1346 — one canonical wire type (`RegisterPcaAgentResponse`) shared with the
-  // daemon route + confirmation decoder; covers the current coherent shape and
-  // the pre-#1346 legacy shape (adapterSupported present, verified absent).
-  async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResponse> {
+  // #1346 — the client TOLERATES current OR pre-#1346 legacy responses (version
+  // skew), so the return is the wider `AnyRegisterPcaAgentResponse`. The daemon
+  // route itself emits the strict `RegisterPcaAgentResponse`.
+  async registerPcaAgent(accountId: string, agent: string): Promise<AnyRegisterPcaAgentResponse> {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
   }
 
