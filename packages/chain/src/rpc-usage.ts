@@ -87,6 +87,30 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
   }
 }
 
+/**
+ * Merge usage windows from multiple trackers into one (pure model operation:
+ * per-method sums, summed totals, summed lifetimes). A process can own several
+ * chain adapters with independent trackers — one per configured RPC consumer
+ * (e.g. the agent's adapter plus one per publisher wallet); billing-exact
+ * accounting is the SUM across all of them. Returns undefined when no input
+ * window is defined (no capability anywhere).
+ */
+export function mergeRpcUsageWindows(
+  ...windows: Array<RpcUsageWindow | undefined>
+): RpcUsageWindow | undefined {
+  const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
+  if (defined.length === 0) return undefined;
+  const byMethod: Record<string, number> = {};
+  let total = 0;
+  let lifetimeTotal = 0;
+  for (const w of defined) {
+    for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
+    total += w.total;
+    lifetimeTotal += w.lifetimeTotal;
+  }
+  return { byMethod, total, lifetimeTotal };
+}
+
 export interface RpcUsageWindow {
   /**
    * Raw requests since the previous drain, keyed by the RAW JSON-RPC method

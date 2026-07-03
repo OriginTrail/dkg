@@ -42,30 +42,6 @@ export function formatRpcUsageLines(
   return lines;
 }
 
-/**
- * Merge usage windows from MULTIPLE trackers into one. The daemon process can
- * own several chain adapters with independent trackers (the agent's adapter
- * plus one per publisher wallet in the async-publisher runtime) — the emitted
- * rpc_usage lines must be the SUM across all of them or the highest-burn path
- * (publish transactions) silently vanishes from the billing signal. Returns
- * undefined when no input window is defined (no capability anywhere).
- */
-export function mergeRpcUsageWindows(
-  ...windows: Array<RpcUsageWindow | undefined>
-): RpcUsageWindow | undefined {
-  const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
-  if (defined.length === 0) return undefined;
-  const byMethod: Record<string, number> = {};
-  let total = 0;
-  let lifetimeTotal = 0;
-  for (const w of defined) {
-    for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
-    total += w.total;
-    lifetimeTotal += w.lifetimeTotal;
-  }
-  return { byMethod, total, lifetimeTotal };
-}
-
 /** The drain capability the daemon consumes (DKGAgent.drainChainRpcUsage). */
 export interface RpcUsageSource {
   drainChainRpcUsage?: () => RpcUsageWindow | undefined;

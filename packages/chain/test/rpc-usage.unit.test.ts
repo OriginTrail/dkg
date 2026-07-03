@@ -18,7 +18,7 @@ import {
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { boundedRpcMethodLabel, RpcUsageTracker } from '../src/rpc-usage.js';
+import { boundedRpcMethodLabel, mergeRpcUsageWindows, RpcUsageTracker } from '../src/rpc-usage.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -162,6 +162,25 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod['fabricated_0']).toBe(2);
     expect(w.byMethod['other']).toBe(6); // the 6 overflow names
     expect(w.total).toBe(max + 7);
+  });
+
+  it('mergeRpcUsageWindows sums per-method, total and lifetime across trackers', () => {
+    const merged = mergeRpcUsageWindows(
+      { byMethod: { eth_call: 5, eth_estimateGas: 2 }, total: 7, lifetimeTotal: 100 },
+      { byMethod: { eth_call: 3, eth_sendRawTransaction: 4 }, total: 7, lifetimeTotal: 50 },
+    );
+    expect(merged).toEqual({
+      byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
+      total: 14,
+      lifetimeTotal: 150,
+    });
+  });
+
+  it('mergeRpcUsageWindows skips undefined inputs and returns undefined when nothing is defined', () => {
+    const w = { byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 };
+    expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
+    expect(mergeRpcUsageWindows(undefined, undefined)).toBeUndefined();
+    expect(mergeRpcUsageWindows()).toBeUndefined();
   });
 
   it('tracker.record never throws; window keys stay RAW (log token-safety is the formatter concern)', () => {

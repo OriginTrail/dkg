@@ -65,6 +65,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
   MockChainAdapter,
+  mergeRpcUsageWindows,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
@@ -137,7 +138,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
-import { mergeRpcUsageWindows, startRpcUsageTelemetry } from './rpc-usage-log.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
