@@ -94,6 +94,31 @@ export interface CliResult {
   stderr: string;
 }
 
+/**
+ * Extract the final JSON object a CLI command prints after human/log lines.
+ * Many devnet suites use JSON mode on commands that still emit progress text;
+ * scanning from the last object start keeps those assertions consistent.
+ */
+export function parseLastJsonBlock<T extends Record<string, unknown> = Record<string, unknown>>(
+  stdout: string,
+  label = 'CLI stdout',
+): T {
+  for (let i = stdout.lastIndexOf('\n{'); i >= 0; i = i === 0 ? -1 : stdout.lastIndexOf('\n{', i - 1)) {
+    const candidate = stdout.slice(i).trim();
+    try {
+      return JSON.parse(candidate) as T;
+    } catch {
+      // keep scanning earlier object starts
+    }
+  }
+
+  try {
+    return JSON.parse(stdout.trim()) as T;
+  } catch {
+    throw new Error(`no JSON object in ${label}:\n${stdout.slice(0, 2000)}`);
+  }
+}
+
 // ──────────────────────── node config / identity ────────────────────────
 
 export function readNodeConfig(num: number): DevnetNode {

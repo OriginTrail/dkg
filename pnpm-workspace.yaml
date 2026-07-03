@@ -18,6 +18,7 @@ packages:
   - "devnet/pr1386-term-canon"
   - "devnet/pr1385-subgraph-rs"
   - "devnet/pr1388-okf-integration"
+  - "devnet/ka-lifecycle-cli"
   - "devnet/pr1366-pca-deposit-waiver"
   - "devnet/pr1387-bulk-register-agents"
   - "devnet/pr1384-preserve-agents-on-transfer"

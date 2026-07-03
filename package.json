@@ -58,6 +58,7 @@
     "test:devnet:pr1386-term-canon": "vitest run --config devnet/pr1386-term-canon/vitest.config.ts",
     "test:devnet:pr1385-subgraph-rs": "vitest run --config devnet/pr1385-subgraph-rs/vitest.config.ts",
     "test:devnet:pr1388-okf-integration": "vitest run --config devnet/pr1388-okf-integration/vitest.config.ts",
+    "test:devnet:ka-lifecycle-cli": "vitest run --config devnet/ka-lifecycle-cli/vitest.config.ts",
     "test:devnet:pr1366-pca-deposit-waiver": "vitest run --config devnet/pr1366-pca-deposit-waiver/vitest.config.ts",
     "test:devnet:pr1387-bulk-register-agents": "vitest run --config devnet/pr1387-bulk-register-agents/vitest.config.ts",
     "test:devnet:pr1384-preserve-agents-on-transfer": "vitest run --config devnet/pr1384-preserve-agents-on-transfer/vitest.config.ts",
