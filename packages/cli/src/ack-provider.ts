@@ -27,6 +27,12 @@ export interface ACKTransportFactory {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   getConnectedCorePeers: () => string[];
+  /**
+   * Confirmed-core-only readiness probe (no padding). Drives the collector's
+   * peer-readiness wait so a padded dial pool can't disarm it (otReviewAgent
+   * #1404 P1). Optional: the collector falls back to getConnectedCorePeers.
+   */
+  getReadinessCorePeers?: () => string[];
   log?: (message: string) => void;
 }
 
@@ -54,6 +60,7 @@ export function createV10ACKProviderForPublisher(
     gossipPublish: transport.gossipPublish,
     sendP2P: transport.sendP2P,
     getConnectedCorePeers: transport.getConnectedCorePeers,
+    getReadinessCorePeers: transport.getReadinessCorePeers,
     verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
     // Prefer the structured verifier when the chain adapter exposes it
     // so the rejection log can report the specific failing gate.

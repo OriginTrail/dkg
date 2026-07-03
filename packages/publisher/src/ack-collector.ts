@@ -37,7 +37,23 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  /**
+   * The DIAL pool: the peers the collector snapshots and dials for ACKs. The
+   * daemon may PAD this with non-core peers when confirmed cores are below
+   * quorum (best-effort dial to avoid `pool_below_quorum`), so its length is
+   * NOT a reliable "quorum is reachable" signal — see {@link getReadinessCorePeers}.
+   */
   getConnectedCorePeers: () => string[];
+  /**
+   * The READINESS predicate: how many QUORUM-ELIGIBLE confirmed core peers are
+   * connected right now (NO padding with edge/non-core peers). The readiness
+   * wait polls THIS — not {@link getConnectedCorePeers} — so a padded dial pool
+   * (e.g. 2 cores + 1 edge on a 3-signature chain) can no longer disarm the
+   * wait and let the round fast-fail before a slow-to-identify 3rd core shows
+   * up. Optional: defaults to {@link getConnectedCorePeers} for back-compat, so
+   * callers that don't distinguish the two keep the legacy behaviour.
+   */
+  getReadinessCorePeers?: () => string[];
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -199,27 +215,43 @@ export class ACKCollector {
     required: number,
     log: (msg: string) => void,
   ): Promise<string[]> {
-    let peers = this.deps.getConnectedCorePeers();
+    // Readiness is decided by QUORUM-ELIGIBLE CONFIRMED cores only — never the
+    // padded dial pool. `getConnectedCorePeers` may be padded with non-core
+    // peers when confirmed cores are below quorum (best-effort dial), so polling
+    // it for readiness would let a single connected edge peer disarm the wait
+    // and fast-fail before a slow 3rd core identifies. Fall back to it only when
+    // no distinct readiness probe is wired (legacy callers / unit tests). The
+    // whole readiness poll is gated on the timeout being enabled, so the legacy
+    // one-shot path takes EXACTLY the single dial snapshot below (no extra read).
     const timeoutMs = this.deps.corePeerReadinessTimeoutMs ?? 0;
-    if (timeoutMs > 0 && peers.length < required) {
-      const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-      log(
-        `[ACKCollector] ${peers.length}/${required} core peers connected — waiting up to ` +
-        `${timeoutMs}ms for quorum-eligible peers to connect/identify`,
-      );
-      // Bound the wait by the SAME poll interval handed to `sleep` (elapsed =
-      // sum of PEER_READINESS_POLL_MS steps) rather than a `Date.now()` deadline,
-      // so a test that injects a fast/no-op `sleep` fully controls how many polls
-      // run — no wall-clock dependency, no tight-loop footgun.
-      for (let waited = 0; waited < timeoutMs; waited += PEER_READINESS_POLL_MS) {
-        await sleep(PEER_READINESS_POLL_MS);
-        peers = this.deps.getConnectedCorePeers();
-        if (peers.length >= required) {
-          log(`[ACKCollector] core-peer quorum ready: ${peers.length}/${required} connected`);
-          break;
+    if (timeoutMs > 0) {
+      const readinessProbe = this.deps.getReadinessCorePeers ?? this.deps.getConnectedCorePeers;
+      let readyCount = readinessProbe().length;
+      if (readyCount < required) {
+        const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+        log(
+          `[ACKCollector] ${readyCount}/${required} core peers connected — waiting up to ` +
+          `${timeoutMs}ms for quorum-eligible peers to connect/identify`,
+        );
+        // Bound the wait by the SAME poll interval handed to `sleep` (elapsed =
+        // sum of PEER_READINESS_POLL_MS steps) rather than a `Date.now()` deadline,
+        // so a test that injects a fast/no-op `sleep` fully controls how many polls
+        // run — no wall-clock dependency, no tight-loop footgun.
+        for (let waited = 0; waited < timeoutMs; waited += PEER_READINESS_POLL_MS) {
+          await sleep(PEER_READINESS_POLL_MS);
+          readyCount = readinessProbe().length;
+          if (readyCount >= required) {
+            log(`[ACKCollector] core-peer quorum ready: ${readyCount}/${required} connected`);
+            break;
+          }
         }
       }
     }
+    // Snapshot the DIAL pool (which may be padded) AFTER the readiness gate, so
+    // we still dial the broader pool when confirmed cores never reach quorum
+    // (unchanged `pool_below_quorum` fallback) but only after the wait has had
+    // its chance to let a real core identify.
+    const peers = this.deps.getConnectedCorePeers();
     // Own the full pre-collection quorum invariant in one place: below-quorum is
     // a THROW here, not a normal return value each caller re-checks. Preserve the
     // exact legacy messages + peerOutcome shapes so log greps + tests keep matching.

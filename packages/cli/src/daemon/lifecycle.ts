@@ -1837,6 +1837,19 @@ export async function runDaemonInner(
                 }
                 return allPeers;
               },
+              // Readiness counts ONLY confirmed cores (never the all-peers
+              // padding fallback above), so a connected non-core peer can't
+              // disarm the peer-readiness wait (otReviewAgent #1404 P1).
+              getReadinessCorePeers: () => {
+                const knownCorePeerIds = (agent as any).knownCorePeerIds as
+                  | Set<string>
+                  | undefined;
+                if (!knownCorePeerIds || knownCorePeerIds.size === 0) return [];
+                return agent.node.libp2p
+                  .getPeers()
+                  .map((p) => p.toString())
+                  .filter((id) => id !== agent.peerId && knownCorePeerIds.has(id));
+              },
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),

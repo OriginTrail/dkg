@@ -1445,12 +1445,29 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
+  /**
+   * Connected, QUORUM-ELIGIBLE confirmed core peers only — no edge/non-core
+   * padding. This is the ACK-readiness predicate (see
+   * `ACKCollectorDeps.getReadinessCorePeers`): the readiness wait must count
+   * only real cores, so a padded dial pool (cores + an edge peer) can't disarm
+   * it and let the round fast-fail before a slow-to-identify core shows up.
+   */
+  private getConfirmedCorePeers(): string[] {
+    const connected = this.node.libp2p
+      .getPeers()
+      .map(p => p.toString())
+      .filter(id => id !== this.peerId);
+    return connected.filter(id => this.knownCorePeerIds.has(id));
+  }
+
   private getACKCandidatePeers(): string[] {
-    const peers = this.node.libp2p.getPeers();
-    const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-    const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
+    const confirmedCore = this.getConfirmedCorePeers();
     const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     if (confirmedCore.length >= quorum) return confirmedCore;
+    const connected = this.node.libp2p
+      .getPeers()
+      .map(p => p.toString())
+      .filter(id => id !== this.peerId);
     const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
     return [...confirmedCore, ...rest];
   }
@@ -1496,6 +1513,9 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Readiness counts ONLY confirmed cores (no padding) so a connected
+      // edge peer can't disarm the peer-readiness wait (otReviewAgent #1404 P1).
+      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1675,6 +1695,9 @@ export class DKGAgent extends DKGAgentBase {
         return sendResult.response;
       },
       getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Readiness counts ONLY confirmed cores (no padding) so a connected
+      // edge peer can't disarm the peer-readiness wait (otReviewAgent #1404 P1).
+      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

@@ -731,6 +731,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * NOTE (otReviewAgent #1404 P2): the underlying RPC is NOT cancelled on
+   * timeout — the ethers read path (`isContextGraphActiveOnChain` /
+   * `getContextGraphAccessPolicy` → `readContract`) takes no `AbortSignal`, and
+   * ethers v6 provider calls don't cleanly abort an in-flight JSON-RPC anyway.
+   * So a timed-out read runs to completion in the background. Combined with
+   * {@link retryTransientPolicyState}, a single policy resolve can therefore
+   * leave up to `POLICY_STATE_RETRY_ATTEMPTS` abandoned reads — but the reads
+   * are idempotent (no state), strictly SEQUENTIAL (a backoff sleep separates
+   * attempts), and bounded by that small fixed attempt count, so the only cost
+   * is a few extra eth_calls + slight RPC load per slow publish. Threading a
+   * cancellation signal would require changing the public ChainAdapter read
+   * interface + every adapter for no correctness gain, so we accept + document
+   * the bounded extra in-flight read budget instead.
    */
   private raceChainPolicyRead<T>(p: Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> {
     let timer: ReturnType<typeof setTimeout> | undefined;

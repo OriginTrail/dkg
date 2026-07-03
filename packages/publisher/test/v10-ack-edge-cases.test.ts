@@ -321,10 +321,43 @@ describe('ACKCollector core-peer readiness gate (#1404)', () => {
     expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
   });
 
+  it('otReviewAgent #1404 P1: readiness counts CONFIRMED cores, not the padded dial pool — a connected edge peer cannot disarm the wait', async () => {
+    // 2 confirmed cores + 1 edge peer on a 3-signature chain, with a 3rd core
+    // that identifies moments later. The DIAL pool is padded to length 3
+    // (2 cores + edge); under the OLD gate that padded count satisfied
+    // readiness, skipped the wait, froze the edge into the snapshot, and
+    // fast-failed once the edge couldn't ACK. Readiness must instead count only
+    // the 2 confirmed cores, wait for the 3rd core, then dial the 3 real cores.
+    let readinessCalls = 0;
+    const cores3 = ['peer-0', 'peer-1', 'peer-2'];
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      // 'edge' has no peer-N index, so its send throws (it never ACKs) — exactly
+      // what makes a frozen [core, core, edge] snapshot fast-fail.
+      sendP2P: buildSendP2P(),
+      // DIAL pool: padded with the edge until the 3rd core identifies.
+      getConnectedCorePeers: () =>
+        readinessCalls >= 3 ? cores3 : ['peer-0', 'peer-1', 'edge'],
+      // READINESS: confirmed cores only — 2 until the 3rd core shows up mid-wait.
+      getReadinessCorePeers: () => {
+        readinessCalls += 1;
+        return readinessCalls >= 3 ? cores3 : ['peer-0', 'peer-1'];
+      },
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {}, // collapse the wait; readiness polls drive the budget
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);         // dialed the 3 real cores, not the edge
+    expect(readinessCalls).toBeGreaterThan(1);   // it WAITED on confirmed cores (didn't skip)
+  });
+
   // NOTE: `collect` and `collectUpdate` both call the SAME shared preflight
   // (`getQuorumEligibleCorePeersOrThrow`), so the cases above exercise the exact
   // gate the UPDATE path uses. See storage-update-ack.test.ts for collectUpdate
-  // quorum coverage.
+  // quorum coverage. The existing cases wire ONLY getConnectedCorePeers, so they
+  // also lock in the readiness-probe fallback (getReadinessCorePeers ?? …).
 });
 
 // ── ACKCollector identity verification ───────────────────────────────────
