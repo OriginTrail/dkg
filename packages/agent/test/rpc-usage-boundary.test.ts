@@ -28,9 +28,9 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
     expect(out).toEqual({ byMethod: {}, total: 0, lifetimeTotal: 0 });
   });
 
-  it('returns undefined when the adapter lacks the optional capability', () => {
+  it('collapses a missing adapter capability to a concrete EMPTY window (consumers never see undefined)', () => {
     const out = drain.call({ chain: {} } as never);
-    expect(out).toBeUndefined();
+    expect(out).toEqual({ byMethod: {}, total: 0, lifetimeTotal: 0 });
   });
 
   it('is inherited by the composed DKGAgent class (the daemon consumes agent, not the base)', () => {

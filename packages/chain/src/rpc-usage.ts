@@ -87,14 +87,22 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
   }
 }
 
+/** A fresh all-zero window — the identity element for merging and the value of "nothing to report". */
+export function emptyRpcUsageWindow(): RpcUsageWindow {
+  return { byMethod: {}, total: 0, lifetimeTotal: 0 };
+}
+
 /**
  * THE drain contract — one name for one concept, wherever a usage window can
- * be drained from: a chain adapter (optional capability), an agent (delegates
- * to its adapter), a publisher runtime (merges its per-wallet adapters), or
- * the daemon's composite source. Deltas since the previous drain.
+ * be drained from: an agent (delegates to its adapter), a publisher runtime
+ * (merges its per-wallet adapters), or the daemon's composite source. Deltas
+ * since the previous drain. Always a concrete window: capability-optionality
+ * exists only at the ChainAdapter API edge and is collapsed to
+ * emptyRpcUsageWindow() the moment it crosses into a drainable, so consumers
+ * never juggle "missing capability" vs "empty window".
  */
 export interface RpcUsageDrainable {
-  drainRpcUsage(): RpcUsageWindow | undefined;
+  drainRpcUsage(): RpcUsageWindow;
 }
 
 /**
@@ -102,14 +110,15 @@ export interface RpcUsageDrainable {
  * per-method sums, summed totals, summed lifetimes). A process can own several
  * chain adapters with independent trackers — one per configured RPC consumer
  * (e.g. the agent's adapter plus one per publisher wallet); billing-exact
- * accounting is the SUM across all of them. Returns undefined when no input
- * window is defined (no capability anywhere).
+ * accounting is the SUM across all of them. undefined inputs (an absent
+ * optional capability, a not-yet-started runtime) are skipped; the result is
+ * always a concrete window — empty when there is nothing to merge.
  */
 export function mergeRpcUsageWindows(
   ...windows: Array<RpcUsageWindow | undefined>
-): RpcUsageWindow | undefined {
+): RpcUsageWindow {
   const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
-  if (defined.length === 0) return undefined;
+  if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
   let total = 0;
   let lifetimeTotal = 0;

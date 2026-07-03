@@ -83,7 +83,7 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
   it('emits nothing for an empty window, a missing capability, or no source', () => {
     const emitted: string[] = [];
     expect(emitRpcUsage({ drainRpcUsage: () => ({ byMethod: {}, total: 0, lifetimeTotal: 9 }) }, (l) => emitted.push(l), 60)).toBe(0);
-    expect(emitRpcUsage({ drainRpcUsage: () => undefined }, (l) => emitted.push(l), 60)).toBe(0);
+    expect(emitRpcUsage({ drainRpcUsage: () => undefined } as never, (l) => emitted.push(l), 60)).toBe(0); // rogue undefined still tolerated at runtime
     expect(emitRpcUsage({}, (l) => emitted.push(l), 60)).toBe(0); // adapter without the capability
     expect(emitRpcUsage(undefined, (l) => emitted.push(l), 60)).toBe(0);
     expect(emitted).toEqual([]);

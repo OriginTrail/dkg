@@ -176,11 +176,12 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     });
   });
 
-  it('mergeRpcUsageWindows skips undefined inputs and returns undefined when nothing is defined', () => {
+  it('mergeRpcUsageWindows skips undefined inputs; nothing to merge yields a concrete EMPTY window', () => {
     const w = { byMethod: { eth_call: 1 }, total: 1, lifetimeTotal: 1 };
+    const empty = { byMethod: {}, total: 0, lifetimeTotal: 0 };
     expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
-    expect(mergeRpcUsageWindows(undefined, undefined)).toBeUndefined();
-    expect(mergeRpcUsageWindows()).toBeUndefined();
+    expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
+    expect(mergeRpcUsageWindows()).toEqual(empty);
   });
 
   it('tracker.record never throws; window keys stay RAW (log token-safety is the formatter concern)', () => {

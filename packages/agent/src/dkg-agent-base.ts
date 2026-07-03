@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1408,11 +1408,12 @@ export class DKGAgentBase {
 
   /**
    * RpcUsageDrainable: drain the chain adapter's raw JSON-RPC usage window
-   * (delta since the previous drain — the provider-billing unit). Returns
-   * undefined when the adapter lacks the optional capability. Keeps `chain`
+   * (delta since the previous drain — the provider-billing unit). The
+   * adapter capability is optional; an adapter without it reports an empty
+   * window here, so consumers never see the optionality. Keeps `chain`
    * protected instead of the daemon reaching through a cast.
    */
-  drainRpcUsage(): RpcUsageWindow | undefined {
-    return this.chain.drainRpcUsage?.();
+  drainRpcUsage(): RpcUsageWindow {
+    return this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
   }
 }

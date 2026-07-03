@@ -14,7 +14,7 @@ export interface PublisherRuntime {
   readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
   /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
-  readonly drainRpcUsage: () => RpcUsageWindow | undefined;
+  readonly drainRpcUsage: () => RpcUsageWindow;
 }
 
 export interface PublisherRuntimeWallet {

@@ -2445,7 +2445,7 @@ export async function runDaemonInner(
   const rpcUsageTelemetry = startRpcUsageTelemetry({
     source: {
       drainRpcUsage: () => mergeRpcUsageWindows(
-        agent.drainRpcUsage?.(),
+        agent.drainRpcUsage(),
         publisherRuntime?.drainRpcUsage(),
       ),
     },
