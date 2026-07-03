@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import type { RegisterAgentAdvisoryStatus } from '../pca-confirmation-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -103,6 +104,27 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
+// #1346 — the operator-facing `verified:` line for a register-agent advisory.
+// An exhaustive switch (the `never` default) forces a future
+// RegisterAgentAdvisoryStatus to add a case here rather than silently rendering
+// as `pending`.
+function describeRegisterAdvisory(advisory: RegisterAgentAdvisoryStatus): string {
+  switch (advisory) {
+    case 'confirmed':
+      return 'confirmed on-chain';
+    case 'unsupported':
+      return 'not verifiable on this adapter (registration is authoritative via the mined tx)';
+    case 'legacy-unverified':
+      return 'unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify';
+    case 'pending':
+      return 'pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)';
+    default: {
+      const _exhaustive: never = advisory;
+      return _exhaustive;
+    }
+  }
+}
+
 export function registerPcaCommand(program: Command): void {
 // ─── dkg publisher ────────────────────────────────────────────────────
 
@@ -155,15 +177,7 @@ pcaCmd
       // #1346 — the client already normalized version-skew into
       // `{ registered, advisory }`; render it directly.
       console.log(`  registered: ${result.registered}`);
-      if (result.advisory === 'confirmed') {
-        console.log(`  verified:   confirmed on-chain`);
-      } else if (result.advisory === 'unsupported') {
-        console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
-      } else if (result.advisory === 'legacy-unverified') {
-        console.log(`  verified:   unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify`);
-      } else {
-        console.log(`  verified:   pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)`);
-      }
+      console.log(`  verified:   ${describeRegisterAdvisory(result.advisory)}`);
       console.log(`  txHash:     ${result.txHash}`);
       console.log(`  block:      ${result.blockNumber}`);
     } catch (err) {
