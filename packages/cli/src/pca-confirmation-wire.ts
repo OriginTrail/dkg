@@ -18,17 +18,6 @@ export type PcaAgentConfirmation =
   | { adapterSupported: false; verified: null }
   | { adapterSupported: true; verified: boolean | null };
 
-/**
- * The advisory portion of a register-agent response on the wire: a CURRENT
- * coherent `PcaAgentConfirmation`, or the pre-#1346 legacy shape
- * (`adapterSupported` present, `verified` absent — the old route emitted
- * `adapterSupported: verified !== null` with no `verified` field). This is the
- * CONSUMER-side tolerance (decoder / client), NOT what a current daemon emits.
- */
-export type RegisterPcaAgentAdvisory =
-  | PcaAgentConfirmation
-  | { adapterSupported: boolean; verified?: undefined };
-
 type RegisterPcaAgentResponseBase = {
   accountId: string;
   agent: string;
@@ -40,7 +29,7 @@ type RegisterPcaAgentResponseBase = {
  * What the CURRENT daemon EMITS — STRICT. The mined tx is authoritative AND a
  * `success:false` tx is rejected upstream (502), so `registered` is literally
  * `true`, and the advisory is the coherent `PcaAgentConfirmation`. The route
- * (`registerPcaAgentResponse`) returns this: a future edit that drops the
+ * helper (`resolveRegisterPcaAgent`) returns this: a future edit that drops the
  * invariant — `registered:false`, or a missing `verified`/`adapterSupported` —
  * fails to compile.
  */
@@ -88,6 +77,21 @@ export type RegisterAgentDisplay = {
 };
 
 /**
+ * The stable, CLI-facing result of `ApiClient.registerPcaAgent` — the
+ * current/legacy version-skew rules are already normalized into
+ * `{ registered, advisory }` at the client boundary, so callers render directly
+ * without re-deriving the wire shapes.
+ */
+export type RegisterPcaAgentResult = {
+  accountId: string;
+  agent: string;
+  registered: boolean;
+  advisory: RegisterAgentAdvisoryStatus;
+  txHash: string;
+  blockNumber: number;
+};
+
+/**
  * #1346 — decode a register-agent response (current OR pre-#1346 legacy) into one
  * coherent display, so consumers don't each re-derive the wire rules.
  *   - CURRENT daemon (`verified` present): the mined tx is authoritative AND a
@@ -101,8 +105,19 @@ export type RegisterAgentDisplay = {
  *     `registered` AS-IS (do NOT force `true`) with `legacy-unverified`, so a
  *     failed/unconfirmed legacy registration is never reported as success.
  */
+/**
+ * The register-agent fields the decoder needs, kept as strict as the response
+ * model: CURRENT (`registered:true` + coherent advisory) OR LEGACY
+ * (`registered:boolean`, `verified` absent). Rejects incoherent shapes such as
+ * `{ registered:false, verified:true }` that are neither a valid current nor a
+ * legacy response.
+ */
+export type DecodableRegisterAgentResponse =
+  | ({ registered: true } & PcaAgentConfirmation)
+  | { registered: boolean; adapterSupported: boolean; verified?: undefined };
+
 export function decodeRegisterAgentAdvisory(
-  resp: { registered: boolean } & RegisterPcaAgentAdvisory,
+  resp: DecodableRegisterAgentResponse,
 ): RegisterAgentDisplay {
   if (resp.verified !== undefined) {
     const advisory: RegisterAgentAdvisoryStatus =

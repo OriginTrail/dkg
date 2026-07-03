@@ -30,7 +30,6 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { decodeRegisterAgentAdvisory } from '../pca-confirmation-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -153,18 +152,14 @@ pcaCmd
       const result = await client.registerPcaAgent(accountId, agent);
       console.log(`Registered agent on PCA ${result.accountId}:`);
       console.log(`  agent:      ${result.agent}`);
-      // #1346 — the register-agent response (current or pre-#1346 legacy wire
-      // shape) is decoded ONCE into a coherent display: `registered` follows the
-      // mined-tx authority, and `advisory` is the on-chain confirmation status
-      // (see decodeRegisterAgentAdvisory). This keeps the version-skew rules out
-      // of the presentation layer.
-      const display = decodeRegisterAgentAdvisory(result);
-      console.log(`  registered: ${display.registered}`);
-      if (display.advisory === 'confirmed') {
+      // #1346 — the client already normalized version-skew into
+      // `{ registered, advisory }`; render it directly.
+      console.log(`  registered: ${result.registered}`);
+      if (result.advisory === 'confirmed') {
         console.log(`  verified:   confirmed on-chain`);
-      } else if (display.advisory === 'unsupported') {
+      } else if (result.advisory === 'unsupported') {
         console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
-      } else if (display.advisory === 'legacy-unverified') {
+      } else if (result.advisory === 'legacy-unverified') {
         console.log(`  verified:   unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify`);
       } else {
         console.log(`  verified:   pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)`);

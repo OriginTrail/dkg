@@ -6,7 +6,8 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { AnyRegisterPcaAgentResponse } from './pca-confirmation-wire.js';
+import type { AnyRegisterPcaAgentResponse, RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { decodeRegisterAgentAdvisory } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -989,11 +990,25 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  // #1346 — the client TOLERATES current OR pre-#1346 legacy responses (version
-  // skew), so the return is the wider `AnyRegisterPcaAgentResponse`. The daemon
-  // route itself emits the strict `RegisterPcaAgentResponse`.
-  async registerPcaAgent(accountId: string, agent: string): Promise<AnyRegisterPcaAgentResponse> {
-    return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+  // #1346 — the client is the version-skew boundary: it posts, then NORMALIZES
+  // the raw current-or-legacy wire response into a stable
+  // `{ registered, advisory }` result so callers render directly and don't
+  // re-derive the `verified`-presence rules. (The daemon route emits the strict
+  // `RegisterPcaAgentResponse`; the decoder handles legacy tolerance.)
+  async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResult> {
+    const raw = await this.post<AnyRegisterPcaAgentResponse>(
+      `/api/pca/${encodeURIComponent(accountId)}/agent`,
+      { agent },
+    );
+    const { registered, advisory } = decodeRegisterAgentAdvisory(raw);
+    return {
+      accountId: raw.accountId,
+      agent: raw.agent,
+      registered,
+      advisory,
+      txHash: raw.txHash,
+      blockNumber: raw.blockNumber,
+    };
   }
 
   async getPcaInfo(accountId: string, probeKey?: string): Promise<{

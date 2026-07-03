@@ -18,8 +18,7 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
-import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
-import type { PcaConfirmationOutcome } from '@origintrail-official/dkg-agent';
+import { resolveRegisterPcaAgent } from './pca-register-agent.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
@@ -393,48 +392,6 @@ function serializeAccountInfo(
   };
 }
 
-/**
- * #1346 — POST /api/pca/:id/agent orchestration + response assembly, kept as a
- * route-local helper so the handler stays parse/dispatch. Returns the status +
- * body the route serializes (input validation and chain-error classification
- * stay in the route). Paths: `null` chain surface → 503; a mined-but-reverted
- * tx (`success:false`) → 502 (never reported as registered); otherwise the mined
- * tx is authoritative (`registered:true`) and the advisory `PcaConfirmationOutcome`
- * is derived to the wire `{ verified, adapterSupported }` here at the boundary.
- */
-async function registerPcaAgentResponse(
-  agent: {
-    registerPublishingConvictionAgent(accountId: bigint, agent: string): Promise<{ hash: string; blockNumber: number; success: boolean } | null>;
-    confirmPublishingConvictionAgentRegistration(accountId: bigint, agent: string): Promise<PcaConfirmationOutcome>;
-  },
-  accountId: bigint,
-  agentAddr: string,
-  idStr: string,
-): Promise<{ status: number; body: RegisterPcaAgentResponse | { error: string } }> {
-  const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
-  if (result === null) return { status: 503, body: FEATURE_UNAVAILABLE_503 };
-  if (result.success === false) {
-    return { status: 502, body: { error: 'PCA agent registration transaction was mined but did not succeed on-chain' } };
-  }
-  // Spread the advisory object (do NOT destructure) so its discriminated-union
-  // correlation between `verified` and `adapterSupported` is preserved for the
-  // typed `RegisterPcaAgentResponse` body.
-  const advisory = pcaConfirmationToWire(
-    await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr),
-  );
-  return {
-    status: 200,
-    body: {
-      accountId: idStr,
-      agent: agentAddr,
-      registered: true,
-      ...advisory,
-      txHash: result.hash,
-      blockNumber: result.blockNumber,
-    },
-  };
-}
-
 export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, agent, path, config, requestToken, validTokens, opWallets } = ctx;
 
@@ -557,11 +514,13 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'agent must not be the zero address' });
     }
     try {
-      // Orchestration + response assembly live in the route-local
-      // registerPcaAgentResponse (above); this handler owns input validation +
-      // chain-error classification (the catch below).
-      const r = await registerPcaAgentResponse(agent, accountId, agentAddr, idStr);
-      return jsonResponse(res, r.status, r.body);
+      // Orchestration + response assembly live in the focused pca-register-agent
+      // module; this handler owns input validation + chain-error classification
+      // (the catch below) and maps the outcome to a response.
+      const outcome = await resolveRegisterPcaAgent(agent, accountId, agentAddr, idStr);
+      if (outcome.kind === 'unavailable') return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (outcome.kind === 'tx-failed') return jsonResponse(res, 502, { error: outcome.error });
+      return jsonResponse(res, 200, outcome.body);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
