@@ -208,24 +208,51 @@ function publisherJobTargetsKnowledgeAsset(
   job: PublisherJobView,
   expected: { contextGraphId: string; name: string },
 ): boolean {
+  // Match any subgraph for negative checks so wrong-subgraph publishes fail too.
   const request = job.request?.knowledgeAssetVmPublish;
   return job.request?.jobType === 'knowledge-asset-vm-publish' &&
     request?.contextGraphId === expected.contextGraphId &&
     request?.name === expected.name;
 }
 
-async function assertNoPublisherJobForKnowledgeAsset(
-  node: DevnetNode,
-  expected: { contextGraphId: string; name: string; subGraphName?: string },
-): Promise<void> {
+async function listPublisherJobs(node: DevnetNode): Promise<PublisherJobView[]> {
   const jobs = await runDkgCli(node, ['publisher', 'jobs'], 60_000);
   expectCliOk(jobs, 'publisher jobs');
   const parsed = JSON.parse(jobs.stdout.trim()) as PublisherJobView[];
   expect(Array.isArray(parsed), `publisher jobs output: ${jobs.stdout}`).toBe(true);
+  return parsed;
+}
+
+function publisherJobKey(job: PublisherJobView): string {
+  return job.jobId ?? JSON.stringify(job);
+}
+
+async function assertNoPublisherJobForKnowledgeAsset(
+  node: DevnetNode,
+  expected: { contextGraphId: string; name: string; subGraphName?: string },
+): Promise<void> {
+  const parsed = await listPublisherJobs(node);
   expect(
     parsed.some((job) => publisherJobTargetsKnowledgeAsset(job, expected)),
-    `publisher jobs unexpectedly contained a VM publish for ${expected.name}: ${jobs.stdout}`,
+    `publisher jobs unexpectedly contained a VM publish for ${expected.name}: ${JSON.stringify(parsed)}`,
   ).toBe(false);
+}
+
+async function assertNoNewPublisherJobForKnowledgeAsset(
+  node: DevnetNode,
+  expected: { contextGraphId: string; name: string; subGraphName?: string },
+  baseline: PublisherJobView[],
+): Promise<void> {
+  const baselineKeys = new Set(baseline.map(publisherJobKey));
+  const current = await listPublisherJobs(node);
+  const newMatches = current.filter(
+    (job) => publisherJobTargetsKnowledgeAsset(job, expected) &&
+      !baselineKeys.has(publisherJobKey(job)),
+  );
+  expect(
+    newMatches,
+    `publisher jobs unexpectedly gained a VM publish for ${expected.name}: ${JSON.stringify(current)}`,
+  ).toHaveLength(0);
 }
 
 async function waitForPublisherJobFinalized(
@@ -336,7 +363,7 @@ async function reopenEditFinalizeAndShare(
   contextGraphId: string,
   name: string,
   layer: 'swm' | 'vm',
-  initialSubject: string,
+  initial: { subject: string; value: string },
   update: { filePath: string; subject: string; value: string },
   flowLabel: string,
 ): Promise<void> {
@@ -352,7 +379,7 @@ async function reopenEditFinalizeAndShare(
     node,
     contextGraphId,
     name,
-    initialSubject,
+    initial.subject,
     `${flowLabel} WM after pull-from`,
   );
 
@@ -370,6 +397,7 @@ async function reopenEditFinalizeAndShare(
 
   expectCliOk(await runDkgCli(node, ['ka', 'finalize', name, '-c', contextGraphId], 60_000), `ka finalize ${flowLabel}`);
   expectCliOk(await runDkgCli(node, ['ka', 'share', name, '-c', contextGraphId], 180_000), `ka share ${flowLabel}`);
+  await assertSharedSubject(node, contextGraphId, initial.subject, initial.value);
   await assertSharedSubject(node, contextGraphId, update.subject, update.value);
 }
 
@@ -539,11 +567,19 @@ describe('KA lifecycle CLI on devnet', () => {
       view: 'verifiable-memory',
       label: 'VM after initial SWM-only share',
     });
+    await assertNoPublisherJobForKnowledgeAsset(node, {
+      contextGraphId,
+      name,
+    });
 
-    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'swm', initial.subject, update, 'SWM update');
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'swm', initial, update, 'SWM update');
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM after SWM-only update',
+    });
+    await assertNoPublisherJobForKnowledgeAsset(node, {
+      contextGraphId,
+      name,
     });
   });
 
@@ -561,6 +597,10 @@ describe('KA lifecycle CLI on devnet', () => {
       ),
       'ka create --share for VM update',
     );
+    await assertNoPublisherJobForKnowledgeAsset(node, {
+      contextGraphId,
+      name,
+    });
     await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async initial VM update');
     await assertVerifiableSubject(node, contextGraphId, initial.subject, 'vm update initial');
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
@@ -568,13 +608,19 @@ describe('KA lifecycle CLI on devnet', () => {
       label: 'VM before edited publish',
     });
 
-    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'vm', initial.subject, update, 'VM update');
+    const publisherJobsBeforeReshare = await listPublisherJobs(node);
+    await reopenEditFinalizeAndShare(node, contextGraphId, name, 'vm', initial, update, 'VM update');
     await assertSubjectNotVisible(node, contextGraphId, update.subject, {
       view: 'verifiable-memory',
       label: 'VM before edited publish after re-share',
     });
+    await assertNoNewPublisherJobForKnowledgeAsset(node, {
+      contextGraphId,
+      name,
+    }, publisherJobsBeforeReshare);
 
     await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async edited VM update');
+    await assertVerifiableSubject(node, contextGraphId, initial.subject, 'vm update initial');
     await assertVerifiableSubject(node, contextGraphId, update.subject, 'vm update edited');
   });
 
