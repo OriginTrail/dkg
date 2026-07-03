@@ -9,7 +9,7 @@ import { ApiClient } from '../src/api-client.js';
 // Mock ApiClient.registerPcaAgent per advisory branch, run the command in
 // process, and assert stdout.
 async function runRegisterAgent(
-  advisory: { verified: boolean | null; adapterSupported: boolean },
+  advisory: { verified?: boolean | null; adapterSupported: boolean },
 ): Promise<string> {
   const logs: string[] = [];
   const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
@@ -58,5 +58,15 @@ describe('pca register-agent — advisory output rendering', () => {
   it('adapterSupported:false → "not verifiable on this adapter"', async () => {
     const out = await runRegisterAgent({ verified: null, adapterSupported: false });
     expect(out).toMatch(/verified:\s+not verifiable on this adapter/);
+  });
+
+  // R10 — legacy (pre-#1346) daemon omits `verified`; its registered:true meant
+  // the on-chain read confirmed the registration, so it must render as confirmed
+  // (not the generic pending fallback), preserving the modeled legacy wire shape.
+  it('legacy shape (verified absent, registered:true, adapterSupported:true) → confirmed, not pending', async () => {
+    const out = await runRegisterAgent({ adapterSupported: true }); // no `verified` field
+    expect(out).toMatch(/registered: true/);
+    expect(out).toMatch(/verified:\s+confirmed on-chain/);
+    expect(out).not.toMatch(/pending/);
   });
 });

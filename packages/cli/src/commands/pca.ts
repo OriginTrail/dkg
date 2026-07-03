@@ -158,6 +158,11 @@ pcaCmd
       console.log(`  registered: ${result.registered}`);
       if (result.verified === true) {
         console.log(`  verified:   confirmed on-chain`);
+      } else if (result.verified === undefined && result.registered === true && result.adapterSupported === true) {
+        // Pre-#1346 daemon (version skew): it omitted `verified`, and its
+        // `registered:true` WAS the on-chain confirmation signal (the old route
+        // set registered = (verified === true)). Don't misreport that as pending.
+        console.log(`  verified:   confirmed on-chain (reported by daemon)`);
       } else if (result.adapterSupported === false) {
         console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
       } else {
