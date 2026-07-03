@@ -235,17 +235,38 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory outcom
     expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]); // no hard-coded 0n / swapped args
   });
 
-  it('probe false then true → "confirmed" (backoff retry upgrades)', async () => {
+  // R12 (12-C) — a confirmed probe must SHORT-CIRCUIT: resolve without waiting
+  // through any backoff. Prove it by NOT advancing fake time — flush only
+  // microtasks; a regression that slept before returning `confirmed` would
+  // leave the promise pending here.
+  it('probe true → resolves "confirmed" WITHOUT advancing the backoff timer', async () => {
+    const { agent, probes } = await makeProbeAgent([true]);
+    vi.useFakeTimers();
+    try {
+      let resolved = false;
+      const p = agent
+        .confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR)
+        .then((r) => { resolved = true; return r; });
+      await vi.advanceTimersByTimeAsync(0); // flush microtasks only — do NOT advance the 300ms backoff
+      expect(resolved).toBe(true);
+      expect(await p).toBe('confirmed');
+      expect(probes()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('probe false then true → "confirmed" in EXACTLY 2 probes (no extra probing after confirmation)', async () => {
     const { agent, probes } = await makeProbeAgent([false, true]);
     expect(await confirm(agent)).toBe('confirmed');
-    expect(probes()).toBeGreaterThanOrEqual(2);
+    expect(probes()).toBe(2);
   });
 
   // R2-C — a THROWN probe (RPC blip) then a healthy read must recover to confirmed.
-  it('probe throw then true → "confirmed" (throw→true retry recovery)', async () => {
+  it('probe throw then true → "confirmed" in EXACTLY 2 probes (throw→true recovery, stops on confirm)', async () => {
     const { agent, probes } = await makeProbeAgent(['throw', true]);
     expect(await confirm(agent)).toBe('confirmed');
-    expect(probes()).toBeGreaterThanOrEqual(2);
+    expect(probes()).toBe(2);
   });
 
   it('probe false ×3 → "not_observed" (surface exists, never observed)', async () => {

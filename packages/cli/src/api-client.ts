@@ -6,21 +6,7 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { PcaAgentConfirmation } from './pca-confirmation-wire.js';
-
-/**
- * #1346 — the register-agent advisory fields on the wire. A CURRENT daemon
- * emits a coherent `PcaAgentConfirmation` (the discriminated union keeps
- * `adapterSupported`/`verified` in lock-step). A PRE-#1346 daemon emitted
- * `adapterSupported` (as `verified !== null`) but NO `verified` field — so the
- * legacy variant carries `adapterSupported` with `verified` absent, matching
- * the actual previous wire shape (not a both-absent shape older daemons never
- * sent). Modeled explicitly rather than with `Partial`, so a consumer that sees
- * a coherent `verified` can trust it and version-skew is represented honestly.
- */
-type RegisterPcaAgentAdvisory =
-  | PcaAgentConfirmation
-  | { adapterSupported: boolean; verified?: undefined };
+import type { RegisterPcaAgentResponse } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1003,16 +989,10 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  async registerPcaAgent(accountId: string, agent: string): Promise<{
-    accountId: string;
-    agent: string;
-    registered: boolean;
-    txHash: string;
-    blockNumber: number;
-    // #1346 — advisory on-chain confirmation of the mined registration; a
-    // current daemon's fields stay coherent (`PcaAgentConfirmation`), an older
-    // daemon omits them (legacy variant → the CLI treats absent as inconclusive).
-  } & RegisterPcaAgentAdvisory> {
+  // #1346 — one canonical wire type (`RegisterPcaAgentResponse`) shared with the
+  // daemon route + confirmation decoder; covers the current coherent shape and
+  // the pre-#1346 legacy shape (adapterSupported present, verified absent).
+  async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResponse> {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
   }
 

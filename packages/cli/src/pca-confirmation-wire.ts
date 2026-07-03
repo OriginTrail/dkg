@@ -18,6 +18,31 @@ export type PcaAgentConfirmation =
   | { adapterSupported: false; verified: null }
   | { adapterSupported: true; verified: boolean | null };
 
+/**
+ * The advisory portion of a register-agent response on the wire: a CURRENT
+ * coherent `PcaAgentConfirmation`, or the pre-#1346 legacy shape
+ * (`adapterSupported` present, `verified` absent — the old route emitted
+ * `adapterSupported: verified !== null` with no `verified` field).
+ */
+export type RegisterPcaAgentAdvisory =
+  | PcaAgentConfirmation
+  | { adapterSupported: boolean; verified?: undefined };
+
+/**
+ * The FULL register-agent response body (daemon → client) — the SINGLE source of
+ * truth for this route's wire contract, consumed by the daemon route
+ * (`registerPcaAgentResponse`), the `ApiClient.registerPcaAgent` return type, and
+ * `decodeRegisterAgentAdvisory`. Keeping one type here prevents the route from
+ * emitting a shape the client/decoder don't model.
+ */
+export type RegisterPcaAgentResponse = {
+  accountId: string;
+  agent: string;
+  registered: boolean;
+  txHash: string;
+  blockNumber: number;
+} & RegisterPcaAgentAdvisory;
+
 /** Derive the wire advisory fields from the agent's single confirmation outcome. */
 export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {
   switch (outcome) {
@@ -54,11 +79,9 @@ export type RegisterAgentDisplay = {
  *     contradiction this fixes). Legacy `registered:true` + adapterSupported:true
  *     → confirmed; adapterSupported:false → unsupported; else pending.
  */
-export function decodeRegisterAgentAdvisory(resp: {
-  registered: boolean;
-  verified?: boolean | null;
-  adapterSupported?: boolean;
-}): RegisterAgentDisplay {
+export function decodeRegisterAgentAdvisory(
+  resp: { registered: boolean } & RegisterPcaAgentAdvisory,
+): RegisterAgentDisplay {
   const legacy = resp.verified === undefined;
   // A successful response = the register tx mined = the agent is registered.
   const registered = legacy ? true : resp.registered;

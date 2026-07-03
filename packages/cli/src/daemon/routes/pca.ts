@@ -18,7 +18,7 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
-import { pcaConfirmationToWire } from '../../pca-confirmation-wire.js';
+import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 import type { PcaConfirmationOutcome } from '@origintrail-official/dkg-agent';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -410,13 +410,16 @@ async function registerPcaAgentResponse(
   accountId: bigint,
   agentAddr: string,
   idStr: string,
-): Promise<{ status: number; body: Record<string, unknown> }> {
+): Promise<{ status: number; body: RegisterPcaAgentResponse | { error: string } }> {
   const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
   if (result === null) return { status: 503, body: FEATURE_UNAVAILABLE_503 };
   if (result.success === false) {
     return { status: 502, body: { error: 'PCA agent registration transaction was mined but did not succeed on-chain' } };
   }
-  const { verified, adapterSupported } = pcaConfirmationToWire(
+  // Spread the advisory object (do NOT destructure) so its discriminated-union
+  // correlation between `verified` and `adapterSupported` is preserved for the
+  // typed `RegisterPcaAgentResponse` body.
+  const advisory = pcaConfirmationToWire(
     await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr),
   );
   return {
@@ -425,8 +428,7 @@ async function registerPcaAgentResponse(
       accountId: idStr,
       agent: agentAddr,
       registered: true,
-      verified,
-      adapterSupported,
+      ...advisory,
       txHash: result.hash,
       blockNumber: result.blockNumber,
     },

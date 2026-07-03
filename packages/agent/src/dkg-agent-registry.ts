@@ -380,62 +380,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-/**
- * #1346 — the advisory outcome of confirming a just-mined PCA agent
- * registration, as a SINGLE discriminant (no coupled boolean/null fields to
- * keep in lock-step). The mined receipt is already authoritative for
- * `registered:true`; this only refines the ADVISORY picture:
- *   - `confirmed`    — an on-chain read observed the agent registered.
- *   - `not_observed` — the probe read but did not (yet) observe it (follower-RPC lag).
- *   - `inconclusive` — the probe surface exists but every read threw.
- *   - `unsupported`  — no on-chain probe surface (the chain adapter lacks the read).
- * This is the agent's DOMAIN result; the daemon/CLI boundary derives the wire
- * `{ verified, adapterSupported }` from it (see the cli `pca-confirmation-wire`
- * module) — the wire representation deliberately does not live in the agent.
- */
-export type PcaConfirmationOutcome = 'confirmed' | 'not_observed' | 'inconclusive' | 'unsupported';
-
-// #1346 — production confirmation policy: a bounded post-mine probe. These are
-// fixed domain constants, NOT caller-tunable knobs (implementation detail of
-// the advisory read, never a public facade option).
-const PCA_CONFIRM_ATTEMPTS = 3;
-const PCA_CONFIRM_BACKOFF_MS = 300;
-
-/**
- * Advisory-confirmation state machine, kept as a MODULE-PRIVATE helper (NOT
- * exported — the only public surface is the facade method
- * `confirmPublishingConvictionAgentRegistration`) so the bounded-probe retry
- * policy is a fixed internal constant, never a deep-importable tuning knob.
- * `probe` yields the typed registration read: `true` (registered) | `false`
- * (not yet — follower-RPC lag → retry) | `null` (no probe surface →
- * `unsupported`, short-circuit). `null` is a per-adapter-STABLE capability
- * signal (the facade returns it iff the chain method is absent), so it
- * legitimately halts regardless of earlier reads.
- *
- * A definitive `not_observed` (`false`) is NEVER downgraded by a later throw:
- * once the surface has reported not-yet-registered, an RPC blip on a subsequent
- * attempt leaves the outcome `not_observed` (not `inconclusive`) — only a later
- * `true` upgrades it to `confirmed`. The full matrix is exercised through the
- * facade in pca-v10-facade.test.ts.
- */
-async function confirmPcaAgentRegistration(
-  probe: () => Promise<boolean | null>,
-): Promise<PcaConfirmationOutcome> {
-  let sawNotObserved = false; // a read returned `false` at least once
-  for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
-    try {
-      const result = await probe();
-      if (result === null) return 'unsupported'; // no probe surface — short-circuit
-      if (result === true) return 'confirmed';
-      sawNotObserved = true; // a definitive `false` read (follower-RPC lag) — retry
-    } catch {
-      // The read surface exists; a throw is an RPC read failure, not a gap, and
-      // does NOT downgrade a prior definitive `not_observed`.
-    }
-    if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
-  }
-  return sawNotObserved ? 'not_observed' : 'inconclusive';
-}
+import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
