@@ -42,6 +42,8 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
 
 interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
   readonly publisher: DKGPublisher;
+  /** The wallet's own chain adapter — also the wallet's RpcUsageDrainable source. */
+  readonly chain: ChainAdapter;
 }
 
 export async function startPublisherRuntimeIfEnabled(args: {
@@ -234,7 +236,6 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
 
   const eventBus = new TypedEventBus();
   const wallets: ConfiguredPublisherWallet[] = [];
-  const chainAdapters: ChainAdapter[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -249,10 +250,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    chainAdapters.push(chain);
     wallets.push({
       address: wallet.address,
       identityId,
+      chain,
       publisher: new DKGPublisher({
         store: args.store,
         chain,
@@ -350,7 +351,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     publisher: asyncPublisher,
     walletIds: validWalletIds,
     wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
-    drainRpcUsage: () => mergeRpcUsageWindows(...chainAdapters.map((c) => c.drainRpcUsage?.())),
+    drainRpcUsage: () => mergeRpcUsageWindows(...wallets.map((w) => w.chain.drainRpcUsage?.())),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
