@@ -2887,7 +2887,7 @@ export async function runDaemonInner(
       agentAddress,
     };
   };
-  const dashboardLoopbackToken =
+  const resolveDashboardLoopbackToken = () =>
     Array.from(validTokens).find((token) => !agent.resolveAgentByToken(token))
     ?? (validTokens.values().next().value as string | undefined);
 
@@ -3069,7 +3069,7 @@ export async function runDaemonInner(
           {
             authEnabled,
             validTokens,
-            loopbackToken: dashboardLoopbackToken,
+            resolveLoopbackToken: resolveDashboardLoopbackToken,
             resolvePrincipal: resolveDashboardPrincipal,
             corsOrigin: reqCorsOrigin,
           },

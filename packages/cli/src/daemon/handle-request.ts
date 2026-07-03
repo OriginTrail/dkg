@@ -370,11 +370,23 @@ export async function handleRequest(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Use the auth-guard's resolved principal when present; legacy/internal callers
-  // without guard context still fall back to the token-derived agent address.
+  // Use the auth-guard's resolved principal as the canonical route identity.
+  // requestToken remains as a compatibility credential for routes that still need
+  // token-backed self-calls or node-admin checks.
   const requestAuth = getRequestAuthContext(req);
-  const requestToken = requestAuth?.token ?? requestAuth?.compatToken ?? extractBearerToken(req.headers.authorization);
-  const requestAgentAddress = requestAuth?.principal.agentAddress ?? agent.resolveAgentAddress(requestToken);
+  const credentialToken = requestAuth?.token ?? requestAuth?.compatToken ?? extractBearerToken(req.headers.authorization);
+  const requestPrincipal = requestAuth?.principal ?? {
+    kind: credentialToken && agent.resolveAgentByToken(credentialToken) ? "agent" as const : "node-admin" as const,
+    agentAddress: agent.resolveAgentAddress(credentialToken),
+  };
+  const credentialAgentAddress = credentialToken ? agent.resolveAgentByToken(credentialToken) : undefined;
+  const authEnabled = config.auth?.enabled !== false;
+  const authCapabilities = {
+    nodeAdmin: !authEnabled || (!!credentialToken && validTokens.has(credentialToken) && !credentialAgentAddress),
+    agentToken: !!credentialAgentAddress,
+  };
+  const requestToken = credentialToken;
+  const requestAgentAddress = requestPrincipal.agentAddress;
 
   const ctx: RequestContext = {
     req,
@@ -406,6 +418,10 @@ export async function handleRequest(
     admission,
     url,
     path,
+    requestPrincipal,
+    authSource: requestAuth?.source,
+    credentialToken,
+    authCapabilities,
     requestToken,
     requestAgentAddress,
     requestAuth,

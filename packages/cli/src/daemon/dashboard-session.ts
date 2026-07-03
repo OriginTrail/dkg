@@ -87,6 +87,7 @@ export interface DashboardSessionHandlerOptions {
   authEnabled: boolean;
   validTokens: Set<string>;
   loopbackToken?: string;
+  resolveLoopbackToken?: () => string | undefined;
   resolvePrincipal: (token: string) => RequestAuthPrincipal;
   corsOrigin?: string | null;
 }
@@ -134,11 +135,12 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 403, { error: "Loopback dashboard session is only available from localhost" }, options.corsOrigin);
       return true;
     }
-    if (!options.loopbackToken || !verifyToken(options.loopbackToken, options.validTokens)) {
+    const loopbackToken = resolveCurrentLoopbackToken(options);
+    if (!loopbackToken) {
       jsonResponse(res, 503, { error: "No valid dashboard bootstrap token is available" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(options.loopbackToken, "loopback", options.resolvePrincipal(options.loopbackToken));
+    const created = store.create(loopbackToken, "loopback", options.resolvePrincipal(loopbackToken));
     setSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
@@ -256,6 +258,16 @@ function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken
     csrfToken: session.csrfToken,
     expiresAt: session.expiresAt,
   };
+}
+
+function resolveCurrentLoopbackToken(options: DashboardSessionHandlerOptions): string | undefined {
+  let token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
+  if (token && verifyToken(token, options.validTokens)) return token;
+
+  // verifyToken() reconciles file-backed token rotation as a side effect. Resolve
+  // once more so a daemon can use the freshly reconciled admin token without a restart.
+  token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
+  return token && verifyToken(token, options.validTokens) ? token : undefined;
 }
 
 function hashSessionId(sessionId: string): string {

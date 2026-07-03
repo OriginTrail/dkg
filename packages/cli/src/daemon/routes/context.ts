@@ -23,7 +23,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
-import type { RequestAuthContext } from '../../auth.js';
+import type { RequestAuthContext, RequestAuthPrincipal } from '../../auth.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -95,6 +95,13 @@ export interface RequestContext {
   // here keeps every group on the same fast path.
   url: URL;
   path: string;
+  requestPrincipal?: RequestAuthPrincipal;
+  authSource?: RequestAuthContext['source'];
+  credentialToken?: string;
+  authCapabilities?: {
+    nodeAdmin: boolean;
+    agentToken: boolean;
+  };
   requestToken: string | undefined;
   requestAuth?: RequestAuthContext;
   requestAgentAddress: string;

@@ -10,6 +10,7 @@ import {
 import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
 
 const VALID_TOKEN = 'dashboard-backed-token';
+const ROTATED_TOKEN = 'dashboard-rotated-token';
 const AGENT_TOKEN = 'dkg_at_agent-token';
 const DEFAULT_AGENT_ADDRESS = 'did:dkg:agent:default';
 const TOKEN_AGENT_ADDRESS = 'did:dkg:agent:token';
@@ -27,8 +28,12 @@ function cookieFrom(res: Response): string {
   return setCookie!.split(';')[0];
 }
 
-async function startServer(): Promise<{ server: Server; baseUrl: string }> {
-  const validTokens = new Set([VALID_TOKEN, AGENT_TOKEN]);
+async function startServer(options: {
+  validTokens?: Set<string>;
+  loopbackToken?: string;
+  resolveLoopbackToken?: () => string | undefined;
+} = {}): Promise<{ server: Server; baseUrl: string }> {
+  const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
   const resolvePrincipal = (token: string) => token === AGENT_TOKEN
     ? { kind: 'agent' as const, agentAddress: TOKEN_AGENT_ADDRESS }
@@ -42,7 +47,8 @@ async function startServer(): Promise<{ server: Server; baseUrl: string }> {
     if (await handleDashboardSessionRequest(req, res, url, sessions, {
       authEnabled: true,
       validTokens,
-      loopbackToken: VALID_TOKEN,
+      loopbackToken: options.loopbackToken ?? VALID_TOKEN,
+      resolveLoopbackToken: options.resolveLoopbackToken,
       resolvePrincipal,
     })) {
       return;
@@ -123,6 +129,35 @@ describe('dashboard browser sessions', () => {
     expect(setCookie).toContain('Path=/');
     expect(setCookie.toLowerCase()).not.toContain('domain=');
     await expect(res.json()).resolves.toMatchObject({ authenticated: true, source: 'loopback' });
+  });
+
+  it('selects the current loopback bootstrap token after token rotation', async () => {
+    const validTokens = new Set([ROTATED_TOKEN]);
+    let resolveCalls = 0;
+    const started = await startServer({
+      validTokens,
+      resolveLoopbackToken: () => {
+        resolveCalls += 1;
+        return resolveCalls === 1 ? VALID_TOKEN : ROTATED_TOKEN;
+      },
+    });
+    server = started.server;
+
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    expect(bootstrap.status).toBe(200);
+    expect(resolveCalls).toBeGreaterThanOrEqual(2);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: cookieFrom(bootstrap) },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      requestAuth: {
+        source: 'dashboard-session',
+        compatToken: ROTATED_TOKEN,
+        principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
+      },
+    });
   });
 
   it('rejects loopback bootstrap with a disallowed Host header', async () => {

@@ -33,6 +33,7 @@ describe('DashboardSessionGate', () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
   const calls: Array<{ url: string; method: string; body?: string }> = [];
+  let statusBody: unknown;
   let resolveExchange: ((response: Response) => void) | undefined;
 
   beforeEach(() => {
@@ -41,6 +42,7 @@ describe('DashboardSessionGate', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     calls.length = 0;
+    statusBody = { authenticated: false };
     resolveExchange = undefined;
     resetDashboardSession();
     const exchangeResponse = new Promise<Response>((resolve) => {
@@ -51,7 +53,7 @@ describe('DashboardSessionGate', () => {
       const method = init?.method ?? 'GET';
       calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : undefined });
       if (url === '/api/dashboard/session/status') {
-        return new Response(JSON.stringify({ authenticated: false }), {
+        return new Response(JSON.stringify(statusBody), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -133,5 +135,21 @@ describe('DashboardSessionGate', () => {
     expect(container.querySelector('[data-testid="dashboard-session-unlock"]')).toBeNull();
     expect(container.querySelector('[data-testid="protected-probe"]')).toBeTruthy();
     expect(calls.some((call) => call.url === '/api/status')).toBe(true);
+  });
+
+  it('allows auth-disabled dashboards without unlock or loopback bootstrap', async () => {
+    statusBody = { authenticated: true, authDisabled: true };
+
+    await act(async () => {
+      root!.render(React.createElement(DashboardSessionGate, null, React.createElement(ProtectedProbe)));
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="dashboard-session-unlock"]')).toBeNull();
+    expect(container.querySelector('[data-testid="protected-probe"]')).toBeTruthy();
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'GET /api/dashboard/session/status',
+      'GET /api/status',
+    ]);
   });
 });
