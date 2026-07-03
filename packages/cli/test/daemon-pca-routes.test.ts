@@ -244,23 +244,9 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(body.adapterSupported).toBe(true);
   });
 
-  // #1346 — a genuine capability gap: the adapter does not expose the probe
-  // method at all → adapterSupported:false, distinct from a throwing read.
-  it('register: no probe method on the adapter → 200 registered:true, verified:null, adapterSupported:false', async () => {
-    const addr = '0x' + '1'.repeat(40);
-    const agent = {
-      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      // isPublishingConvictionAgent intentionally absent.
-    };
-    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
-    await done;
-    expect(res.statusCode).toBe(200);
-    const body = JSON.parse(res.body);
-    expect(body.registered).toBe(true);
-    expect(body.verified).toBe(null);
-    expect(body.adapterSupported).toBe(false);
-  });
-
+  // #1346 — the unsupported-read signal on a real DKGAgent is a `null` return
+  // (the typed facade maps an adapter with no probe surface to null), so that
+  // is the single case pinned here; method-absence is not a production shape.
   it('register: probe returns null (adapter has no probe surface) → 200 registered:true, verified:null, adapterSupported:false', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {

@@ -1090,13 +1090,18 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     }
   });
 
-  it('#1085 adapter without the stored-options helper skips rehydration cleanly (200, no throw)', async () => {
-    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
-      { id: 'no-helper-cg' },
-      { /* getStoredContextGraphRegistrationOptions intentionally absent (older/mock adapter) */ },
+  it('#1085 explicit pcaAccountId + rehydrated OPEN stored policy → 400 before registerContextGraph', async () => {
+    const { status, json, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'open-cg', pcaAccountId: '7' }, // body omits publishPolicy
+      {
+        getStoredContextGraphRegistrationOptions: async () => ({ publishPolicy: 1 }), // stored OPEN
+      },
     );
-    expect(status).toBe(200);
-    expect(registerOpts.publishPolicy).toBeUndefined();
+    // The effective (post-rehydration) policy is open, so an explicit pcaAccountId
+    // is rejected at the route boundary — before registerContextGraph runs.
+    expect(status).toBe(400);
+    expect(json.error).toMatch(/pcaAccountId is only valid for curated/);
+    expect(registerOpts).toBeNull();
   });
 
   it('#1085 explicit publishPolicy in the body wins over the stored policy', async () => {

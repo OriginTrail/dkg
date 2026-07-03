@@ -394,6 +394,36 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+// #1085 — resolve the effective register publishPolicy for POST /register.
+// The body value wins; an omitted policy rehydrates the create-time policy
+// stored by `createContextGraph` (best-effort — a stored-read error is warned,
+// never fatal — mirroring the publish auto-register path). `pcaAccountId` is
+// NEVER rehydrated (explicit-only by design; anti-stale-replay). Returns the
+// effective policy, or a route-boundary validation error: pcaAccountId is
+// curated-only, so it is rejected against the EFFECTIVE (post-rehydration) policy.
+async function resolveRegisterPublishPolicy(
+  agent: DKGAgent,
+  contextGraphId: string,
+  bodyPublishPolicy: number | undefined,
+  pcaAccountId: bigint | undefined,
+): Promise<{ publishPolicy: number | undefined } | { error: string }> {
+  let publishPolicy = bodyPublishPolicy;
+  if (publishPolicy === undefined) {
+    try {
+      const stored = await agent.getStoredContextGraphRegistrationOptions(contextGraphId);
+      if (stored?.publishPolicy !== undefined) publishPolicy = stored.publishPolicy;
+    } catch (err) {
+      console.warn(
+        `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${contextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+      );
+    }
+  }
+  if (pcaAccountId !== undefined && publishPolicy === 1) {
+    return { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' };
+  }
+  return { publishPolicy };
+}
+
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -651,9 +681,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (parsedPcaAccountId.error) {
       return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
     }
-    if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
-      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
-    }
     try {
       // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2):
       // expose `strictEoaCuratorMatch` opt-in on the public registration
@@ -662,50 +689,21 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
-      // #1085 — a standalone /register historically forwarded ONLY the
-      // body `publishPolicy` (often undefined), silently dropping the
-      // create-time choice persisted by `createContextGraph`. The publish
-      // auto-register path (`ensureRegisteredForPublish`) already rehydrates
-      // it via `getStoredContextGraphRegistrationOptions`; mirror that here
-      // so an explicit /register that omits `publishPolicy` doesn't regress
-      // a curated CG to the default policy (governance drift). We deliberately
-      // do NOT rehydrate `pcaAccountId` / `publishAuthorityAccountId` — that
-      // stays EXPLICIT-ONLY by design (anti-stale-replay); only the request
-      // may supply it.
-      let effectivePublishPolicy = publishPolicy;
-      if (effectivePublishPolicy === undefined) {
-        // Best-effort: a stored-policy read failure (store unavailable /
-        // adapter without the helper) must never break an otherwise-valid
-        // register — fall back to the body value (undefined → agent default).
-        // Guard the capability (method absent = mock/older adapter, expected)
-        // separately from a genuine READ error, which we log so a silent
-        // policy fall-back is observable (the whole point of #1085).
-        if (typeof agent.getStoredContextGraphRegistrationOptions === 'function') {
-          try {
-            const storedOpts = await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId);
-            if (storedOpts?.publishPolicy !== undefined) {
-              effectivePublishPolicy = storedOpts.publishPolicy;
-            }
-          } catch (err) {
-            console.warn(
-              `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
-            );
-          }
-        }
-      }
-      // #1085 hardening: the earlier mutual-exclusion guard checked the BODY
-      // publishPolicy; re-check the EFFECTIVE (post-rehydration) policy so a
-      // body that omits publishPolicy but carries an explicit pcaAccountId,
-      // against a stored `open` policy, is rejected cleanly at the route
-      // boundary (400) instead of surfacing as a 500 from the agent layer.
-      if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
-        return jsonResponse(res, 400, {
-          error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)',
-        });
+      // #1085 — resolve the effective publishPolicy (rehydrate the stored
+      // create-time policy on omission; reject an explicit pcaAccountId against
+      // an open effective policy). See `resolveRegisterPublishPolicy`.
+      const resolved = await resolveRegisterPublishPolicy(
+        agent,
+        resolvedContextGraphId,
+        publishPolicy,
+        parsedPcaAccountId.value,
+      );
+      if ('error' in resolved) {
+        return jsonResponse(res, 400, { error: resolved.error });
       }
       const result = await agent.registerContextGraph(resolvedContextGraphId, {
         accessPolicy,
-        publishPolicy: effectivePublishPolicy,
+        publishPolicy: resolved.publishPolicy,
         callerAgentAddress: requestAgentAddress,
         publishAuthorityAccountId: parsedPcaAccountId.value,
         ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),

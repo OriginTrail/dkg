@@ -304,11 +304,11 @@ function parseAccountId(idStr: string): bigint | null {
 // read stays advisory and NEVER flips the authoritative registration.
 //
 // The two signals are DECOUPLED (QA #1346 acceptance contract):
-//   `adapterSupported` = does the probe SURFACE exist at all?
-//     - method absent, or an explicit `null` return (adapter's "no probe
-//       surface" signal) → false (genuine capability gap).
-//     - method invoked and returned a boolean, OR invoked and threw (an
-//       RPC read error — the surface exists, the read just failed) → true.
+//   `adapterSupported` = does the probe read SURFACE exist?
+//     - an explicit `null` return (the typed facade's "no probe surface"
+//       signal) → false (genuine capability gap).
+//     - a boolean return, OR a throw (an RPC read error — the surface
+//       exists, the read just failed) → true.
 //   `verified` = the on-chain read OUTCOME (advisory only):
 //     - true  — confirmed registered on-chain
 //     - false — probe ran but did not (yet) observe it (follower-RPC lag)
@@ -319,24 +319,22 @@ async function confirmAgentRegistration(
   agentAddr: string,
   { attempts = 3, backoffMs = 300 }: { attempts?: number; backoffMs?: number } = {},
 ): Promise<{ verified: boolean | null; adapterSupported: boolean }> {
-  const probe = (agent as any)?.isPublishingConvictionAgent;
-  // Method absent → genuine capability gap; nothing to read.
-  if (typeof probe !== 'function') return { verified: null, adapterSupported: false };
   let adapterSupported = false;
   let last: boolean | null = null;
   for (let i = 0; i < attempts; i++) {
     try {
-      const result = await probe.call(agent, accountId, agentAddr);
-      // Explicit `null` return = adapter has no probe surface → capability
-      // gap. Retrying is pointless and it is NOT "supported".
+      // Typed facade call: `DKGAgent.isPublishingConvictionAgent` always
+      // exists and returns `null` when the chain adapter exposes no probe
+      // surface — that `null` is the SOLE "unsupported" signal.
+      const result = await agent.isPublishingConvictionAgent(accountId, agentAddr);
       if (result === null) return { verified: null, adapterSupported: false };
-      // A boolean return proves the surface exists.
+      // A boolean return proves the read surface exists.
       adapterSupported = true;
       if (result === true) return { verified: true, adapterSupported: true };
       last = false; // `false` could be follower-RPC lag on a mined tx → retry.
     } catch {
-      // The method exists and was invoked; a throw is an RPC read failure,
-      // not a capability gap → supported, but the outcome stays inconclusive.
+      // The read surface exists; a throw is an RPC read failure (not a
+      // capability gap) → supported, outcome inconclusive.
       adapterSupported = true;
       last = null;
     }
