@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// PCA register-agent confirmation: the advisory outcome model + the bounded-probe
-// retry state machine. The DKGAgent facade delegates to
-// confirmPcaAgentRegistration; only PcaConfirmationOutcome is public API (via
-// src/index.ts) — the helper is package-internal.
+// PCA register-agent confirmation outcome model. The bounded-probe retry state
+// machine + the facade live in dkg-agent-registry.ts (the retry loop is a
+// module-private facade detail); this module is the public home for the outcome
+// type, re-exported via src/index.ts.
 
 /**
  * Outcomes reachable once the probe surface is known to exist — the retry state
@@ -23,28 +23,3 @@ export type ProbedConfirmationOutcome = 'confirmed' | 'not_observed' | 'inconclu
  * The daemon/CLI boundary derives the wire { verified, adapterSupported } from it.
  */
 export type PcaConfirmationOutcome = ProbedConfirmationOutcome | 'unsupported';
-
-const PCA_CONFIRM_ATTEMPTS = 3;
-const PCA_CONFIRM_BACKOFF_MS = 300;
-
-/**
- * Bounded-probe retry state machine. `probe` yields the registration read: true
- * (registered) | false (not yet — retry) | throws (RPC read failure). A
- * definitive not_observed (a false read) is never downgraded by a later throw;
- * only a later true upgrades it to confirmed.
- */
-export async function confirmPcaAgentRegistration(
-  probe: () => Promise<boolean>,
-): Promise<ProbedConfirmationOutcome> {
-  let sawNotObserved = false;
-  for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
-    try {
-      if (await probe()) return 'confirmed';
-      sawNotObserved = true;
-    } catch {
-      // An RPC read failure does not downgrade a prior not_observed.
-    }
-    if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
-  }
-  return sawNotObserved ? 'not_observed' : 'inconclusive';
-}

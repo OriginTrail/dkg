@@ -1,11 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { pcaConfirmationToWire, decodeRegisterAgentAdvisory, parseRegisterPcaAgentResult } from '../src/pca-confirmation-wire.js';
+import { pcaConfirmationToWire, parseRegisterPcaAgentResult } from '../src/pca-confirmation-wire.js';
 
 const BASE = { accountId: '7', agent: '0xabc', txHash: '0xreg', blockNumber: 9 };
 
-// R9 (9-A) — the wire advisory derivation lives at the CLI boundary now (moved
-// out of the agent package); pin the exhaustive outcome → { verified,
-// adapterSupported } mapping here.
+// The daemon side: agent confirmation outcome → wire advisory fields.
 describe('pcaConfirmationToWire (outcome → wire advisory fields)', () => {
   it('maps each outcome to its coherent wire shape', () => {
     expect(pcaConfirmationToWire('confirmed')).toEqual({ adapterSupported: true, verified: true });
@@ -15,59 +13,40 @@ describe('pcaConfirmationToWire (outcome → wire advisory fields)', () => {
   });
 });
 
-// R11 (11-B/11-C) — centralized decoding of a register-agent response (current
-// AND pre-#1346 legacy wire shape) into one coherent { registered, advisory }.
-describe('decodeRegisterAgentAdvisory', () => {
-  it('current daemon: verified drives advisory; registered stays as sent', () => {
-    expect(decodeRegisterAgentAdvisory({ registered: true, verified: true, adapterSupported: true }))
-      .toEqual({ registered: true, advisory: 'confirmed' });
-    expect(decodeRegisterAgentAdvisory({ registered: true, verified: false, adapterSupported: true }))
-      .toEqual({ registered: true, advisory: 'pending' });
-    expect(decodeRegisterAgentAdvisory({ registered: true, verified: null, adapterSupported: true }))
-      .toEqual({ registered: true, advisory: 'pending' });
-    expect(decodeRegisterAgentAdvisory({ registered: true, verified: null, adapterSupported: false }))
-      .toEqual({ registered: true, advisory: 'unsupported' });
-  });
-
-  // R14 (14-A) — a legacy daemon had no success:false guard, so a legacy
-  // registered:false may be a failed/unconfirmed tx. Only registered:true+
-  // adapterSupported:true (the old read OBSERVED it) is confirmed; otherwise
-  // `registered` is surfaced AS-IS (never forced true) with legacy-unverified —
-  // so a failed/unconfirmed legacy registration is NEVER reported as success.
-  it('legacy daemon (verified absent): only observed-registered → confirmed; otherwise registered stays AS-IS + legacy-unverified', () => {
-    // old read observed it registered → the tx succeeded → confirmed
-    expect(decodeRegisterAgentAdvisory({ registered: true, adapterSupported: true }))
-      .toEqual({ registered: true, advisory: 'confirmed' });
-    // no probe surface, read did not confirm — DO NOT force registered:true
-    expect(decodeRegisterAgentAdvisory({ registered: false, adapterSupported: false }))
-      .toEqual({ registered: false, advisory: 'legacy-unverified' });
-    // read ran but did not observe it — cannot assert tx success; registered stays false
-    expect(decodeRegisterAgentAdvisory({ registered: false, adapterSupported: true }))
-      .toEqual({ registered: false, advisory: 'legacy-unverified' });
-  });
-});
-
-// R16 (16-A) — the client is a REAL runtime boundary: parse+validate the raw
-// JSON, don't just cast it. Incoherent/malformed wire shapes fail loudly here.
+// The client parser is the ONE runtime boundary for raw daemon JSON: it validates
+// the wire shape and normalizes current + legacy responses into { registered,
+// advisory }. Cover every current advisory shape THROUGH the parser, plus legacy
+// tolerance and the rejection paths.
 describe('parseRegisterPcaAgentResult', () => {
-  it('current coherent response → normalized result', () => {
+  it('current daemon → normalized advisory for every shape', () => {
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: true, adapterSupported: true }))
       .toEqual({ ...BASE, registered: true, advisory: 'confirmed' });
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: false, adapterSupported: true }))
+      .toEqual({ ...BASE, registered: true, advisory: 'pending' });
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: null, adapterSupported: true }))
+      .toEqual({ ...BASE, registered: true, advisory: 'pending' });
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: null, adapterSupported: false }))
+      .toEqual({ ...BASE, registered: true, advisory: 'unsupported' });
   });
 
-  it('legacy response (verified absent, registered:false) → registered:false + legacy-unverified', () => {
+  it('legacy daemon (verified absent): observed-registered → confirmed; otherwise registered as-is + legacy-unverified', () => {
+    // old read observed it registered → the tx succeeded → confirmed
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, adapterSupported: true }))
+      .toEqual({ ...BASE, registered: true, advisory: 'confirmed' });
+    // read did not confirm — a legacy daemon has no success guard, so registered
+    // stays as-is (never forced true) with legacy-unverified.
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: false, adapterSupported: false }))
+      .toEqual({ ...BASE, registered: false, advisory: 'legacy-unverified' });
+    expect(parseRegisterPcaAgentResult({ ...BASE, registered: false, adapterSupported: true }))
       .toEqual({ ...BASE, registered: false, advisory: 'legacy-unverified' });
   });
 
-  it('rejects an INCOHERENT shape (adapterSupported:false with a non-null verified)', () => {
+  it('rejects an incoherent current shape (adapterSupported:false with a non-null verified)', () => {
     expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: true, adapterSupported: false }))
       .toThrow(/incoherent/i);
   });
 
-  // R17 — a verified-present (current) response with registered:false is neither
-  // a current nor a legacy shape; it must be REJECTED, never promoted to success.
-  it('rejects a verified-present response with registered:false (all verified values)', () => {
+  it('rejects a verified-present response with registered:false (never promoted to success)', () => {
     for (const verified of [true, false, null]) {
       expect(() => parseRegisterPcaAgentResult({ ...BASE, registered: false, verified, adapterSupported: true }))
         .toThrow(/registered:false/i);

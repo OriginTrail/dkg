@@ -14,7 +14,7 @@ import type { PcaConfirmationOutcome } from '@origintrail-official/dkg-agent';
  *   - `{ adapterSupported: true; verified: boolean | null }` — surface exists;
  *     `verified` is true (confirmed) | false (not observed / lag) | null (inconclusive).
  */
-export type PcaAgentConfirmation =
+type PcaAgentConfirmation =
   | { adapterSupported: false; verified: null }
   | { adapterSupported: true; verified: boolean | null };
 
@@ -49,8 +49,9 @@ export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgent
  *  = a pre-#1346 daemon that could not confirm and whose success we cannot assert. */
 export type RegisterAgentAdvisoryStatus = 'confirmed' | 'pending' | 'unsupported' | 'legacy-unverified';
 
-/** A register-agent response normalized into a coherent display. */
-export type RegisterAgentDisplay = {
+/** A register-agent response normalized into a coherent display (module-private —
+ *  the one public runtime boundary is `parseRegisterPcaAgentResult`). */
+type RegisterAgentDisplay = {
   /** Whether the agent is registered. */
   registered: boolean;
   /** The on-chain confirmation status. */
@@ -93,11 +94,11 @@ export type RegisterPcaAgentResult = {
  * `{ registered:false, verified:true }` that are neither a valid current nor a
  * legacy response.
  */
-export type DecodableRegisterAgentResponse =
+type DecodableRegisterAgentResponse =
   | ({ registered: true } & PcaAgentConfirmation)
   | { registered: boolean; adapterSupported: boolean; verified?: undefined };
 
-export function decodeRegisterAgentAdvisory(
+function decodeRegisterAgentAdvisory(
   resp: DecodableRegisterAgentResponse,
 ): RegisterAgentDisplay {
   if (resp.verified !== undefined) {
