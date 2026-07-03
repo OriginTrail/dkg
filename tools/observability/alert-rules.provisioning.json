@@ -52,7 +52,8 @@
       ],
       "group_by": [
         "alertname",
-        "service_instance_id"
+        "service_instance_id",
+        "deployment_environment"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -76,7 +77,8 @@
       "group_by": [
         "alertname",
         "service_instance_id",
-        "instance"
+        "instance",
+        "deployment_environment"
       ],
       "group_wait": "30s",
       "group_interval": "5m",
@@ -123,7 +125,7 @@
           "datasourceUid": "loki",
           "model": {
             "refId": "A",
-            "expr": "count by (service_instance_id) (count_over_time({service_name=\"dkg-node\"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name=\"dkg-node\"}[15m]))",
+            "expr": "count by (service_instance_id, deployment_environment) (count_over_time({service_name=\"dkg-node\"}[3h] offset 15m)) unless count by (service_instance_id, deployment_environment) (count_over_time({service_name=\"dkg-node\"}[15m]))",
             "queryType": "range",
             "intervalMs": 60000,
             "maxDataPoints": 50,
@@ -177,7 +179,7 @@
         "signal": "logs"
       },
       "annotations": {
-        "summary": "Node {{ $labels.service_instance_id }} was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving."
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) was shipping logs (seen in the 3h window) but has been silent for 15m. Fires per node — unaffected by other nodes joining or leaving."
       }
     },
     {
@@ -269,7 +271,7 @@
           "datasourceUid": "loki",
           "model": {
             "refId": "A",
-            "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\"} | severity_text=`ERROR` [10m]))",
+            "expr": "sum by (service_instance_id, deployment_environment) (count_over_time({service_name=\"dkg-node\"} | severity_text=`ERROR` [10m]))",
             "queryType": "range",
             "intervalMs": 60000,
             "maxDataPoints": 100,
@@ -323,7 +325,7 @@
         "signal": "logs"
       },
       "annotations": {
-        "summary": "Node {{ $labels.service_instance_id }} logged {{ $values.B }} ERRORs in 10m."
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} ERRORs in 10m."
       }
     },
     {
@@ -342,7 +344,7 @@
           "datasourceUid": "loki",
           "model": {
             "refId": "A",
-            "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\"} | severity_text=`WARN` [10m]))",
+            "expr": "sum by (service_instance_id, deployment_environment) (count_over_time({service_name=\"dkg-node\"} | severity_text=`WARN` [10m]))",
             "queryType": "range",
             "intervalMs": 60000,
             "maxDataPoints": 100,
@@ -396,7 +398,7 @@
         "signal": "logs"
       },
       "annotations": {
-        "summary": "Node {{ $labels.service_instance_id }} logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues)."
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) logged {{ $values.B }} WARNs in 10m — something is degraded (sync retries, RPC trouble, store issues)."
       }
     },
     {
@@ -415,7 +417,7 @@
           "datasourceUid": "loki",
           "model": {
             "refId": "A",
-            "expr": "sum by (service_instance_id) (sum_over_time({service_name=\"dkg-node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))",
+            "expr": "sum by (service_instance_id, deployment_environment) (sum_over_time({service_name=\"dkg-node\"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))",
             "queryType": "range",
             "intervalMs": 60000,
             "maxDataPoints": 100,
@@ -469,7 +471,7 @@
         "signal": "metrics"
       },
       "annotations": {
-        "summary": "Node {{ $labels.service_instance_id }} made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build."
+        "summary": "Node {{ $labels.service_instance_id }} ({{ $labels.deployment_environment }}) made {{ $values.B }} raw RPC requests in the last hour — provider credits are burning (the $200/day scenario). Requires nodes on a post-#1409 build."
       }
     },
     {

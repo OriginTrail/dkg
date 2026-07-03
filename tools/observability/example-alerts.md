@@ -20,7 +20,7 @@
 
 Routes are appended as children of the root notification policy
 (`group_wait 30s`, `group_interval 5m`, `repeat_interval 4h`). Grouping is
-signal-aware: logs group by `alertname, service_instance_id`; metrics group by `alertname, service_instance_id, instance`; traces group by `alertname` (the metrics set covers both the
+signal-aware: logs group by `alertname, service_instance_id, deployment_environment`; metrics group by `alertname, service_instance_id, instance, deployment_environment`; traces group by `alertname` (the metrics set covers both the
 Loki- and VictoriaMetrics-sourced rules). Every rule carries labels
 `team=dkg` + `signal=<x>`; add those two labels to any new rule and it routes
 itself.
@@ -63,7 +63,7 @@ reached`; range+reduce avoids that class of failure entirely.
 1. Node silent — seen in last 3h, quiet 15m (per node)
 
 ```
-count by (service_instance_id) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id) (count_over_time({service_name="dkg-node"}[15m]))
+count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[3h] offset 15m)) unless count by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"}[15m]))
 ```
 
 2. Fleet blackout — NO node logs reaching Loki
@@ -75,19 +75,19 @@ count(sum by (service_instance_id) (count_over_time({service_name="dkg-node"}[15
 3. Error spike on a node (>10 ERROR / 10m)
 
 ```
-sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))
+sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`ERROR` [10m]))
 ```
 
 4. Warn spike on a node (>150 WARN / 10m)
 
 ```
-sum by (service_instance_id) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))
+sum by (service_instance_id, deployment_environment) (count_over_time({service_name="dkg-node"} | severity_text=`WARN` [10m]))
 ```
 
 5. RPC credit burn spike (armed — needs nodes on a post-#1409 build)
 
 ```
-sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))
+sum by (service_instance_id, deployment_environment) (sum_over_time({service_name="dkg-node"} |= `rpc_usage` | logfmt | method != `` | unwrap count [1h]))
 ```
 
 6. Log pipeline export failing (collector cannot ship to Loki)
