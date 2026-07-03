@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
-import { EVMChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
 import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -13,6 +13,8 @@ export interface PublisherRuntime {
   readonly walletIds: string[];
   readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
+  /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
+  readonly drainRpcUsage: () => RpcUsageWindow;
 }
 
 export interface PublisherRuntimeWallet {
@@ -40,6 +42,8 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
 
 interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
   readonly publisher: DKGPublisher;
+  /** The wallet's own chain adapter — also the wallet's RpcUsageDrainable source. */
+  readonly chain: ChainAdapter;
 }
 
 export async function startPublisherRuntimeIfEnabled(args: {
@@ -249,6 +253,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     wallets.push({
       address: wallet.address,
       identityId,
+      chain,
       publisher: new DKGPublisher({
         store: args.store,
         chain,
@@ -346,6 +351,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     publisher: asyncPublisher,
     walletIds: validWalletIds,
     wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
+    drainRpcUsage: () => mergeRpcUsageWindows(...wallets.map((w) => w.chain.drainRpcUsage?.())),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {

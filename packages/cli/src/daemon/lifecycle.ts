@@ -65,6 +65,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
   MockChainAdapter,
+  mergeRpcUsageWindows,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
@@ -137,6 +138,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -2431,6 +2433,27 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
+  // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
+  // ~$200 of RPC credits in a day with nothing measuring it). The whole
+  // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
+  // The composite source merges EVERY drainable this process owns: the agent
+  // (its chain adapter) plus the async-publisher runtime's per-wallet
+  // adapters — `publisherRuntime` is late-bound, so read the live variable at
+  // each drain. chainId is the EFFECTIVE one (chainBase resolves field-level
+  // inheritance; config.chain?.chainId alone is undefined for configs that
+  // override only rpcUrl).
+  const rpcUsageLogger = new Logger("chain-rpc");
+  const rpcUsageTelemetry = startRpcUsageTelemetry({
+    source: {
+      drainRpcUsage: () => mergeRpcUsageWindows(
+        agent.drainRpcUsage(),
+        publisherRuntime?.drainRpcUsage(),
+      ),
+    },
+    emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
+    chainId: chainBase?.chainId ?? config.chain?.chainId,
+  });
+
   const tracker = new OperationTracker(dashDb);
 
   // Track peer connections
@@ -3258,6 +3281,10 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        // Clears the timer AND performs the final best-effort drain (BEFORE
+        // telemetry stops), so a partial window still reaches Loki — keeps
+        // log-derived request totals exact across process lifecycles.
+        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.

@@ -30,6 +30,7 @@ import type {
   PcaRpcMethod,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
+import type { RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -127,6 +128,11 @@ export class MockChainAdapter implements ChainAdapter {
 
   getRpcUrls(): string[] {
     return [];
+  }
+
+  /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
+  drainRpcUsage(): RpcUsageWindow {
+    return { byMethod: {}, lifetimeTotal: 0 };
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {

@@ -1,4 +1,5 @@
 import type { ethers } from 'ethers';
+import type { RpcUsageWindow } from './rpc-usage.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -861,6 +862,16 @@ export interface ChainAdapter {
    * `chainId` (single in-memory deployment per process).
    */
   deploymentId: string;
+
+  /**
+   * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts
+   * accumulated since the previous drain (a DELTA window — summing drains over
+   * time yields exact request totals, the provider-billing unit). The EVM
+   * adapter counts at its HTTP transport; the mock adapter returns an
+   * always-empty window (it has no RPC transport). Consumed by the daemon's
+   * minutely `rpc_usage` telemetry log line.
+   */
+  drainRpcUsage?(): RpcUsageWindow;
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
