@@ -626,7 +626,10 @@ export class ACKCollector {
     // `storage_ack_insufficient` message when quorum can't be reached.
     // Cores that pre-date the typed wire shape continue to throw / reset
     // and follow the legacy retry path below — declines are strictly
-    // additive on the wire.
+    // additive on the wire. ALSO carries the synthetic `TRANSPORT_ERROR`
+    // terminal outcome for peers whose final send attempt threw, so a
+    // peer that never answered surfaces WITH its transport error string
+    // instead of a bare `no_response` (testnet dead-air incident).
     const declines = new Map<string, { code: string; message: string }>();
     // ACKs that arrived over the protocol but failed publisher-side validation
     // are not "no response". Track them separately so QuorumUnmetError can
@@ -966,20 +969,22 @@ export class ACKCollector {
             }
             continue;
           }
-          // Terminal transport failure on the final attempt. If this
-          // peer transient-declined on an earlier attempt the
-          // `declines` map still holds that stale code — overwrite
-          // it with the actual terminal reason so the aggregated
-          // `storage_ack_insufficient` diagnostic reflects the last
-          // observed outcome (the codex review on PR #559 caught
-          // the original "stale decline shadows the real failure"
-          // path here).
-          if (declines.has(peerId)) {
-            declines.set(peerId, {
-              code: 'TRANSPORT_ERROR',
-              message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
-            });
-          }
+          // Terminal transport failure on the final attempt. ALWAYS record
+          // it — not only when this peer transient-declined earlier. The old
+          // `declines.has(peerId)` gate (a remnant of the PR #559 "stale
+          // decline shadows the real failure" overwrite) meant a peer that
+          // never got a single byte back surfaced as a bare `no_response`
+          // in `snapshotPeerOutcomes` + the final error, with the real
+          // transport error string erased (testnet dead-air incident:
+          // 7 cores dialled × 3 attempts, ALL `no_response`, 0 declines —
+          // zero diagnostic signal for the operator). Recording the
+          // sanitized, bounded message here makes the terminal cause ride
+          // `QuorumUnmetError.peerOutcomes` (reason `TRANSPORT_ERROR`) and
+          // the `Declines:` detail on the aggregated message.
+          declines.set(peerId, {
+            code: 'TRANSPORT_ERROR',
+            message: sanitizeDeclineField(msg, MAX_DECLINE_MESSAGE_CHARS),
+          });
           log(`[ACKCollector] Failed to get ACK from ${peerId.slice(-8)} after ${MAX_RETRIES} attempts: ${msg}`);
           return null;
         }

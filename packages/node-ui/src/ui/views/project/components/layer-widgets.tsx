@@ -1,10 +1,12 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useId, useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { PublishEligibilityChip } from '../../../pages/conviction/PublishEligibilityChip.js';
+import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -113,7 +115,12 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // B8 — the CONFIRMED post-publish discount from the VM publish response's sample.
+  const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const isWm = layer === 'wm';
+  // S5 — the PCA eligibility verdict the publish button is aria-describedby'd to,
+  // so a screen-reader user activating Publish hears the direct-cost/fail state.
+  const verdictId = useId();
   // Mirror the outcome up to the strip; it persists past this widget's unmount.
   useEffect(() => {
     if (result) onResult?.({ ok: true, text: result });
@@ -125,6 +132,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
     setBusy(true);
     setError(null);
     setResult(null);
+    setCostCovered(null);
     // Issue #864 (Codex review on #874) — track the in-flight
     // assertion so mid-loop failures surface "<name>: …" instead of
     // the generic "an assertion …".
@@ -182,6 +190,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
+          // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH (not off the
+          // headline sample, which is picked for cleanliness not discount). Absent → hidden.
+          setCostCovered(r.convictionCostCovered ?? null);
         } else if (assertions.length === 0) {
           setResult('Nothing to publish — promote assertions to Shared Memory first.');
         } else {
@@ -209,6 +220,12 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
       </div>
       {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
       {error && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {/* B8 — the CONFIRMED post-publish discount (from the on-chain CostCovered event);
+          renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
+          predictive chip below. */}
+      {!isWm && <DiscountAppliedBadge convictionCostCovered={costCovered} />}
+      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). */}
+      {!isWm && <PublishEligibilityChip contextGraphId={contextGraphId} id={verdictId} />}
       <div className="v10-decision-actions">
         <button
           data-testid={isWm ? 'widget-promote-all-btn' : 'widget-publish-vm-btn'}
@@ -217,6 +234,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
             ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
             : { opacity: busy ? 0.5 : 1 }}
           disabled={busy}
+          aria-describedby={!isWm ? verdictId : undefined}
           onClick={handleAction}
         >
           {busy ? '...' : (isWm ? '✓ Promote All → Shared' : '◉ Publish to Verifiable Memory')}

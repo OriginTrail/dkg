@@ -13,12 +13,17 @@
  */
 import React from 'react';
 import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
-import { JoinRequestRow, ActivityDigestRow, ConfirmationRow } from './rows.js';
+import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
+import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
   /** Open a context graph (set active + open its tab) and close the pane. */
   onOpenContextGraph: (cgId: string) => void;
+  /** E2 — client-derived predictive PCA alerts (default none = no section). */
+  pcaAlerts?: PcaAlert[];
+  /** Open a PCA's Manage detail tab from an alert. */
+  onOpenPca?: (accountId: string) => void;
   /** Dropdown id — wired to the bell's `aria-controls`. */
   id?: string;
   /** Ref to the pane root so the bell can move focus into it on open
@@ -26,7 +31,7 @@ export interface NotificationsPaneProps {
   paneRef?: React.Ref<HTMLDivElement>;
 }
 
-export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: NotificationsPaneProps) {
+export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], onOpenPca, id, paneRef }: NotificationsPaneProps) {
   const {
     joinRequests,
     activity,
@@ -51,7 +56,8 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
 
   const hasJoin = joinRequests.length > 0;
   const hasActivity = activity.length > 0;
-  const isEmpty = !hasJoin && !hasActivity;
+  const hasPca = pcaAlerts.length > 0;
+  const isEmpty = !hasJoin && !hasActivity && !hasPca;
 
   return (
     <div className="v10-notif-pane" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
@@ -70,6 +76,36 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
       </div>
 
       <div className="v10-notif-pane-body">
+        {/* E2 — predictive PCA alerts (client-derived; shown regardless of the
+            server feed's state). Additive: omitted entirely when there are none. */}
+        {hasPca && (
+          <section className="v10-notif-section v10-notif-section-pca" aria-label="Publisher Conviction">
+            <div className="v10-notif-section-head">
+              <span className="v10-notif-section-label">Publisher Conviction</span>
+              <span className="v10-notif-section-count">{pcaAlerts.length}</span>
+            </div>
+            <div className="v10-notif-section-rows">
+              {pcaAlerts.map((al) => (
+                <div
+                  key={al.id}
+                  className="v10-pca-alert-row"
+                  data-severity={al.severity}
+                  data-testid="pca-bell-alert"
+                  role={al.severity === 'danger' ? 'alert' : 'status'}
+                >
+                  <div className="v10-pca-alert-title">{al.title}</div>
+                  <div className="v10-pca-alert-msg">{al.message}</div>
+                  {onOpenPca && (
+                    <button type="button" className="v10-pca-alert-action" onClick={() => onOpenPca(al.accountId)}>
+                      Manage PCA #{al.accountId}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* identity-pending — fail closed, never "all caught up" (UX §7). */}
         {status === 'identity-pending' ? (
           <div className="v10-notif-pane-state" role="status">Verifying access…</div>
@@ -136,6 +172,9 @@ export function NotificationsPane({ feed, onOpenContextGraph, id, paneRef }: Not
                         item={item}
                         onOpen={(cgId) => openAndMarkSeen(cgId, item.id)}
                       />
+                    ) : item.kind === 'pca_cost_covered' ? (
+                      // B8 (P2) — confirmed discount; informational, non-clickable.
+                      <PcaCostCoveredRow key={item.id} item={item} />
                     ) : (
                       <ConfirmationRow
                         key={item.id}

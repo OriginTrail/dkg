@@ -58,6 +58,17 @@ const rejected = (over: Partial<Extract<NotifWire, { type: 'join_rejected' }>> =
   ...over,
 });
 
+// B8 (P2) — confirmed-discount bell wire row.
+const pcaCovered = (over: Partial<Extract<NotifWire, { type: 'pca_cost_covered' }>> = {}): NotifWire => ({
+  type: 'pca_cost_covered',
+  id: 4,
+  ts: 1800,
+  read: 0,
+  contextGraphId: 'cg:d',
+  meta: { contextGraphName: 'Delta', accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0', publisherAddress: '0xpub' },
+  ...over,
+});
+
 describe('mapJoinRequests', () => {
   it('extracts only join_request rows, newest-first', () => {
     const rows = [activity(), joinReq({ id: 10, ts: 100 }), joinReq({ id: 11, ts: 900 }), approved()];
@@ -76,6 +87,19 @@ describe('mapActivity', () => {
   it('maps digest + confirmations, newest-first, and drops join_request', () => {
     const out = mapActivity([joinReq(), activity({ ts: 2000 }), approved({ ts: 1500 }), rejected({ ts: 1200 })]);
     expect(out.map((i) => i.kind)).toEqual(['digest', 'join_approved', 'join_rejected']);
+  });
+
+  // B8 (P2) — the confirmed-discount row maps to a pca_cost_covered ActivityItem
+  // carrying the CostCovered event + the publishing wallet, newest-first with the rest.
+  it('maps a pca_cost_covered row (covered event + publisher), interleaved newest-first', () => {
+    const out = mapActivity([activity({ ts: 1000 }), pcaCovered({ ts: 1800 })]);
+    expect(out.map((i) => i.kind)).toEqual(['pca_cost_covered', 'digest']); // 1800 before 1000
+    const item = out[0];
+    if (item.kind !== 'pca_cost_covered') throw new Error('expected pca_cost_covered');
+    expect(item.covered).toMatchObject({ accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700' });
+    expect(item.publisherAddress).toBe('0xpub');
+    expect(item.contextGraphName).toBe('Delta');
+    expect(item.read).toBe(false);
   });
 
   it('keeps the digestKey string id for digests', () => {
@@ -153,13 +177,14 @@ describe('selectInformationalUnreadIds (M8 — actionable rows never auto-clear)
     expect(ids).toEqual([]);
   });
 
-  it('includes unread informational ids (digests + approved + rejected)', () => {
+  it('includes unread informational ids (digests + approved + rejected + pca_cost_covered)', () => {
     const ids = selectInformationalUnreadIds([
       activity({ id: 'd1', read: 0 }),
       approved({ id: 10, read: 0 }),
       rejected({ id: 11, read: 0 }),
+      pcaCovered({ id: 12, read: 0 }), // B8 — confirmed discount counts toward the badge
     ]);
-    expect(ids).toEqual(['d1', 10, 11]);
+    expect(ids).toEqual(['d1', 10, 11, 12]);
   });
 
   it('excludes already-read informational rows', () => {

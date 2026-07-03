@@ -65,6 +65,20 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-app-body\s*\{/);
   });
 
+  it('pins the app shell to the viewport so side panel toggles cannot strand scroll state', () => {
+    const appRule = css.match(/\.v10-app\s*\{([\s\S]*?)\}/)?.[1] ?? '';
+    expect(appRule).toContain('position: fixed;');
+    expect(appRule).toContain('inset: 0;');
+    expect(appRule).toContain('height: 100dvh;');
+    expect(appRule).toContain('overflow: hidden;');
+  });
+
+  it('keeps PCA section actions right-aligned when section headers wrap', () => {
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*div:first-child\s*\{[\s\S]*?flex:\s*1 1 320px/);
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*\.v10-pca-overview-cta-group\s*\{[\s\S]*?margin-left:\s*auto/);
+    expect(css).toMatch(/\.v10-pca-section-head\s*>\s*\.v10-pca-overview-cta-group\s*\{[\s\S]*?justify-content:\s*flex-end/);
+  });
+
   it('includes .v10-panel-left and .v10-panel-right selectors', () => {
     expect(css).toMatch(/\.v10-panel-left\s*\{/);
     expect(css).toMatch(/\.v10-panel-right\s*\{/);
@@ -205,6 +219,11 @@ describe('right-rail agent shell replaces Agent Hub', () => {
     expect(app).toContain('PanelLeft');
     expect(app).toContain('PanelCenter');
     expect(app).toContain('PanelRight');
+  });
+
+  it('emits a resize signal after side rail toggles so measured panes recalculate', () => {
+    expect(app).toContain("window.dispatchEvent(new Event('resize'))");
+    expect(app).toContain('[leftCollapsed, rightCollapsed]');
   });
 
   it('hides the duplicate left-nav Agent Hub entry while keeping the internal route alive', () => {

@@ -330,3 +330,52 @@ describe('scopeNotifications — join confirmations are caller-scoped, not membe
     expect(out.notifications).toHaveLength(0);
   });
 });
+
+describe('scopeNotifications — pca_cost_covered (B8, wallet-scoped)', () => {
+  function pcaRow(cgId: string, publisherAddress: string, ts: number, read = 0): NotificationRow {
+    return row({
+      type: 'pca_cost_covered',
+      ts,
+      read,
+      context_graph_id: cgId,
+      meta: JSON.stringify({
+        contextGraphId: cgId, publisherAddress, accountId: '7', epoch: 42,
+        baseCost: '1000', discountedCost: '700', drawnFromEpoch: '500', drawnFromTopUp: '200',
+      }),
+    });
+  }
+
+  it('surfaces a confirmed-discount alert to the publishing wallet', () => {
+    const out = scopeNotifications([pcaRow('cg-1', '0xme', 2000)], baseCtx());
+    expect(out.notifications).toHaveLength(1);
+    const n = out.notifications[0] as Extract<typeof out.notifications[number], { type: 'pca_cost_covered' }>;
+    expect(n.type).toBe('pca_cost_covered');
+    expect(n.meta).toMatchObject({
+      accountId: '7', epoch: 42, baseCost: '1000', discountedCost: '700', publisherAddress: '0xme',
+    });
+    expect(out.badgeCount).toBe(1);
+  });
+
+  it('drops the alert for a DIFFERENT wallet (wallet-scoped, NOT CG-membership)', () => {
+    // Same member CG, but a publish by another wallet → not this caller's business.
+    const out = scopeNotifications([pcaRow('cg-1', '0xsomeoneelse', 2000)], baseCtx());
+    expect(out.notifications).toHaveLength(0);
+    expect(out.badgeCount).toBe(0);
+  });
+
+  it('matches the publishing wallet case-insensitively', () => {
+    const out = scopeNotifications([pcaRow('cg-1', '0xME', 2000)], baseCtx({ selfAgentDid: 'did:dkg:agent:0xme' }));
+    expect(out.notifications).toHaveLength(1);
+  });
+
+  it('fails closed when the caller address is unknown', () => {
+    const out = scopeNotifications([pcaRow('cg-1', '0xme', 2000)], baseCtx({ selfAgentDid: undefined }));
+    expect(out.notifications).toHaveLength(0);
+  });
+
+  it('a read alert does not count toward the badge', () => {
+    const out = scopeNotifications([pcaRow('cg-1', '0xme', 2000, 1)], baseCtx());
+    expect(out.notifications).toHaveLength(1);
+    expect(out.badgeCount).toBe(0);
+  });
+});

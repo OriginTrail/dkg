@@ -14,6 +14,8 @@ import {
   type AgentSidebarIdentity,
 } from '../lib/contextGraphSidebar.js';
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
+import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
+import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -58,29 +60,30 @@ interface CgReport {
   sig: string;
 }
 
-// chainId → display name + native gas-token symbol. Only the chains
-// DKG runs on; unknown ids fall back to "Chain <id>" / "ETH". The TRAC
-// token symbol still comes from the wallets endpoint — this is only
-// chain + gas naming (no backend change).
-const CHAIN_INFO: Record<string, { name: string; gas: string }> = {
-  '1': { name: 'Ethereum', gas: 'ETH' },
-  '8453': { name: 'Base', gas: 'ETH' },
-  '84532': { name: 'Base Sepolia', gas: 'ETH' },
-  '100': { name: 'Gnosis', gas: 'xDAI' },
-  '10200': { name: 'Chiado', gas: 'xDAI' },
-  '2043': { name: 'NeuroWeb', gas: 'NEURO' },
-  '20430': { name: 'NeuroWeb Testnet', gas: 'NEURO' },
+// chainId → display name. The native gas-token symbol comes from the shared
+// `nativeGasSymbol` helper (one map, also used by the PCA surfaces — avoids the
+// cross-surface chain→symbol drift this codebase has hit before). The TRAC token
+// symbol still comes from the wallets endpoint — this is only chain naming.
+const CHAIN_NAMES: Record<string, string> = {
+  '1': 'Ethereum',
+  '8453': 'Base',
+  '84532': 'Base Sepolia',
+  '100': 'Gnosis',
+  '10200': 'Chiado',
+  '2043': 'NeuroWeb',
+  '20430': 'NeuroWeb Testnet',
 };
 function chainInfo(id: unknown): { name: string; gas: string } {
-  if (id == null) return { name: 'Unknown chain', gas: 'ETH' };
+  const gas = nativeGasSymbol(id as string | number | null | undefined);
+  if (id == null) return { name: 'Unknown chain', gas };
   const k = String(id);
   // The daemon may return a compound id like "base:84532" (slug:chainId).
   // Try the raw string first, then the numeric suffix; fall back to a
   // human-readable "Chain <id>" rather than echoing "base:84532".
-  if (CHAIN_INFO[k]) return CHAIN_INFO[k];
+  if (CHAIN_NAMES[k]) return { name: CHAIN_NAMES[k], gas };
   const numeric = k.match(/(\d+)\s*$/)?.[1];
-  if (numeric && CHAIN_INFO[numeric]) return CHAIN_INFO[numeric];
-  return { name: numeric ? `Chain ${numeric}` : `Chain ${k}`, gas: 'ETH' };
+  if (numeric && CHAIN_NAMES[numeric]) return { name: CHAIN_NAMES[numeric], gas };
+  return { name: numeric ? `Chain ${numeric}` : `Chain ${k}`, gas };
 }
 
 // Compact number: 1234 → "1.2k", 4500000 → "4.5M". Keeps list/stat
@@ -850,6 +853,8 @@ export function DashboardView() {
               </div>
             ))}
           </div>
+
+          <PcaDashboardRow />
         </div>
       </div>
     </div>

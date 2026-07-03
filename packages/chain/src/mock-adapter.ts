@@ -24,6 +24,10 @@ import type {
   OperationalWalletRegistrationResult,
   V10PublishingConvictionAccountInfo,
   NodePublishingConvictionAccount,
+  PcaAccountRelation,
+  ShardingTableNode,
+  PcaContracts,
+  PcaRpcMethod,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
 import {
@@ -566,13 +570,17 @@ export class MockChainAdapter implements ChainAdapter {
     return { accountId, ...this.txResult(true) };
   }
 
-  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null> {
+  async getPublishingConvictionAccountInfo(
+    accountId: bigint,
+    opts?: { extended?: boolean },
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return null;
-    return {
+    const baseEpochAllowance = acct.committedTRAC / BigInt(acct.lockDurationEpochs);
+    const info: V10PublishingConvictionAccountInfo = {
       owner: acct.owner,
       committedTRAC: acct.committedTRAC,
-      baseEpochAllowance: acct.committedTRAC / BigInt(acct.lockDurationEpochs),
+      baseEpochAllowance,
       createdAtEpoch: acct.createdAtEpoch,
       // Mock models boundary-aligned creation only; the contract's mid-epoch
       // round-up (epochAtTimestamp(expiresAtTimestamp-1)+1) is not modeled.
@@ -588,6 +596,16 @@ export class MockChainAdapter implements ChainAdapter {
       lastSettledWindow: 0,
       fullySwept: false,
     };
+    if (opts?.extended) {
+      // GAP-4/5 stubs — mock doesn't model RFC-51 per-node allocation
+      // (primaryNode 0n) or per-epoch decay; current-epoch headroom is the
+      // nominal base allowance + top-up buffer.
+      info.primaryNode = 0n;
+      info.lastPrimaryNodeChangeEpoch = 0;
+      info.currentEpoch = acct.createdAtEpoch;
+      info.remainingAllowance = baseEpochAllowance + acct.topUpBuffer;
+    }
+    return info;
   }
 
   private requireConvictionAccount(accountId: bigint) {
@@ -694,6 +712,75 @@ export class MockChainAdapter implements ChainAdapter {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return false;
     return acct.agents.has(ethers.getAddress(agent).toLowerCase());
+  }
+
+  /** Mirrors `getRegisteredAgents`. Keys are stored lowercased, so
+   *  checksum-normalize on the way out to match the on-chain view. */
+  async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return [];
+    return [...acct.agents].map((k) => ethers.getAddress(k));
+  }
+
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+
+    for (const wallet of wallets) {
+      if (!ethers.isAddress(wallet)) continue;
+      const key = ethers.getAddress(wallet).toLowerCase();
+      for (const [id, acct] of this.convictionAccounts) {
+        if (acct.owner.toLowerCase() === key) owned.add(id);
+      }
+      const accountId = this.agentToConvictionAccount.get(key);
+      if (accountId != null && accountId > 0n) agent.add(accountId);
+    }
+
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const isOwned = owned.has(accountId);
+      const isAgent = agent.has(accountId);
+      return { accountId, relation: isOwned && isAgent ? 'both' : isOwned ? 'owned' : 'agent' };
+    });
+  }
+
+  async listDesignatableNodes(_opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    return [
+      { nodeId: '0x6e6f64652d31', identityId: 42n, ask: 1_000_000_000_000_000_000n, stake: 250_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d33', identityId: 61n, ask: 1_500_000_000_000_000_000n, stake: 500_000n * 10n ** 18n },
+    ];
+  }
+
+  /** Browser-bootstrap parity (sub-PR #2) — fixed checksummed addresses + the
+   *  mock chainId. Browser RPC transport is daemon-owned, so the mock does not
+   *  expose adapter/private RPC endpoints here. */
+  async getPublishingConvictionContracts(): Promise<PcaContracts> {
+    return {
+      nft: ethers.getAddress('0x' + '11'.repeat(20)),
+      token: ethers.getAddress('0x' + '22'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+    switch (method) {
+      case 'eth_chainId': {
+        const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
+        return `0x${Number(tail).toString(16)}`;
+      }
+      case 'eth_blockNumber':
+        return `0x${this.nextBlock.toString(16)}`;
+      case 'eth_call':
+        return '0x' + '0'.repeat(64);
+      case 'eth_getBlockByNumber':
+        return { number: `0x${this.nextBlock.toString(16)}` };
+      case 'eth_getTransactionReceipt':
+      case 'eth_getTransactionByHash':
+        return null;
+    }
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

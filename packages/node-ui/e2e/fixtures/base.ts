@@ -14,6 +14,7 @@ import { SettingsPage } from '../pages/settings.po.js';
 import { CreateProjectModal } from '../pages/modals/create-project.po.js';
 import { ImportFilesModal } from '../pages/modals/import-files.po.js';
 import { FilePreviewModal } from '../pages/modals/file-preview.po.js';
+import { PublishingConvictionPage } from '../pages/publishing-conviction.po.js';
 
 type Fixtures = {
   /**
@@ -36,6 +37,7 @@ type Fixtures = {
   createProjectModal: CreateProjectModal;
   importFilesModal: ImportFilesModal;
   filePreviewModal: FilePreviewModal;
+  conviction: PublishingConvictionPage;
 };
 
 export const test = base.extend<Fixtures>({
@@ -46,8 +48,8 @@ export const test = base.extend<Fixtures>({
   // HARD GUARD against silent false positives. The product wraps several core
   // endpoints in `api-wrapper.detectMockMode`, which swaps in fabricated demo
   // fixtures (connectedPeers:12, "Pharma Drug Interactions" CGs, a `my-dkg-node`
-  // identity, …) the instant the initial /api/status probe 5xx's, times out
-  // (2s) or network-fails — and the decision is sticky for the whole page. If
+  // identity, …) after repeated /api/status probes 5xx, time out, or
+  // network-fail — and the decision is sticky for the whole page. If
   // that ever fires mid-run, EVERY assertion on the rendered data is suspect.
   // This auto fixture refuses to let such a run pass: after each test it reads
   // the `window.__DKG_USING_MOCKS__` flag the wrapper sets and fails the test
@@ -112,6 +114,9 @@ export const test = base.extend<Fixtures>({
   },
   filePreviewModal: async ({ page }, use) => {
     await use(new FilePreviewModal(page));
+  },
+  conviction: async ({ page }, use) => {
+    await use(new PublishingConvictionPage(page));
   },
 });
 

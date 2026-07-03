@@ -1,0 +1,801 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useFetch } from '../../hooks.js';
+import {
+  fetchWalletsBalances,
+  fetchPca,
+  describePcaError,
+  HttpError,
+  type PcaErrorInfo,
+} from '../../api.js';
+import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { resolveWalletBinding, planSelfCoverage, type SignableOwner } from '../../pca/walletBinding.js';
+import { PcaModalShell } from './PcaModalShell.js';
+import {
+  describeWalletTxError,
+  WalletReceiptRevertedError,
+  WalletReceiptWaitError,
+  WalletTxStepError,
+} from '../../web3/walletTxError.js';
+import {
+  WalletOwnerActionAbortError,
+  WalletOwnerActionUnavailableError,
+} from '../../web3/walletOwnerActionSubmitter.js';
+import {
+  AddressCrux,
+  DeviceConfirmProgress,
+  WalletRow,
+  SponsorshipHandshake,
+  CopyButton,
+  type DeviceConfirmStep,
+  type WalletRowTone,
+} from '../../components/Pca/index.js';
+import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+
+type RowStatus = 'pending' | 'approved' | 'submitted' | 'skipped' | 'sponsored' | 'stranded' | 'conflict' | 'cap' | 'error' | 'aborted' | 'unverified';
+interface Row {
+  address: string;
+  status: RowStatus;
+  message?: string;
+  txHash?: string;
+}
+
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const sameAddress = (a?: string | null, b?: string | null) =>
+  !!a && !!b && a.toLowerCase() === b.toLowerCase();
+
+function walletBatchAbortMessage(err: unknown): string | null {
+  if (
+    err instanceof WalletOwnerActionAbortError ||
+    err instanceof WalletOwnerActionUnavailableError
+  ) {
+    return err.message;
+  }
+  if (err instanceof WalletReceiptWaitError) {
+    return `${describeWalletTxError(err, err.txStep ?? 'action').message} Stop here and verify before continuing.`;
+  }
+  if (err instanceof WalletReceiptRevertedError) {
+    return describeWalletTxError(err, 'action').message;
+  }
+  const info = describeWalletTxError(
+    err,
+    err instanceof WalletTxStepError ? err.txStep : 'action',
+  );
+  if (
+    info.kind === 'rejected' ||
+    info.kind === 'insufficient_funds' ||
+    info.kind === 'rpc_timeout' ||
+    info.kind === 'unknown'
+  ) {
+    return info.message;
+  }
+  return null;
+}
+
+function walletActionAbortMessage(err: unknown): string | null {
+  if (
+    err instanceof WalletOwnerActionAbortError ||
+    err instanceof WalletOwnerActionUnavailableError ||
+    err instanceof WalletReceiptWaitError ||
+    err instanceof WalletReceiptRevertedError ||
+    err instanceof WalletTxStepError
+  ) {
+    return walletBatchAbortMessage(err);
+  }
+  return null;
+}
+
+function describeWalletPcaRevert(err: unknown, accountId: string): PcaErrorInfo | null {
+  const info = describeWalletTxError(
+    err,
+    err instanceof WalletTxStepError ? err.txStep : 'action',
+  );
+  if (info.kind !== 'revert') return null;
+  switch (info.revertName) {
+    case 'AgentAlreadyRegistered':
+      return {
+        code: 'AgentAlreadyRegistered',
+        status: 400,
+        message: 'This operational wallet is already approved on another PCA - deregister it there first.',
+      };
+    case 'AgentCapReached':
+      return {
+        code: 'AgentCapReached',
+        status: 400,
+        message: `PCA #${accountId} already has the maximum 100 approved publishing wallets.`,
+      };
+    case 'NotAccountOwner':
+      return {
+        code: 'NotAccountOwner',
+        status: 403,
+        message: `This wallet is not the owner of PCA #${accountId}, so it cannot manage it.`,
+      };
+    default:
+      return null;
+  }
+}
+
+const ROW_LABEL: Record<RowStatus, string> = {
+  pending: 'approving…',
+  approved: 'approved on-chain',
+  submitted: 'submitted — verify',
+  skipped: 'already approved here (skipped)',
+  // Self-coverage — bound to a sponsor's PCA; intentionally left there (already discounted
+  // free), NOT moved. Distinct from 'skipped' (= already approved HERE).
+  sponsored: 'left on another PCA (already discounted)',
+  // Deregistered from the old PCA but the re-register failed: currently uncovered, recoverable.
+  stranded: 'removed from the old PCA, not yet on the new one — retry to finish',
+  conflict: 'on another PCA',
+  cap: 'cap reached',
+  error: 'failed',
+  aborted: 'aborted',
+  // N5/#9 — couldn't confirm whether the AgentAlreadyRegistered is on THIS account
+  // (transient probe failure or adapter capability gap). Neutral, not a false conflict.
+  unverified: 'already approved somewhere — couldn’t verify; retry',
+};
+const ROW_TONE: Record<RowStatus, WalletRowTone> = {
+  pending: 'neutral',
+  approved: 'success',
+  submitted: 'neutral',
+  skipped: 'neutral',
+  sponsored: 'neutral',
+  stranded: 'warn',
+  conflict: 'danger',
+  cap: 'warn',
+  error: 'danger',
+  aborted: 'neutral',
+  unverified: 'neutral',
+};
+
+/**
+ * Approve publishing wallets (self · sponsor). Self prefills this node's operational
+ * wallets ("0/100 covers nothing" framing); sponsor is the address bulk paste.
+ * Approvals run as a SEQUENTIAL per-row loop in a `role="status"` region with a Stop
+ * control. The 409-AgentAlreadyRegistered branch re-probes THIS account: registered
+ * here → benign "skipped"; otherwise it's a cross-account CONFLICT (never a benign skip)
+ * naming the existing PCA when the daemon surfaces its existingAccountId.
+ */
+export function ApproveWalletsModal({
+  accountId,
+  initialMode = 'sponsor',
+  onClose,
+  onApproved,
+  seedBulk,
+  deregisterFrom,
+  seedAgentsResolved,
+  selfCoverage,
+}: {
+  accountId: string;
+  initialMode?: 'self' | 'sponsor';
+  onClose: () => void;
+  onApproved?: () => void;
+  /** Renew — prefill the sponsor bulk-paste with the replaced account's agents,
+   *  so re-approving the same wallets on the new account is one step. */
+  seedBulk?: string;
+  /**
+   * Renew (deregister-first, #1344) — the OLD account these seeded wallets are still bound
+   * to on-chain. Account EXPIRY does NOT clear `agentToAccountId`, so re-approving a
+   * seeded wallet on the new account would revert `AgentAlreadyRegistered`. When set,
+   * each row is DEREGISTERED from this old account before being registered on the new
+   * one. Its presence also marks the renew re-approval context (honest copy).
+   */
+  deregisterFrom?: string;
+  /** Renew — whether the old account's agents loaded (`listPcaAgents`). `false` →
+   *  the seed couldn't be pre-filled; the copy stops promising it and prompts manual entry. */
+  seedAgentsResolved?: boolean;
+  /**
+   * Self-coverage — set when this is the post-create self-coverage of THIS node's
+   * own wallets. Each wallet is binding-probed at run start before any owner write: a wallet on a
+   * PCA the node OWNS is deregistered-first; a wallet on a PCA the node CAN'T own (a sponsor's)
+   * is SKIPPED (already discounted free), never burning a register. Distinct from `deregisterFrom`
+   * (renew's single old account) — here the old account varies per wallet.
+   */
+  selfCoverage?: boolean;
+}) {
+  const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
+  const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
+  const owner = useOwnerActionSubmitter({ accountId });
+  // Renew — the OLD account's owner-action submitter (free the wallet there first).
+  // Resolved separately because the old PCA can have a different owner/signing branch.
+  const deregisterOwner = useOwnerActionSubmitter({ accountId: deregisterFrom });
+  const nodeWallets = wb?.wallets ?? [];
+  const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
+  const connectedWallet = useWalletStore((s) => s.address);
+  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const agentCount = snapshot?.agentCount ?? 0;
+  const cap = Math.max(0, 100 - agentCount);
+
+  const [mode, setMode] = useState<'self' | 'sponsor'>(initialMode);
+  const [unchecked, setUnchecked] = useState<Record<string, boolean>>({}); // self: opt-OUT set
+  const [alreadyApprovedHere, setAlreadyApprovedHere] = useState<Record<string, boolean>>({});
+  const [bulk, setBulk] = useState(seedBulk ?? ''); // S2b renew prefills the old account's agents
+  const [rows, setRows] = useState<Record<string, Row>>({});
+  const [order, setOrder] = useState<string[]>([]);
+  const [running, setRunning] = useState(false);
+  const [done, setDone] = useState(false);
+  const [aborted, setAborted] = useState<string | null>(null);
+  const [verificationDelayed, setVerificationDelayed] = useState<string | null>(null);
+  const [deviceSteps, setDeviceSteps] = useState<DeviceConfirmStep[]>([]);
+  const [deviceLabel, setDeviceLabel] = useState<string | undefined>(undefined);
+  const [walletBatchSigning, setWalletBatchSigning] = useState(false);
+  const stopRef = useRef(false);
+  const devicePromptIndexRef = useRef(0);
+  const devicePromptTotalRef = useRef(0);
+
+  const parsed = useMemo(() => {
+    const seen = new Set<string>();
+    const valid: string[] = [];
+    let invalid = 0;
+    for (const line of bulk.split('\n').map((s) => s.trim()).filter(Boolean)) {
+      if (!ADDR_RE.test(line)) {
+        invalid += 1;
+        continue;
+      }
+      const key = line.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      valid.push(line);
+    }
+    return { valid, invalid };
+  }, [bulk]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function probeAlreadyApprovedHere() {
+      const entries = await Promise.all(
+        nodeWallets.map(async (wallet) => {
+          try {
+            const snap = await fetchPca(accountId, wallet, { extended: true });
+            return [wallet, String(snap.accountId) === String(accountId) && snap.probedKey?.registered === true] as const;
+          } catch {
+            return [wallet, false] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      const confirmed = Object.fromEntries(entries) as Record<string, boolean>;
+      setAlreadyApprovedHere(confirmed);
+      setUnchecked((prev) => {
+        const next = { ...prev };
+        for (const [wallet, registered] of entries) {
+          if (registered && next[wallet] === undefined) next[wallet] = true;
+        }
+        return next;
+      });
+    }
+    if (nodeWallets.length === 0) {
+      setAlreadyApprovedHere({});
+      return () => {
+        cancelled = true;
+      };
+    }
+    void probeAlreadyApprovedHere();
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, nodeWallets.join('|')]);
+
+  const selfSelected = useMemo(
+    () => nodeWallets.filter((w) => !alreadyApprovedHere[w] && !unchecked[w]),
+    [alreadyApprovedHere, nodeWallets, unchecked],
+  );
+  const addresses = mode === 'self' ? selfSelected : parsed.valid;
+  const overCap = addresses.length > cap;
+  const targetWalletManaged =
+    !!snapshot?.owner &&
+    !!connectedWallet &&
+    !walletWrongNetwork &&
+    !sameAddress(snapshot.owner, ownerWallet) &&
+    sameAddress(snapshot.owner, connectedWallet);
+  const signableOwners = useMemo<SignableOwner[]>(
+    () => [
+      { address: ownerWallet, kind: 'daemon' },
+      { address: connectedWallet, kind: 'wallet' },
+    ],
+    [connectedWallet, ownerWallet],
+  );
+
+  const runOwnerWrite = async <T extends { txHash?: string }>(
+    label: string,
+    write: () => Promise<T>,
+    walletSigned = false,
+  ): Promise<T> => {
+    if (!walletSigned) return write();
+    const index = devicePromptIndexRef.current + 1;
+    devicePromptIndexRef.current = index;
+    const total = Math.max(devicePromptTotalRef.current, index);
+    const id = `${index}-${label}`;
+    setDeviceLabel(`Confirm on your device (${index} of ${total})`);
+    setDeviceSteps((steps) => [...steps, { id, label, state: 'active' }]);
+    try {
+      const result = await write();
+      setDeviceSteps((steps) =>
+        steps.map((step) =>
+          step.id === id
+            ? { ...step, state: 'confirmed', txHash: result.txHash }
+            : step,
+        ),
+      );
+      return result;
+    } catch (err) {
+      const receiptWait = err instanceof WalletReceiptWaitError && !!err.txHash;
+      setDeviceSteps((steps) =>
+        steps.map((step) =>
+          step.id === id
+            ? receiptWait
+              ? {
+                  ...step,
+                  state: 'submitted',
+                  txHash: err.txHash,
+                  error: 'confirmation delayed - recheck on-chain',
+                }
+              : { ...step, state: 'failed', error: (err as Error)?.message ?? 'Action failed.' }
+            : step,
+        ),
+      );
+      throw err;
+    }
+  };
+
+  const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {
+    if (!id) return undefined;
+    const oldSnapshot = await fetchPca(id).catch(() => null);
+    if (!oldSnapshot?.owner) return undefined;
+    if (sameAddress(oldSnapshot.owner, ownerWallet)) return 'daemon';
+    if (connectedWallet && !walletWrongNetwork && sameAddress(oldSnapshot.owner, connectedWallet)) return 'wallet';
+    return undefined;
+  };
+
+  const run = async () => {
+    // U1 — do NOT hard-block on the raw count > cap: already-approved-here addresses
+    // consume NO slot (resolved per-row as 'skipped' after submit) and the FE can't
+    // know that pre-probe. Cap correctness stays via the per-row AgentCapReached
+    // handling (the shipped daemon/contract enforce it).
+    if (addresses.length === 0) return;
+    stopRef.current = false;
+    setRunning(true);
+    setDone(false);
+    setAborted(null);
+    setVerificationDelayed(null);
+    setOrder(addresses);
+    setRows(Object.fromEntries(addresses.map((a) => [a, { address: a, status: 'pending' as RowStatus }])));
+    devicePromptIndexRef.current = 0;
+    devicePromptTotalRef.current = 0;
+    setDeviceLabel(undefined);
+    setDeviceSteps([]);
+    setWalletBatchSigning(false);
+
+    const plannedSelfCoverage = new Map<string, {
+      action: ReturnType<typeof planSelfCoverage>;
+      signerKind?: 'daemon' | 'wallet';
+    }>();
+    if (selfCoverage && mode === 'self') {
+      for (const addr of addresses) {
+        const binding = await resolveWalletBinding(addr, signableOwners);
+        plannedSelfCoverage.set(addr, {
+          action: planSelfCoverage(binding),
+          signerKind: binding.signerKind,
+        });
+      }
+    }
+    const deregisterFromSignerKind = await signerKindForAccount(deregisterFrom);
+    devicePromptTotalRef.current = addresses.reduce((total, addr) => {
+      if (deregisterFrom) {
+        return total + (deregisterFromSignerKind === 'wallet' ? 1 : 0) + (targetWalletManaged ? 1 : 0);
+      }
+      if (selfCoverage && mode === 'self') {
+        const plan = plannedSelfCoverage.get(addr);
+        if (plan?.action.kind === 'skipSponsored' || plan?.action.kind === 'conflictSponsorDead') return total;
+        const deregisterPrompt = plan?.action.kind === 'deregisterThenRegister' && plan.signerKind === 'wallet' ? 1 : 0;
+        return total + deregisterPrompt + (targetWalletManaged ? 1 : 0);
+      }
+      return total + (targetWalletManaged ? 1 : 0);
+    }, 0);
+    setWalletBatchSigning(devicePromptTotalRef.current > 0);
+
+    // W1/U1 — set `current` AND sweep every still-'pending' (not-yet-processed) row to
+    // `status` before a loop `break`, so a break never leaves later rows on "approving…".
+    const markRemaining = (
+      prev: Record<string, Row>,
+      current: Row,
+      status: RowStatus,
+      message?: string,
+    ): Record<string, Row> => {
+      const next: Record<string, Row> = { ...prev, [current.address]: current };
+      for (const a of addresses) {
+        if (next[a]?.status === 'pending') next[a] = { address: a, status, message };
+      }
+      return next;
+    };
+
+    for (const addr of addresses) {
+      if (stopRef.current) {
+        setRows((r) => ({ ...r, [addr]: { address: addr, status: 'error', message: 'stopped' } }));
+        continue;
+      }
+      // The old PCA we DEREGISTERED this wallet from (set only on a SUCCESSFUL deregister),
+      // so a subsequent register failure can be flagged "stranded" (off old, not on new) for retry.
+      let strandedFrom: string | null = null;
+      try {
+        // Renew (deregister-first, #1344): expiry doesn't clear `agentToAccountId`, so a seeded
+        // old-PCA wallet is still bound there and registerAgent(newId) would revert
+        // AgentAlreadyRegistered. Free it from the OLD account FIRST. Daemon/transient failures
+        // still fall through to register for the old recovery path, but wallet-signing aborts/rejects
+        // stop the batch immediately so the UI never opens another prompt after the user declined.
+        if (deregisterFrom) {
+          try {
+            await runOwnerWrite(
+              `Deregister ${addr} from PCA #${deregisterFrom}`,
+              () => deregisterOwner.deregisterAgent(deregisterFrom, addr),
+              deregisterFromSignerKind === 'wallet',
+            );
+            strandedFrom = deregisterFrom;
+          } catch (err) {
+            if (deregisterFromSignerKind === 'wallet' && walletActionAbortMessage(err)) throw err;
+          }
+        } else if (selfCoverage && mode === 'self') {
+          // Honesty/safety gate on mode==='self': the mode radios stay enabled, so running this
+          // self-coverage logic on THIRD-PARTY (sponsor-mode) addresses would mis-classify them.
+          // The per-wallet classification lives in the planner (walletBinding.ts); this loop just
+          // EXECUTES the plan. (Old account varies per wallet, unlike renew's deregisterFrom.)
+          let planned = plannedSelfCoverage.get(addr);
+          if (!planned) {
+            const binding = await resolveWalletBinding(addr, signableOwners);
+            planned = { action: planSelfCoverage(binding), signerKind: binding.signerKind };
+          }
+          const plan = planned.action;
+          if (plan.kind === 'skipSponsored') {
+            // Bound to a LIVE sponsor PCA → already discounted free; don't burn a register/conflict.
+            setRows((r) => ({
+              ...r,
+              [addr]: { address: addr, status: 'sponsored', message: `Stays on PCA #${plan.prevAccountId} - already discounted.` },
+            }));
+            continue;
+          }
+          if (plan.kind === 'conflictSponsorDead') {
+            // Bound to an EXPIRED/swept sponsor PCA: NOT covering, and this node can't free it (not
+            // the owner). A distinct conflict — NEVER the benign "already discounted free" skip.
+            setRows((r) => ({
+              ...r,
+              [addr]: { address: addr, status: 'conflict', message: `Approved on PCA #${plan.prevAccountId}, but it’s expired/swept (not covering) — ask its owner to deregister you; this node can’t free it.` },
+            }));
+            continue;
+          }
+          if (plan.kind === 'deregisterThenRegister') {
+            // Record a SUCCESSFUL deregister so a later register failure reads as "stranded"
+            // (off old, not on new) with a retry, not a generic error. A FAILED deregister leaves
+            // the wallet on old → register conflicts → the AgentAlreadyRegistered handling below
+            // recovers it.
+            try {
+              await runOwnerWrite(
+                `Deregister ${addr} from PCA #${plan.prevAccountId}`,
+                () => owner.deregisterAgent(plan.prevAccountId, addr),
+                planned.signerKind === 'wallet',
+              );
+              strandedFrom = plan.prevAccountId;
+            }
+            catch (err) {
+              if (planned.signerKind === 'wallet' && walletActionAbortMessage(err)) throw err;
+              /* still bound to old — not stranded; register's conflict path recovers */
+            }
+          }
+          // plan.kind === 'register' (unbound / inconclusive) → fall through to register.
+        }
+        const res = await runOwnerWrite(
+          `Approve ${addr} on PCA #${accountId}`,
+          () => owner.registerAgent(accountId, addr),
+          targetWalletManaged,
+        );
+        setRows((r) => ({
+          ...r,
+          [addr]: { address: addr, status: res.registered ? 'approved' : 'submitted', txHash: res.txHash },
+        }));
+      } catch (err) {
+        // If we'd already deregistered this wallet off its old PCA, a register failure leaves
+        // it off old + not on new (stranded). Tag it so the row offers "retry to finish" instead of
+        // a dead-end error. (NOT used for AgentAlreadyRegistered, which means it's still bound.)
+        const strandRow = (): Row => ({
+          address: addr,
+          status: 'stranded',
+          message: `Removed from PCA #${strandedFrom}, not yet on #${accountId} — retry to finish.`,
+        });
+        const walletAbort = walletActionAbortMessage(err);
+        if (err instanceof WalletReceiptWaitError && err.txHash && (err.txStep ?? 'action') === 'action') {
+          setVerificationDelayed(
+            `Transaction ${err.txHash} was broadcast, but receipt verification failed. Recheck on-chain before retrying.`,
+          );
+          setRows((r) =>
+            markRemaining(
+              r,
+              {
+                address: addr,
+                status: 'submitted',
+                txHash: err.txHash,
+                message: 'Broadcast; verify on-chain before retrying.',
+              },
+              'aborted',
+              'not run - verify the previous transaction first',
+            ),
+          );
+          break;
+        }
+        if (walletAbort) {
+          setAborted(walletAbort);
+          setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: walletAbort }, 'aborted', 'aborted'));
+          break;
+        }
+        // 403 → owner-gate failure: abort the WHOLE operation. W1 — sweep the later
+        // not-yet-processed rows too, else they stay stuck on "approving…".
+        if (err instanceof HttpError && err.status === 403) {
+          setAborted(`This node isn’t the owner of PCA #${accountId} — approval aborted.`);
+          setRows((r) => markRemaining(r, strandedFrom ? strandRow() : { address: addr, status: 'error', message: 'owner-only' }, 'error', 'aborted'));
+          break;
+        }
+        const info = describePcaError(err, { accountId }) ?? describeWalletPcaRevert(err, accountId);
+        if (info?.code === 'AgentCapReached') {
+          // U1 — mark the current row AND every NOT-YET-processed row 'cap' before the
+          // break, else the later rows would stay stuck on 'pending' ("approving…").
+          setRows((r) => markRemaining(r, { address: addr, status: 'cap', message: info.message }, 'cap'));
+          break;
+        }
+        if (info?.code === 'AgentAlreadyRegistered') {
+          // Resolve the ambiguity: already approved HERE, bound ELSEWHERE, or
+          // UNVERIFIABLE? N5/#9 — only assert a cross-account CONFLICT (danger,
+          // "deregister there first") when the probe POSITIVELY says not-registered
+          // -here with a working adapter. A transient probe failure (null) or a
+          // capability gap (adapterSupported===false) is "couldn't verify" — neutral,
+          // never a false DANGER pointing at the wrong fix. (A real conflict is still
+          // NEVER downgraded to a benign skip.)
+          const probe = await fetchPca(accountId, addr).catch(() => null);
+          const pk = probe?.probedKey;
+          if (pk?.registered === true) {
+            setRows((r) => ({
+              ...r,
+              [addr]: { address: addr, status: 'skipped', message: 'Already an approved publishing wallet here.' },
+            }));
+          } else if (pk?.registered === false && pk.adapterSupported !== false) {
+            // Cross-account conflict — NEVER a benign skip.
+            setRows((r) => ({ ...r, [addr]: { address: addr, status: 'conflict', message: info.message } }));
+          } else {
+            setRows((r) => ({ ...r, [addr]: { address: addr, status: 'unverified' } }));
+          }
+        } else {
+          setRows((r) => ({
+            ...r,
+            [addr]: strandedFrom ? strandRow() : { address: addr, status: 'error', message: info?.message ?? (err as Error)?.message },
+          }));
+        }
+      }
+    }
+    setRunning(false);
+    setWalletBatchSigning(false);
+    setDone(true);
+    onApproved?.();
+  };
+
+  const counts = useMemo(() => {
+    const list = order.map((a) => rows[a]).filter(Boolean);
+    return {
+      // #9 — confirmed (chain re-read) vs submitted (verify) kept separate so the
+      // roll-up never overstates on-chain confirmation.
+      confirmed: list.filter((r) => r.status === 'approved').length,
+      submitted: list.filter((r) => r.status === 'submitted').length,
+      skipped: list.filter((r) => r.status === 'skipped').length,
+      sponsored: list.filter((r) => r.status === 'sponsored').length,
+      stranded: list.filter((r) => r.status === 'stranded').length,
+      conflict: list.filter((r) => r.status === 'conflict').length,
+      error: list.filter((r) => r.status === 'error' || r.status === 'cap').length,
+      aborted: list.filter((r) => r.status === 'aborted').length,
+      unverified: list.filter((r) => r.status === 'unverified').length,
+    };
+  }, [order, rows]);
+
+  const approvedWallets = order.filter((a) => {
+    const s = rows[a]?.status;
+    return s === 'approved' || s === 'submitted';
+  });
+
+  const showResults = order.length > 0;
+  const alreadyApprovedCount = nodeWallets.filter((w) => alreadyApprovedHere[w]).length;
+
+  return (
+    <PcaModalShell
+      onClose={onClose}
+      testId="pca-approve-modal"
+      title={`Approve publishing wallets — PCA #${accountId}`}
+      dismissDisabled={walletBatchSigning}
+    >
+      <div className="v10-modal-body">
+        {/* Mode */}
+        <div className="v10-form-group">
+          <div className="v10-form-radio-group" role="radiogroup" aria-label="Approval mode">
+            <label className="v10-form-radio">
+              <input type="radio" checked={mode === 'self'} onChange={() => setMode('self')} disabled={running} />
+              Approve my own node’s wallets
+            </label>
+            <label className="v10-form-radio">
+              <input type="radio" checked={mode === 'sponsor'} onChange={() => setMode('sponsor')} disabled={running} />
+              Approve another node’s wallets
+            </label>
+          </div>
+        </div>
+
+        {mode === 'self' ? (
+          <section className="v10-pca-approve-self">
+            <p className="v10-pca-create-warn">
+              {agentCount} / 100 slots used — {alreadyApprovedCount} of this node&apos;s wallets are
+              already approved here. Unapproved wallets pay the direct cost until you approve them.
+            </p>
+            <div className="v10-pca-approve-checklist">
+              {nodeWallets.map((w, i) => (
+                <label key={w} className="v10-pca-approve-self-row">
+                  <input
+                    type="checkbox"
+                    checked={!alreadyApprovedHere[w] && !unchecked[w]}
+                    onChange={(e) => setUnchecked((u) => ({ ...u, [w]: !e.target.checked }))}
+                    disabled={running || alreadyApprovedHere[w]}
+                    aria-label={`Approve ${w}`}
+                  />
+                  <WalletRow
+                    address={w}
+                    status={alreadyApprovedHere[w] ? 'already approved here' : i === 0 ? 'primary signer' : undefined}
+                    statusTone={alreadyApprovedHere[w] ? 'success' : 'neutral'}
+                  />
+                </label>
+              ))}
+              {nodeWallets.length === 0 && (
+                <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
+              )}
+            </div>
+            <div className="v10-modal-tip">
+              A new PCA covers NOTHING until you approve your own signing wallets. Each is a separate
+              on-chain tx you sign (~30s, owner gas).
+            </div>
+          </section>
+        ) : (
+          <section className="v10-pca-approve-sponsor">
+            <AddressCrux
+              mode="bulk"
+              testId="pca-approve-address"
+              value={bulk}
+              onChange={setBulk}
+              label="Wallet address(es) — one per line"
+              disabled={running}
+            />
+            <p className="v10-pca-approve-counts">
+              {parsed.valid.length} valid · {parsed.invalid} invalid ·{' '}
+              {agentCount} → {agentCount + parsed.valid.length} of 100 after this
+            </p>
+            {deregisterFrom ? (
+              // Renew (#1344) — these are the node's OWN carried-over wallets,
+              // not a third party, so the sponsor-can't-verify warning is wrong here.
+              <div className="v10-modal-warning" data-testid="pca-renew-reapprove-note">
+                ⓘ Re-approving PCA #{deregisterFrom}’s wallets on #{accountId}. Each wallet is MOVED —
+                deregistered from #{deregisterFrom}, then approved on #{accountId} (two txs per wallet,
+                owner gas). Account expiry alone doesn’t free a wallet, so this is required to re-use them.
+                {seedAgentsResolved === false && (
+                  <>
+                    {' '}
+                    <strong>Couldn’t load PCA #{deregisterFrom}’s wallets — add them manually below.</strong>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="v10-modal-warning">
+                ⚠ We can only check the address is well-formed — we can’t verify it’s the node’s real
+                signing wallet. A typo / admin / author address still “approves” and burns a cap slot.
+                Confirm it shows as approved in the other operator&apos;s Get added to a PCA panel.
+              </div>
+            )}
+          </section>
+        )}
+
+        {overCap && (
+          // U1 — SOFT heads-up, not a command to remove: some of these may already be
+          // approved here (no slot consumed), so we don't know the real overage pre-probe.
+          <div className="v10-modal-warning" role="status">
+            ⚠ Up to {cap} of these can be approved. Any already approved here are skipped (no slot
+            used); any genuinely beyond the {cap}-slot cap are marked “cap reached”.
+          </div>
+        )}
+
+        {aborted && (
+          <div className="v10-modal-error" role="alert">{aborted}</div>
+        )}
+
+        {verificationDelayed && (
+          <div className="v10-modal-warning" role="status">{verificationDelayed}</div>
+        )}
+
+        {deviceSteps.length > 0 && (
+          <DeviceConfirmProgress
+            steps={deviceSteps}
+            currentLabel={deviceLabel ?? 'Confirm on your device'}
+          />
+        )}
+
+        {/* Per-row results */}
+        {showResults && (
+          <div className="v10-pca-approve-results" role="status" aria-live="polite">
+            {order.map((a) => {
+              const row = rows[a];
+              if (!row) return null;
+              return (
+                <WalletRow
+                  key={a}
+                  address={a}
+                  status={row.message && (row.status === 'conflict' || row.status === 'error' || row.status === 'sponsored' || row.status === 'stranded' || row.status === 'submitted' || row.status === 'aborted') ? row.message : ROW_LABEL[row.status]}
+                  statusTone={ROW_TONE[row.status]}
+                />
+              );
+            })}
+            {done && (
+              <p className="v10-pca-approve-summary">
+                Approved {counts.confirmed} confirmed
+                {counts.submitted > 0 ? ` · ${counts.submitted} submitted (verify)` : ''}
+                {' '}· {counts.skipped} already here · {counts.conflict} conflict
+                {counts.sponsored > 0 ? ` · ${counts.sponsored} left on another PCA` : ''}
+                {counts.stranded > 0 ? ` · ${counts.stranded} need a retry` : ''}
+                {counts.error > 0 ? ` · ${counts.error} failed` : ''}
+                {counts.unverified > 0 ? ` · ${counts.unverified} unverified` : ''} (of {order.length}).
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Stranded recovery: a wallet was deregistered from its old PCA but its re-register
+            failed, so it's temporarily UNCOVERED. Surface it loudly + offer the one-click re-run
+            (the footer "Retry to finish" button re-runs the loop; the now-unbound wallet registers). */}
+        {done && counts.stranded > 0 && (
+          <div className="v10-modal-warning" role="alert" data-testid="pca-approve-stranded">
+            ⚠ {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
+            PCA but not yet re-approved on #{accountId} — temporarily UNCOVERED. Click “Retry to finish”
+            to complete the move.
+          </div>
+        )}
+
+        {/* Sponsor handoff after a run — third-party only; a renew re-approves the node's
+            OWN wallets (#1344), so the "remind the other operator" handshake is off. */}
+        {done && mode === 'sponsor' && !deregisterFrom && (
+          <div className="v10-pca-approve-handoff">
+            <div className="v10-modal-warning">
+              Remind the other operator: these wallets must hold NATIVE GAS to publish — the account
+              covers TRAC, never gas.
+            </div>
+            <SponsorshipHandshake wallets={approvedWallets} accountId={accountId} role="core" />
+            <p className="v10-pca-approve-counts">
+              Account id to share back: <strong>#{accountId}</strong>{' '}
+              <CopyButton value={accountId} label={`Copy account id ${accountId}`} />
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="v10-modal-footer">
+        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={walletBatchSigning}>
+          {done ? 'Done' : 'Cancel'}
+        </button>
+        {running ? (
+          <button type="button" className="v10-modal-btn" onClick={() => { stopRef.current = true; }}>
+            Stop
+          </button>
+        ) : !done ? (
+          <button
+            type="button"
+            className="v10-modal-btn primary"
+            data-testid="pca-approve-submit"
+            onClick={run}
+            disabled={addresses.length === 0}
+          >
+            Approve {addresses.length} wallet{addresses.length === 1 ? '' : 's'}
+          </button>
+        ) : counts.stranded > 0 ? (
+          // One-click re-run to finish the stranded migrations. `run()` re-processes the
+          // selected wallets; a stranded one is now UNBOUND (we deregistered it) → it registers.
+          <button type="button" className="v10-modal-btn primary" data-testid="pca-approve-retry-stranded" onClick={run}>
+            Retry to finish
+          </button>
+        ) : null}
+      </div>
+    </PcaModalShell>
+  );
+}

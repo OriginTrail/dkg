@@ -1,0 +1,294 @@
+// @vitest-environment happy-dom
+//
+// B2 — PcaAccountCard render states (owned / approved / per-card error),
+// fixture-driven (no api mocks). Pins the §11 owner≠coverage warning, the §8A
+// owner-wallet action gate, the round-robin "N of M approved" honesty, and the
+// 404→Remove / transient→Retry per-card recovery.
+
+import React, { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { PcaAccountCard } from '../src/ui/pages/conviction/PcaAccountCard.js';
+import type { ResolvedPcaAccount } from '../src/ui/hooks/usePcaOverview.js';
+import type { PcaSnapshot } from '../src/ui/api.js';
+
+function snap(over: Partial<PcaSnapshot> = {}): PcaSnapshot {
+  return {
+    accountId: '7',
+    owner: '0x9A3f000000000000000000000000000000000E41D',
+    committedTRAC: '100000000000000000000000',
+    committedTRACTrac: '100000.0',
+    baseEpochAllowance: '850000000000000000000',
+    topUpBuffer: '12500000000000000000000',
+    topUpBufferTrac: '12500.0',
+    createdAtEpoch: 1200,
+    expiresAtEpoch: 1560,
+    createdAtTimestamp: 1000,
+    expiresAtTimestamp: 9_999_999_999,
+    discountBps: 3000,
+    agentCount: 4,
+    lastSettledWindow: 0,
+    fullySwept: false,
+    ...over,
+  };
+}
+
+function acct(over: Partial<ResolvedPcaAccount> = {}): ResolvedPcaAccount {
+  return {
+    accountId: '7',
+    snapshot: snap(),
+    error: null,
+    notFound: false,
+    classification: 'owned',
+    ownerIsPrimaryWallet: true,
+    health: 'healthy',
+    walletProbes: [],
+    approvedCount: 0,
+    walletCount: 3,
+    probesInconclusive: false,
+    ...over,
+  };
+}
+
+async function render(node: React.ReactElement) {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root: Root = createRoot(container);
+  await act(async () => {
+    root.render(node);
+  });
+  return {
+    container,
+    unmount: async () => {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+beforeEach(() => {
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  document.body.innerHTML = '';
+});
+afterEach(() => {
+  document.body.innerHTML = '';
+});
+
+describe('PcaAccountCard', () => {
+  it('owned card with 0 approved wallets shows the #11 "discounts nothing yet" warning', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account: acct({ approvedCount: 0 }) }),
+    );
+    expect(container.querySelector('[data-state="owned"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="pca-account-card"]')).toBeTruthy(); // e2e anchor
+    expect(container.textContent).toContain('discounts nothing yet');
+    expect(container.textContent).toContain('100,000 TRAC');
+    await unmount();
+  });
+
+  // H2 — a null per-wallet probe means we COULDN'T verify approvals, not that
+  // zero are approved. The card must caveat, never fire the false #11.
+  it('owned card with a null probe caveats instead of asserting "discounts nothing yet" (H2)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({
+          approvedCount: 0,
+          probesInconclusive: true,
+          walletProbes: [{ wallet: '0x71D4000000000000000000000000000000009Ac2', registered: null }],
+        }),
+      }),
+    );
+    expect(container.textContent).not.toContain('discounts nothing yet');
+    expect(container.textContent).toContain('Couldn’t verify');
+    await unmount();
+  });
+
+  it('approved card with a null probe shows "couldn’t verify approvals", not a false "N of M" (H2)', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({
+          classification: 'approved',
+          owner: '0xSOMEONEELSE0000000000000000000000000000',
+          ownerIsPrimaryWallet: false,
+          approvedCount: 1,
+          walletCount: 3,
+          probesInconclusive: true,
+          walletProbes: [
+            { wallet: '0x71D4000000000000000000000000000000009Ac2', registered: true },
+            { wallet: '0x3F8a0000000000000000000000000000000C1b7', registered: null },
+            { wallet: '0xE0c500000000000000000000000000000000042dD', registered: null },
+          ],
+        }),
+      }),
+    );
+    expect(container.textContent).toContain('couldn’t verify approvals');
+    expect(container.textContent).not.toContain('1 of 3 wallets approved');
+    await unmount();
+  });
+
+  it('owned card with approved wallets drops the #11 warning', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account: acct({ approvedCount: 2 }) }),
+    );
+    expect(container.textContent).not.toContain('discounts nothing yet');
+    await unmount();
+  });
+
+  it('enables daemon owner actions and hides owner writes for external tracked accounts', async () => {
+    const onApproveWallets = vi.fn();
+    const enabled = await render(
+      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: true }), onApproveWallets }),
+    );
+    let approveBtn = Array.from(enabled.container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn.disabled).toBe(false);
+    await enabled.unmount();
+
+    const external = await render(
+      React.createElement(PcaAccountCard, { account: acct({ ownerIsPrimaryWallet: false }), onApproveWallets }),
+    );
+    approveBtn = Array.from(external.container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn).toBeUndefined();
+    expect(external.container.textContent).toContain('tracked external');
+    await external.unmount();
+  });
+
+  it('enables wallet-managed owner controls and states that the connected wallet signs', async () => {
+    const onApproveWallets = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'wallet',
+      connectedWallet: '0xCdA7000000000000000000000000000000001F9B',
+      walletWrongNetwork: false,
+      approvedCount: 1,
+      snapshot: snap({ owner: '0xCdA7000000000000000000000000000000001F9B' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, onApproveWallets }),
+    );
+    expect(container.querySelector('[data-owner-mode="wallet"]')).toBeTruthy();
+    expect(container.textContent).toContain('wallet-managed');
+    expect(container.textContent).toContain('connected wallet');
+    const approveBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn.disabled).toBe(false);
+    expect(approveBtn.getAttribute('title')).toContain('Connected wallet will sign');
+    await unmount();
+  });
+
+  it('disables wallet-managed writes on the wrong network and offers a switch prompt', async () => {
+    const onSwitchNetwork = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'wallet',
+      connectedWallet: '0xCdA7000000000000000000000000000000001F9B',
+      walletWrongNetwork: true,
+      approvedCount: 1,
+      snapshot: snap({ owner: '0xCdA7000000000000000000000000000000001F9B' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, onApproveWallets: vi.fn(), onSwitchNetwork }),
+    );
+    expect(container.textContent).toContain('Wrong network');
+    const approveBtn = Array.from(container.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Approve wallets',
+    )!;
+    expect(approveBtn.disabled).toBe(true);
+    Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Switch network')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onSwitchNetwork).toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('approved card surfaces the round-robin "N of M approved" footgun without duplicating wallet rows', async () => {
+    const account = acct({
+      classification: 'approved',
+      owner: '0xSOMEONEELSE0000000000000000000000000000',
+      ownerIsPrimaryWallet: false,
+      approvedCount: 2,
+      walletCount: 3,
+      walletProbes: [
+        { wallet: '0x71D4000000000000000000000000000000009Ac2', registered: true },
+        { wallet: '0x3F8a0000000000000000000000000000000C1b7', registered: true },
+        { wallet: '0xE0c500000000000000000000000000000000042dD', registered: false },
+      ],
+    });
+    const onUse = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, onUseForPublishing: onUse }),
+    );
+    expect(container.querySelector('[data-state="approved"]')).toBeTruthy();
+    expect(container.textContent).toContain('2 of 3 wallets approved');
+    expect(container.textContent).toContain('2 of 3 node publishing wallets approved');
+    expect(container.textContent).toContain('pay the direct cost');
+    expect(container.querySelectorAll('.v10-pca-wallet-row')).toHaveLength(1); // owner row only
+    // Use-for-publishing wired.
+    Array.from(container.querySelectorAll('button'))
+      .find((b) => b.textContent === 'Use for publishing')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onUse).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  it('tracked external owner card exposes View details and Stop tracking', async () => {
+    const onManage = vi.fn();
+    const onRemove = vi.fn();
+    const account = acct({
+      classification: 'unknown',
+      ownerIsPrimaryWallet: false,
+      ownerMode: 'external',
+      approvedCount: 0,
+      snapshot: snap({ owner: '0xSOMEONEELSE0000000000000000000000000000' }),
+    });
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, { account, view: 'owner', onManage, onRemove, onApproveWallets: vi.fn() }),
+    );
+    const view = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'View details')!;
+    const stop = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Stop tracking')!;
+    expect(view).toBeTruthy();
+    expect(stop).toBeTruthy();
+    expect(container.textContent).not.toContain('Manage');
+    view.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    stop.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onManage).toHaveBeenCalledWith('7');
+    expect(onRemove).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  it('404 card offers Remove-from-tracked', async () => {
+    const onRemove = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({ snapshot: null, notFound: true, classification: 'unknown' }),
+        onRemove,
+      }),
+    );
+    expect(container.querySelector('[data-state="not-found"]')).toBeTruthy();
+    expect(container.textContent).toContain('no longer exists');
+    container.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onRemove).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+
+  it('transient-error card offers Retry', async () => {
+    const onRetry = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(PcaAccountCard, {
+        account: acct({ snapshot: null, notFound: false, error: new Error('network'), classification: 'unknown' }),
+        onRetry,
+      }),
+    );
+    expect(container.querySelector('[data-state="error"]')).toBeTruthy();
+    expect(container.textContent).toContain('Couldn’t load');
+    container.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(onRetry).toHaveBeenCalledWith('7');
+    await unmount();
+  });
+});

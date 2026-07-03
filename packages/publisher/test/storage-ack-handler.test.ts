@@ -11,7 +11,7 @@ import {
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -29,6 +29,32 @@ const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+/**
+ * Wrap a REAL OxigraphStore so only the named ops throw the classic mid-
+ * worker-restart oxigraph failure ('store is closed'); every other op keeps
+ * hitting the live store. Mirrors `storeWithFailingOps` in
+ * storage-ack-core-unavailable.test.ts — the curated-catalog store-failure
+ * regressions below need the SAME real-store-with-armed-failure model so
+ * they exercise the actual persist path (parse → verify → deleteByPattern →
+ * insert) up to the failing store call.
+ */
+function storeWithFailingOps(
+  base: OxigraphStore,
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'flush')[],
+): TripleStore {
+  return new Proxy(base as unknown as TripleStore, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && (failingOps as readonly string[]).includes(prop)) {
+        return async () => {
+          throw new Error('store is closed');
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 describe('StorageACKHandler', () => {
@@ -297,6 +323,40 @@ describe('StorageACKHandler', () => {
     expect(isStorageACKDecline(ok)).toBe(false);
   });
 
+  it('otReviewAgent #1408 P2a: a malformed term is a bad request, NOT a transient store outage', async () => {
+    // A term with a SPARQL-breaking char (`|`) parses under the permissive
+    // parseSimpleNQuads and hashes into a self-consistent merkle root, but is
+    // not a valid store term. It must reset the stream (malformed request),
+    // not be mislabeled as a retryable CORE_TEMPORARILY_UNAVAILABLE decline.
+    const g = 'did:dkg:context-graph:42';
+    const badQuads: Quad[] = [makeQuad('urn:s|bad', 'urn:p', 'urn:o', g)];
+    const nquadsStr = badQuads
+      .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+      .join('\n');
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const badRoot = computeFlatKCRoot(badQuads, []);
+    const badLeaf = computeFlatKCMerkleLeafCountV10(badQuads, []);
+
+    const handler = await createHandler([]); // inline payload; no SWM data
+    const intent = encodePublishIntent({
+      merkleRoot: badRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingBytes.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:s|bad'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: badLeaf,
+      stagingQuads: stagingBytes,
+    });
+
+    // Malformed → the persist validation throws (stream reset), it does NOT
+    // return a signed ACK nor a transient store-unavailable decline.
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/unsafe|empty|iri/i);
+  });
+
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
     // PR #557: this used to throw, which the publisher saw as a libp2p
     // stream reset; now the handler returns a typed decline so the
@@ -325,7 +385,13 @@ describe('StorageACKHandler', () => {
     expect(decoded.declineMessage).toContain('not confirmed on-chain');
   });
 
-  it('refuses to sign when signer registration lookup fails', async () => {
+  it('declines (CORE_TEMPORARILY_UNAVAILABLE) when signer registration lookup fails — still refuses to sign', async () => {
+    // Testnet dead-air fix: a THROWN lookup used to escape the handler,
+    // which ProtocolRouter surfaced as a bare stream reset — the publisher
+    // retried 3× and bucketed the peer as `no_response`. It now replies
+    // with a transient in-band decline (fail-closed still holds: no ACK is
+    // ever signed without a confirmed registration). The definitive
+    // `registered === false` verdict keeps SIGNER_NOT_REGISTERED above.
     const lookupFailed = vi.fn();
     const unregistered = vi.fn();
     const handler = await createHandler(swmQuads, {
@@ -346,9 +412,13 @@ describe('StorageACKHandler', () => {
       merkleLeafCount: swmMerkleLeafCount,
     });
 
-    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
-      'StorageACK signer registration lookup failed; refusing to sign',
-    );
+    const response = await handler.handler(intent, fakePeerId);
+    const decoded = decodeStorageACK(response);
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toContain('signer registration lookup unavailable');
+    // The raw RPC error stays off the wire — it only reaches the local hook.
+    expect(decoded.declineMessage).not.toContain('rpc unavailable');
     expect(lookupFailed).toHaveBeenCalledOnce();
     expect(unregistered).not.toHaveBeenCalled();
   });
@@ -600,6 +670,92 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(response);
       expect(isStorageACKDecline(decoded)).toBe(true);
       expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED);
+    });
+
+    // Build a curated handler over a REAL store whose named ops are armed to
+    // throw the classic 'store is closed' mid-restart error, reusing the
+    // curated fixtures above. The catalog is VALID (root/leaf/byteSize all
+    // check out) so the handler reaches the `<cg>/_catalog` persist —
+    // deleteByPattern + insert — which is the store-outage catch path this
+    // regression pins (otReviewAgent #1408:650).
+    async function curatedHandlerWithFailingStore(
+      failingOps: readonly ('deleteByPattern' | 'insert' | 'flush')[],
+      configOverrides: Partial<StorageACKHandlerConfig> = {},
+    ) {
+      const base = new OxigraphStore();
+      const config: StorageACKHandlerConfig = {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) =>
+          `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+        ...configOverrides,
+      };
+      return new StorageACKHandler(
+        storeWithFailingOps(base, failingOps) as any,
+        config,
+        new TypedEventBus() as any,
+      );
+    }
+
+    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Dead-air regression: a curated encrypted publish with a VALID catalog
+      // root whose `<cg>/_catalog` REPLACE (deleteByPattern) hits a closed
+      // store used to throw out of the handler → stream reset → publisher
+      // no_response. It must instead reply with the transient decline.
+      const onDecline = vi.fn();
+      const handler = await curatedHandlerWithFailingStore(['deleteByPattern'], { onDecline });
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      // No signed ACK rides a decline — the signature fields stay empty.
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+      // Wire hygiene: the raw store error stays OFF the network...
+      expect(decoded.declineMessage).not.toContain('store is closed');
+      // ...but the local WARN hook still gets the real cause for the operator.
+      expect(onDecline).toHaveBeenCalledOnce();
+      expect(onDecline.mock.calls[0]?.[0]).toMatchObject({
+        code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+        contextGraphId,
+        message: expect.stringContaining('store is closed'),
+      });
+    });
+
+    it('curated catalog persist / insert throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Same durability invariant, second store call: the deletes succeed but
+      // the catalog INSERT hits the closed store. Still a transient decline.
+      const handler = await curatedHandlerWithFailingStore(['insert']);
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+    });
+
+    it('otReviewAgent #1408 P1b: catalog persist FLUSH throws → transient decline, NO signed ACK (durability boundary before sign)', async () => {
+      // The delete+insert succeed but the durability flush (forcing the write
+      // past the debounced-flush window, so a worker respawn can't roll back
+      // ACKed data) fails. We MUST decline rather than sign an ACK for data
+      // that isn't guaranteed durable.
+      const handler = await curatedHandlerWithFailingStore(['flush']);
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
     });
   });
 

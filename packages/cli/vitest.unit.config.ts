@@ -22,6 +22,7 @@ export default defineConfig({
           'test/trust-endpoint-validation.test.ts',
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
+          'test/daemon-pca-routes.test.ts',
           'test/auth.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of
@@ -67,6 +68,10 @@ export default defineConfig({
           'test/blazegraph-integration.test.ts',
           // #761 — context graph write-target validation (from main).
           'test/context-graph-write-path-validation.test.ts',
+          // Track B — write-preflight resilience when the local store is
+          // slow/closed. Real resolver + real agent probe + real (closed)
+          // OxigraphWorkerStore; no hardhat needed.
+          'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/assertion-cli-smoke.test.ts',
@@ -80,6 +85,7 @@ export default defineConfig({
           // Notifications-pane redesign (A4) — scoped GET/POST route. Real
           // DashboardDB + mocked agent; no hardhat.
           'test/notifications-route.test.ts',
+          'test/notifications-route-pca.test.ts',
           // Local-agent bridge routes are mocked HTTP/runtime tests; include
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.part-*.test.ts',

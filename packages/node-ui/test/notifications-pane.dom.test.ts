@@ -213,6 +213,57 @@ describe('NotificationsPane — interaction + a11y (happy-dom)', () => {
     expect(buttonByText(/Mark all read/)).toBeUndefined();
   });
 
+  // B8 (P2) — the CONFIRMED PCA discount row renders the derived discount + saved amount
+  // + the account; informational + non-actionable (no approve/deny).
+  it('B8 — renders the confirmed PCA discount row (−% + saved + PCA #N)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 12,
+      cgId: 'cg:d',
+      covered: {
+        accountId: '7', epoch: 1284,
+        baseCost: '1000000000000000000000', discountedCost: '700000000000000000000', // 1000 → 700 TRAC ⇒ 30%
+        drawnFromEpoch: '700000000000000000000', drawnFromTopUp: '0',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      contextGraphName: 'Delta',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Publishing discount applied');
+    expect(container.textContent).toContain('30%');
+    expect(container.textContent).toContain('PCA #7');
+    expect(container.textContent).toContain('300'); // saved 300 TRAC
+    expect(container.textContent).toContain('Delta'); // CG context surfaced when present
+    // Informational — no Approve/Deny actions on this row.
+    expect(buttonByText(/^Approve$/)).toBeUndefined();
+  });
+
+  // #9 — a genuine 0% draw (baseCost === discountedCost) still fired a CostCovered event
+  // (the PCA covered the publish), but there's NO discount: the row must say "covered"
+  // WITHOUT a "−0%"/"saved 0 TRAC" false claim.
+  it('B8 — a 0% draw renders "Publishing fee covered" with no −%/saved (#9)', () => {
+    const covered: ActivityItem = {
+      kind: 'pca_cost_covered',
+      id: 13,
+      cgId: 'cg:e',
+      covered: {
+        accountId: '9', epoch: 1300,
+        baseCost: '1000000000000000000000', discountedCost: '1000000000000000000000', // 0% effective
+        drawnFromEpoch: '0', drawnFromTopUp: '1000000000000000000000',
+      },
+      publisherAddress: '0xpub0000000000000000000000000000000000pub',
+      ts: 1,
+      read: false,
+    };
+    render(makeFeed({ unread: 1, hasInformationalUnread: true, activity: [covered] }));
+    expect(container.textContent).toContain('Publishing fee covered');
+    expect(container.textContent).toContain('PCA #9');
+    expect(container.textContent).not.toContain('%'); // no −0% (or any %) claim
+    expect(container.textContent).not.toContain('saved'); // no "saved 0 TRAC"
+  });
+
   it('M9 frontend re-surface: a digest renders unread again after a load() returns read=0 for its digestKey', () => {
     const digest = (read: boolean): ActivityItem => ({
       kind: 'digest', id: 'activity:cg:a:promoted:42', cgId: 'cg:a',

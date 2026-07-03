@@ -527,6 +527,7 @@ export class DKGAgent extends DKGAgentBase {
       const evmConfigBase = {
         rpcUrl: config.chainConfig.rpcUrl,
         rpcUrls: config.chainConfig.rpcUrls,
+        walletRpcUrls: config.chainConfig.walletRpcUrls,
         privateKey: opKeys[0],
         additionalKeys: opKeys.slice(1),
         hubAddress: config.chainConfig.hubAddress,

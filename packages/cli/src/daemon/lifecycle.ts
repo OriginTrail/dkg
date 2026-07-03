@@ -1413,6 +1413,7 @@ export async function runDaemonInner(
     chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
       rpcUrl: chainBase.rpcUrl,
       rpcUrls: chainBase.rpcUrls,
+      walletRpcUrls: chainBase.walletRpcUrls,
       hubAddress: chainBase.hubAddress,
       tokenAddress: chainBase.tokenAddress,
       ...(opWallets.adminWallet

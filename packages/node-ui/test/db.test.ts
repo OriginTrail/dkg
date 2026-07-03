@@ -1583,6 +1583,27 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     expect(a.context_graph_id).toBe('cg-1');
     expect(b.context_graph_id).toBeNull();
   });
+
+  it('getPcaCostCoveredRowsForWallet returns ONLY the wallet rows, SQL-filtered, ts DESC, bounded, case-insensitive (#1365 r2)', () => {
+    const A = '0xaaaa000000000000000000000000000000000001';
+    const B = '0xbbbb000000000000000000000000000000000002';
+    const pca = (ts: number, publisher: string) => db.insertNotification({
+      ts, type: 'pca_cost_covered', title: 'd', message: 'd', contextGraphId: 'cg-pub',
+      meta: JSON.stringify({ publisherAddress: publisher.toLowerCase(), accountId: '7', epoch: 42 }),
+    });
+    pca(1000, A);
+    pca(3000, A);
+    pca(2000, B);
+
+    const rowsA = db.getPcaCostCoveredRowsForWallet(A);
+    expect(rowsA).toHaveLength(2);                          // only A's rows (B filtered out in SQL)
+    expect(rowsA.map((r) => r.ts)).toEqual([3000, 1000]);  // ts DESC
+    expect(db.getPcaCostCoveredRowsForWallet(B)).toHaveLength(1);
+    expect(db.getPcaCostCoveredRowsForWallet(A.toUpperCase())).toHaveLength(2); // case-insensitive
+    expect(db.getPcaCostCoveredRowsForWallet('0xcccc000000000000000000000000000000000003')).toHaveLength(0);
+    expect(db.getPcaCostCoveredRowsForWallet('  ')).toHaveLength(0); // blank → []
+    expect(db.getPcaCostCoveredRowsForWallet(A, 1)).toHaveLength(1); // bounded by limit
+  });
 });
 
 describe('DashboardDB — resolveActivityDigestRowIds (CR-3 digest read-marking)', () => {
