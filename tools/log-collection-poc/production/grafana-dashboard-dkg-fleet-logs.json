@@ -1,228 +1,52 @@
 {
-  "title": "DKG Fleet \u2014 Logs Overview",
+  "title": "DKG Fleet — Logs Overview",
   "uid": "dkg-fleet-logs",
-  "tags": [
-    "dkg",
-    "logs"
-  ],
+  "tags": ["dkg", "logs"],
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "time": {
-    "from": "now-6h",
-    "to": "now"
-  },
+  "time": { "from": "now-6h", "to": "now" },
   "templating": {
     "list": [
+      { "name": "loki", "label": "Loki", "type": "datasource", "query": "loki", "refresh": 1, "current": {} },
       {
-        "name": "loki",
-        "label": "Loki",
-        "type": "datasource",
-        "query": "loki",
-        "refresh": 1,
-        "current": {}
-      },
-      {
-        "name": "env",
-        "label": "Environment",
-        "type": "query",
-        "datasource": {
-          "type": "loki",
-          "uid": "${loki}"
-        },
-        "definition": "label_values(deployment_environment)",
-        "query": "label_values(deployment_environment)",
-        "refresh": 2,
-        "sort": 1,
-        "includeAll": true,
-        "allValue": ".+",
-        "multi": false,
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        }
+        "name": "env", "label": "Environment", "type": "query",
+        "datasource": { "type": "loki", "uid": "${loki}" },
+        "definition": "label_values(deployment_environment)", "query": "label_values(deployment_environment)",
+        "refresh": 2, "sort": 1, "includeAll": true, "allValue": ".+", "multi": false,
+        "current": { "text": "All", "value": "$__all" }
       }
     ]
   },
   "panels": [
     {
-      "type": "stat",
-      "title": "Active nodes ($env)",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 6,
-        "x": 0,
-        "y": 0
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "value"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "queryType": "instant",
-          "expr": "count(count by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} [$__range])))"
-        }
-      ]
+      "type": "stat", "title": "Active nodes ($env)", "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [{ "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "queryType": "instant",
+        "expr": "count(count by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} [$__range])))" }]
     },
     {
-      "type": "timeseries",
-      "title": "Log volume per node",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 18,
-        "x": 6,
-        "y": 0
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "queryType": "range",
-          "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} [$__auto]))",
-          "legendFormat": "{{service_instance_id}}"
-        }
-      ]
+      "type": "timeseries", "title": "Log volume per node", "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 9, "w": 18, "x": 6, "y": 0 },
+      "targets": [{ "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "queryType": "range",
+        "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} [$__auto]))",
+        "legendFormat": "{{service_instance_id}}" }]
     },
     {
-      "type": "timeseries",
-      "title": "Errors per node",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 70,
-            "stacking": {
-              "mode": "normal"
-            }
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "queryType": "range",
-          "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", level=\"ERROR\", deployment_environment=~\"$env\"} [$__auto]))",
-          "legendFormat": "{{service_instance_id}}"
-        }
-      ]
+      "type": "timeseries", "title": "Errors per node", "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "targets": [{ "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "queryType": "range",
+        "expr": "sum by (service_instance_id) (count_over_time({service_name=\"dkg-node\", level=\"ERROR\", deployment_environment=~\"$env\"} [$__auto]))",
+        "legendFormat": "{{service_instance_id}}" }]
     },
     {
-      "type": "logs",
-      "title": "Recent errors (all nodes)",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 17
-      },
-      "options": {
-        "showTime": true,
-        "showLabels": true,
-        "wrapLogMessage": true,
-        "sortOrder": "Descending",
-        "enableLogDetails": true
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "queryType": "range",
-          "expr": "{service_name=\"dkg-node\", level=\"ERROR\", deployment_environment=~\"$env\"} | json | line_format `{{.body}}`"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 0,
-        "y": 27
-      },
-      "title": "RPC requests per node",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "expr": "sum by (service_instance_id) (sum_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} |= \"rpc_usage\" | json | line_format `{{.body}}` | logfmt | method != `` | unwrap count [$__auto]))",
-          "legendFormat": "{{service_instance_id}}",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 12,
-        "y": 27
-      },
-      "title": "RPC requests by method (fleet)",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "expr": "sum by (method) (sum_over_time({service_name=\"dkg-node\", deployment_environment=~\"$env\"} |= \"rpc_usage\" | json | line_format `{{.body}}` | logfmt | method != `` | unwrap count [$__auto]))",
-          "legendFormat": "{{method}}",
-          "refId": "A"
-        }
-      ]
+      "type": "logs", "title": "Recent errors (all nodes)", "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 17 },
+      "options": { "showTime": true, "showLabels": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true },
+      "targets": [{ "refId": "A", "datasource": { "type": "loki", "uid": "${loki}" }, "queryType": "range",
+        "expr": "{service_name=\"dkg-node\", level=\"ERROR\", deployment_environment=~\"$env\"} | json | line_format `{{.body}}`" }]
     }
   ]
 }

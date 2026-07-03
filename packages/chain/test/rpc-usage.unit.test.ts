@@ -129,6 +129,41 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(boundedRpcMethodLabel('weird method !!')).toBe('other');
   });
 
+  it('MULTI-ENDPOINT FAILOVER: failed attempts on endpoint A and the fallback success on B both bill (tracker == A hits + B hits)', async () => {
+    installMeter();
+    // Endpoint A rate-limits eth_chainId (HTTP 429 — the request REACHED the
+    // provider, so it bills); endpoint B is healthy. A multi-RPC adapter uses
+    // perEndpointRetries = 0, so the failover client moves to B after A's
+    // billed refusal. The drained window must equal the SUM of what both
+    // servers actually received — the failed attempt and the fallback success
+    // are each one billable raw request.
+    const rpcA = await startLoopbackRpc({ throttle: ['eth_chainId'] });
+    const rpcB = await startLoopbackRpc();
+    servers.push(rpcA, rpcB);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpcA.url, rpcUrls: [rpcA.url, rpcB.url] }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n); // failover succeeds via B
+
+    const usage = a.drainRpcUsage();
+    expect(rpcA.hits('eth_chainId')).toBeGreaterThanOrEqual(1); // billed refusal happened
+    expect(rpcB.hits('eth_chainId')).toBeGreaterThanOrEqual(1); // fallback success happened
+    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpcA.hits('eth_chainId') + rpcB.hits('eth_chainId'));
+    expect(usage.total).toBe(rpcA.totalHits() + rpcB.totalHits());
+  }, 30_000);
+
+  it('caps distinct window keys at MAX_WINDOW_METHODS; overflow aggregates into "other", existing keys keep counting raw', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    const max = RpcUsageTracker.MAX_WINDOW_METHODS;
+    for (let i = 0; i < max + 6; i++) t.record(`fabricated_${i}`);
+    t.record('fabricated_0'); // existing key increments raw even after the cap
+    const w = t.drainWindow();
+    expect(Object.keys(w.byMethod).length).toBeLessThanOrEqual(max + 1); // raw keys + 'other'
+    expect(w.byMethod['fabricated_0']).toBe(2);
+    expect(w.byMethod['other']).toBe(6); // the 6 overflow names
+    expect(w.total).toBe(max + 7);
+  });
+
   it('tracker.record never throws; window keys stay RAW (log token-safety is the formatter concern)', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     expect(() => t.record('eth_call')).not.toThrow();

@@ -31,13 +31,3 @@ Defense-in-depth — alert if anything that looks like an un-redacted key reache
   (matches a sensitive key followed by a value that is NOT `[REDACTED]`)
 - Condition: `IS ABOVE 0`
 - This should always be 0; if it fires, investigate the redactor / add the field to `logs.redact`.
-
-## 4. RPC request spike on a node (credit burn)
-A node issued **more than 6,000 raw JSON-RPC requests in 1 hour** (~100/min
-sustained — tune to your provider plan; the $200/day incident would have tripped
-this within the first hour).
-
-- Query (Loki, instant): `sum by (service_instance_id) (sum_over_time({service_name="dkg-node"} |= "rpc_usage" | json | line_format "{{.body}}" | logfmt | method != "" | unwrap count [1h]))`
-- Condition: `IS ABOVE 6000`  (tune to your RPC plan / baseline)
-- Evaluate every `5m`, for `15m`.
-- Annotation: `Node {{ $labels.service_instance_id }} issued {{ $values.A }} raw RPC requests in the last hour — check the "RPC requests by method" panel to see which call is burning credits.`

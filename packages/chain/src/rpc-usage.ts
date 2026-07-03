@@ -113,13 +113,22 @@ export class RpcUsageTracker {
 
   /**
    * Count one raw JSON-RPC request. Called from the provider's `_send` and the
-   * FetchRequest retry hook. Window keys keep the RAW method name (log-line
-   * token safety is the cli formatter's concern, not the tracker's); only the
-   * METRIC label is bounded to the known set to protect metric cardinality.
+   * FetchRequest retry hook. Window keys keep the RAW method name BY DESIGN:
+   * the log path's `method` is parsed at Loki query time (logfmt), so raw
+   * names cost no index cardinality and preserve full diagnostic fidelity
+   * (seeing the real `debug_traceTransaction` is the point). Only the METRIC
+   * label is bounded to the known set — Prometheus label cardinality is a
+   * real storage cost. As a spam guard, a window holds at most
+   * MAX_WINDOW_METHODS distinct raw keys; pathological method-name churn
+   * (buggy caller, hostile input) overflows into 'other' instead of emitting
+   * one rpc_usage log line per fabricated name every minute.
    */
+  static readonly MAX_WINDOW_METHODS = 64;
+
   record(method: string): void {
     try {
-      const key = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
+      const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
+      const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
       this.window.set(key, (this.window.get(key) ?? 0) + 1);
       this.lifetime += 1;
       getMetrics().chainRpcRequestsTotal.add(1, {

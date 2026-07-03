@@ -1,36 +1,14 @@
 {
   "title": "DKG Node Logs",
   "uid": "dkg-node-logs",
-  "tags": [
-    "dkg",
-    "logs"
-  ],
+  "tags": ["dkg", "logs"],
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
+  "time": { "from": "now-1h", "to": "now" },
   "timepicker": {
-    "refresh_intervals": [
-      "10s",
-      "30s",
-      "1m",
-      "5m",
-      "15m"
-    ],
-    "time_options": [
-      "15m",
-      "1h",
-      "3h",
-      "6h",
-      "12h",
-      "24h",
-      "2d",
-      "7d",
-      "30d"
-    ]
+    "refresh_intervals": ["10s", "30s", "1m", "5m", "15m"],
+    "time_options": ["15m", "1h", "3h", "6h", "12h", "24h", "2d", "7d", "30d"]
   },
   "templating": {
     "list": [
@@ -46,10 +24,7 @@
         "name": "node",
         "label": "Node",
         "type": "query",
-        "datasource": {
-          "type": "loki",
-          "uid": "${loki}"
-        },
+        "datasource": { "type": "loki", "uid": "${loki}" },
         "definition": "label_values(service_instance_id)",
         "query": "label_values(service_instance_id)",
         "refresh": 2,
@@ -62,10 +37,7 @@
         "name": "level",
         "label": "Level",
         "type": "query",
-        "datasource": {
-          "type": "loki",
-          "uid": "${loki}"
-        },
+        "datasource": { "type": "loki", "uid": "${loki}" },
         "definition": "label_values(level)",
         "query": "label_values(level)",
         "refresh": 2,
@@ -73,37 +45,23 @@
         "includeAll": true,
         "allValue": ".+",
         "multi": true,
-        "current": {
-          "text": "All",
-          "value": "$__all"
-        }
+        "current": { "text": "All", "value": "$__all" }
       },
       {
         "name": "search",
         "label": "Filter (regex)",
         "type": "textbox",
         "query": "",
-        "current": {
-          "text": "",
-          "value": ""
-        }
+        "current": { "text": "", "value": "" }
       }
     ]
   },
   "panels": [
     {
       "type": "logs",
-      "title": "Logs \u2014 $node",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 22,
-        "w": 24,
-        "x": 0,
-        "y": 1
-      },
+      "title": "Logs — $node",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 22, "w": 24, "x": 0, "y": 1 },
       "options": {
         "showTime": true,
         "showLabels": false,
@@ -116,10 +74,7 @@
       "targets": [
         {
           "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
+          "datasource": { "type": "loki", "uid": "${loki}" },
           "queryType": "range",
           "expr": "{service_instance_id=\"$node\", level=~\"$level\"} |~ `(?i)$search` | json | line_format `{{.body}}`"
         }
@@ -127,64 +82,17 @@
     },
     {
       "type": "timeseries",
-      "title": "Log volume by level \u2014 $node",
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 24,
-        "x": 0,
-        "y": 23
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "bars",
-            "fillOpacity": 70,
-            "stacking": {
-              "mode": "normal"
-            }
-          }
-        },
-        "overrides": []
-      },
+      "title": "Log volume by level — $node",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 23 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 70, "stacking": { "mode": "normal" } } }, "overrides": [] },
       "targets": [
         {
           "refId": "A",
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
+          "datasource": { "type": "loki", "uid": "${loki}" },
           "queryType": "range",
           "expr": "sum by (level) (count_over_time({service_instance_id=\"$node\", level=~\"$level\"} |~ `(?i)$search` [$__auto]))",
           "legendFormat": "{{level}}"
-        }
-      ]
-    },
-    {
-      "datasource": {
-        "type": "loki",
-        "uid": "${loki}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 29
-      },
-      "title": "RPC requests by method \u2014 $node",
-      "type": "timeseries",
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "${loki}"
-          },
-          "expr": "sum by (method) (sum_over_time({service_instance_id=\"$node\"} |= \"rpc_usage\" | json | line_format `{{.body}}` | logfmt | method != `` | unwrap count [$__auto]))",
-          "legendFormat": "{{method}}",
-          "refId": "A"
         }
       ]
     }
