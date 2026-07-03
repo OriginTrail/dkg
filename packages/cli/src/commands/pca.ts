@@ -152,7 +152,17 @@ pcaCmd
       const result = await client.registerPcaAgent(accountId, agent);
       console.log(`Registered agent on PCA ${result.accountId}:`);
       console.log(`  agent:      ${result.agent}`);
-      console.log(`  registered: ${result.registered} (verified via on-chain read)`);
+      // #1346 — a mined tx is authoritative, so `registered` is true on
+      // success. On-chain confirmation is a separate advisory signal; a
+      // lagging read must not read as "registered: false (verified)".
+      console.log(`  registered: ${result.registered}`);
+      if (result.verified === true) {
+        console.log(`  verified:   confirmed on-chain`);
+      } else if (result.adapterSupported === false) {
+        console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
+      } else {
+        console.log(`  verified:   pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)`);
+      }
       console.log(`  txHash:     ${result.txHash}`);
       console.log(`  block:      ${result.blockNumber}`);
     } catch (err) {

@@ -217,10 +217,16 @@ describe('daemon /api/pca V10 caller contract', () => {
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
     expect(body.registered).toBe(true);
+    expect(body.verified).toBe(true);
     expect(registered).toEqual({ id: 1n, agent: addr });
   });
 
-  it('register: mined tx authoritative even if the verification probe throws → 200, not 500', async () => {
+  // #1346 — the mined tx is authoritative, so a lagging/throwing on-chain
+  // read must NEVER flip `registered` to false. The read only feeds the
+  // advisory `verified` signal. A THROW means the probe SURFACE exists but
+  // the read failed (RPC lag) → adapterSupported stays true (distinct from
+  // the no-capability `null` case below).
+  it('register: mined tx authoritative even if the verification probe throws → 200 registered:true, verified:null, adapterSupported:true', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
@@ -232,11 +238,30 @@ describe('daemon /api/pca V10 caller contract', () => {
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
     expect(body.blockNumber).toBe(9);
-    expect(body.registered).toBe(false);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(null);
+    // Adapter EXISTS (probe was invoked and threw) — read lagged, not a gap.
+    expect(body.adapterSupported).toBe(true);
+  });
+
+  // #1346 — a genuine capability gap: the adapter does not expose the probe
+  // method at all → adapterSupported:false, distinct from a throwing read.
+  it('register: no probe method on the adapter → 200 registered:true, verified:null, adapterSupported:false', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      // isPublishingConvictionAgent intentionally absent.
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(null);
     expect(body.adapterSupported).toBe(false);
   });
 
-  it('register: probe returns null (adapter has no probe) → 200, registered:false, adapterSupported:false', async () => {
+  it('register: probe returns null (adapter has no probe surface) → 200 registered:true, verified:null, adapterSupported:false', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
@@ -247,11 +272,12 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
-    expect(body.registered).toBe(false);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(null);
     expect(body.adapterSupported).toBe(false);
   });
 
-  it('register: probe returns true → 200, registered:true, adapterSupported:true', async () => {
+  it('register: probe returns true → 200 registered:true, verified:true, adapterSupported:true', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
@@ -262,6 +288,46 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.registered).toBe(true);
+    expect(body.verified).toBe(true);
+    expect(body.adapterSupported).toBe(true);
+  });
+
+  // #1346 — under RPC lag the immediate read races the mined state and
+  // returns a stale `false`; the bounded backoff retries and confirms.
+  it('register: probe lags false then true → 200 registered:true, verified:true (backoff confirms)', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    let probes = 0;
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      isPublishingConvictionAgent: async () => {
+        probes += 1;
+        return probes >= 2; // first read stale-false, second confirms
+      },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(true);
+    expect(body.adapterSupported).toBe(true);
+    expect(probes).toBeGreaterThanOrEqual(2);
+  });
+
+  // A persistently-false read (still lagging) stays advisory — registration
+  // remains authoritative-true.
+  it('register: probe stays false → 200 registered:true, verified:false, adapterSupported:true', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      isPublishingConvictionAgent: async () => false,
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(false);
     expect(body.adapterSupported).toBe(true);
   });
 

@@ -662,9 +662,50 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
+      // #1085 — a standalone /register historically forwarded ONLY the
+      // body `publishPolicy` (often undefined), silently dropping the
+      // create-time choice persisted by `createContextGraph`. The publish
+      // auto-register path (`ensureRegisteredForPublish`) already rehydrates
+      // it via `getStoredContextGraphRegistrationOptions`; mirror that here
+      // so an explicit /register that omits `publishPolicy` doesn't regress
+      // a curated CG to the default policy (governance drift). We deliberately
+      // do NOT rehydrate `pcaAccountId` / `publishAuthorityAccountId` — that
+      // stays EXPLICIT-ONLY by design (anti-stale-replay); only the request
+      // may supply it.
+      let effectivePublishPolicy = publishPolicy;
+      if (effectivePublishPolicy === undefined) {
+        // Best-effort: a stored-policy read failure (store unavailable /
+        // adapter without the helper) must never break an otherwise-valid
+        // register — fall back to the body value (undefined → agent default).
+        // Guard the capability (method absent = mock/older adapter, expected)
+        // separately from a genuine READ error, which we log so a silent
+        // policy fall-back is observable (the whole point of #1085).
+        if (typeof agent.getStoredContextGraphRegistrationOptions === 'function') {
+          try {
+            const storedOpts = await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId);
+            if (storedOpts?.publishPolicy !== undefined) {
+              effectivePublishPolicy = storedOpts.publishPolicy;
+            }
+          } catch (err) {
+            console.warn(
+              `[DKG-Daemon] WARN [register] stored publishPolicy read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+            );
+          }
+        }
+      }
+      // #1085 hardening: the earlier mutual-exclusion guard checked the BODY
+      // publishPolicy; re-check the EFFECTIVE (post-rehydration) policy so a
+      // body that omits publishPolicy but carries an explicit pcaAccountId,
+      // against a stored `open` policy, is rejected cleanly at the route
+      // boundary (400) instead of surfacing as a 500 from the agent layer.
+      if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
+        return jsonResponse(res, 400, {
+          error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)',
+        });
+      }
       const result = await agent.registerContextGraph(resolvedContextGraphId, {
         accessPolicy,
-        publishPolicy,
+        publishPolicy: effectivePublishPolicy,
         callerAgentAddress: requestAgentAddress,
         publishAuthorityAccountId: parsedPcaAccountId.value,
         ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),

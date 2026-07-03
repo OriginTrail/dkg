@@ -43,7 +43,7 @@
  * a real chain") enforced in CI.
  */
 
-import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
@@ -990,6 +990,145 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         });
       }
     }
+  });
+
+  // ── #1085 — /register rehydrates the stored create-time publishPolicy ──
+  // A standalone /api/context-graph/register that omits `publishPolicy`
+  // used to forward `undefined`, silently regressing a curated CG to the
+  // default policy (the publish auto-register path already rehydrates it).
+  // These tests pin: the stored policy is rehydrated on omission, an
+  // explicit body value still wins, and `pcaAccountId` stays explicit-only
+  // (never rehydrated).
+  async function runRegisterRouteCaptureOpts(
+    body: Record<string, unknown>,
+    agentOverrides: Record<string, any>,
+  ): Promise<{ status: number; json: any; registerOpts: any }> {
+    const contextGraphId = String(body.id ?? body.contextGraphId);
+    let registerOpts: any = null;
+    const agent = {
+      listContextGraphs: async () => [{
+        id: contextGraphId,
+        uri: `did:dkg:context-graph:${contextGraphId}`,
+        subscribed: true,
+        synced: true,
+      }],
+      resolveAgentByToken: () => undefined,
+      registerContextGraph: async (_id: string, opts: any) => {
+        registerOpts = opts;
+        return { onChainId: '42', txHash: '0x' + 'ab'.repeat(32) };
+      },
+      ...agentOverrides,
+    };
+    const routeServer = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      await handleContextGraphRoutes({
+        req, res, agent,
+        publisherControl: {}, publisherRuntime: null, config: {}, startedAt: Date.now(),
+        dashDb: {}, opWallets: {}, network: {}, tracker: {}, memoryManager: {},
+        bridgeAuthToken: undefined, nodeVersion: 'test', nodeCommit: 'test',
+        catchupTracker: { jobs: new Map(), latestByContextGraph: new Map() },
+        extractionRegistry: {}, fileStore: {}, extractionStatus: new Map(),
+        assertionImportLocks: new Map(), vectorStore: {}, embeddingProvider: null,
+        validTokens: new Set(), apiHost: '127.0.0.1', apiPortRef: { value: 0 },
+        routePlugins: [], url, path: url.pathname, requestToken: undefined,
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      } as any);
+      if (!res.writableEnded) { res.statusCode = 404; res.end(); }
+    });
+    try {
+      await new Promise<void>((resolve) => routeServer.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') throw new Error('no port');
+      const resp = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      return { status: resp.status, json: await resp.json(), registerOpts };
+    } finally {
+      await new Promise<void>((resolve, reject) => routeServer.close((e) => (e ? reject(e) : resolve())));
+    }
+  }
+
+  it('#1085 /register without publishPolicy rehydrates the stored create-time policy', async () => {
+    let storedFor: string | null = null;
+    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'rehydrate-cg' },
+      {
+        getStoredContextGraphRegistrationOptions: async (id: string) => {
+          storedFor = id;
+          return { publishPolicy: 0 }; // curated at create time
+        },
+      },
+    );
+    expect(status).toBe(200);
+    expect(storedFor).toBe('rehydrate-cg');
+    // The rehydrated curated policy reaches the chain layer instead of undefined.
+    expect(registerOpts.publishPolicy).toBe(0);
+    // pcaAccountId is explicit-only — nothing stored is forwarded.
+    expect(registerOpts.publishAuthorityAccountId).toBeUndefined();
+  });
+
+  it('#1085 stored-policy READ error is best-effort — 200, falls back to default, warns (not silent)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+        { id: 'read-error-cg' },
+        {
+          getStoredContextGraphRegistrationOptions: async () => {
+            throw new Error('store down');
+          },
+        },
+      );
+      // A stored-read failure must NOT 500 — best-effort fall back to the body/default policy…
+      expect(status).toBe(200);
+      expect(registerOpts.publishPolicy).toBeUndefined();
+      // …but the fall-back is observable, not silent (the stated purpose of #1085).
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('#1085 adapter without the stored-options helper skips rehydration cleanly (200, no throw)', async () => {
+    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'no-helper-cg' },
+      { /* getStoredContextGraphRegistrationOptions intentionally absent (older/mock adapter) */ },
+    );
+    expect(status).toBe(200);
+    expect(registerOpts.publishPolicy).toBeUndefined();
+  });
+
+  it('#1085 explicit publishPolicy in the body wins over the stored policy', async () => {
+    let storedCalled = false;
+    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'explicit-cg', publishPolicy: 1 },
+      {
+        getStoredContextGraphRegistrationOptions: async () => {
+          storedCalled = true;
+          return { publishPolicy: 0 };
+        },
+      },
+    );
+    expect(status).toBe(200);
+    // Explicit wins; the stored-policy read is skipped entirely.
+    expect(registerOpts.publishPolicy).toBe(1);
+    expect(storedCalled).toBe(false);
+  });
+
+  it('#1085 pcaAccountId stays explicit-only — a stored publishAuthorityAccountId is never rehydrated', async () => {
+    const { status, registerOpts } = await runRegisterRouteCaptureOpts(
+      { id: 'pca-explicit-only-cg' },
+      {
+        getStoredContextGraphRegistrationOptions: async () => ({
+          publishPolicy: 0,
+          publishAuthorityAccountId: 7n, // must NOT leak into the register call
+        }),
+      },
+    );
+    expect(status).toBe(200);
+    expect(registerOpts.publishPolicy).toBe(0);
+    expect(registerOpts.publishAuthorityAccountId).toBeUndefined();
   });
 
   it('marks timeout-after-response catchup as failed rather than unreachable', async () => {

@@ -295,6 +295,56 @@ function parseAccountId(idStr: string): bigint | null {
   }
 }
 
+// #1346 — Best-effort on-chain confirmation of a just-mined agent
+// registration. The tx receipt is already authoritative for
+// `registered:true`; this read only upgrades the ADVISORY `verified` +
+// `adapterSupported` signals. Under RPC lag the immediate post-submit read
+// can race the mined state and return a stale `false` (or throw), so we
+// retry a couple of times with a short bounded backoff. A lagging/throwing
+// read stays advisory and NEVER flips the authoritative registration.
+//
+// The two signals are DECOUPLED (QA #1346 acceptance contract):
+//   `adapterSupported` = does the probe SURFACE exist at all?
+//     - method absent, or an explicit `null` return (adapter's "no probe
+//       surface" signal) → false (genuine capability gap).
+//     - method invoked and returned a boolean, OR invoked and threw (an
+//       RPC read error — the surface exists, the read just failed) → true.
+//   `verified` = the on-chain read OUTCOME (advisory only):
+//     - true  — confirmed registered on-chain
+//     - false — probe ran but did not (yet) observe it (follower-RPC lag)
+//     - null  — inconclusive (no capability, or every attempt threw)
+async function confirmAgentRegistration(
+  agent: RequestContext['agent'],
+  accountId: bigint,
+  agentAddr: string,
+  { attempts = 3, backoffMs = 300 }: { attempts?: number; backoffMs?: number } = {},
+): Promise<{ verified: boolean | null; adapterSupported: boolean }> {
+  const probe = (agent as any)?.isPublishingConvictionAgent;
+  // Method absent → genuine capability gap; nothing to read.
+  if (typeof probe !== 'function') return { verified: null, adapterSupported: false };
+  let adapterSupported = false;
+  let last: boolean | null = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const result = await probe.call(agent, accountId, agentAddr);
+      // Explicit `null` return = adapter has no probe surface → capability
+      // gap. Retrying is pointless and it is NOT "supported".
+      if (result === null) return { verified: null, adapterSupported: false };
+      // A boolean return proves the surface exists.
+      adapterSupported = true;
+      if (result === true) return { verified: true, adapterSupported: true };
+      last = false; // `false` could be follower-RPC lag on a mined tx → retry.
+    } catch {
+      // The method exists and was invoked; a throw is an RPC read failure,
+      // not a capability gap → supported, but the outcome stays inconclusive.
+      adapterSupported = true;
+      last = null;
+    }
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, backoffMs));
+  }
+  return { verified: last, adapterSupported };
+}
+
 // OT-RFC-51: a PCA's committed TRAC funds the publishing factor P(t) of ONE
 // node (`primaryNode`), seeded per-epoch over the lock. The value is that
 // node's identityId (uint72). `0` is the contract's "no designated node"
@@ -515,19 +565,22 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
     try {
       const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
       if (result === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      // Tx mined → authoritative 200. Verification is best-effort: own
-      // try/catch keeps a probe failure off the outer catch (no false 500).
-      let verified: boolean | null = null;
-      try {
-        verified = await agent.isPublishingConvictionAgent(accountId, agentAddr);
-      } catch {
-        verified = null;
-      }
+      // #1346 — The tx is mined, so registration is AUTHORITATIVE
+      // (`registered:true`). The on-chain read below is a best-effort
+      // ADVISORY confirmation with a short bounded backoff; a lagging or
+      // throwing read must never flip a successful registration to false.
+      const { verified, adapterSupported } = await confirmAgentRegistration(
+        agent,
+        accountId,
+        agentAddr,
+      );
       return jsonResponse(res, 200, {
         accountId: idStr,
         agent: agentAddr,
-        registered: verified === true,
-        adapterSupported: verified !== null,
+        registered: true,
+        // Advisory on-chain confirmation: true | false | null (inconclusive).
+        verified,
+        adapterSupported,
         txHash: result.hash,
         blockNumber: result.blockNumber,
       });

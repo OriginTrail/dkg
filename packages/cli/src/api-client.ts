@@ -992,6 +992,10 @@ export class ApiClient {
     accountId: string;
     agent: string;
     registered: boolean;
+    // #1346 — advisory on-chain confirmation of the mined registration:
+    // true (confirmed) | false (RPC lag) | null (inconclusive/unsupported).
+    verified?: boolean | null;
+    adapterSupported?: boolean;
     txHash: string;
     blockNumber: number;
   }> {
