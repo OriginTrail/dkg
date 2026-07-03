@@ -1,5 +1,13 @@
 # Lessons Notes
 
+## 2026-07-03 - Playwright Request Wait Timing
+
+Mistake pattern: started `page.waitForRequest('/api/events')` before the app shell navigation had finished.
+
+Root cause: the wait's timeout ran concurrently with `page.goto()`, so slow devnet page load could fail the request wait before the app had a chance to open SSE.
+
+Preventive rule: attach passive request listeners before navigation, but only start active request waits after the page reaches the state that should trigger the request unless missing the earliest request would make the test invalid.
+
 ## 2026-07-03 - React Session Store Test Cleanup
 
 Mistake pattern: reset a module-level session store while the component under test was still subscribed.

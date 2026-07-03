@@ -1,4 +1,4 @@
-import { apiFetch, authHeaders, ensureDashboardSession, mergeHeaders } from './dashboardSessionClient.js';
+import { apiFetch } from './dashboardSessionClient.js';
 
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -79,11 +79,8 @@ export class LocalAgentApiError extends Error {
 
 async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   try {
-    await ensureDashboardSession();
-    return await fetch(input, {
+    return await apiFetch(input, {
       ...init,
-      credentials: init.credentials ?? 'same-origin',
-      headers: mergeHeaders(init.headers, authHeaders()),
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {

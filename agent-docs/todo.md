@@ -42,9 +42,12 @@ Review:
   - Kept PCA same-origin RPC clients cached while injecting CSRF per request.
   - Replaced synthetic dashboard-session bearer header mutation with typed request auth context.
   - Added loopback Host rejection and exchange endpoint regression tests.
+  - Added one-shot stale browser session recovery on protected API 401 responses.
+  - Tightened the auth-session Playwright spec so it must observe a real `/api/events` request before asserting the SSE URL is token-free.
 - Review-round verification passed in isolated WSL worktree `/home/jurij/dkg-pr1428`:
-  - `pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/web3-clients.test.ts test/dashboard-session-gate.test.ts test/ui-api-pure.test.ts test/project-view-navigation.test.ts test/use-assertion-lifecycle-events.test.ts test/layer-graph-panel.test.ts test/use-current-agent.test.ts test/ui-compat.test.ts test/app-primer-route.test.ts --no-file-parallelism`
+  - `pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/dashboard-session-client.test.ts test/web3-clients.test.ts test/dashboard-session-gate.test.ts test/ui-api-pure.test.ts test/project-view-navigation.test.ts test/use-assertion-lifecycle-events.test.ts test/layer-graph-panel.test.ts test/use-current-agent.test.ts test/ui-compat.test.ts test/app-primer-route.test.ts --no-file-parallelism`
   - `pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.unit.config.ts test/dashboard-session.test.ts test/auth.test.ts`
   - `pnpm --filter @origintrail-official/dkg-node-ui run build`
   - `pnpm --filter @origintrail-official/dkg-node-ui run build:ui`
   - `pnpm --filter @origintrail-official/dkg run build`
+  - `PLAYWRIGHT_DEVNET_TIMEOUT_MS=300000 PW_HEADLESS=1 pnpm --filter @origintrail-official/dkg-node-ui exec playwright test e2e/specs/auth-session.spec.ts`

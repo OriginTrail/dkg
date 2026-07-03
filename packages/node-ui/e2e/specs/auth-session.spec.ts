@@ -24,7 +24,14 @@ test.describe('dashboard auth session', () => {
     expect(status.ok).toBe(true);
     expect(status.json?.peerId).toBeTruthy();
 
-    await page.waitForTimeout(500);
+    if (eventUrls.length === 0) {
+      const eventRequest = await page.waitForRequest(
+        (request) => request.url().includes('/api/events'),
+        { timeout: 30_000 },
+      );
+      eventUrls.push(eventRequest.url());
+    }
+    expect(eventUrls.length).toBeGreaterThan(0);
     expect(eventUrls.every((url) => !new URL(url).searchParams.has('token'))).toBe(true);
   });
 });

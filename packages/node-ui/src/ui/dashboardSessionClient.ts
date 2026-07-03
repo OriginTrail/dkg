@@ -30,6 +30,11 @@ function setDashboardSession(session: DashboardSessionStatus): DashboardSessionS
   return dashboardSession;
 }
 
+function invalidateDashboardSession(): void {
+  dashboardSessionPromise = null;
+  setDashboardSession({ authenticated: false });
+}
+
 async function readJson<T>(res: Response): Promise<T | null> {
   return res.json().catch(() => null) as Promise<T | null>;
 }
@@ -141,10 +146,18 @@ export function mergeHeaders(base?: HeadersInit, extra: Record<string, string> =
 }
 
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  await ensureDashboardSession();
-  return fetch(input, {
+  const sessionBeforeRequest = await ensureDashboardSession();
+  const withSession = () => fetch(input, {
     ...init,
     credentials: init.credentials ?? 'same-origin',
     headers: mergeHeaders(init.headers, authHeaders()),
   });
+
+  const res = await withSession();
+  if (res.status !== 401 || !isDashboardSessionReady(sessionBeforeRequest)) return res;
+
+  invalidateDashboardSession();
+  const refreshed = await ensureDashboardSession();
+  if (!isDashboardSessionReady(refreshed)) return res;
+  return withSession();
 }
