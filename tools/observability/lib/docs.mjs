@@ -64,7 +64,7 @@ The webhooks belong to the Slack app **"DKG Grafana Alerts"** (workspace
 OriginTrail) — manage/rotate them at *api.slack.com/apps → DKG Grafana Alerts →
 Incoming Webhooks*.
 
-## The 10 rules (folder "DKG V10 Node Observability", group \`dkg-node-telemetry\`)
+## The ${specs.length} rules (folder "DKG V10 Node Observability", group \`dkg-node-telemetry\`)
 
 > **Machine-importable copy:** \`alert-rules.provisioning.json\` in this directory
 > holds the exact provisioning-API payloads (rules, contact-point templates with

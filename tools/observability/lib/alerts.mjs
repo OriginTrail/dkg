@@ -132,7 +132,7 @@ export const buildAlerts = ({ nodeProfile, VM_UID, LOKI_UID }) => {
       '  1. For each entry in contactPoints: POST /api/v1/provisioning/contact-points  (fill url from your password manager first)',
       '  2. GET /api/v1/provisioning/policies, APPEND policyRoutes to .routes, PUT the tree back (a PUT replaces the WHOLE tree - never PUT without GET+append)',
       '  3. For each entry in rules: POST /api/v1/provisioning/alert-rules',
-      'Verified: this exact payload (rendered with the production UIDs) was imported into the production Grafana 11.4.0 on 2026-07-02; all 10 rules evaluate health=ok on the scheduler and route to the three Slack channels.',
+      `Verified: this exact payload (rendered with the production UIDs) was imported into the production Grafana 11.4.0 on 2026-07-02; all ${ALERT_SPECS.length} rules evaluate health=ok on the scheduler and route to the three Slack channels.`,
     ],
     contactPoints: SIGNAL_ROUTES.map(r => ({
       name: r.contactPoint, type: 'slack',
