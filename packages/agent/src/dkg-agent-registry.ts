@@ -381,22 +381,40 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 /**
- * #1346 — advisory result of confirming a just-mined PCA agent registration.
- * The mined receipt is already authoritative for `registered:true`; these two
- * DECOUPLED signals only refine the ADVISORY picture (QA #1346 acceptance
- * contract). Modeled as a DISCRIMINATED UNION so the invariant "no probe
- * surface ⟹ no outcome" is enforced by the compiler, not prose — the
- * `{adapterSupported:false, verified:false|true}` combos are unrepresentable:
- *   - `{ adapterSupported: false; verified: null }` — no on-chain probe surface
- *     (the typed facade's `null`): a genuine capability gap, so no outcome.
- *   - `{ adapterSupported: true; verified: boolean | null }` — the surface
- *     exists; `verified` is the OUTCOME: `true` (confirmed on-chain) | `false`
- *     (a read observed it as not-yet-registered — follower-RPC lag) | `null`
- *     (every read threw — inconclusive).
+ * #1346 — the advisory outcome of confirming a just-mined PCA agent
+ * registration, as a SINGLE discriminant (no coupled boolean/null fields to
+ * keep in lock-step). The mined receipt is already authoritative for
+ * `registered:true`; this only refines the ADVISORY picture:
+ *   - `confirmed`    — an on-chain read observed the agent registered.
+ *   - `not_observed` — the probe read but did not (yet) observe it (follower-RPC lag).
+ *   - `inconclusive` — the probe surface exists but every read threw.
+ *   - `unsupported`  — no on-chain probe surface (the chain adapter lacks the read).
+ * The HTTP boundary derives the wire fields from this via {@link pcaConfirmationToWire}.
+ */
+export type PcaConfirmationOutcome = 'confirmed' | 'not_observed' | 'inconclusive' | 'unsupported';
+
+/**
+ * #1346 — the WIRE shape of the advisory confirmation, DERIVED from a
+ * {@link PcaConfirmationOutcome} at the HTTP boundary. A discriminated union so
+ * the illegal `{adapterSupported:false, verified:false|true}` combos stay
+ * unrepresentable for wire/client consumers:
+ *   - `{ adapterSupported: false; verified: null }` — unsupported (no probe surface).
+ *   - `{ adapterSupported: true; verified: boolean | null }` — surface exists;
+ *     `verified` is true (confirmed) | false (not observed / lag) | null (inconclusive).
  */
 export type PcaAgentConfirmation =
   | { adapterSupported: false; verified: null }
   | { adapterSupported: true; verified: boolean | null };
+
+/** Derive the wire advisory fields from the single confirmation outcome. */
+export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {
+  switch (outcome) {
+    case 'confirmed':    return { adapterSupported: true, verified: true };
+    case 'not_observed': return { adapterSupported: true, verified: false };
+    case 'inconclusive': return { adapterSupported: true, verified: null };
+    case 'unsupported':  return { adapterSupported: false, verified: null };
+  }
+}
 
 // #1346 — production confirmation policy: a bounded post-mine probe. These are
 // fixed domain constants, NOT caller-tunable knobs (implementation detail of
@@ -411,41 +429,33 @@ const PCA_CONFIRM_BACKOFF_MS = 300;
  * policy is a fixed internal constant, never a deep-importable tuning knob.
  * `probe` yields the typed registration read: `true` (registered) | `false`
  * (not yet — follower-RPC lag → retry) | `null` (no probe surface →
- * unsupported, short-circuit). `null` is a per-adapter-STABLE capability signal
- * (the facade returns it iff the chain method is absent), so it legitimately
- * halts regardless of earlier reads — a `false`-then-`null` sequence is
- * unreachable from a real adapter.
+ * `unsupported`, short-circuit). `null` is a per-adapter-STABLE capability
+ * signal (the facade returns it iff the chain method is absent), so it
+ * legitimately halts regardless of earlier reads.
  *
- * A definitive `false` read is NEVER erased by a later throw: once the surface
- * has reported not-yet-registered, an RPC blip on a subsequent attempt leaves
- * the advisory outcome `false` (not `null`) — only a later `true` upgrades it.
- * The full retry matrix is exercised through the facade in pca-v10-facade.test.ts.
+ * A definitive `not_observed` (`false`) is NEVER downgraded by a later throw:
+ * once the surface has reported not-yet-registered, an RPC blip on a subsequent
+ * attempt leaves the outcome `not_observed` (not `inconclusive`) — only a later
+ * `true` upgrades it to `confirmed`. The full matrix is exercised through the
+ * facade in pca-v10-facade.test.ts.
  */
 async function confirmPcaAgentRegistration(
   probe: () => Promise<boolean | null>,
-): Promise<PcaAgentConfirmation> {
-  let surfaceExists = false;
-  let verified: boolean | null = null; // advisory outcome once the surface is known
+): Promise<PcaConfirmationOutcome> {
+  let sawNotObserved = false; // a read returned `false` at least once
   for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
     try {
       const result = await probe();
-      if (result === null) return { adapterSupported: false, verified: null };
-      surfaceExists = true; // a boolean return proves the read surface exists
-      if (result === true) return { adapterSupported: true, verified: true };
-      verified = false; // observed not-yet-registered (lag) — a definitive read
+      if (result === null) return 'unsupported'; // no probe surface — short-circuit
+      if (result === true) return 'confirmed';
+      sawNotObserved = true; // a definitive `false` read (follower-RPC lag) — retry
     } catch {
-      // The read surface exists; a throw is an RPC read failure, not a gap.
-      // Deliberately does NOT touch `verified`: a prior definitive `false`
-      // survives a later blip (only a `true` upgrades it).
-      surfaceExists = true;
+      // The read surface exists; a throw is an RPC read failure, not a gap, and
+      // does NOT downgrade a prior definitive `not_observed`.
     }
     if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
   }
-  // Unreachable while PCA_CONFIRM_ATTEMPTS >= 1 (every attempt sets surfaceExists);
-  // the branch keeps the return a provable union member without a cast.
-  return surfaceExists
-    ? { adapterSupported: true, verified }
-    : { adapterSupported: false, verified: null };
+  return sawNotObserved ? 'not_observed' : 'inconclusive';
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
@@ -1580,10 +1590,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   // #1346 — Best-effort on-chain confirmation of a just-mined agent
-  // registration. The tx receipt is already authoritative for
-  // `registered:true`; this only refines the ADVISORY `{ verified,
-  // adapterSupported }` signals (see `confirmPcaAgentRegistration` for the
-  // decoupled-signal contract + bounded-probe state machine). A lagging or
+  // registration. The tx receipt is already authoritative for `registered:true`;
+  // this only refines the ADVISORY picture, returned as a single
+  // `PcaConfirmationOutcome` (the HTTP boundary derives the wire
+  // `{ verified, adapterSupported }` via `pcaConfirmationToWire`). A lagging or
   // throwing read stays advisory and NEVER flips the authoritative
   // registration. The retry policy is a private production constant —
   // deliberately NOT a caller-tunable option on the public facade — so this
@@ -1591,7 +1601,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
     accountId: bigint,
     agent: string,
-  ): Promise<PcaAgentConfirmation> {
+  ): Promise<PcaConfirmationOutcome> {
     return confirmPcaAgentRegistration(() => this.isPublishingConvictionAgent(accountId, agent));
   }
 

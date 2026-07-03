@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, pcaConfirmationToWire } from '../src/index.js';
 import { MockChainAdapter, NoChainAdapter, PcaUnavailableError } from '@origintrail-official/dkg-chain';
 
 async function makeAgent(chain: MockChainAdapter | NoChainAdapter): Promise<DKGAgent> {
@@ -178,24 +178,25 @@ describe('DKGAgent V10 PCA facade', () => {
   });
 });
 
-// PR #1423 R2-B/R2-C/R4/R7 — the register-agent confirmation state machine is a
-// MODULE-PRIVATE helper; the ONLY public surface is the facade method
-// `confirmPublishingConvictionAgentRegistration`, so the retry policy is never a
-// deep-importable knob (R7). The full advisory matrix is therefore exercised
-// THROUGH the facade with a scripted `chain.isPublishingConvictionAgent`. Retry
-// cases pay the real (private, bounded ~300ms) backoff; true/null short-circuit
-// with no wait. Each probe records its (accountId, agent) so the matrix also
-// pins that the EXACT request args flow through (a hard-coded 0n would fail).
-describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory matrix, via facade)', () => {
+// PR #1423 R2-B/R2-C/R4/R7/R8 — the register-agent confirmation state machine is
+// a MODULE-PRIVATE helper returning a single `PcaConfirmationOutcome`; the ONLY
+// public surface is the facade method `confirmPublishingConvictionAgentRegistration`,
+// so the retry policy is never a deep-importable knob. The full advisory matrix
+// is exercised THROUGH the facade with a scripted `chain.isPublishingConvictionAgent`.
+// Retry cases pay the real (private, bounded ~300ms) backoff; `confirmed` /
+// `unsupported` short-circuit with no wait. Each probe records its (accountId,
+// agent) so the matrix also pins that the EXACT request args flow through.
+describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory outcome matrix, via facade)', () => {
   const ACCOUNT_ID = 7n;
   const AGENT_ADDR = ethers.Wallet.createRandom().address;
 
   // Build an agent whose chain probe replays `script` (one entry per call; the
   // last entry repeats) and records the (accountId, agent) of every call. A
-  // boolean/null is returned; 'throw' raises an RPC-style error. `null` is the
-  // "no probe surface" signal.
+  // boolean is returned; 'throw' raises an RPC-style error. (The no-surface
+  // `unsupported` case is NOT modeled here — a mocked method returning null is
+  // an impossible adapter shape; it is tested via a real NoChainAdapter below.)
   async function makeProbeAgent(
-    script: Array<boolean | null | 'throw'>,
+    script: Array<boolean | 'throw'>,
   ): Promise<{ agent: DKGAgent; probes: () => number; calls: () => Array<[bigint, string]> }> {
     const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
     let n = 0;
@@ -213,54 +214,68 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory matrix
   const confirm = (agent: DKGAgent) =>
     agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR);
 
-  it('probe true → confirmed in a single probe, with the EXACT (accountId, agent)', async () => {
+  it('probe true → "confirmed" in a single probe, with the EXACT (accountId, agent)', async () => {
     const { agent, probes, calls } = await makeProbeAgent([true]);
-    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(await confirm(agent)).toBe('confirmed');
     expect(probes()).toBe(1); // confirms on the first read — no retry
     expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]); // no hard-coded 0n / swapped args
   });
 
-  it('probe false then true → confirmed (backoff retry upgrades)', async () => {
+  it('probe false then true → "confirmed" (backoff retry upgrades)', async () => {
     const { agent, probes } = await makeProbeAgent([false, true]);
-    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(await confirm(agent)).toBe('confirmed');
     expect(probes()).toBeGreaterThanOrEqual(2);
   });
 
   // R2-C — a THROWN probe (RPC blip) then a healthy read must recover to confirmed.
-  it('probe throw then true → confirmed (throw→true retry recovery)', async () => {
+  it('probe throw then true → "confirmed" (throw→true retry recovery)', async () => {
     const { agent, probes } = await makeProbeAgent(['throw', true]);
-    expect(await confirm(agent)).toEqual({ verified: true, adapterSupported: true });
+    expect(await confirm(agent)).toBe('confirmed');
     expect(probes()).toBeGreaterThanOrEqual(2);
   });
 
-  it('probe false ×3 → { verified:false, adapterSupported:true } (advisory-false, surface exists)', async () => {
+  it('probe false ×3 → "not_observed" (surface exists, never observed)', async () => {
     const { agent, probes } = await makeProbeAgent([false]);
-    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+    expect(await confirm(agent)).toBe('not_observed');
     expect(probes()).toBe(3);
   });
 
-  it('probe throw ×3 → { verified:null, adapterSupported:true } (inconclusive, surface exists)', async () => {
+  it('probe throw ×3 → "inconclusive" (surface exists, every read threw)', async () => {
     const { agent, probes } = await makeProbeAgent(['throw']);
-    expect(await confirm(agent)).toEqual({ verified: null, adapterSupported: true });
+    expect(await confirm(agent)).toBe('inconclusive');
     expect(probes()).toBe(3);
   });
 
-  // T5-B — a definitive `false` is NOT erased by a later throw (contrast throw×3 → null).
-  it('probe false then throw ×2 → { verified:false, adapterSupported:true } (a later throw does NOT erase a prior false)', async () => {
+  // T5-B — a definitive `not_observed` is NOT downgraded by a later throw
+  // (contrast throw×3 → inconclusive above).
+  it('probe false then throw ×2 → "not_observed" (a later throw does NOT downgrade a prior false)', async () => {
     const { agent, probes } = await makeProbeAgent([false, 'throw', 'throw']);
-    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+    expect(await confirm(agent)).toBe('not_observed');
     expect(probes()).toBe(3);
   });
 
-  it('probe throw then false → { verified:false, adapterSupported:true } (a false after a throw is still definitive)', async () => {
+  it('probe throw then false → "not_observed" (a false after a throw is still definitive)', async () => {
     const { agent } = await makeProbeAgent(['throw', false]);
-    expect(await confirm(agent)).toEqual({ verified: false, adapterSupported: true });
+    expect(await confirm(agent)).toBe('not_observed');
   });
 
-  it('probe null (no surface) → { verified:null, adapterSupported:false }, no retry, exact args', async () => {
-    const { agent, probes, calls } = await makeProbeAgent([null]);
-    expect(await confirm(agent)).toEqual({ verified: null, adapterSupported: false });
-    expect(probes()).toBe(1); // unsupported short-circuits
-    expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]);
+  // R8 (8-A) — the UNSUPPORTED outcome must come from a REAL no-surface adapter
+  // (the facade's typeof-guard on a chain that lacks the method), not a mocked
+  // method returning null. NoChainAdapter has no isPublishingConvictionAgent, so
+  // this exercises the true capability-gap path end-to-end.
+  it('no probe surface (real NoChainAdapter) → "unsupported"', async () => {
+    const agent = await makeAgent(new NoChainAdapter());
+    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR)).toBe('unsupported');
+  });
+});
+
+// R8 (8-B) — the wire advisory fields are DERIVED from the single outcome at the
+// HTTP boundary; pin that exhaustive mapping directly.
+describe('pcaConfirmationToWire (outcome → wire advisory fields)', () => {
+  it('maps each outcome to its coherent wire shape', () => {
+    expect(pcaConfirmationToWire('confirmed')).toEqual({ adapterSupported: true, verified: true });
+    expect(pcaConfirmationToWire('not_observed')).toEqual({ adapterSupported: true, verified: false });
+    expect(pcaConfirmationToWire('inconclusive')).toEqual({ adapterSupported: true, verified: null });
+    expect(pcaConfirmationToWire('unsupported')).toEqual({ adapterSupported: false, verified: null });
   });
 });

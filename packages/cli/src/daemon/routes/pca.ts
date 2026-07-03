@@ -18,6 +18,7 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
+import { pcaConfirmationToWire } from '@origintrail-official/dkg-agent';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
@@ -527,10 +528,12 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       // (`registered:true`). The on-chain read below is a best-effort
       // ADVISORY confirmation with a short bounded backoff; a lagging or
       // throwing read must never flip a successful registration to false.
-      // The retry/probe logic lives on the typed facade (route is a thin
-      // serializer of `{ verified, adapterSupported }`).
-      const { verified, adapterSupported } =
-        await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr);
+      // The retry/probe logic lives on the typed facade, which returns a single
+      // `PcaConfirmationOutcome`; the route derives the wire advisory fields at
+      // this HTTP boundary.
+      const { verified, adapterSupported } = pcaConfirmationToWire(
+        await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr),
+      );
       return jsonResponse(res, 200, {
         accountId: idStr,
         agent: agentAddr,

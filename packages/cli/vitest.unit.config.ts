@@ -23,6 +23,10 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          // R8 — #1085 /register policy-matrix route tests, extracted from
+          // daemon-http-behavior-extra so they run here (pure route handler,
+          // no hardhat/daemon spawn) instead of the daemon-http lane.
+          'test/daemon-context-graph-register.test.ts',
           'test/auth.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of

@@ -212,7 +212,7 @@ describe('daemon /api/pca V10 caller contract', () => {
       },
       confirmPublishingConvictionAgentRegistration: async (id: bigint, a: string) => {
         confirmArgs = [id, a];
-        return { verified: true, adapterSupported: true };
+        return 'confirmed';
       },
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
@@ -243,7 +243,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      confirmPublishingConvictionAgentRegistration: async () => ({ verified: null, adapterSupported: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'inconclusive',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -262,7 +262,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      confirmPublishingConvictionAgentRegistration: async () => ({ verified: null, adapterSupported: false }),
+      confirmPublishingConvictionAgentRegistration: async () => 'unsupported',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -278,7 +278,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      confirmPublishingConvictionAgentRegistration: async () => ({ verified: true, adapterSupported: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'confirmed',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -295,7 +295,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      confirmPublishingConvictionAgentRegistration: async () => ({ verified: false, adapterSupported: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'not_observed',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -315,7 +315,7 @@ describe('daemon /api/pca V10 caller contract', () => {
     let confirmCalled = false;
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xdead', blockNumber: 10, success: false }),
-      confirmPublishingConvictionAgentRegistration: async () => { confirmCalled = true; return { verified: null, adapterSupported: true }; },
+      confirmPublishingConvictionAgentRegistration: async () => { confirmCalled = true; return 'inconclusive'; },
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -417,10 +417,8 @@ describe('daemon /api/pca V10 caller contract', () => {
         state.agents.delete(a.toLowerCase());
         return { hash: '0xd', blockNumber: 2, success: true };
       },
-      confirmPublishingConvictionAgentRegistration: async (_id: bigint, a: string) => ({
-        verified: state.agents.has(a.toLowerCase()),
-        adapterSupported: true,
-      }),
+      confirmPublishingConvictionAgentRegistration: async (_id: bigint, a: string) =>
+        state.agents.has(a.toLowerCase()) ? 'confirmed' : 'not_observed',
       topUpPublishingConvictionAccount: async (_id: bigint, amount: bigint) => {
         state.topUp += amount;
         return { hash: '0xt', blockNumber: 3, success: true };
