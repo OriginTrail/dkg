@@ -120,7 +120,7 @@ Restart the node. Local logging (SQLite + daemon.log) is unaffected; this only a
 - **Per-node:** `https://polaris.xtrmstrngth.com/d/dkg-node-logs` → pick a **Node** → set the time range (top-right) → logs appear. `Level` and `Filter (regex)` narrow further; the bottom panel is volume-by-level.
 - **Fleet overview:** `https://polaris.xtrmstrngth.com/d/dkg-fleet-logs` → active-node count, log volume per node, errors per node, recent fleet-wide errors (filter by `Environment`).
 
-Both dashboards are already imported. Optional alerts: `example-alerts.md`. Node-operator self-serve guide (any operator, their own backend): `tools/log-collection-poc/OPERATOR-GUIDE.md`.
+Both dashboards are already imported. Note: `example-alerts.md` in this directory targets the CURRENT stack (Loki 3.x structured metadata + VictoriaMetrics) — its query shapes and datasources do not apply to this legacy Loki 2.5/Alloy path; polaris keeps its own 4-rule set configured directly in its Grafana. Node-operator self-serve guide (any operator, their own backend): `tools/log-collection-poc/OPERATOR-GUIDE.md`.
 
 ---
 

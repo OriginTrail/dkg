@@ -26,18 +26,22 @@ const nodeVarMulti = (identity) => ({ name: 'node', label: 'Node', type: 'query'
 // row), so inserting or resizing a panel never requires recalculating any
 // other panel's coordinates. Builders take (w, h) and carry a gridPos
 // placeholder so the stamped key keeps its position in the rendered JSON.
-// Stamping is PURE: each panel def is copied with gridPos filled in, never
-// mutated — a def could be reused across dashboards without layout coupling.
-// The `gridPos: undefined` placeholders in the builders are deliberate: a
-// spread preserves first-occurrence key order, so the placeholder pins where
-// gridPos lands in the rendered JSON (byte-stable artifacts).
+// Stamping is PURE and layout is the ONLY owner of gridPos: panel defs are
+// plain, complete data (no placeholder fields), and layout() copies each def
+// inserting the computed gridPos immediately after `title` — the canonical
+// position Grafana exports use — so the rendered JSON stays byte-stable.
 const layout = (rows) => {
   const panels = [];
   let y = 0;
   for (const row of rows) {
     let x = 0, rowH = 0;
     for (const item of row) {
-      panels.push({ ...item.def, gridPos: { h: item.h, w: item.w, x, y } });
+      const stamped = {};
+      for (const [k, v] of Object.entries(item.def)) {
+        stamped[k] = v;
+        if (k === 'title') stamped.gridPos = { h: item.h, w: item.w, x, y };
+      }
+      panels.push(stamped);
       x += item.w;
       rowH = Math.max(rowH, item.h);
     }
@@ -46,14 +50,14 @@ const layout = (rows) => {
   return panels;
 };
 
-const TS = (w, h, ds, title, targets, unit) => ({ w, h, def: { datasource: ds, type: 'timeseries', title, gridPos: undefined,
+const TS = (w, h, ds, title, targets, unit) => ({ w, h, def: { datasource: ds, type: 'timeseries', title,
   fieldConfig: { defaults: { unit: unit ?? 'short' }, overrides: [] },
   targets: targets.map((t, i) => ({ datasource: ds, refId: String.fromCharCode(65 + i), expr: t.expr, legendFormat: t.legend })) } });
-const LOGSP = (w, h, title, expr) => ({ w, h, def: { datasource: LOKI, type: 'logs', title, gridPos: undefined,
+const LOGSP = (w, h, title, expr) => ({ w, h, def: { datasource: LOKI, type: 'logs', title,
   options: { showTime: true, sortOrder: 'Descending', wrapLogMessage: true, enableLogDetails: true },
   targets: [{ datasource: LOKI, refId: 'A', expr }] } });
-const TEXT = (content) => ({ w: 24, h: 3, def: { type: 'text', title: '', gridPos: undefined, options: { mode: 'markdown', content }, transparent: true } });
-const ROW = (title) => ({ w: 24, h: 1, def: { type: 'row', title, gridPos: undefined, collapsed: false } });
+const TEXT = (content) => ({ w: 24, h: 3, def: { type: 'text', title: '', options: { mode: 'markdown', content }, transparent: true } });
+const ROW = (title) => ({ w: 24, h: 1, def: { type: 'row', title, collapsed: false } });
 
 const FE = '{service_name="dkg-node", deployment_environment=~"${env:regex}"}';
 const RPCPIPE = ' |= `rpc_usage` | logfmt | method != `` | unwrap count ';
@@ -66,7 +70,7 @@ const buildFleetLogsDashboard = () => ({
   ]},
   panels: layout([
     [
-      { w: 6, h: 5, def: { datasource: LOKI, type: 'stat', title: 'Nodes reporting (last 10m)', gridPos: undefined,
+      { w: 6, h: 5, def: { datasource: LOKI, type: 'stat', title: 'Nodes reporting (last 10m)',
         fieldConfig: { defaults: { unit: 'none' }, overrides: [] },
         targets: [{ datasource: LOKI, refId: 'A', instant: true, queryType: 'instant',
           expr: `count(count by (service_instance_id) (count_over_time(${FE} [10m])))` }] } },
@@ -79,11 +83,11 @@ const buildFleetLogsDashboard = () => ({
       TS(12, 9, LOKI, 'RPC requests by method (fleet)', [{ expr: `sum by (method) (sum_over_time(${FE}${RPCPIPE}[$__auto]))`, legend: '{{method}}' }]),
     ],
     [
-      { w: 6, h: 7, def: { datasource: LOKI, type: 'stat', title: 'Total RPC requests (selected range)', gridPos: undefined,
+      { w: 6, h: 7, def: { datasource: LOKI, type: 'stat', title: 'Total RPC requests (selected range)',
         fieldConfig: { defaults: { unit: 'short' }, overrides: [] },
         options: { reduceOptions: { calcs: ['sum'], fields: '', values: false } },
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${FE}${RPCPIPE}[$__auto]))` }] } },
-      { w: 18, h: 7, def: { datasource: LOKI, type: 'bargauge', title: 'Top nodes by RPC requests (selected range) — credit burners', gridPos: undefined,
+      { w: 18, h: 7, def: { datasource: LOKI, type: 'bargauge', title: 'Top nodes by RPC requests (selected range) — credit burners',
         options: { displayMode: 'gradient', orientation: 'horizontal', reduceOptions: { calcs: ['sum'], fields: '', values: false } },
         transformations: [ { id: 'reduce', options: { reducers: ['sum'] } }, { id: 'sortBy', options: { sort: [{ field: 'Total', desc: true }] } } ],
         targets: [{ datasource: LOKI, refId: 'A', legendFormat: '{{service_instance_id}}', expr: `sum by (service_instance_id) (sum_over_time(${FE}${RPCPIPE}[$__auto]))` }] } },
@@ -105,7 +109,7 @@ const buildNodeLogsDashboard = (NODE_IDENTITY) => ({
     [ TS(24, 6, LOKI, 'Log volume by level — $node', [{ expr: `sum by (severity_text) (count_over_time(${NB} | severity_text=~\`\${level:regex}\` |~ \`(?i)$search\` [$__auto]))`, legend: '{{severity_text}}' }]) ],
     [
       TS(18, 8, LOKI, 'RPC requests by method — $node', [{ expr: `sum by (method) (sum_over_time(${NB}${RPCPIPE}[$__auto]))`, legend: '{{method}}' }]),
-      { w: 6, h: 8, def: { datasource: LOKI, type: 'stat', title: 'RPC requests — $node (selected range)', gridPos: undefined,
+      { w: 6, h: 8, def: { datasource: LOKI, type: 'stat', title: 'RPC requests — $node (selected range)',
         fieldConfig: { defaults: { unit: 'short' }, overrides: [] },
         options: { reduceOptions: { calcs: ['sum'], fields: '', values: false } },
         targets: [{ datasource: LOKI, refId: 'A', expr: `sum(sum_over_time(${NB}${RPCPIPE}[$__auto]))` }] } },
@@ -185,7 +189,7 @@ const buildMetricsDashboard = (nodeProfile, NODE_IDENTITY) => {
   };
 };
 
-const TQ = (w, h, title, q, limit) => ({ w, h, def: { datasource: TEMPO, type: 'table', title, gridPos: undefined,
+const TQ = (w, h, title, q, limit) => ({ w, h, def: { datasource: TEMPO, type: 'table', title,
   targets: [{ datasource: TEMPO, refId: 'A', queryType: 'traceql', query: q, limit: limit ?? 20, tableType: 'traces', filters: [] }] } });
 const NODEQ = 'resource.service.name="dkg-node" && resource.service.instance.id=~"${node:regex}"';
 const buildTracesDashboard = (NODE_IDENTITY) => ({
