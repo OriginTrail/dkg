@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { decodeRegisterAgentAdvisory } from '../pca-confirmation-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -152,18 +153,16 @@ pcaCmd
       const result = await client.registerPcaAgent(accountId, agent);
       console.log(`Registered agent on PCA ${result.accountId}:`);
       console.log(`  agent:      ${result.agent}`);
-      // #1346 — a mined tx is authoritative, so `registered` is true on
-      // success. On-chain confirmation is a separate advisory signal; a
-      // lagging read must not read as "registered: false (verified)".
-      console.log(`  registered: ${result.registered}`);
-      if (result.verified === true) {
+      // #1346 — the register-agent response (current or pre-#1346 legacy wire
+      // shape) is decoded ONCE into a coherent display: `registered` follows the
+      // mined-tx authority, and `advisory` is the on-chain confirmation status
+      // (see decodeRegisterAgentAdvisory). This keeps the version-skew rules out
+      // of the presentation layer.
+      const display = decodeRegisterAgentAdvisory(result);
+      console.log(`  registered: ${display.registered}`);
+      if (display.advisory === 'confirmed') {
         console.log(`  verified:   confirmed on-chain`);
-      } else if (result.verified === undefined && result.registered === true && result.adapterSupported === true) {
-        // Pre-#1346 daemon (version skew): it omitted `verified`, and its
-        // `registered:true` WAS the on-chain confirmation signal (the old route
-        // set registered = (verified === true)). Don't misreport that as pending.
-        console.log(`  verified:   confirmed on-chain (reported by daemon)`);
-      } else if (result.adapterSupported === false) {
+      } else if (display.advisory === 'unsupported') {
         console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
       } else {
         console.log(`  verified:   pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)`);

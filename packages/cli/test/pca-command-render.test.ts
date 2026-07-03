@@ -9,7 +9,7 @@ import { ApiClient } from '../src/api-client.js';
 // Mock ApiClient.registerPcaAgent per advisory branch, run the command in
 // process, and assert stdout.
 async function runRegisterAgent(
-  advisory: { verified?: boolean | null; adapterSupported: boolean },
+  resp: { registered?: boolean; verified?: boolean | null; adapterSupported: boolean },
 ): Promise<string> {
   const logs: string[] = [];
   const logSpy = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
@@ -19,10 +19,12 @@ async function runRegisterAgent(
     registerPcaAgent: async () => ({
       accountId: '7',
       agent: '0x' + '1'.repeat(40),
-      registered: true,
+      registered: resp.registered ?? true,
       txHash: '0xreg',
       blockNumber: 9,
-      ...advisory,
+      // Legacy (pre-#1346) responses OMIT `verified`; include it only when set.
+      ...(resp.verified !== undefined ? { verified: resp.verified } : {}),
+      adapterSupported: resp.adapterSupported,
     }),
   } as any);
   try {
@@ -68,5 +70,17 @@ describe('pca register-agent — advisory output rendering', () => {
     expect(out).toMatch(/registered: true/);
     expect(out).toMatch(/verified:\s+confirmed on-chain/);
     expect(out).not.toMatch(/pending/);
+  });
+
+  // R11 (11-C) — a pre-#1346 daemon with no probe surface returns
+  // { registered:false, adapterSupported:false, verified absent }. The old
+  // `registered:false` was the probe-derived confirmation, NOT the mined-tx
+  // authority — echoing it alongside "authoritative via the mined tx" was
+  // contradictory. The mined tx is authoritative, so render registered:true.
+  it('legacy unsupported (verified absent, registered:false, adapterSupported:false) → registered:true + not verifiable (no contradiction)', async () => {
+    const out = await runRegisterAgent({ registered: false, adapterSupported: false });
+    expect(out).toMatch(/registered: true/);
+    expect(out).toMatch(/verified:\s+not verifiable on this adapter/);
+    expect(out).not.toMatch(/registered: false/);
   });
 });

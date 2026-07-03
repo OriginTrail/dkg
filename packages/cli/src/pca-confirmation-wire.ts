@@ -27,3 +27,48 @@ export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgent
     case 'unsupported':  return { adapterSupported: false, verified: null };
   }
 }
+
+/** The register-agent advisory confirmation status, for display. */
+export type RegisterAgentAdvisoryStatus = 'confirmed' | 'pending' | 'unsupported';
+
+/** A register-agent response normalized into a coherent display. */
+export type RegisterAgentDisplay = {
+  /** Whether the agent is registered — driven by the MINED-TX authority. */
+  registered: boolean;
+  /** The on-chain confirmation status. */
+  advisory: RegisterAgentAdvisoryStatus;
+};
+
+/**
+ * #1346 — decode a register-agent response (current OR pre-#1346 legacy wire
+ * shape) into ONE coherent display, so consumers don't each re-derive the wire
+ * rules — especially under CLI/daemon version skew. A returned (non-error)
+ * response means the register tx MINED, so the agent IS registered; that is the
+ * authoritative signal for `registered`. Advisory decoding:
+ *   - current daemon: `verified` present — true → confirmed; false/null → pending;
+ *     adapterSupported:false → unsupported.
+ *   - pre-#1346 legacy daemon: `verified` ABSENT. Its own `registered` field was
+ *     the OLD probe-derived confirmation (registered = verified===true), NOT the
+ *     mined-tx authority — so it is NOT echoed as final (echoing a legacy
+ *     `registered:false` alongside "authoritative via the mined tx" is the
+ *     contradiction this fixes). Legacy `registered:true` + adapterSupported:true
+ *     → confirmed; adapterSupported:false → unsupported; else pending.
+ */
+export function decodeRegisterAgentAdvisory(resp: {
+  registered: boolean;
+  verified?: boolean | null;
+  adapterSupported?: boolean;
+}): RegisterAgentDisplay {
+  const legacy = resp.verified === undefined;
+  // A successful response = the register tx mined = the agent is registered.
+  const registered = legacy ? true : resp.registered;
+  let advisory: RegisterAgentAdvisoryStatus;
+  if (resp.verified === true || (legacy && resp.registered === true && resp.adapterSupported === true)) {
+    advisory = 'confirmed';
+  } else if (resp.adapterSupported === false) {
+    advisory = 'unsupported';
+  } else {
+    advisory = 'pending';
+  }
+  return { registered, advisory };
+}
