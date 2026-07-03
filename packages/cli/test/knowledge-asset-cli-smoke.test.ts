@@ -3,17 +3,16 @@ import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
-const BUILD_CLI_COMMAND = process.platform === 'win32'
-  ? { file: 'cmd.exe', args: ['/d', '/s', '/c', 'pnpm build'] }
-  : { file: 'pnpm', args: ['build'] };
+const REPO_ROOT = join(__dirname, '..', '..', '..');
+const TSX_LOADER = join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'loader.mjs');
+const CLI_SOURCE = join(__dirname, '..', 'src', 'cli.ts');
+const TSX_LOADER_URL = pathToFileURL(TSX_LOADER).href;
 const AUTHOR_AGENT_ADDRESS = `0x${'11'.repeat(20)}`;
 const PRE_SIGNED_AUTHOR_ATTESTATION = {
   address: `0x${'22'.repeat(20)}`,
@@ -29,10 +28,6 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   beforeAll(async () => {
     dkgHome = await mkdtemp(join(tmpdir(), 'dkg-ka-cli-'));
-    await execFileAsync(BUILD_CLI_COMMAND.file, BUILD_CLI_COMMAND.args, { cwd: join(__dirname, '..') });
-    if (!existsSync(CLI_ENTRY)) {
-      throw new Error(`CLI entry not found after build: ${CLI_ENTRY}`);
-    }
     await writeFile(join(dkgHome, 'paper.md'), '# Paper\n\nAcme logistics note.\n');
     await writeFile(
       join(dkgHome, 'paper.nt'),
@@ -698,7 +693,7 @@ function testEnv(dkgHome: string, apiPort: string): NodeJS.ProcessEnv {
 }
 
 async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync('node', [CLI_ENTRY, ...args], { env });
+  return execFileAsync('node', ['--import', TSX_LOADER_URL, CLI_SOURCE, ...args], { env });
 }
 
 async function readJsonBody(req: Parameters<Parameters<typeof createServer>[0]>[0]): Promise<any> {

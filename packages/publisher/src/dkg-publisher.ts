@@ -321,6 +321,7 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bypass, which is the other legitimate non-guard path).
 const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
 const TRUSTED_CATALOG_ORIGIN_TOKEN = Symbol('dkg-publisher:trusted-catalog-origin');
+const DKG_CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
 type InternalPublishOptions = PublishOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
@@ -409,6 +410,15 @@ function rejectReservedSubjectPrefixes(quads: Quad[]): void {
 function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
   rejectReservedSubjectPrefixes(quads);
   assertNoUserAuthoredTrustLevelQuads(quads);
+}
+
+function normalizeAssertionInputGraph(wmGraphUri: string, graph: string): string {
+  if (graph === '' || graph === wmGraphUri) return '';
+  // RDF parsers and older tests often carry the DKG physical storage graph in
+  // the quad graph term. That is placement metadata, not user-authored RDF
+  // named-graph identity, so keep it in the KA default graph.
+  if (graph.startsWith(DKG_CONTEXT_GRAPH_URI_PREFIX)) return '';
+  return graph;
 }
 
 function rejectOversizedRdfLiterals(quads: Quad[], label: string): void {
@@ -5423,7 +5433,10 @@ export class DKGPublisher implements Publisher {
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const scopedGraphs = new Set<string>([graphUri]);
     const quads = input.map((t) => {
-      const originalGraph = 'graph' in t ? String(t.graph ?? '') : '';
+      const originalGraph = normalizeAssertionInputGraph(
+        graphUri,
+        'graph' in t ? String(t.graph ?? '') : '',
+      );
       if (originalGraph !== '') assertSafeIri(originalGraph);
       const graph = assertionScopedGraphUri(graphUri, originalGraph);
       scopedGraphs.add(graph);

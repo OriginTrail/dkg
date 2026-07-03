@@ -270,6 +270,28 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(swmResult.type === 'boolean' ? swmResult.value : true).toBe(false);
   });
 
+  it('treats DKG physical graph input as default-graph assertion content', async () => {
+    const name = 'physical-graph-default';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:physical-default',
+        predicate: 'http://schema.org/name',
+        object: '"Physical Default"',
+        graph: `did:dkg:context-graph:${CG_ID}`,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:physical-default',
+        graph: '',
+      }),
+    ]);
+    const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
+    expect(promoted.promotedCount).toBe(1);
+  });
+
   it('discard removes KA-scoped named graph draft content', async () => {
     const name = 'named-graph-discard';
     const namedGraph = 'urn:test:graph:discard-only';
