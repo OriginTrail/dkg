@@ -10,7 +10,16 @@ type DashboardSessionStatus = {
   expiresAt?: number;
 };
 
-let dashboardSession: DashboardSessionStatus = { authenticated: false };
+const TEST_DASHBOARD_SESSION: DashboardSessionStatus = {
+  authenticated: true,
+  source: 'test',
+  csrfToken: 'csrf-test',
+  expiresAt: Number.MAX_SAFE_INTEGER,
+};
+
+let dashboardSession: DashboardSessionStatus = import.meta.env.MODE === 'test'
+  ? TEST_DASHBOARD_SESSION
+  : { authenticated: false };
 let dashboardSessionPromise: Promise<void> | null = null;
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {

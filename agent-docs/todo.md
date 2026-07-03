@@ -15,7 +15,8 @@ Plan:
 - [x] Update devnet smoke, Playwright auth/session coverage, and CI static bundle contract.
 - [x] Run focused verification and document any deferred checks with rationale.
 - [x] Update project memory and prepare PR-driver-ready summary/test plan.
-- [ ] Push the branch, open a PR into `main`, and use the `github-pr-driver` workflow to drive CI/review convergence.
+- [x] Push the branch and open PR #1428 into `main`.
+- [ ] Use the `github-pr-driver` workflow to drive CI/review convergence, including replies to all addressed comments.
 
 Review:
 - Added server-side dashboard sessions in `packages/cli/src/daemon/dashboard-session.ts`, wired into the daemon lifecycle and `httpAuthGuard`.
@@ -29,6 +30,9 @@ Review:
   - `pnpm --filter @origintrail-official/dkg exec tsc --noEmit`
   - `pnpm --filter @origintrail-official/dkg-node-ui run build:ui`
   - `pnpm --filter @origintrail-official/dkg run build`
-  - Static contract check against `packages/node-ui/dist-ui/index.html`.
-  - `scripts/devnet-test-node-ui-smoke.sh` against a one-node WSL devnet: `PASS=11 FAIL=0`.
-  - `PLAYWRIGHT_DEVNET_TIMEOUT_MS=300000 PW_HEADLESS=1 pnpm exec playwright test e2e/specs/auth-session.spec.ts`: `1 passed`.
+- Static contract check against `packages/node-ui/dist-ui/index.html`.
+- `scripts/devnet-test-node-ui-smoke.sh` against a one-node WSL devnet: `PASS=11 FAIL=0`.
+- `PLAYWRIGHT_DEVNET_TIMEOUT_MS=300000 PW_HEADLESS=1 pnpm exec playwright test e2e/specs/auth-session.spec.ts`: `1 passed`.
+- Opened PR #1428: `codex/node-ui-auth-bootstrap-session` -> `main`.
+- Initial PR CI left only `Kosava: node-ui` failing; `Kosava: node-ui e2e (Playwright real-node devnet)` passed.
+- Follow-up PR-driver work moved to isolated WSL worktree `/home/jurij/dkg-pr1428` to avoid interfering with the user's `/home/jurij/dkg` checkout.

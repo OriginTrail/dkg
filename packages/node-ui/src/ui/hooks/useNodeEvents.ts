@@ -68,6 +68,7 @@ function connect() {
 
   void ensureDashboardSession().finally(() => {
     if (source || listeners.size === 0) return;
+    if (typeof EventSource === 'undefined') return;
     const nextSource = new EventSource('/api/events');
     source = nextSource;
 

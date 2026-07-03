@@ -1,5 +1,13 @@
 # Lessons Notes
 
+## 2026-07-03 - PR Driver Worktrees
+
+Mistake pattern: continued PR follow-up work in a shared WSL checkout after the active branch had changed.
+
+Root cause: the PR-driver loop assumed the checkout still belonged to the PR branch instead of re-validating the branch immediately before edits.
+
+Preventive rule: for active PR sweeps, use an isolated worktree for the PR branch and verify `git status --branch` before editing, staging, or running long verification.
+
 ## 2026-07-03 - WSL Command Hygiene
 
 Mistake pattern: complex PowerShell-to-Bash command strings introduced quoting and CRLF artifacts while driving WSL.

@@ -172,6 +172,7 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 }));
 
 vi.mock('../src/ui/api.js', () => ({
+  dashboardSessionAuthKey: () => 'test',
   listParticipants: vi.fn(async () => ({ allowedAgents: [] })),
 }));
 

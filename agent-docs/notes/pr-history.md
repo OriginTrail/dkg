@@ -18,3 +18,8 @@ Verification:
 - Static bundle contract passed.
 - WSL one-node devnet UI smoke passed with `PASS=11 FAIL=0`.
 - Four-node Playwright auth-session spec passed.
+
+PR driver:
+- Opened PR #1428 from `codex/node-ui-auth-bootstrap-session` to `main`.
+- Initial CI: real-node Playwright devnet passed; `Kosava: node-ui` exposed test-environment assumptions around dashboard-session bootstrapping and `EventSource`.
+- Follow-up fix keeps Vitest browser tests on a stable test dashboard session, adds the missing API mock export, and avoids constructing `EventSource` where the test environment does not provide it.
