@@ -699,14 +699,48 @@ export interface ContextGraphSubscriptionRehydrationStatus {
 }
 
 export interface ContextGraphWritePreflightProbe {
-  exists: boolean;
-  hasLocalContent: boolean;
+  /**
+   * Explicit, REQUIRED store-availability discriminant. `true` when every
+   * store-backed read the probe issued answered, `false` when at least one
+   * failed (slow-store abort timeout, "the store is closed" after an Oxigraph
+   * worker crash, …). This is the typed boundary consumers MUST check before
+   * trusting any store-derived fact below: with `storeAvailable === false`,
+   * `exists` / `hasLocalContent` / `declarationFound` / `accessPolicy` /
+   * `callerAuthorized` are NOT definitive — a failed read leaves them
+   * `undefined` (UNKNOWN), which must never be misread as a "does not exist"
+   * deny. Making this required (not just the optional `storeUnavailable`
+   * flag) means the type stops a consumer from reading `exists` as a plain
+   * boolean without first establishing the store was up. Logical inverse of
+   * `storeUnavailable` — kept alongside it so the 503-diagnostics path (which
+   * greps `storeUnavailable === true` + `storeErrorMessage`) is unchanged.
+   */
+  storeAvailable: boolean;
+  /**
+   * Store-derived facts are tri-state: `true`/`false` when the local store
+   * answered (`storeAvailable === true`), `undefined` when the backing read
+   * failed. Only trust these when `storeAvailable` is `true`.
+   */
+  exists?: boolean;
+  hasLocalContent?: boolean;
   inMemorySubscription?: Pick<ContextGraphSub, 'subscribed' | 'synced'>;
   persistedSubscription?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'synced'>;
-  declarationFound: boolean;
+  declarationFound?: boolean;
   accessPolicy?: 'public' | 'private';
   curator?: string;
   callerAuthorized?: boolean;
+  /**
+   * True when at least one local-store read failed (slow-store abort
+   * timeout, "the store is closed" after an Oxigraph worker crash, …) —
+   * the inverse of `storeAvailable`. The probe still carries the zero-I/O
+   * in-memory subscription snapshot above, so the daemon's write preflight
+   * can rescue an id it ALREADY tracks instead of 503ing every write until
+   * the store recovers. The store-derived fields whose reads failed are left
+   * `undefined`. Retained for the 503-diagnostics grep alongside
+   * `storeErrorMessage`.
+   */
+  storeUnavailable?: boolean;
+  /** First store-read failure message, retained for 503 diagnostics. */
+  storeErrorMessage?: string;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
