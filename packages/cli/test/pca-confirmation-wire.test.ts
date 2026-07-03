@@ -27,15 +27,20 @@ describe('decodeRegisterAgentAdvisory', () => {
       .toEqual({ registered: true, advisory: 'unsupported' });
   });
 
-  it('legacy daemon (verified absent): registered follows the mined-tx authority (true), advisory from the old fields', () => {
-    // confirmed — old registered:true meant the read confirmed it
+  // R14 (14-A) — a legacy daemon had no success:false guard, so a legacy
+  // registered:false may be a failed/unconfirmed tx. Only registered:true+
+  // adapterSupported:true (the old read OBSERVED it) is confirmed; otherwise
+  // `registered` is surfaced AS-IS (never forced true) with legacy-unverified —
+  // so a failed/unconfirmed legacy registration is NEVER reported as success.
+  it('legacy daemon (verified absent): only observed-registered → confirmed; otherwise registered stays AS-IS + legacy-unverified', () => {
+    // old read observed it registered → the tx succeeded → confirmed
     expect(decodeRegisterAgentAdvisory({ registered: true, adapterSupported: true }))
       .toEqual({ registered: true, advisory: 'confirmed' });
-    // no probe surface — registered becomes true (mined-tx authority), NOT the old false
+    // no probe surface, read did not confirm — DO NOT force registered:true
     expect(decodeRegisterAgentAdvisory({ registered: false, adapterSupported: false }))
-      .toEqual({ registered: true, advisory: 'unsupported' });
-    // read ran, not yet observed — registered true (mined), advisory pending
+      .toEqual({ registered: false, advisory: 'legacy-unverified' });
+    // read ran but did not observe it — cannot assert tx success; registered stays false
     expect(decodeRegisterAgentAdvisory({ registered: false, adapterSupported: true }))
-      .toEqual({ registered: true, advisory: 'pending' });
+      .toEqual({ registered: false, advisory: 'legacy-unverified' });
   });
 });

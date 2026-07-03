@@ -32,21 +32,28 @@ export type RegisterPcaAgentAdvisory =
 type RegisterPcaAgentResponseBase = {
   accountId: string;
   agent: string;
-  registered: boolean;
   txHash: string;
   blockNumber: number;
 };
 
 /**
- * What the CURRENT daemon EMITS — STRICT: the coherent `PcaAgentConfirmation`
- * advisory is required. The daemon route (`registerPcaAgentResponse`) returns
- * this, so a future edit that drops `verified`/`adapterSupported` fails to
- * compile — the producer keeps type pressure to emit the coherent wire shape.
+ * What the CURRENT daemon EMITS — STRICT. The mined tx is authoritative AND a
+ * `success:false` tx is rejected upstream (502), so `registered` is literally
+ * `true`, and the advisory is the coherent `PcaAgentConfirmation`. The route
+ * (`registerPcaAgentResponse`) returns this: a future edit that drops the
+ * invariant — `registered:false`, or a missing `verified`/`adapterSupported` —
+ * fails to compile.
  */
-export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & PcaAgentConfirmation;
+export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: true } & PcaAgentConfirmation;
 
-/** The pre-#1346 legacy wire shape (adapterSupported present, verified absent). */
-export type LegacyRegisterPcaAgentResponse = RegisterPcaAgentResponseBase & {
+/**
+ * The pre-#1346 legacy wire shape: `registered` is the OLD probe-derived boolean
+ * (registered = `verified === true`; may be `false`), with `adapterSupported`
+ * present and `verified` absent. A legacy daemon had NO `success:false` guard,
+ * so a legacy `registered:false` may be an unconfirmed OR a failed tx — hence a
+ * loose boolean here (only the legacy shape carries that looseness).
+ */
+export type LegacyRegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: boolean } & {
   adapterSupported: boolean;
   verified?: undefined;
 };
@@ -68,45 +75,46 @@ export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgent
   }
 }
 
-/** The register-agent advisory confirmation status, for display. */
-export type RegisterAgentAdvisoryStatus = 'confirmed' | 'pending' | 'unsupported';
+/** The register-agent advisory confirmation status, for display. `legacy-unverified`
+ *  = a pre-#1346 daemon that could not confirm and whose success we cannot assert. */
+export type RegisterAgentAdvisoryStatus = 'confirmed' | 'pending' | 'unsupported' | 'legacy-unverified';
 
 /** A register-agent response normalized into a coherent display. */
 export type RegisterAgentDisplay = {
-  /** Whether the agent is registered — driven by the MINED-TX authority. */
+  /** Whether the agent is registered. */
   registered: boolean;
   /** The on-chain confirmation status. */
   advisory: RegisterAgentAdvisoryStatus;
 };
 
 /**
- * #1346 — decode a register-agent response (current OR pre-#1346 legacy wire
- * shape) into ONE coherent display, so consumers don't each re-derive the wire
- * rules — especially under CLI/daemon version skew. A returned (non-error)
- * response means the register tx MINED, so the agent IS registered; that is the
- * authoritative signal for `registered`. Advisory decoding:
- *   - current daemon: `verified` present — true → confirmed; false/null → pending;
- *     adapterSupported:false → unsupported.
- *   - pre-#1346 legacy daemon: `verified` ABSENT. Its own `registered` field was
- *     the OLD probe-derived confirmation (registered = verified===true), NOT the
- *     mined-tx authority — so it is NOT echoed as final (echoing a legacy
- *     `registered:false` alongside "authoritative via the mined tx" is the
- *     contradiction this fixes). Legacy `registered:true` + adapterSupported:true
- *     → confirmed; adapterSupported:false → unsupported; else pending.
+ * #1346 — decode a register-agent response (current OR pre-#1346 legacy) into one
+ * coherent display, so consumers don't each re-derive the wire rules.
+ *   - CURRENT daemon (`verified` present): the mined tx is authoritative AND a
+ *     failed tx was rejected upstream (502), so `registered:true`. Advisory:
+ *     verified===true → confirmed; adapterSupported===false → unsupported; else pending.
+ *   - LEGACY daemon (`verified` absent): its `registered` = old (verified===true).
+ *     If the old read OBSERVED the agent registered (registered:true +
+ *     adapterSupported:true), the tx succeeded → confirmed (registered:true).
+ *     Otherwise the old read did not confirm, and a pre-#1346 daemon had NO
+ *     `success:false` guard, so we CANNOT assert the tx succeeded — surface
+ *     `registered` AS-IS (do NOT force `true`) with `legacy-unverified`, so a
+ *     failed/unconfirmed legacy registration is never reported as success.
  */
 export function decodeRegisterAgentAdvisory(
   resp: { registered: boolean } & RegisterPcaAgentAdvisory,
 ): RegisterAgentDisplay {
-  const legacy = resp.verified === undefined;
-  // A successful response = the register tx mined = the agent is registered.
-  const registered = legacy ? true : resp.registered;
-  let advisory: RegisterAgentAdvisoryStatus;
-  if (resp.verified === true || (legacy && resp.registered === true && resp.adapterSupported === true)) {
-    advisory = 'confirmed';
-  } else if (resp.adapterSupported === false) {
-    advisory = 'unsupported';
-  } else {
-    advisory = 'pending';
+  if (resp.verified !== undefined) {
+    const advisory: RegisterAgentAdvisoryStatus =
+      resp.verified === true ? 'confirmed'
+        : resp.adapterSupported === false ? 'unsupported'
+          : 'pending';
+    return { registered: true, advisory };
   }
-  return { registered, advisory };
+  // Legacy: the old read observed it registered ⇒ the tx succeeded, confirmed.
+  if (resp.registered === true && resp.adapterSupported === true) {
+    return { registered: true, advisory: 'confirmed' };
+  }
+  // Legacy: old read did not confirm — cannot assert the tx succeeded.
+  return { registered: resp.registered, advisory: 'legacy-unverified' };
 }

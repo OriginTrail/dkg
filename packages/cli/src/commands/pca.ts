@@ -164,6 +164,8 @@ pcaCmd
         console.log(`  verified:   confirmed on-chain`);
       } else if (display.advisory === 'unsupported') {
         console.log(`  verified:   not verifiable on this adapter (registration is authoritative via the mined tx)`);
+      } else if (display.advisory === 'legacy-unverified') {
+        console.log(`  verified:   unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify`);
       } else {
         console.log(`  verified:   pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)`);
       }

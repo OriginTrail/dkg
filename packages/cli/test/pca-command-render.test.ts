@@ -72,15 +72,21 @@ describe('pca register-agent — advisory output rendering', () => {
     expect(out).not.toMatch(/pending/);
   });
 
-  // R11 (11-C) — a pre-#1346 daemon with no probe surface returns
-  // { registered:false, adapterSupported:false, verified absent }. The old
-  // `registered:false` was the probe-derived confirmation, NOT the mined-tx
-  // authority — echoing it alongside "authoritative via the mined tx" was
-  // contradictory. The mined tx is authoritative, so render registered:true.
-  it('legacy unsupported (verified absent, registered:false, adapterSupported:false) → registered:true + not verifiable (no contradiction)', async () => {
+  // R14 (14-A) — a pre-#1346 daemon has no success:false guard, so a legacy
+  // `registered:false` may be a failed/unconfirmed tx. We must NOT force it to
+  // `registered:true` (that would report a failed registration as success);
+  // surface it as-is with an unverifiable status.
+  it('legacy unverifiable (verified absent, registered:false, adapterSupported:false) → registered:false + unverifiable, NOT forced true', async () => {
     const out = await runRegisterAgent({ registered: false, adapterSupported: false });
-    expect(out).toMatch(/registered: true/);
-    expect(out).toMatch(/verified:\s+not verifiable on this adapter/);
-    expect(out).not.toMatch(/registered: false/);
+    expect(out).toMatch(/registered: false/);
+    expect(out).toMatch(/verified:\s+unverifiable/);
+    expect(out).not.toMatch(/registered: true/);
+  });
+
+  it('legacy unverifiable (verified absent, registered:false, adapterSupported:true) → registered:false + unverifiable (unconfirmed legacy tx not reported registered)', async () => {
+    const out = await runRegisterAgent({ registered: false, adapterSupported: true });
+    expect(out).toMatch(/registered: false/);
+    expect(out).toMatch(/verified:\s+unverifiable/);
+    expect(out).not.toMatch(/registered: true/);
   });
 });
