@@ -50,6 +50,7 @@ import {
   runDkgCli,
   queryNode,
   unwrapIri,
+  parseLastJsonBlock,
   type DevnetState,
   type DevnetNode,
 } from '../_bootstrap/harness.js';
@@ -78,26 +79,6 @@ const freshCgId = (): string =>
 const manifestFor = (cgId: string): string =>
   join(import.meta.dirname, `.okf-manifest-${cgId}.json`);
 
-/** Extract the final JSON object the okf CLI prints to stdout (after per-line logs). */
-function lastJsonBlock(stdout: string): Record<string, unknown> {
-  // The summary is a pretty-printed multi-line object; find the last top-level
-  // `{` whose brace-balanced slice parses as JSON.
-  for (let i = stdout.lastIndexOf('\n{'); i >= 0; i = stdout.lastIndexOf('\n{', i - 1)) {
-    const candidate = stdout.slice(i).trim();
-    try {
-      return JSON.parse(candidate) as Record<string, unknown>;
-    } catch {
-      /* keep scanning earlier */
-    }
-  }
-  // Fall back: whole stdout (dry-run prints a single object).
-  try {
-    return JSON.parse(stdout.trim()) as Record<string, unknown>;
-  } catch {
-    throw new Error(`no JSON summary in okf stdout:\n${stdout.slice(0, 2000)}`);
-  }
-}
-
 // SPARQL binding normalizers (unwrapIri, valueOf) now live in the shared harness —
 // single typed SparqlBindingCell boundary (otReviewAgent #1397). harness.unwrapIri
 // does valueOf() internally, so `unwrapIri(cellStr(x))` collapses to `unwrapIri(x)`.
@@ -119,7 +100,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
     const res = await runDkgCli(node, ['okf', 'import', BUNDLE_DIR, '--dry-run'], 60_000);
     expect(res.code, `okf import --dry-run failed:\n${res.stdout}\n${res.stderr}`).toBe(0);
 
-    const summary = lastJsonBlock(res.stdout);
+    const summary = parseLastJsonBlock(res.stdout, 'okf import --dry-run stdout');
     expect(summary.mode).toBe('dry-run');
     // Offline default is Working Memory, per-concept.
     expect(summary.memoryLayer).toBe('WM');
@@ -157,7 +138,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
       120_000,
     );
     expect(wm.code, `okf import (WM) failed:\n${wm.stdout}\n${wm.stderr}`).toBe(0);
-    const wmSummary = lastJsonBlock(wm.stdout);
+    const wmSummary = parseLastJsonBlock(wm.stdout, 'okf import WM stdout');
     expect(wmSummary.mode).toBe('import');
     expect(wmSummary.memoryLayer).toBe('WM');
     expect(wmSummary.contextGraphId).toBe(wmCg);
@@ -185,7 +166,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
       180_000,
     );
     expect(res.code, `okf import --share failed:\n${res.stdout}\n${res.stderr}`).toBe(0);
-    const summary = lastJsonBlock(res.stdout);
+    const summary = parseLastJsonBlock(res.stdout, 'okf import --share stdout');
     expect(summary.mode).toBe('import');
     expect(summary.memoryLayer).toBe('SWM');
     expect(summary.assetsShared).toBe(CONCEPT_IDS.length);
@@ -258,7 +239,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
     );
     expect(ver.code, `okf verify exited non-zero (shortfall):\n${ver.stdout}\n${ver.stderr}`).toBe(0);
 
-    const report = lastJsonBlock(ver.stdout);
+    const report = parseLastJsonBlock(ver.stdout, 'okf verify stdout');
     expect(report.mode).toBe('verify');
     expect(report.contextGraphId).toBe(cgId);
     expect(report.complete, `verify not complete: ${JSON.stringify(report.predicates)}`).toBe(true);
@@ -310,7 +291,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
       120_000,
     );
     expect(exp.code, `okf export failed:\n${exp.stdout}\n${exp.stderr}`).toBe(0);
-    const expSummary = lastJsonBlock(exp.stdout);
+    const expSummary = parseLastJsonBlock(exp.stdout, 'okf export stdout');
     expect(expSummary.mode).toBe('export');
     expect(expSummary.contextGraphId).toBe(cgId);
     // Every concept (4) is rebuilt as a bundle file (section/skolem nodes excluded).
@@ -322,7 +303,7 @@ describe('PR #1388 — OKF bundle → DKG memory integration', () => {
     const reimport = await runDkgCli(node, ['okf', 'import', outDir, '--dry-run'], 60_000);
     expect(reimport.code, `re-import of exported bundle failed:\n${reimport.stdout}\n${reimport.stderr}`)
       .toBe(0);
-    const reSummary = lastJsonBlock(reimport.stdout);
+    const reSummary = parseLastJsonBlock(reimport.stdout, 'okf re-import --dry-run stdout');
     expect(reSummary.conformant).toBe(true);
     expect(reSummary.concepts).toBe(CONCEPT_IDS.length);
     const reIris = (reSummary.iris ?? {}) as Record<string, string>;
