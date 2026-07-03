@@ -384,6 +384,22 @@ import type { DKGAgent } from './dkg-agent.js';
 // confirmation module (imported here for the facade, not re-exported from index).
 import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 
+// #1346 — the SINGLE PCA capability boundary for the "is this agent registered?"
+// chain read. Narrows the optional `chain.isPublishingConvictionAgent` into a
+// bound boolean probe, or `null` when the adapter has no such read. Both the
+// direct read (`isPublishingConvictionAgent`) and the post-mine confirmation
+// derive supported/unsupported from this one place — the "method present?" rule
+// is modeled once, with no duplicated `typeof` guard and no non-null assertion.
+// `.call(chain, …)` preserves the adapter's `this` binding.
+function pcaRegisteredProbe(
+  chain: { isPublishingConvictionAgent?: (accountId: bigint, agent: string) => Promise<boolean> },
+  accountId: bigint,
+  agent: string,
+): (() => Promise<boolean>) | null {
+  const read = chain.isPublishingConvictionAgent;
+  return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
+
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
@@ -1511,8 +1527,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   async isPublishingConvictionAgent(this: DKGAgent, accountId: bigint, agent: string): Promise<boolean | null> {
-    if (typeof this.chain.isPublishingConvictionAgent !== 'function') return null;
-    return this.chain.isPublishingConvictionAgent(accountId, agent);
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    return probe ? probe() : null;
   }
 
   // #1346 — Best-effort on-chain confirmation of a just-mined agent
@@ -1521,14 +1537,16 @@ export class AgentRegistryMethods extends DKGAgentBase {
   // `PcaConfirmationOutcome` (the daemon/CLI boundary derives the wire
   // `{ verified, adapterSupported }` from it). A lagging or throwing read stays
   // advisory and NEVER flips the authoritative registration. The STATIC adapter
-  // capability gap (`unsupported`) is decided HERE, once, so the retry state
-  // machine only reasons about boolean reads (it never sees a `null`).
+  // capability gap (`unsupported`) is decided HERE, once — via the shared
+  // `pcaRegisteredProbe` boundary — so the retry state machine only reasons
+  // about boolean reads (it never sees a `null`).
   async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
     accountId: bigint,
     agent: string,
   ): Promise<PcaConfirmationOutcome> {
-    if (typeof this.chain.isPublishingConvictionAgent !== 'function') return 'unsupported';
-    return confirmPcaAgentRegistration(() => this.chain.isPublishingConvictionAgent!(accountId, agent));
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    if (!probe) return 'unsupported';
+    return confirmPcaAgentRegistration(probe);
   }
 
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {

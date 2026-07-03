@@ -18,7 +18,6 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
-import { resolveRegisterPcaAgent } from './pca-register-agent.js';
 import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -515,22 +514,27 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'agent must not be the zero address' });
     }
     try {
-      // Orchestration + response assembly live in the focused pca-register-agent
-      // module; this handler owns input validation + chain-error classification
-      // (the catch below) and maps the outcome to a response.
-      const outcome = await resolveRegisterPcaAgent(agent, accountId, agentAddr);
-      if (outcome.kind === 'unavailable') return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      if (outcome.kind === 'reverted') {
+      // Register on-chain, then best-effort confirm. Like its sibling PCA routes,
+      // this handler orchestrates the agent-facade calls inline and owns input
+      // validation + chain-error classification (the catch below):
+      //   - null       ⟹ the chain adapter exposes no PCA surface (503).
+      //   - success:false ⟹ the tx mined but reverted — never a registration (502).
+      const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
+      if (result === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
+      if (result.success === false) {
         return jsonResponse(res, 502, { error: 'PCA agent registration transaction was mined but did not succeed on-chain' });
       }
-      // The route owns the wire response body; the module returned pure domain data.
+      // Advisory on-chain confirmation of the just-mined registration — refines
+      // the wire `{ verified, adapterSupported }` but NEVER flips the
+      // authoritative `registered:true` from the mined receipt.
+      const confirmation = await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr);
       const body: RegisterPcaAgentResponse = {
         accountId: accountId.toString(),
         agent: agentAddr,
         registered: true,
-        ...pcaConfirmationToWire(outcome.confirmation),
-        txHash: outcome.txHash,
-        blockNumber: outcome.blockNumber,
+        ...pcaConfirmationToWire(confirmation),
+        txHash: result.hash,
+        blockNumber: result.blockNumber,
       };
       return jsonResponse(res, 200, body);
     } catch (err: any) {

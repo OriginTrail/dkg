@@ -28,10 +28,10 @@ type RegisterPcaAgentResponseBase = {
 /**
  * What the CURRENT daemon EMITS — STRICT. The mined tx is authoritative AND a
  * `success:false` tx is rejected upstream (502), so `registered` is literally
- * `true`, and the advisory is the coherent `PcaAgentConfirmation`. The route
- * helper (`resolveRegisterPcaAgent`) returns this: a future edit that drops the
- * invariant — `registered:false`, or a missing `verified`/`adapterSupported` —
- * fails to compile.
+ * `true`, and the advisory is the coherent `PcaAgentConfirmation`. The
+ * register-agent route assembles this: a future edit that drops the invariant —
+ * `registered:false`, or a missing `verified`/`adapterSupported` — fails to
+ * compile.
  */
 export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: true } & PcaAgentConfirmation;
 
