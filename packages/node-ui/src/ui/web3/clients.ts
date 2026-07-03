@@ -18,7 +18,7 @@ import {
   type WalletClient,
 } from 'viem';
 import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
-import { authHeaders } from '../api.js';
+import { authHeaders, ensureDashboardSession, mergeHeaders } from '../dashboardSessionClient.js';
 import { numericChainId } from './chainId.js';
 import type { Eip1193Provider } from './eip6963.js';
 
@@ -59,8 +59,16 @@ function isSameOriginRpcUrl(url: string): boolean {
 
 function rpcFetchOptions(url: string): RequestInit | undefined {
   if (!isSameOriginRpcUrl(url)) return undefined;
-  const headers = authHeaders();
-  return { credentials: 'same-origin', ...(Object.keys(headers).length ? { headers } : {}) };
+  return { credentials: 'same-origin' };
+}
+
+async function rpcOnFetchRequest(_request: Request, init: RequestInit): Promise<RequestInit> {
+  await ensureDashboardSession();
+  return {
+    ...init,
+    credentials: init.credentials ?? 'same-origin',
+    headers: mergeHeaders(init.headers, authHeaders()),
+  };
 }
 
 /**
@@ -84,7 +92,7 @@ export function publicClientFor(chainId: string | number, rpcUrls: string[]): Pu
         timeout: 8_000,
         retryCount: multiRpc ? 0 : 2,
         retryDelay: 200,
-        ...(fetchOptions ? { fetchOptions } : {}),
+        ...(fetchOptions ? { fetchOptions, onFetchRequest: rpcOnFetchRequest } : {}),
       });
     }),
     { retryCount: 1, retryDelay: 250 },

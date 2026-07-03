@@ -16,6 +16,8 @@ import { dkgDir } from './config.js';
 export interface DashboardSessionAuthResult {
   token: string;
   csrfToken: string;
+  source?: 'loopback' | 'exchange';
+  expiresAt?: number;
 }
 
 export interface HttpAuthGuardOptions {
@@ -23,6 +25,29 @@ export interface HttpAuthGuardOptions {
     authenticate: (req: IncomingMessage) => DashboardSessionAuthResult | null;
     verifyCsrf: (req: IncomingMessage, session: DashboardSessionAuthResult) => boolean;
   };
+}
+
+export interface RequestAuthContext {
+  source: 'authorization-header' | 'events-query' | 'dashboard-session';
+  token: string;
+  csrf: {
+    required: boolean;
+    validated: boolean;
+  };
+  dashboardSession?: {
+    source?: 'loopback' | 'exchange';
+    expiresAt?: number;
+  };
+}
+
+const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
+
+export function setRequestAuthContext(req: IncomingMessage, context: RequestAuthContext): void {
+  (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT] = context;
+}
+
+export function getRequestAuthContext(req: IncomingMessage): RequestAuthContext | undefined {
+  return (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT];
 }
 
 // ---------------------------------------------------------------------------
@@ -849,8 +874,13 @@ export function httpAuthGuard(
 
   const token = extractBearerToken(req.headers.authorization);
   let acceptedToken: string | undefined;
+  let acceptedAuthSource: RequestAuthContext['source'] | undefined;
+  let acceptedDashboardSession: RequestAuthContext['dashboardSession'] | undefined;
+  let csrfRequired = false;
+  let csrfValidated = false;
   if (verifyToken(token, validTokens)) {
     acceptedToken = token;
+    acceptedAuthSource = 'authorization-header';
   } else if (pathname === '/api/events') {
     // EventSource can't set headers — accept token as query param, but ONLY
     // for the SSE endpoint to avoid leaking credentials in URLs/logs/referrers.
@@ -858,6 +888,7 @@ export function httpAuthGuard(
     const qsToken = url.searchParams.get('token');
     if (qsToken && verifyToken(qsToken, validTokens)) {
       acceptedToken = qsToken;
+      acceptedAuthSource = 'events-query';
     }
   }
 
@@ -869,7 +900,9 @@ export function httpAuthGuard(
     if (session && verifyToken(session.token, validTokens)) {
       const method = req.method ?? 'GET';
       const unsafe = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
-      if (unsafe && !options.dashboardSession.verifyCsrf(req, session)) {
+      csrfRequired = unsafe;
+      csrfValidated = unsafe ? options.dashboardSession.verifyCsrf(req, session) : false;
+      if (unsafe && !csrfValidated) {
         res.writeHead(403, {
           'Content-Type': 'application/json',
           'Access-Control-Allow-Origin': corsOrigin ?? '*',
@@ -878,12 +911,25 @@ export function httpAuthGuard(
         return false;
       }
       acceptedToken = session.token;
-      req.headers.authorization = `Bearer ${session.token}`;
-      (req as unknown as { __dkgAuthSource?: string }).__dkgAuthSource = 'dashboard-session';
+      acceptedAuthSource = 'dashboard-session';
+      acceptedDashboardSession = {
+        source: session.source,
+        expiresAt: session.expiresAt,
+      };
     }
   }
 
   if (acceptedToken) {
+    setRequestAuthContext(req, {
+      source: acceptedAuthSource ?? 'authorization-header',
+      token: acceptedToken,
+      csrf: {
+        required: csrfRequired,
+        validated: csrfValidated,
+      },
+      ...(acceptedDashboardSession ? { dashboardSession: acceptedDashboardSession } : {}),
+    });
+
     const now = Date.now();
 
     // CLI-10: stale-timestamp gate. If the client opted into the

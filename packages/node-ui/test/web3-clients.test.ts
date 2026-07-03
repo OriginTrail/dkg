@@ -4,10 +4,17 @@ import { describe, expect, it, afterEach, vi } from 'vitest';
 
 import { numericChainId, chainIdHex } from '../src/ui/web3/chainId.js';
 import { synthesizeChain, publicClientFor, _resetClientCacheForTesting } from '../src/ui/web3/clients.js';
+import { __setDashboardSessionForTesting } from '../src/ui/api.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   _resetClientCacheForTesting();
+  __setDashboardSessionForTesting({
+    authenticated: true,
+    source: 'test',
+    csrfToken: 'csrf-test',
+    expiresAt: Number.MAX_SAFE_INTEGER,
+  });
 });
 
 describe('chainId helpers', () => {
@@ -67,6 +74,12 @@ describe('publicClientFor', () => {
   it('can read through a same-origin relative PCA RPC URL in the browser', async () => {
     const seenUrls: string[] = [];
     const seenInits: Array<RequestInit | undefined> = [];
+    __setDashboardSessionForTesting({
+      authenticated: true,
+      source: 'test',
+      csrfToken: 'csrf-123',
+      expiresAt: Date.now() + 60_000,
+    });
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       seenUrls.push(typeof input === 'string' ? input : input.toString());
       seenInits.push(init);
@@ -85,6 +98,54 @@ describe('publicClientFor', () => {
     expect(seenUrls).toEqual(['/api/pca/rpc']);
     expect(seenInits[0]?.credentials).toBe('same-origin');
     expect(headerValue(seenInits[0]?.headers, 'Authorization')).toBeUndefined();
+    expect(headerValue(seenInits[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-123');
+  });
+
+  it('uses the current CSRF token for each same-origin RPC request on a cached client', async () => {
+    const seenHeaders: Array<HeadersInit | undefined> = [];
+    __setDashboardSessionForTesting({
+      authenticated: true,
+      source: 'test',
+      csrfToken: 'csrf-old',
+      expiresAt: Date.now() + 60_000,
+    });
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/dashboard/session/status') {
+        return new Response(JSON.stringify({
+          authenticated: true,
+          source: 'exchange',
+          csrfToken: 'csrf-new',
+          expiresAt: Date.now() + 60_000,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      seenHeaders.push(init?.headers);
+      const body = JSON.parse(String(init?.body ?? '{}')) as { id?: unknown } | Array<{ id?: unknown }>;
+      const responseBody = Array.isArray(body)
+        ? body.map((call) => ({ jsonrpc: '2.0', id: call.id, result: '0x14a34' }))
+        : { jsonrpc: '2.0', id: body.id, result: '0x14a34' };
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const client = publicClientFor('base:84532', ['/api/pca/rpc']);
+    await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
+    expect(headerValue(seenHeaders[0], 'X-DKG-CSRF')).toBe('csrf-old');
+
+    __setDashboardSessionForTesting({
+      authenticated: true,
+      source: 'test',
+      csrfToken: 'csrf-old',
+      expiresAt: Date.now() - 1,
+    });
+    expect(publicClientFor('base:84532', ['/api/pca/rpc'])).toBe(client);
+    await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
+    expect(headerValue(seenHeaders[1], 'X-DKG-CSRF')).toBe('csrf-new');
   });
 
   it('does not send dashboard credentials to external RPC URLs', async () => {

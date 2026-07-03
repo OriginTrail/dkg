@@ -1,11 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   DashboardSessionStore,
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
-import { httpAuthGuard } from '../src/auth.js';
+import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
 
 const VALID_TOKEN = 'dashboard-backed-token';
 
@@ -39,12 +39,38 @@ async function startServer(): Promise<{ server: Server; baseUrl: string }> {
     res.end(JSON.stringify({
       ok: true,
       authorization: req.headers.authorization ?? null,
+      requestAuth: getRequestAuthContext(req) ?? null,
     }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('server did not bind');
   return { server, baseUrl: `http://127.0.0.1:${address.port}` };
+}
+
+async function rawRequest(
+  baseUrl: string,
+  path: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; headers: IncomingMessage['headers']; body: string }> {
+  const url = new URL(baseUrl);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({
+      hostname: url.hostname,
+      port: url.port,
+      path,
+      method: options.method ?? 'GET',
+      headers: options.headers,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
+    });
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
 }
 
 describe('dashboard browser sessions', () => {
@@ -81,6 +107,21 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({ authenticated: true, source: 'loopback' });
   });
 
+  it('rejects loopback bootstrap with a disallowed Host header', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await rawRequest(started.baseUrl, '/api/dashboard/session/loopback', {
+      method: 'POST',
+      headers: { Host: 'attacker.example' },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['set-cookie']).toBeUndefined();
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: expect.stringContaining('localhost'),
+    });
+  });
+
   it('authenticates protected GETs with the dashboard cookie and no Authorization header from the browser', async () => {
     const started = await startServer();
     server = started.server;
@@ -91,8 +132,61 @@ describe('dashboard browser sessions', () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({
       ok: true,
-      authorization: `Bearer ${VALID_TOKEN}`,
+      authorization: null,
+      requestAuth: {
+        source: 'dashboard-session',
+        token: VALID_TOKEN,
+        dashboardSession: { source: 'loopback' },
+        csrf: { required: false, validated: false },
+      },
     });
+  });
+
+  it('exchanges a valid JSON token for a usable dashboard session cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Strict');
+    expect(setCookie).toContain('Path=/');
+    expect(setCookie.toLowerCase()).not.toContain('domain=');
+    await expect(exchange.json()).resolves.toMatchObject({ authenticated: true, source: 'exchange' });
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: setCookie.split(';')[0] },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      authorization: null,
+      requestAuth: {
+        source: 'dashboard-session',
+        token: VALID_TOKEN,
+        dashboardSession: { source: 'exchange' },
+      },
+    });
+  });
+
+  it('rejects invalid dashboard session exchange tokens without setting a cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: 'wrong' }),
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    await expect(res.json()).resolves.toMatchObject({ error: 'Invalid dashboard session token' });
   });
 
   it('rejects unsafe session-authenticated requests without CSRF', async () => {

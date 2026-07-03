@@ -23,3 +23,5 @@ PR driver:
 - Opened PR #1428 from `codex/node-ui-auth-bootstrap-session` to `main`.
 - Initial CI: real-node Playwright devnet passed; `Kosava: node-ui` exposed test-environment assumptions around dashboard-session bootstrapping and `EventSource`.
 - Follow-up fix keeps Vitest browser tests on a stable test dashboard session, adds the missing API mock export, and avoids constructing `EventSource` where the test environment does not provide it.
+- Review round 1 fixes added remote dashboard unlock/exchange UX, extracted browser session transport state, made PCA RPC CSRF headers refresh per request, introduced typed server request auth context, and expanded dashboard-session regression tests.
+- Review round 1 verification in isolated WSL worktree `/home/jurij/dkg-pr1428`: targeted Node UI vitest suite passed (221 tests, 38 skipped), CLI auth/session vitest passed (47 tests), node-ui TypeScript build passed, Vite UI build passed, and CLI build passed.

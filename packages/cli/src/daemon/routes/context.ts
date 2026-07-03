@@ -23,6 +23,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
+import type { RequestAuthContext } from '../../auth.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -95,6 +96,7 @@ export interface RequestContext {
   url: URL;
   path: string;
   requestToken: string | undefined;
+  requestAuth?: RequestAuthContext;
   requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */

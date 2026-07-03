@@ -36,3 +36,15 @@ Review:
 - Opened PR #1428: `codex/node-ui-auth-bootstrap-session` -> `main`.
 - Initial PR CI left only `Kosava: node-ui` failing; `Kosava: node-ui e2e (Playwright real-node devnet)` passed.
 - Follow-up PR-driver work moved to isolated WSL worktree `/home/jurij/dkg-pr1428` to avoid interfering with the user's `/home/jurij/dkg` checkout.
+- Addressed review round:
+  - Added explicit remote dashboard unlock via `/api/dashboard/session/exchange`.
+  - Extracted browser session/bootstrap state into `dashboardSessionClient.ts`.
+  - Kept PCA same-origin RPC clients cached while injecting CSRF per request.
+  - Replaced synthetic dashboard-session bearer header mutation with typed request auth context.
+  - Added loopback Host rejection and exchange endpoint regression tests.
+- Review-round verification passed in isolated WSL worktree `/home/jurij/dkg-pr1428`:
+  - `pnpm --filter @origintrail-official/dkg-node-ui exec vitest run test/web3-clients.test.ts test/dashboard-session-gate.test.ts test/ui-api-pure.test.ts test/project-view-navigation.test.ts test/use-assertion-lifecycle-events.test.ts test/layer-graph-panel.test.ts test/use-current-agent.test.ts test/ui-compat.test.ts test/app-primer-route.test.ts --no-file-parallelism`
+  - `pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.unit.config.ts test/dashboard-session.test.ts test/auth.test.ts`
+  - `pnpm --filter @origintrail-official/dkg-node-ui run build`
+  - `pnpm --filter @origintrail-official/dkg-node-ui run build:ui`
+  - `pnpm --filter @origintrail-official/dkg run build`

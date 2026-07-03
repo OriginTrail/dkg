@@ -57,3 +57,56 @@ button:focus:not(:focus-visible) { outline: none; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 .pulse-dot { animation: pulse 2s ease-in-out infinite; }
 .fade-in { animation: fadeSlideIn 0.4s ease; }
+
+.v10-session-gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.v10-session-unlock {
+  width: min(100%, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 22px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+}
+
+.v10-session-unlock-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.v10-session-unlock-copy h1 {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.v10-session-unlock-copy p,
+.v10-session-token-field span,
+.v10-session-error {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.v10-session-token-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.v10-session-token-field input {
+  width: 100%;
+  min-height: 38px;
+}
+
+.v10-session-error {
+  color: var(--text-danger);
+}

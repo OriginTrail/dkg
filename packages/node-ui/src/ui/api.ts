@@ -1,26 +1,21 @@
+import { apiFetch, authHeaders, ensureDashboardSession, mergeHeaders } from './dashboardSessionClient.js';
+
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 
-type DashboardSessionStatus = {
-  authenticated?: boolean;
-  authDisabled?: boolean;
-  source?: string;
-  csrfToken?: string;
-  expiresAt?: number;
-};
-
-const TEST_DASHBOARD_SESSION: DashboardSessionStatus = {
-  authenticated: true,
-  source: 'test',
-  csrfToken: 'csrf-test',
-  expiresAt: Number.MAX_SAFE_INTEGER,
-};
-
-let dashboardSession: DashboardSessionStatus = import.meta.env.MODE === 'test'
-  ? TEST_DASHBOARD_SESSION
-  : { authenticated: false };
-let dashboardSessionPromise: Promise<void> | null = null;
+export {
+  apiFetch,
+  authHeaders,
+  dashboardSessionAuthKey,
+  ensureDashboardSession,
+  exchangeDashboardSession,
+  getDashboardSession,
+  isDashboardSessionReady,
+  subscribeDashboardSession,
+  __setDashboardSessionForTesting,
+  type DashboardSessionStatus,
+} from './dashboardSessionClient.js';
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -51,84 +46,6 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   if (hasFinalizeOnlyField && !(Array.isArray(args.quads) && args.quads.length > 0)) {
     throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads');
   }
-}
-
-export function authHeaders(): Record<string, string> {
-  if (dashboardSession.csrfToken) return { 'X-DKG-CSRF': dashboardSession.csrfToken };
-  return {};
-}
-
-export function dashboardSessionAuthKey(): string {
-  if (!dashboardSession.authenticated) return '';
-  return `${dashboardSession.source ?? 'session'}:${dashboardSession.expiresAt ?? 0}`;
-}
-
-export function __setDashboardSessionForTesting(session: DashboardSessionStatus): void {
-  dashboardSession = session;
-  dashboardSessionPromise = null;
-}
-
-export async function ensureDashboardSession(): Promise<void> {
-  if (typeof window === 'undefined') return;
-  if (
-    dashboardSession.authenticated &&
-    (!dashboardSession.expiresAt || dashboardSession.expiresAt > Date.now() + 5000)
-  ) {
-    return;
-  }
-  if (dashboardSessionPromise) return dashboardSessionPromise;
-
-  dashboardSessionPromise = (async () => {
-    const status = await fetch('/api/dashboard/session/status', {
-      cache: 'no-store',
-      credentials: 'same-origin',
-    }).then((res) => res.ok ? res.json() as Promise<DashboardSessionStatus> : null).catch(() => null);
-    if (status?.authenticated) {
-      dashboardSession = status;
-      return;
-    }
-
-    const loopback = await fetch('/api/dashboard/session/loopback', {
-      method: 'POST',
-      cache: 'no-store',
-      credentials: 'same-origin',
-    }).then((res) => res.ok ? res.json() as Promise<DashboardSessionStatus> : null).catch(() => null);
-    if (loopback?.authenticated) {
-      dashboardSession = loopback;
-      return;
-    }
-
-    dashboardSession = { authenticated: false };
-  })();
-
-  try {
-    await dashboardSessionPromise;
-  } finally {
-    dashboardSessionPromise = null;
-  }
-}
-
-function mergeHeaders(base?: HeadersInit, extra: Record<string, string> = {}): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (base instanceof Headers) {
-    base.forEach((value, key) => {
-      headers[key] = value;
-    });
-  } else if (Array.isArray(base)) {
-    for (const [key, value] of base) headers[key] = value;
-  } else if (base) {
-    Object.assign(headers, base);
-  }
-  return { ...headers, ...extra };
-}
-
-export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  await ensureDashboardSession();
-  return fetch(input, {
-    ...init,
-    credentials: init.credentials ?? 'same-origin',
-    headers: mergeHeaders(init.headers, authHeaders()),
-  });
 }
 
 export class HttpError extends Error {

@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../auth.js';
+import { loadTokens, httpAuthGuard, getRequestAuthContext } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -373,7 +373,8 @@ export async function handleRequest(
   // Resolve the requesting agent's address from the Bearer token.
   // Agent tokens (dkg_at_...) resolve to their specific agent; node-level tokens
   // fall back to the default owner agent.
-  const requestToken = extractBearerToken(req.headers.authorization);
+  const requestAuth = getRequestAuthContext(req);
+  const requestToken = requestAuth?.token;
   const requestAgentAddress = agent.resolveAgentAddress(requestToken);
 
   const ctx: RequestContext = {
@@ -408,6 +409,7 @@ export async function handleRequest(
     path,
     requestToken,
     requestAgentAddress,
+    requestAuth,
     emitMemoryGraphChanged,
     emitNotification,
   };

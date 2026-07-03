@@ -1,5 +1,13 @@
 # Lessons Notes
 
+## 2026-07-03 - React Session Store Test Cleanup
+
+Mistake pattern: reset a module-level session store while the component under test was still subscribed.
+
+Root cause: the test cleanup restored default session state before unmounting `DashboardSessionGate`, which triggered a React state update outside `act()`.
+
+Preventive rule: unmount React subscribers before resetting shared test stores, or wrap the reset itself in `act()` when the subscription intentionally remains mounted.
+
 ## 2026-07-03 - PR Driver Worktrees
 
 Mistake pattern: continued PR follow-up work in a shared WSL checkout after the active branch had changed.
