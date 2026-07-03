@@ -369,9 +369,9 @@ log "Stake snapshot BEFORE soak written to $STAKE_BEFORE"
 log "Negative scenario A: create/share to unregistered CG (expect HTTP 4xx)"
 NEG_TMP=$(mktemp -d -t soak-neg)
 trap 'rm -rf "$NEG_TMP"' RETURN
-echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" <did:dkg:context-graph:does-not-exist-'"$ROUND"'> .' > "$NEG_TMP/neg.nq"
+echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" .' > "$NEG_TMP/neg.nt"
 NEG_RC=0
-DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" ka create "soak-neg-${ROUND}" --context-graph-id "does-not-exist-$ROUND" --input-file "$NEG_TMP/neg.nq" --share \
+DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" ka create "soak-neg-${ROUND}" --context-graph-id "does-not-exist-$ROUND" --input-file "$NEG_TMP/neg.nt" --share \
   > "$OUT_DIR/neg-create-share-bogus-cg.log" 2>&1 || NEG_RC=$?
 if [ "$NEG_RC" -eq 0 ]; then
   log "  WARNING: create/share to unregistered CG SUCCEEDED - that should have failed"
@@ -385,7 +385,7 @@ fi
 
 cat > "$OUT_DIR/publisher-loop.sh" <<'EOLOOP'
 #!/usr/bin/env bash
-# Publishes a steady workload of N-Quad fixtures across the two registered
+# Publishes a steady workload of default-graph RDF fixtures across the two registered
 # CGs and round-robin across all 4 core nodes. Times are second-resolution —
 # BSD `date` (macOS) does not honour `%N`, and bashs $((...)) cannot eat a
 # literal "N", so we deliberately stick to whole seconds.
@@ -405,11 +405,11 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
   uniq="$(date +%s)-${i}-$$"
   subj="urn:soak:r${ROUND}:i${i}:${uniq}"
   ka_name="soak-${ROUND}-${i}-${uniq}"
-  fixture="$TMP/q${i}.nq"
+  fixture="$TMP/q${i}.nt"
   cat > "$fixture" <<EOF
-<${subj}> <urn:soak:predicate> "value-${i}" <did:dkg:context-graph:${cg}> .
-<${subj}> <urn:soak:round> "${ROUND}" <did:dkg:context-graph:${cg}> .
-<${subj}> <urn:soak:emittedAt> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <did:dkg:context-graph:${cg}> .
+<${subj}> <urn:soak:predicate> "value-${i}" .
+<${subj}> <urn:soak:round> "${ROUND}" .
+<${subj}> <urn:soak:emittedAt> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
 EOF
   start_s=$(date +%s)
   rc=0

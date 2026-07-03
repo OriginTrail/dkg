@@ -21,7 +21,7 @@
 #      the real tx. Falls back to parsing
 #      ContextGraphStorage.ContextGraphCreated from the receipt if preview
 #      fails.
-#   3. Writes a single N-Quad into a tmp file under the new CG URI.
+#   3. Writes a single default-graph triple into a tmp file.
 #   4. Invokes the CLI KA lifecycle via DKG_HOME=.devnet/node1:
 #      `dkg ka create <name> --input-file <tmp> --share`, then `dkg ka publish`.
 #   5. Tails .devnet/node1/daemon.log for a line matching
@@ -106,8 +106,9 @@ log "Preconditions OK (hardhat pid=$HARDHAT_PID, node $NODE_NUM pid=$NODE_PID, a
 #   1. `context-graph create <slug>` creates a local CG name.
 #   2. `context-graph register <slug>` mints the on-chain CG under the
 #      daemon's EOA and binds the local name to the numeric id.
-# The RDF data graph URI is `did:dkg:context-graph:<slug>` (the publisher
-# resolves the slug → on-chain id internally before computing leaves).
+# The RDF fixture itself stays in the default graph; the CLI routes it to the
+# selected context graph via --context-graph-id; the daemon resolves the slug to
+# the on-chain id internally before computing leaves.
 #
 # Slug is timestamped so reruns within the same devnet session don't
 # collide with prior CGs.
@@ -145,10 +146,10 @@ KA_NAME="publish-smoke-$(date +%s)"
 
 TMP_DIR=$(mktemp -d -t v10-publish-smoke)
 trap 'rm -rf "$TMP_DIR"' EXIT
-TMP_RDF="$TMP_DIR/fixture.nq"
+TMP_RDF="$TMP_DIR/fixture.nt"
 SUBJECT="urn:test:v10-smoke:$(date +%s)"
 cat > "$TMP_RDF" <<EOF
-<${SUBJECT}> <urn:test:predicate> "v10-publishDirect-smoke" <did:dkg:context-graph:${CG_ID}> .
+<${SUBJECT}> <urn:test:predicate> "v10-publishDirect-smoke" .
 EOF
 log "Wrote RDF fixture to $TMP_RDF (subject=$SUBJECT)"
 

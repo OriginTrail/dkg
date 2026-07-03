@@ -173,6 +173,11 @@ interface MockAgentOptions {
    */
   dropGraphError?: Error;
   /**
+   * Predicate form of `dropGraphError`, used when a test needs one graph drop
+   * to succeed before a later graph drop fails.
+   */
+  dropGraphErrorPredicate?: (graphUri: string) => Error | null;
+  /**
    * Round 13 Bug 38: predicate that gates `agent.store.query` — when
    * it returns an Error, the query throws. Used by the stage-context
    * preservation tests to simulate a snapshot query failure (the
@@ -266,6 +271,8 @@ function makeMockAgent(peerId = '0xMockAgentPeerId', options: MockAgentOptions =
       },
       async dropGraph(graphUri: string): Promise<void> {
         if (options.dropGraphError) throw options.dropGraphError;
+        const predicateError = options.dropGraphErrorPredicate?.(graphUri);
+        if (predicateError) throw predicateError;
         createdGraphs.delete(graphUri);
         droppedGraphs.push(graphUri);
         for (let i = insertedQuads.length - 1; i >= 0; i--) {

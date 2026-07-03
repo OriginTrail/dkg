@@ -2048,7 +2048,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       // correspond to state we actually corrupted:
       //
       //  - `metaCleanupSucceeded` → restore `metaSnapshot`
-      //  - `dataDropSucceeded` → restore `dataSnapshot`
+      //  - a graph added to `droppedDataGraphs` → restore its `dataSnapshot`
       //  - insert succeeded → no rollback
       //  - `deleteByPattern` itself failed → no rollback (nothing
       //    changed, retry converges cleanly)
@@ -2073,8 +2073,8 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
         for (const graph of dataGraphsToDrop) {
           await agent.store.dropGraph(graph);
           droppedDataGraphs.add(graph);
+          dataDropSucceeded = true;
         }
-        dataDropSucceeded = droppedDataGraphs.size > 0;
         // ── Atomic multi-graph insert: rows 1-13 + rows 14-20 in one call ──
         // A single `store.insert` across two graphs — either both
         // land or neither does, per the adapter contracts.
@@ -2084,8 +2084,8 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
         const rollbackErrors: string[] = [];
         // Restore each side we corrupted, in reverse order of the
         // forward sequence (insert → dropGraph → deleteByPattern).
-        // `dataSnapshot` is restored only if `dropGraph` succeeded
-        // (before then the old data is still in the store); likewise
+        // `dataSnapshot` is restored only for graphs whose `dropGraph`
+        // succeeded (before then the old data is still in the store); likewise
         // `metaSnapshot` is restored only if `deleteByPattern`
         // succeeded. On a `deleteByPattern`-only failure both flags
         // are false and no rollback fires — the state is unchanged.

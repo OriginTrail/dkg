@@ -672,8 +672,8 @@ export async function runImportFileOrchestration(params: {
       for (const graph of dataGraphsToDrop) {
         await agent.store.dropGraph(graph);
         droppedDataGraphs.add(graph);
+        dataDropSucceeded = true;
       }
-      dataDropSucceeded = droppedDataGraphs.size > 0;
       await agent.store.insert([...dataGraphQuads, ...metaQuads]);
     } catch (writeErr: any) {
       const rollbackErrors: string[] = [];

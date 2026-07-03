@@ -174,6 +174,26 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(String(res.body.recovery)).toContain('skipSeal');
   });
 
+  it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
+    await startWith({
+      promote: async () => {
+        throw Object.assign(
+          new Error('Knowledge Asset contains RDF named-graph quads'),
+          {
+            code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+            namedGraphs: ['urn:test:graph:one'],
+          },
+        );
+      },
+    });
+
+    const res = await post('swm/share', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('KA_NAMED_GRAPH_SHARE_UNSUPPORTED');
+    expect(String(res.body.error)).toContain('named-graph');
+    expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
+  });
+
   it('wm/finalize (layer:swm): forwards layer:"swm" to the engine AND maps SWM_SUBSET_NOT_SEALABLE → 409', async () => {
     // Round 10 (reviewer 🟡): CAPTURE the finalize call args so we prove the route
     // threaded `layer:"swm"` through resolveFinalizeOptions into

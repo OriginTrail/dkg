@@ -292,6 +292,31 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(promoted.promotedCount).toBe(1);
   });
 
+  it('preserves non-physical DKG context graph DIDs as named graph identity', async () => {
+    const name = 'dkg-did-named-graph';
+    const namedGraph = 'did:dkg:context-graph:partner-catalog';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:dkg-did-named',
+        predicate: 'http://schema.org/name',
+        object: '"DKG DID Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:dkg-did-named',
+        graph: namedGraph,
+      }),
+    ]);
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: [namedGraph],
+    });
+  });
+
   it('discard removes KA-scoped named graph draft content', async () => {
     const name = 'named-graph-discard';
     const namedGraph = 'urn:test:graph:discard-only';
@@ -855,6 +880,43 @@ describe('Working Memory Assertion Lifecycle', () => {
       const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
       expect(swmSubjects.has('urn:test:entity:alice')).toBe(true);
       expect(swmSubjects.has('urn:test:entity:bob')).toBe(false);
+    }
+  });
+
+  it('promote with entity filter ignores unrelated named-graph draft content', async () => {
+    const name = 'subset-default-with-local-named-graph';
+    const localNamedGraph = 'urn:test:graph:local-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:selected', predicate: 'http://schema.org/name', object: '"Selected"' },
+      {
+        subject: 'urn:test:entity:local-only',
+        predicate: 'http://schema.org/name',
+        object: '"Local Only"',
+        graph: localNamedGraph,
+      },
+    ]);
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      entities: ['urn:test:entity:selected'],
+    });
+    expect(result.promotedCount).toBe(1);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:local-only',
+        graph: localNamedGraph,
+      }),
+    ]);
+
+    const swmResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
+    );
+    expect(swmResult.type).toBe('bindings');
+    if (swmResult.type === 'bindings') {
+      const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
+      expect(swmSubjects.has('urn:test:entity:selected')).toBe(true);
+      expect(swmSubjects.has('urn:test:entity:local-only')).toBe(false);
     }
   });
 

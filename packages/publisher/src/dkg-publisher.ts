@@ -321,8 +321,6 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bypass, which is the other legitimate non-guard path).
 const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
 const TRUSTED_CATALOG_ORIGIN_TOKEN = Symbol('dkg-publisher:trusted-catalog-origin');
-const DKG_CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
-
 type InternalPublishOptions = PublishOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
@@ -412,12 +410,23 @@ function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
   assertNoUserAuthoredTrustLevelQuads(quads);
 }
 
-function normalizeAssertionInputGraph(wmGraphUri: string, graph: string): string {
-  if (graph === '' || graph === wmGraphUri) return '';
-  // RDF parsers and older tests often carry the DKG physical storage graph in
+function normalizeAssertionInputGraph(
+  contextGraphId: string,
+  subGraphName: string | undefined,
+  wmGraphUri: string,
+  graph: string,
+): string {
+  if (graph === '') return '';
+  // RDF parsers and older scripts often carry the DKG physical storage graph in
   // the quad graph term. That is placement metadata, not user-authored RDF
-  // named-graph identity, so keep it in the KA default graph.
-  if (graph.startsWith(DKG_CONTEXT_GRAPH_URI_PREFIX)) return '';
+  // named-graph identity, so keep it in the KA default graph. Only normalize
+  // exact physical graph URIs; other DKG context-graph DIDs remain named graphs.
+  const physicalGraphs = new Set([
+    wmGraphUri,
+    contextGraphDataUri(contextGraphId),
+    ...(subGraphName ? [contextGraphDataUri(contextGraphId, subGraphName)] : []),
+  ]);
+  if (physicalGraphs.has(graph)) return '';
   return graph;
 }
 
@@ -5434,6 +5443,8 @@ export class DKGPublisher implements Publisher {
     const scopedGraphs = new Set<string>([graphUri]);
     const quads = input.map((t) => {
       const originalGraph = normalizeAssertionInputGraph(
+        contextGraphId,
+        subGraphName,
         graphUri,
         'graph' in t ? String(t.graph ?? '') : '',
       );
@@ -5744,20 +5755,6 @@ export class DKGPublisher implements Publisher {
       return { promotedCount: 0, promotedAllRoots: false };
     }
 
-    const namedGraphs = [...new Set(assertionQuads
-      .map((q) => q.graph)
-      .filter((graph): graph is string => typeof graph === 'string' && graph.length > 0))];
-    if (namedGraphs.length > 0) {
-      await maintainMarker(false);
-      throw Object.assign(
-        new Error(
-          'Knowledge Asset contains RDF named-graph quads, but SWM share and VM publish do not yet preserve original graph identity. '
-          + 'Rewrite the payload into the default graph before sharing, or keep the KA in WM until graph-preserving SWM/VM semantics are implemented.',
-        ),
-        { code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED', namedGraphs },
-      );
-    }
-
     let quadsToPromote = assertionQuads;
 
     // ── Bug 8 (Codex Round 4) + Round 9 Bug 25 — import-bookkeeping filter ──
@@ -5856,6 +5853,20 @@ export class DKGPublisher implements Publisher {
     if (quadsToPromote.length === 0) {
       await maintainMarker(false);
       return { promotedCount: 0, promotedAllRoots: false };
+    }
+
+    const namedGraphs = [...new Set(quadsToPromote
+      .map((q) => q.graph)
+      .filter((graph): graph is string => typeof graph === 'string' && graph.length > 0))];
+    if (namedGraphs.length > 0) {
+      await maintainMarker(false);
+      throw Object.assign(
+        new Error(
+          'Knowledge Asset contains RDF named-graph quads, but SWM share and VM publish do not yet preserve original graph identity. '
+          + 'Rewrite the payload into the default graph before sharing, or keep the KA in WM until graph-preserving SWM/VM semantics are implemented.',
+        ),
+        { code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED', namedGraphs },
+      );
     }
 
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
