@@ -3,6 +3,7 @@
  * Full conviction discount flows live in devnet/conviction-lazy-settle/.
  */
 import type { PcaContracts } from '../../../src/ui/api.js';
+import { numericChainId } from '../../../src/ui/web3/chainId.js';
 import { test, expect } from '../../fixtures/base.js';
 import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
@@ -13,16 +14,13 @@ const HEX_QUANTITY = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
 
 type PcaRpcError = { code: number; message: string };
 type PcaRpcResponse<T> = { jsonrpc?: '2.0'; id?: number; result?: T; error?: PcaRpcError };
-type PcaRpcMethod = 'eth_chainId' | 'eth_blockNumber' | 'eth_getBlockByNumber' | 'eth_sendTransaction';
-
-function numericChainId(chainId: PcaContracts['chainId']): number {
-  const tail = String(chainId).match(/(\d+)\s*$/)?.[1];
-  const parsed = tail ? Number.parseInt(tail, 10) : Number.NaN;
-  if (!Number.isSafeInteger(parsed)) {
-    throw new Error(`Unrecognized PCA chain id: ${chainId}`);
-  }
-  return parsed;
-}
+type PcaRpcMethod =
+  | 'eth_chainId'
+  | 'eth_blockNumber'
+  | 'eth_getBlockByNumber'
+  | 'eth_getTransactionReceipt'
+  | 'eth_getTransactionByHash'
+  | 'eth_sendTransaction';
 
 function hexQuantityToNumber(value: string): number {
   expect(value).toMatch(HEX_QUANTITY);
@@ -97,7 +95,17 @@ test.describe('Conviction NFT (PCA) API', () => {
     );
     expect(exactBlock).toBeTruthy();
 
-    const writeError = expectRpcError(await postPcaRpc<unknown>(4, 'eth_sendTransaction'), -32601);
+    const missingTxHash = `0x${'ff'.repeat(32)}`;
+    const missingReceipt = expectRpcSuccess<unknown | null>(
+      await postPcaRpc<unknown | null>(4, 'eth_getTransactionReceipt', [missingTxHash]),
+    );
+    const missingTransaction = expectRpcSuccess<unknown | null>(
+      await postPcaRpc<unknown | null>(5, 'eth_getTransactionByHash', [missingTxHash]),
+    );
+    expect(missingReceipt).toBeNull();
+    expect(missingTransaction).toBeNull();
+
+    const writeError = expectRpcError(await postPcaRpc<unknown>(6, 'eth_sendTransaction'), -32601);
     expect(writeError.message).toContain('PCA RPC method not allowed');
   });
 
