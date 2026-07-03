@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { confirmPcaAgentRegistration } from '../src/dkg-agent-registry.js';
 import { MockChainAdapter, NoChainAdapter, PcaUnavailableError } from '@origintrail-official/dkg-chain';
 
 async function makeAgent(chain: MockChainAdapter | NoChainAdapter): Promise<DKGAgent> {
@@ -178,76 +179,90 @@ describe('DKGAgent V10 PCA facade', () => {
   });
 });
 
-// PR #1423 R2-B/R2-C — the register-agent confirmation (retry/probe/capability)
-// logic moved OUT of the daemon route INTO the typed facade. These tests pin the
-// full advisory matrix, driven by a FAKE `chain.isPublishingConvictionAgent`, so
-// the route can stay a thin serializer. `backoffMs` is tiny (1ms) for speed.
-describe('DKGAgent.confirmPublishingConvictionAgentRegistration (PR #1423 R2)', () => {
-  const ACCOUNT_ID = 1n;
-  const AGENT_ADDR = ethers.Wallet.createRandom().address;
+// PR #1423 R2-B/R2-C/R4 — the register-agent confirmation state machine is a
+// PURE helper (`confirmPcaAgentRegistration`), so the retry policy stays PRIVATE
+// (production constants, not public facade opts — R4) and tests drive the full
+// advisory matrix fast via an injected no-op `sleep` + a scripted `probe`. The
+// route/facade stay thin serializers of the result.
+describe('confirmPcaAgentRegistration (PR #1423 advisory state machine)', () => {
+  const NOOP_SLEEP = async () => {}; // no real backoff wait — the whole matrix runs instantly
 
-  // Build an agent whose `chain.isPublishingConvictionAgent` replays `script`
-  // (one entry per probe; the last entry is repeated for any further probes):
-  // a boolean/null is returned, `'throw'` raises an RPC-style error. The
-  // facade propagates a chain-level `null` as the "no probe surface" signal —
-  // identical to an adapter that omits the method entirely.
-  async function makeProbeAgent(
+  // A `probe` that replays `script` (one entry per call; the last entry repeats
+  // for any further calls): a boolean/null is returned, `'throw'` raises an
+  // RPC-style error. `null` is the typed facade's "no probe surface" signal.
+  function makeProbe(
     script: Array<boolean | null | 'throw'>,
-  ): Promise<{ agent: DKGAgent; probes: () => number }> {
-    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+  ): { probe: () => Promise<boolean | null>; probes: () => number } {
     let calls = 0;
-    (chain as any).isPublishingConvictionAgent = async () => {
+    const probe = async (): Promise<boolean | null> => {
       const action = script[Math.min(calls, script.length - 1)];
       calls += 1;
       if (action === 'throw') throw new Error('probe RPC blip');
       return action;
     };
-    const agent = await makeAgent(chain);
-    return { agent, probes: () => calls };
+    return { probe, probes: () => calls };
   }
 
   it('probe true → { verified:true, adapterSupported:true } in a single probe', async () => {
-    const { agent, probes } = await makeProbeAgent([true]);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: true, adapterSupported: true });
+    const { probe, probes } = makeProbe([true]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
     expect(probes()).toBe(1); // confirms on the first read — no retry
   });
 
   it('probe false then true → { verified:true, adapterSupported:true } (backoff retry confirms)', async () => {
-    const { agent, probes } = await makeProbeAgent([false, true]);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: true, adapterSupported: true });
+    const { probe, probes } = makeProbe([false, true]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
     expect(probes()).toBeGreaterThanOrEqual(2);
   });
 
   // R2-C — the missing case: a THROWN probe (RPC blip) followed by a healthy
   // read must recover to a confirmed result, not stay inconclusive.
   it('probe throw then true → { verified:true, adapterSupported:true } (throw→true retry recovery, R2-C)', async () => {
-    const { agent, probes } = await makeProbeAgent(['throw', true]);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: true, adapterSupported: true });
+    const { probe, probes } = makeProbe(['throw', true]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: true, adapterSupported: true });
     expect(probes()).toBeGreaterThanOrEqual(2);
   });
 
   it('probe false ×3 (default attempts) → { verified:false, adapterSupported:true } (advisory-false, surface exists)', async () => {
-    const { agent, probes } = await makeProbeAgent([false]);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: false, adapterSupported: true });
+    const { probe, probes } = makeProbe([false]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
     expect(probes()).toBe(3); // exhausts the default 3 attempts
   });
 
   it('probe throw ×3 → { verified:null, adapterSupported:true } (inconclusive, surface exists)', async () => {
-    const { agent, probes } = await makeProbeAgent(['throw']);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: null, adapterSupported: true });
+    const { probe, probes } = makeProbe(['throw']);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: null, adapterSupported: true });
     expect(probes()).toBe(3);
   });
 
   it('probe null (no probe surface) → { verified:null, adapterSupported:false } in a single probe, no retry', async () => {
-    const { agent, probes } = await makeProbeAgent([null]);
-    const r = await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR, { backoffMs: 1 });
-    expect(r).toEqual({ verified: null, adapterSupported: false });
+    const { probe, probes } = makeProbe([null]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: null, adapterSupported: false });
     expect(probes()).toBe(1); // unsupported signal short-circuits — no retry
+  });
+});
+
+// R4 — the public facade drops the retry knobs and simply wires the typed probe
+// (`chain.isPublishingConvictionAgent`) into the pure helper. Pin that
+// delegation end-to-end (real sleep, but a `true`/`null` probe returns on the
+// first attempt so there is no backoff wait).
+describe('DKGAgent.confirmPublishingConvictionAgentRegistration (facade delegation)', () => {
+  async function facadeAgent(probe: () => Promise<boolean | null>): Promise<DKGAgent> {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    (chain as any).isPublishingConvictionAgent = probe;
+    return makeAgent(chain);
+  }
+
+  it('wires chain.isPublishingConvictionAgent → confirmed result (no public retry opts)', async () => {
+    const agent = await facadeAgent(async () => true);
+    expect(await agent.confirmPublishingConvictionAgentRegistration(1n, ethers.Wallet.createRandom().address))
+      .toEqual({ verified: true, adapterSupported: true });
+  });
+
+  it('null probe surface → { verified:null, adapterSupported:false }', async () => {
+    const agent = await facadeAgent(async () => null);
+    expect(await agent.confirmPublishingConvictionAgentRegistration(1n, ethers.Wallet.createRandom().address))
+      .toEqual({ verified: null, adapterSupported: false });
   });
 });
 

@@ -71,6 +71,7 @@ export {
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { PcaAgentConfirmation } from './dkg-agent-registry.js';
 export {
   verifyBatch,
   buildBatchRejectionRecord,

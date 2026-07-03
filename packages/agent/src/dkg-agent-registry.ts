@@ -380,6 +380,64 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+/**
+ * #1346 — advisory result of confirming a just-mined PCA agent registration.
+ * The mined receipt is already authoritative for `registered:true`; these two
+ * DECOUPLED signals only refine the ADVISORY picture (QA #1346 acceptance
+ * contract):
+ *   - `adapterSupported`: does the on-chain probe SURFACE exist? A boolean OR a
+ *     throw (an RPC read error) ⇒ the surface exists (`true`); only the typed
+ *     facade's `null` ("no probe surface") ⇒ `false`.
+ *   - `verified`: the probe OUTCOME — `true` (confirmed on-chain) | `false`
+ *     (probe ran, did not yet observe it — follower-RPC lag) | `null`
+ *     (inconclusive: no capability, or every attempt threw).
+ * Reachable states: {null,false}=unsupported · {true,true}=confirmed ·
+ * {false,true}=lag · {null,true}=all-threw. ({false,false} is unreachable.)
+ */
+export interface PcaAgentConfirmation {
+  verified: boolean | null;
+  adapterSupported: boolean;
+}
+
+// #1346 — production confirmation policy: a bounded post-mine probe. These are
+// fixed domain constants, NOT caller-tunable knobs (implementation detail of
+// the advisory read, never a public facade option).
+const PCA_CONFIRM_ATTEMPTS = 3;
+const PCA_CONFIRM_BACKOFF_MS = 300;
+
+/**
+ * Pure advisory-confirmation state machine, extracted from the DKGAgent facade
+ * so the retry policy stays private AND tests can drive it fast by injecting a
+ * no-op `sleep` + a scripted `probe` — without exposing retry tuning on the
+ * public DKGAgent surface. `probe` yields the typed registration read: `true`
+ * (registered) | `false` (not yet — follower-RPC lag → retry) | `null` (no
+ * probe surface → unsupported, short-circuit).
+ */
+export async function confirmPcaAgentRegistration(
+  probe: () => Promise<boolean | null>,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  attempts: number = PCA_CONFIRM_ATTEMPTS,
+  backoffMs: number = PCA_CONFIRM_BACKOFF_MS,
+): Promise<PcaAgentConfirmation> {
+  let adapterSupported = false;
+  let last: boolean | null = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const result = await probe();
+      if (result === null) return { verified: null, adapterSupported: false };
+      adapterSupported = true; // a boolean return proves the read surface exists
+      if (result === true) return { verified: true, adapterSupported: true };
+      last = false; // `false` could be follower-RPC lag on a mined tx → retry
+    } catch {
+      // the read surface exists; a throw is an RPC read failure, not a gap
+      adapterSupported = true;
+      last = null;
+    }
+    if (i < attempts - 1) await sleep(backoffMs);
+  }
+  return { verified: last, adapterSupported };
+}
+
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
@@ -1513,51 +1571,18 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   // #1346 — Best-effort on-chain confirmation of a just-mined agent
   // registration. The tx receipt is already authoritative for
-  // `registered:true`; this read only upgrades the ADVISORY `verified` +
-  // `adapterSupported` signals. Under RPC lag the immediate post-submit read
-  // can race the mined state and return a stale `false` (or throw), so we
-  // retry a couple of times with a short bounded backoff. A lagging/throwing
-  // read stays advisory and NEVER flips the authoritative registration.
-  //
-  // The two signals are DECOUPLED (QA #1346 acceptance contract):
-  //   `adapterSupported` = does the probe read SURFACE exist?
-  //     - an explicit `null` return (the typed facade's "no probe surface"
-  //       signal) → false (genuine capability gap).
-  //     - a boolean return, OR a throw (an RPC read error — the surface
-  //       exists, the read just failed) → true.
-  //   `verified` = the on-chain read OUTCOME (advisory only):
-  //     - true  — confirmed registered on-chain
-  //     - false — probe ran but did not (yet) observe it (follower-RPC lag)
-  //     - null  — inconclusive (no capability, or every attempt threw)
+  // `registered:true`; this only refines the ADVISORY `{ verified,
+  // adapterSupported }` signals (see `confirmPcaAgentRegistration` for the
+  // decoupled-signal contract + bounded-probe state machine). A lagging or
+  // throwing read stays advisory and NEVER flips the authoritative
+  // registration. The retry policy is a private production constant —
+  // deliberately NOT a caller-tunable option on the public facade — so this
+  // method exposes only the domain operation: confirm this mined registration.
   async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
     accountId: bigint,
     agent: string,
-    opts?: { attempts?: number; backoffMs?: number },
-  ): Promise<{ verified: boolean | null; adapterSupported: boolean }> {
-    const attempts = opts?.attempts ?? 3;
-    const backoffMs = opts?.backoffMs ?? 300;
-    let adapterSupported = false;
-    let last: boolean | null = null;
-    for (let i = 0; i < attempts; i++) {
-      try {
-        // Typed facade call: `isPublishingConvictionAgent` always exists and
-        // returns `null` when the chain adapter exposes no probe surface —
-        // that `null` is the SOLE "unsupported" signal.
-        const result = await this.isPublishingConvictionAgent(accountId, agent);
-        if (result === null) return { verified: null, adapterSupported: false };
-        // A boolean return proves the read surface exists.
-        adapterSupported = true;
-        if (result === true) return { verified: true, adapterSupported: true };
-        last = false; // `false` could be follower-RPC lag on a mined tx → retry.
-      } catch {
-        // The read surface exists; a throw is an RPC read failure (not a
-        // capability gap) → supported, outcome inconclusive.
-        adapterSupported = true;
-        last = null;
-      }
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, backoffMs));
-    }
-    return { verified: last, adapterSupported };
+  ): Promise<PcaAgentConfirmation> {
+    return confirmPcaAgentRegistration(() => this.isPublishingConvictionAgent(accountId, agent));
   }
 
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {

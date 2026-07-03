@@ -6,6 +6,7 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
+import type { PcaAgentConfirmation } from '@origintrail-official/dkg-agent';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -992,13 +993,13 @@ export class ApiClient {
     accountId: string;
     agent: string;
     registered: boolean;
-    // #1346 — advisory on-chain confirmation of the mined registration:
-    // true (confirmed) | false (RPC lag) | null (inconclusive/unsupported).
-    verified?: boolean | null;
-    adapterSupported?: boolean;
     txHash: string;
     blockNumber: number;
-  }> {
+    // #1346 — advisory on-chain confirmation of the mined registration, shaped
+    // by the single source of truth (`PcaAgentConfirmation`). `Partial` because
+    // an OLDER daemon omits these fields entirely — the only honest wire model;
+    // the CLI treats absent as "inconclusive".
+  } & Partial<PcaAgentConfirmation>> {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
   }
 
