@@ -115,6 +115,34 @@ interface ProviderInternals {
     ) => Promise<VerifyACKIdentityResult>;
   };
   node: { libp2p: { getPeers(): unknown[] } };
+  // #1404 readiness-passthrough coverage reaches the peer-classification state
+  // so it can prove the wired `getReadinessCorePeers` returns confirmed cores
+  // ONLY (never the padded dial pool).
+  knownCorePeerIds: Set<string>;
+  lastKnownRequiredACKs?: number;
+}
+
+/**
+ * Deps shape the two ACK providers hand the (mocked) production factory. The
+ * two peer selectors are the #1404 readiness-gate contract: `getReadinessCorePeers`
+ * must return confirmed cores only, while `getConnectedCorePeers` may pad.
+ */
+interface PeerSelectorDepsCapture {
+  getConnectedCorePeers?: () => string[];
+  getReadinessCorePeers?: () => string[];
+}
+
+/**
+ * Seed the fake libp2p peer list plus the confirmed-core subset, and force the
+ * dial pool to PAD (confirmed cores below a high quorum) so the readiness probe
+ * and the padded dial pool are provably distinct lists.
+ */
+function seedPeers(internals: ProviderInternals, allPeerIds: string[], corePeerIds: string[]): void {
+  (internals as { node: { libp2p: { getPeers(): unknown[] } } }).node = {
+    libp2p: { getPeers: () => allPeerIds.map((id) => ({ toString: () => id })) },
+  };
+  for (const id of corePeerIds) internals.knownCorePeerIds.add(id);
+  internals.lastKnownRequiredACKs = 10;
 }
 
 async function bootProviderAgent(): Promise<{ agent: DKGAgent; internals: ProviderInternals }> {
@@ -302,5 +330,48 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       42n,
     );
     expect(verdict).toEqual({ valid: false, reason: 'rpc-error' });
+  });
+
+  // #1404 — the readiness gate only protects a real publish if the wired
+  // `getReadinessCorePeers` returns confirmed cores ONLY. The prior tests proved
+  // the collector is built through the factory and that `getConnectedCorePeers`
+  // exists; they never proved the SEPARATE readiness probe excludes the padded
+  // dial pool. If the agent regressed to `getReadinessCorePeers: () =>
+  // this.getACKCandidatePeers()` (or dropped the callback so the collector fell
+  // back to the padded pool), a connected edge peer would leak into readiness
+  // and disarm the wait — the exact #1404 failure — while every other test here
+  // stayed green. These pin the confirmed-core-only contract for BOTH providers.
+  it('createV10ACKProvider wires getReadinessCorePeers returning confirmed cores ONLY (padded dial pool excluded)', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    // 2 confirmed cores + 1 connected edge; quorum forced high so the dial pool pads.
+    seedPeers(boot.internals, ['core-a', 'core-b', 'edge-c'], ['core-a', 'core-b']);
+
+    boot.internals.createV10ACKProvider('test-cg');
+
+    expect(capturedAckCollectorDeps).toHaveLength(1);
+    const deps = capturedAckCollectorDeps[0] as PeerSelectorDepsCapture;
+    expect(deps.getReadinessCorePeers).toBeTypeOf('function');
+    // Readiness = confirmed cores ONLY.
+    expect(new Set(deps.getReadinessCorePeers!())).toEqual(new Set(['core-a', 'core-b']));
+    expect(deps.getReadinessCorePeers!()).not.toContain('edge-c');
+    // The padded dial pool DOES include the edge — proving the two selectors are
+    // distinct lists, so this test fails if readiness silently reuses the pool.
+    expect(deps.getConnectedCorePeers!()).toContain('edge-c');
+  });
+
+  it('createV10UpdateACKProvider ALSO wires getReadinessCorePeers returning confirmed cores ONLY', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    seedPeers(boot.internals, ['core-a', 'core-b', 'edge-c'], ['core-a', 'core-b']);
+
+    boot.internals.createV10UpdateACKProvider('test-cg');
+
+    expect(capturedAckCollectorDeps).toHaveLength(1);
+    const deps = capturedAckCollectorDeps[0] as PeerSelectorDepsCapture;
+    expect(deps.getReadinessCorePeers).toBeTypeOf('function');
+    expect(new Set(deps.getReadinessCorePeers!())).toEqual(new Set(['core-a', 'core-b']));
+    expect(deps.getReadinessCorePeers!()).not.toContain('edge-c');
+    expect(deps.getConnectedCorePeers!()).toContain('edge-c');
   });
 });

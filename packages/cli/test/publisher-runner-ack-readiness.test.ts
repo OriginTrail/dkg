@@ -62,7 +62,12 @@ function fakeTransport() {
     publisherPeerId: 'peer-self',
     gossipPublish: async () => undefined,
     sendP2P: async () => new Uint8Array(),
+    // Padded dial pool (all 3) vs. a DISTINCT confirmed-core-only readiness probe
+    // (just core-a). The two lists differ on purpose so the pass-through assertion
+    // fails if the CLI provider aliased readiness onto getConnectedCorePeers or
+    // dropped the callback (otReviewAgent #1404).
     getConnectedCorePeers: () => ['core-a', 'core-b', 'core-c'],
+    getReadinessCorePeers: () => ['core-a'],
     log: () => undefined,
   };
 }
@@ -75,9 +80,18 @@ describe('CLI publisher ACK provider — readiness gate wiring (#1404)', () => {
     expect(capturedFactoryDeps).toHaveLength(1);
     const deps = capturedFactoryDeps[0] as {
       getConnectedCorePeers?: () => string[];
+      getReadinessCorePeers?: () => string[];
       corePeerReadinessTimeoutMs?: number;
     };
     expect(deps.getConnectedCorePeers).toBeTypeOf('function');
+    // #1404: the SEPARATE confirmed-core-only readiness probe must be forwarded
+    // to the collector unchanged — not aliased onto getConnectedCorePeers and not
+    // dropped (which would fall the collector back to the padded pool and let an
+    // edge peer disarm the readiness wait). Assert it round-trips the distinct
+    // sentinel from the transport.
+    expect(deps.getReadinessCorePeers).toBeTypeOf('function');
+    expect(deps.getReadinessCorePeers!()).toEqual(['core-a']);
+    expect(deps.getConnectedCorePeers!()).toEqual(['core-a', 'core-b', 'core-c']);
     // The production factory owns the readiness timeout; the CLI must NOT
     // hand-copy the constant (the centralization this test protects).
     expect(deps.corePeerReadinessTimeoutMs).toBeUndefined();

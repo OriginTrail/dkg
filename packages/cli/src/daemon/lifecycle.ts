@@ -1823,33 +1823,14 @@ export async function runDaemonInner(
                 }
                 return sendResult.response;
               },
-              getConnectedCorePeers: () => {
-                const allPeers = agent.node.libp2p
-                  .getPeers()
-                  .map((p) => p.toString())
-                  .filter((id) => id !== agent.peerId);
-                const knownCorePeerIds = (agent as any).knownCorePeerIds as
-                  | Set<string>
-                  | undefined;
-                if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-                  const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
-                  if (filtered.length > 0) return filtered;
-                }
-                return allPeers;
-              },
-              // Readiness counts ONLY confirmed cores (never the all-peers
-              // padding fallback above), so a connected non-core peer can't
-              // disarm the peer-readiness wait (otReviewAgent #1404 P1).
-              getReadinessCorePeers: () => {
-                const knownCorePeerIds = (agent as any).knownCorePeerIds as
-                  | Set<string>
-                  | undefined;
-                if (!knownCorePeerIds || knownCorePeerIds.size === 0) return [];
-                return agent.node.libp2p
-                  .getPeers()
-                  .map((p) => p.toString())
-                  .filter((id) => id !== agent.peerId && knownCorePeerIds.has(id));
-              },
+              // ACK peer classification is owned by the agent (otReviewAgent
+              // #1404): the daemon must NOT re-derive it by casting into the
+              // private `knownCorePeerIds` set. This hands back the padded dial
+              // pool (`getConnectedCorePeers`, quorum-aware per #1107) plus the
+              // confirmed-core-only readiness probe (`getReadinessCorePeers`,
+              // no padding so a connected edge peer can't disarm the wait), from
+              // the same typed boundary the agent's own publish path uses.
+              ...agent.getACKTransportPeerSelectors(),
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),

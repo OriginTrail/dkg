@@ -1473,6 +1473,32 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
+   * Public ACK-transport peer-selection boundary (otReviewAgent #1404).
+   *
+   * The CLI daemon's `ackTransportFactory` MUST build its collector callbacks
+   * from here rather than re-deriving core classification by reaching into the
+   * private `knownCorePeerIds` set behind an `any` cast — that duplicated the
+   * peer model in two places and would silently drift on any rename. This is the
+   * single owner of the two DISTINCT pools:
+   *   - `getConnectedCorePeers`: the padded ACK dial pool — confirmed cores
+   *     first, then non-core padding when confirmed cores are below quorum, so a
+   *     slow-to-identify core never caps the pool below quorum (#1107).
+   *   - `getReadinessCorePeers`: confirmed cores ONLY (never the padding), so a
+   *     connected edge peer can't disarm the peer-readiness wait (#1404 P1).
+   * The agent's own publish/update ACK providers consume the same pair, so the
+   * daemon and agent publish paths share one classification, not three copies.
+   */
+  getACKTransportPeerSelectors(): {
+    getConnectedCorePeers: () => string[];
+    getReadinessCorePeers: () => string[];
+  } {
+    return {
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
+    };
+  }
+
+  /**
    * Create a V10 ACK provider callback for the publisher.
    * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
    * via direct P2P from connected core nodes. The required number of ACKs
@@ -1512,10 +1538,11 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
-      // Readiness counts ONLY confirmed cores (no padding) so a connected
-      // edge peer can't disarm the peer-readiness wait (otReviewAgent #1404 P1).
-      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
+      // Padded ACK dial pool + confirmed-core-only readiness probe, from the
+      // single agent-owned selector so this path can't drift from the daemon's
+      // (otReviewAgent #1404 P1). Readiness never counts the padding, so a
+      // connected edge peer can't disarm the peer-readiness wait.
+      ...this.getACKTransportPeerSelectors(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1694,10 +1721,11 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
-      // Readiness counts ONLY confirmed cores (no padding) so a connected
-      // edge peer can't disarm the peer-readiness wait (otReviewAgent #1404 P1).
-      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
+      // Padded ACK dial pool + confirmed-core-only readiness probe, from the
+      // single agent-owned selector so this path can't drift from the daemon's
+      // (otReviewAgent #1404 P1). Readiness never counts the padding, so a
+      // connected edge peer can't disarm the peer-readiness wait.
+      ...this.getACKTransportPeerSelectors(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
