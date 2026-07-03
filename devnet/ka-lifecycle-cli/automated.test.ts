@@ -229,7 +229,7 @@ function publisherJobKey(job: PublisherJobView): string {
 
 async function assertNoPublisherJobForKnowledgeAsset(
   node: DevnetNode,
-  expected: { contextGraphId: string; name: string; subGraphName?: string },
+  expected: { contextGraphId: string; name: string },
 ): Promise<void> {
   const parsed = await listPublisherJobs(node);
   expect(
@@ -240,7 +240,7 @@ async function assertNoPublisherJobForKnowledgeAsset(
 
 async function assertNoNewPublisherJobForKnowledgeAsset(
   node: DevnetNode,
-  expected: { contextGraphId: string; name: string; subGraphName?: string },
+  expected: { contextGraphId: string; name: string },
   baseline: PublisherJobView[],
 ): Promise<void> {
   const baselineKeys = new Set(baseline.map(publisherJobKey));
@@ -477,7 +477,6 @@ describe('KA lifecycle CLI on devnet', () => {
     await assertNoPublisherJobForKnowledgeAsset(node, {
       contextGraphId,
       name,
-      subGraphName,
     });
 
     await publishKnowledgeAssetAsyncAndWait(node, contextGraphId, name, 'ka publish-async', subGraphName);
