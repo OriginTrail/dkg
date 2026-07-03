@@ -42,7 +42,7 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'flush')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -321,6 +321,40 @@ describe('StorageACKHandler', () => {
     // Claim at the exact serialized byte length → accepted.
     const ok = decodeStorageACK(await handler.handler(mk(stagingBytes.length), fakePeerId));
     expect(isStorageACKDecline(ok)).toBe(false);
+  });
+
+  it('otReviewAgent #1408 P2a: a malformed term is a bad request, NOT a transient store outage', async () => {
+    // A term with a SPARQL-breaking char (`|`) parses under the permissive
+    // parseSimpleNQuads and hashes into a self-consistent merkle root, but is
+    // not a valid store term. It must reset the stream (malformed request),
+    // not be mislabeled as a retryable CORE_TEMPORARILY_UNAVAILABLE decline.
+    const g = 'did:dkg:context-graph:42';
+    const badQuads: Quad[] = [makeQuad('urn:s|bad', 'urn:p', 'urn:o', g)];
+    const nquadsStr = badQuads
+      .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+      .join('\n');
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const badRoot = computeFlatKCRoot(badQuads, []);
+    const badLeaf = computeFlatKCMerkleLeafCountV10(badQuads, []);
+
+    const handler = await createHandler([]); // inline payload; no SWM data
+    const intent = encodePublishIntent({
+      merkleRoot: badRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingBytes.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:s|bad'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: badLeaf,
+      stagingQuads: stagingBytes,
+    });
+
+    // Malformed → the persist validation throws (stream reset), it does NOT
+    // return a signed ACK nor a transient store-unavailable decline.
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/unsafe|empty|iri/i);
   });
 
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
@@ -645,7 +679,7 @@ describe('StorageACKHandler', () => {
     // deleteByPattern + insert — which is the store-outage catch path this
     // regression pins (otReviewAgent #1408:650).
     async function curatedHandlerWithFailingStore(
-      failingOps: readonly ('deleteByPattern' | 'insert')[],
+      failingOps: readonly ('deleteByPattern' | 'insert' | 'flush')[],
       configOverrides: Partial<StorageACKHandlerConfig> = {},
     ) {
       const base = new OxigraphStore();
@@ -698,6 +732,22 @@ describe('StorageACKHandler', () => {
       // Same durability invariant, second store call: the deletes succeed but
       // the catalog INSERT hits the closed store. Still a transient decline.
       const handler = await curatedHandlerWithFailingStore(['insert']);
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+    });
+
+    it('otReviewAgent #1408 P1b: catalog persist FLUSH throws → transient decline, NO signed ACK (durability boundary before sign)', async () => {
+      // The delete+insert succeed but the durability flush (forcing the write
+      // past the debounced-flush window, so a worker respawn can't roll back
+      // ACKed data) fails. We MUST decline rather than sign an ACK for data
+      // that isn't guaranteed durable.
+      const handler = await curatedHandlerWithFailingStore(['flush']);
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(true);

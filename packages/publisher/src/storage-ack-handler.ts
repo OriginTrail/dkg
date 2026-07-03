@@ -11,6 +11,7 @@ import {
   computePublishACKDigest,
   computeUpdateACKDigest,
   assertSafeIri,
+  assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
   computeCatalogRoot,
@@ -26,6 +27,34 @@ import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
+
+/**
+ * Validate that every term of a parsed quad is well-formed BEFORE it enters the
+ * store-op wrapper. A malformed term is a bad request (the publisher committed
+ * garbage into its merkle root), not a peer-local store outage — so it must
+ * throw here (→ malformed-request stream reset) rather than surface from
+ * `store.insert` and be mislabeled as a transient CORE_TEMPORARILY_UNAVAILABLE
+ * decline that the publisher then retries against its transient budget.
+ *
+ * Mirrors `parseSimpleNQuads`' own literal-vs-IRI split: subject/predicate are
+ * IRIs or blank nodes (angle brackets already stripped); the object is a full
+ * SPARQL literal (kept with its quotes) OR a stripped IRI/blank node. `graph`
+ * is set by the caller to an already-`assertSafeIri`'d URI. `assertSafeIri`
+ * only rejects the SPARQL-breaking character set (`<>"{}|\^`, controls,
+ * whitespace), which is a strict subset of what the store itself rejects — so
+ * this never turns a store-acceptable term into a false malformed-request.
+ */
+function assertPersistQuadTermsSafe(quads: Quad[]): void {
+  for (const q of quads) {
+    assertSafeIri(q.subject);
+    assertSafeIri(q.predicate);
+    if (q.object.startsWith('"')) {
+      assertSafeRdfTerm(q.object);
+    } else {
+      assertSafeIri(q.object);
+    }
+  }
+}
 
 const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
@@ -489,12 +518,21 @@ export class StorageACKHandler {
     catalogGraph: string,
     parsedCatalog: Quad[],
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    // Malformed terms are a bad request, not a store outage — validate BEFORE
+    // the store wrapper so they reset the stream instead of being mislabeled
+    // as a transient decline (see assertPersistQuadTermsSafe).
+    assertPersistQuadTermsSafe(parsedCatalog);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
       for (const subject of catalogSubjects) {
         await this.store.deleteByPattern({ graph: catalogGraph, subject });
       }
       await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+      // Durability boundary: the ACK we are about to sign asserts this data is
+      // stored, and a worker respawn can recover from a snapshot that predates
+      // the debounced flush — so force it durable before signing. A flush
+      // failure stays inside the wrapper → transient decline (never sign).
+      await this.store.flush?.();
     });
     return result.ok ? { ok: true } : result;
   }
@@ -510,10 +548,19 @@ export class StorageACKHandler {
     stagingGraphUri: string,
     parsed: Quad[],
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    // Malformed terms are a bad request, not a store outage — validate BEFORE
+    // the store wrapper so they reset the stream instead of being mislabeled
+    // as a transient decline (see assertPersistQuadTermsSafe).
+    assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       await this.store.dropGraph(stagingGraphUri);
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
       await this.store.insert(graphedQuads);
+      // Durability boundary: the ACK we are about to sign asserts this data is
+      // stored, and a worker respawn can recover from a snapshot that predates
+      // the debounced flush — so force it durable before signing. A flush
+      // failure stays inside the wrapper → transient decline (never sign).
+      await this.store.flush?.();
     });
     return result.ok ? { ok: true } : result;
   }
