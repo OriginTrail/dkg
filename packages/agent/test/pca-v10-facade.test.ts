@@ -235,6 +235,21 @@ describe('confirmPcaAgentRegistration (PR #1423 advisory state machine)', () => 
     expect(probes()).toBe(3);
   });
 
+  // T5-B — a definitive `false` read must NOT be erased by a LATER throw. The
+  // surface reported not-yet-registered, so a subsequent RPC blip leaves the
+  // advisory outcome `false` (not `null`); contrast with throw×3 above, which
+  // stays `null`. Only a later `true` upgrades it.
+  it('probe false then throw ×2 → { verified:false, adapterSupported:true } (a later throw does NOT erase a prior false)', async () => {
+    const { probe, probes } = makeProbe([false, 'throw', 'throw']);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
+    expect(probes()).toBe(3);
+  });
+
+  it('probe throw then false → { verified:false, adapterSupported:true } (a false after a throw is still a definitive read)', async () => {
+    const { probe } = makeProbe(['throw', false]);
+    expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: false, adapterSupported: true });
+  });
+
   it('probe null (no probe surface) → { verified:null, adapterSupported:false } in a single probe, no retry', async () => {
     const { probe, probes } = makeProbe([null]);
     expect(await confirmPcaAgentRegistration(probe, NOOP_SLEEP)).toEqual({ verified: null, adapterSupported: false });
@@ -242,27 +257,42 @@ describe('confirmPcaAgentRegistration (PR #1423 advisory state machine)', () => 
   });
 });
 
-// R4 — the public facade drops the retry knobs and simply wires the typed probe
-// (`chain.isPublishingConvictionAgent`) into the pure helper. Pin that
-// delegation end-to-end (real sleep, but a `true`/`null` probe returns on the
-// first attempt so there is no backoff wait).
+// R4/R5 — the public facade drops the retry knobs and simply wires the typed
+// probe (`chain.isPublishingConvictionAgent`) into the pure helper. Pin that
+// delegation end-to-end AND assert the EXACT (accountId, agent) flow through
+// (T5-B: an arg-insensitive probe would green-light a regression that confirmed
+// the wrong PCA/agent, e.g. a hard-coded 0n). A `true`/`null` probe returns on
+// the first attempt so there is no real-sleep backoff wait.
 describe('DKGAgent.confirmPublishingConvictionAgentRegistration (facade delegation)', () => {
-  async function facadeAgent(probe: () => Promise<boolean | null>): Promise<DKGAgent> {
+  const ACCOUNT_ID = 7n;
+  const AGENT_ADDR = ethers.Wallet.createRandom().address;
+
+  // The chain probe records every (accountId, agent) it is called with, so the
+  // assertion pins the delegated arguments, not just the result shape.
+  async function capturingAgent(
+    reply: boolean | null,
+  ): Promise<{ agent: DKGAgent; calls: () => Array<[bigint, string]> }> {
     const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
-    (chain as any).isPublishingConvictionAgent = probe;
-    return makeAgent(chain);
+    const calls: Array<[bigint, string]> = [];
+    (chain as any).isPublishingConvictionAgent = async (accountId: bigint, agent: string) => {
+      calls.push([accountId, agent]);
+      return reply;
+    };
+    return { agent: await makeAgent(chain), calls: () => calls };
   }
 
-  it('wires chain.isPublishingConvictionAgent → confirmed result (no public retry opts)', async () => {
-    const agent = await facadeAgent(async () => true);
-    expect(await agent.confirmPublishingConvictionAgentRegistration(1n, ethers.Wallet.createRandom().address))
+  it('wires the EXACT (accountId, agent) through to chain.isPublishingConvictionAgent (no hard-coded args)', async () => {
+    const { agent, calls } = await capturingAgent(true);
+    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR))
       .toEqual({ verified: true, adapterSupported: true });
+    expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]); // exact account + agent, probed once
   });
 
-  it('null probe surface → { verified:null, adapterSupported:false }', async () => {
-    const agent = await facadeAgent(async () => null);
-    expect(await agent.confirmPublishingConvictionAgentRegistration(1n, ethers.Wallet.createRandom().address))
+  it('null probe surface → { verified:null, adapterSupported:false } (still with the exact args)', async () => {
+    const { agent, calls } = await capturingAgent(null);
+    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR))
       .toEqual({ verified: null, adapterSupported: false });
+    expect(calls()).toEqual([[ACCOUNT_ID, AGENT_ADDR]]);
   });
 });
 

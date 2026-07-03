@@ -8,6 +8,18 @@ import {
 } from './finalized-publish-options.js';
 import type { PcaAgentConfirmation } from '@origintrail-official/dkg-agent';
 
+/**
+ * #1346 — the register-agent advisory fields on the wire. A CURRENT daemon
+ * emits a coherent `PcaAgentConfirmation` (the discriminated union keeps
+ * `adapterSupported`/`verified` in lock-step); an OLDER daemon omits both.
+ * Modeled as an explicit legacy variant rather than loosening the coherent
+ * shape with `Partial`, so a consumer that sees `adapterSupported` can trust
+ * `verified` is coherent with it and "absent" is a distinct, documented state.
+ */
+type RegisterPcaAgentAdvisory =
+  | PcaAgentConfirmation
+  | { verified?: undefined; adapterSupported?: undefined };
+
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
 export type QueryResult =
@@ -995,11 +1007,10 @@ export class ApiClient {
     registered: boolean;
     txHash: string;
     blockNumber: number;
-    // #1346 — advisory on-chain confirmation of the mined registration, shaped
-    // by the single source of truth (`PcaAgentConfirmation`). `Partial` because
-    // an OLDER daemon omits these fields entirely — the only honest wire model;
-    // the CLI treats absent as "inconclusive".
-  } & Partial<PcaAgentConfirmation>> {
+    // #1346 — advisory on-chain confirmation of the mined registration; a
+    // current daemon's fields stay coherent (`PcaAgentConfirmation`), an older
+    // daemon omits them (legacy variant → the CLI treats absent as inconclusive).
+  } & RegisterPcaAgentAdvisory> {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
   }
 

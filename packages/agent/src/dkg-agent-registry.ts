@@ -384,20 +384,19 @@ import type { DKGAgent } from './dkg-agent.js';
  * #1346 — advisory result of confirming a just-mined PCA agent registration.
  * The mined receipt is already authoritative for `registered:true`; these two
  * DECOUPLED signals only refine the ADVISORY picture (QA #1346 acceptance
- * contract):
- *   - `adapterSupported`: does the on-chain probe SURFACE exist? A boolean OR a
- *     throw (an RPC read error) ⇒ the surface exists (`true`); only the typed
- *     facade's `null` ("no probe surface") ⇒ `false`.
- *   - `verified`: the probe OUTCOME — `true` (confirmed on-chain) | `false`
- *     (probe ran, did not yet observe it — follower-RPC lag) | `null`
- *     (inconclusive: no capability, or every attempt threw).
- * Reachable states: {null,false}=unsupported · {true,true}=confirmed ·
- * {false,true}=lag · {null,true}=all-threw. ({false,false} is unreachable.)
+ * contract). Modeled as a DISCRIMINATED UNION so the invariant "no probe
+ * surface ⟹ no outcome" is enforced by the compiler, not prose — the
+ * `{adapterSupported:false, verified:false|true}` combos are unrepresentable:
+ *   - `{ adapterSupported: false; verified: null }` — no on-chain probe surface
+ *     (the typed facade's `null`): a genuine capability gap, so no outcome.
+ *   - `{ adapterSupported: true; verified: boolean | null }` — the surface
+ *     exists; `verified` is the OUTCOME: `true` (confirmed on-chain) | `false`
+ *     (a read observed it as not-yet-registered — follower-RPC lag) | `null`
+ *     (every read threw — inconclusive).
  */
-export interface PcaAgentConfirmation {
-  verified: boolean | null;
-  adapterSupported: boolean;
-}
+export type PcaAgentConfirmation =
+  | { adapterSupported: false; verified: null }
+  | { adapterSupported: true; verified: boolean | null };
 
 // #1346 — production confirmation policy: a bounded post-mine probe. These are
 // fixed domain constants, NOT caller-tunable knobs (implementation detail of
@@ -411,7 +410,14 @@ const PCA_CONFIRM_BACKOFF_MS = 300;
  * no-op `sleep` + a scripted `probe` — without exposing retry tuning on the
  * public DKGAgent surface. `probe` yields the typed registration read: `true`
  * (registered) | `false` (not yet — follower-RPC lag → retry) | `null` (no
- * probe surface → unsupported, short-circuit).
+ * probe surface → unsupported, short-circuit). `null` is a per-adapter-STABLE
+ * capability signal (the facade returns it iff the chain method is absent), so
+ * it legitimately halts regardless of earlier reads — a `false`-then-`null`
+ * sequence is unreachable from a real adapter.
+ *
+ * A definitive `false` read is NEVER erased by a later throw: once the surface
+ * has reported not-yet-registered, an RPC blip on a subsequent attempt leaves
+ * the advisory outcome `false` (not `null`) — only a later `true` upgrades it.
  */
 export async function confirmPcaAgentRegistration(
   probe: () => Promise<boolean | null>,
@@ -419,23 +425,28 @@ export async function confirmPcaAgentRegistration(
   attempts: number = PCA_CONFIRM_ATTEMPTS,
   backoffMs: number = PCA_CONFIRM_BACKOFF_MS,
 ): Promise<PcaAgentConfirmation> {
-  let adapterSupported = false;
-  let last: boolean | null = null;
+  let surfaceExists = false;
+  let verified: boolean | null = null; // advisory outcome once the surface is known
   for (let i = 0; i < attempts; i++) {
     try {
       const result = await probe();
-      if (result === null) return { verified: null, adapterSupported: false };
-      adapterSupported = true; // a boolean return proves the read surface exists
-      if (result === true) return { verified: true, adapterSupported: true };
-      last = false; // `false` could be follower-RPC lag on a mined tx → retry
+      if (result === null) return { adapterSupported: false, verified: null };
+      surfaceExists = true; // a boolean return proves the read surface exists
+      if (result === true) return { adapterSupported: true, verified: true };
+      verified = false; // observed not-yet-registered (lag) — a definitive read
     } catch {
-      // the read surface exists; a throw is an RPC read failure, not a gap
-      adapterSupported = true;
-      last = null;
+      // The read surface exists; a throw is an RPC read failure, not a gap.
+      // Deliberately does NOT touch `verified`: a prior definitive `false`
+      // survives a later blip (only a `true` upgrades it).
+      surfaceExists = true;
     }
     if (i < attempts - 1) await sleep(backoffMs);
   }
-  return { verified: last, adapterSupported };
+  // `surfaceExists` is false only when no probe ever ran (attempts <= 0) —
+  // indistinguishable from "no surface"; every real attempt sets it true.
+  return surfaceExists
+    ? { adapterSupported: true, verified }
+    : { adapterSupported: false, verified: null };
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
