@@ -27,6 +27,15 @@ Node Skill tools:
 - `dkg_knowledge_asset_share`
 - `dkg_knowledge_asset_publish`
 
+CLI equivalents:
+
+```bash
+dkg ka create <name> -c <context-graph-id> --input-file <rdf-file> --share
+dkg ka publish-async <name> -c <context-graph-id>
+```
+
+Use the one-shot CLI form only for create/write/finalize/share into SWM. VM publish remains explicit and operates on the named KA after it is fully shared.
+
 ## Query path
 
 - Use `memory_search` for recall (`dkg_memory_search` on the MCP runtime).

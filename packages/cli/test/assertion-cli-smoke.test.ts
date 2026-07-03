@@ -7,10 +7,12 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
+import { MAX_UINT72_DECIMAL } from '@origintrail-official/dkg-core';
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
+const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
 describe.sequential('assertion CLI smoke', () => {
   let dkgHome: string;
@@ -281,7 +283,8 @@ describe.sequential('assertion CLI smoke', () => {
     expect(promoted.stdout).toContain('Assertion promoted to shared memory:');
     expect(promoted.stdout).toContain('Triples:        14');
     expect(promoted.stdout).toContain('urn:company:acme');
-    expect(promoted.stdout).toContain('Next:           dkg publisher publish-async research paper');
+    expect(promoted.stdout).toContain('Next:           dkg ka publish-async paper --context-graph-id research');
+    expect(promoted.stdout).toContain('Alias:          dkg publisher publish-async research paper');
 
     const promotedSubgraph = await execFileAsync('node', [
       CLI_ENTRY,
@@ -294,7 +297,8 @@ describe.sequential('assertion CLI smoke', () => {
       'lab',
     ], { env });
 
-    expect(promotedSubgraph.stdout).toContain('Next:           dkg publisher publish-async research paper --sub-graph lab');
+    expect(promotedSubgraph.stdout).toContain('Next:           dkg ka publish-async paper --context-graph-id research --sub-graph-name lab');
+    expect(promotedSubgraph.stdout).toContain('Alias:          dkg publisher publish-async research paper --sub-graph lab');
   }, 60000);
 
   it('does not expose retired shared-memory or raw publisher enqueue commands', async () => {
@@ -309,10 +313,66 @@ describe.sequential('assertion CLI smoke', () => {
     expect(daemonCalls).toEqual([]);
   }, 15000);
 
-  it('enqueues a named KA async VM publish through the publisher CLI', async () => {
+  it('enqueues a named KA async VM publish through the shared CLI publish options', async () => {
     const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: smokeApiPort };
 
-    const published = await execFileAsync('node', [
+    const publishedViaKa = await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--sub-graph-name',
+      'lab',
+      '--publish-epochs',
+      '3',
+      '--publisher-node-identity-id',
+      '7',
+    ], { env });
+
+    expect(publishedViaKa.stdout).toContain('Knowledge asset publish job accepted:');
+    expect(publishedViaKa.stdout).toContain('Job ID:     job-cli-123');
+    expect(publishedViaKa.stdout).toContain('Status:     accepted');
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      subGraphName: 'lab',
+      options: { publishEpochs: 3, publisherNodeIdentityIdOverride: '7' },
+    });
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--publisher-node-identity-id',
+      '0',
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: '0' },
+    });
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'ka',
+      'publish-async',
+      'paper',
+      '--context-graph-id',
+      'research',
+      '--publisher-node-identity-id',
+      MAX_UINT72_DECIMAL,
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: MAX_UINT72_DECIMAL },
+    });
+
+    const publishedViaAlias = await execFileAsync('node', [
       CLI_ENTRY,
       'publisher',
       'publish-async',
@@ -322,15 +382,44 @@ describe.sequential('assertion CLI smoke', () => {
       'lab',
       '--publish-epochs',
       '3',
+      '--publisher-node-identity-id',
+      '7',
     ], { env });
 
-    expect(published.stdout).toContain('Knowledge asset publish job accepted:');
-    expect(published.stdout).toContain('Job ID:     job-cli-123');
-    expect(published.stdout).toContain('Status:     accepted');
+    expect(publishedViaAlias.stdout).toContain('Knowledge asset publish job accepted:');
+    expect(publishedViaAlias.stdout).toContain('Job ID:     job-cli-123');
+    expect(publishedViaAlias.stdout).toContain('Status:     accepted');
     expect(JSON.parse(lastPublishAsyncBody)).toEqual({
       contextGraphId: 'research',
       subGraphName: 'lab',
-      options: { publishEpochs: 3 },
+      options: { publishEpochs: 3, publisherNodeIdentityIdOverride: '7' },
+    });
+
+    await execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'publish-async',
+      'research',
+      'paper',
+      '--publisher-node-identity-id',
+      '0',
+    ], { env });
+
+    expect(JSON.parse(lastPublishAsyncBody)).toEqual({
+      contextGraphId: 'research',
+      options: { publisherNodeIdentityIdOverride: '0' },
+    });
+
+    await expect(execFileAsync('node', [
+      CLI_ENTRY,
+      'publisher',
+      'publish-async',
+      'research',
+      'paper',
+      '--publisher-node-identity-id',
+      UINT72_OVERFLOW_DECIMAL,
+    ], { env })).rejects.toMatchObject({
+      stderr: expect.stringContaining(`--publisher-node-identity-id must be between 0 and ${MAX_UINT72_DECIMAL} (uint72)`),
     });
   }, 30000);
 

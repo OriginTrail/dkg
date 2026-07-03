@@ -25,6 +25,12 @@ import {
 import { validatePublishRequest } from './validation.js';
 import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
+  assertionOriginalGraph,
+  assertionScopedGraphUri,
+  listAssertionScopedGraphUris,
+  listGraphsByPrefix,
+} from './assertion-scoped-graphs.js';
+import {
   generateConfirmedFullMetadata,
   buildDeterministicTokenRows,
   compareRootIris,
@@ -92,12 +98,6 @@ async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<s
     graphs.unshift(rootGraph);
   }
   return graphs;
-}
-
-async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
 }
 
 /**
@@ -321,7 +321,6 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bypass, which is the other legitimate non-guard path).
 const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
 const TRUSTED_CATALOG_ORIGIN_TOKEN = Symbol('dkg-publisher:trusted-catalog-origin');
-
 type InternalPublishOptions = PublishOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
@@ -409,6 +408,26 @@ function rejectReservedSubjectPrefixes(quads: Quad[]): void {
 function rejectUserAuthoredProtocolMetadata(quads: Quad[]): void {
   rejectReservedSubjectPrefixes(quads);
   assertNoUserAuthoredTrustLevelQuads(quads);
+}
+
+function normalizeAssertionInputGraph(
+  contextGraphId: string,
+  subGraphName: string | undefined,
+  wmGraphUri: string,
+  graph: string,
+): string {
+  if (graph === '') return '';
+  // RDF parsers and older scripts often carry the DKG physical storage graph in
+  // the quad graph term. That is placement metadata, not user-authored RDF
+  // named-graph identity, so keep it in the KA default graph. Only normalize
+  // exact physical graph URIs; other DKG context-graph DIDs remain named graphs.
+  const physicalGraphs = new Set([
+    wmGraphUri,
+    contextGraphDataUri(contextGraphId),
+    ...(subGraphName ? [contextGraphDataUri(contextGraphId, subGraphName)] : []),
+  ]);
+  if (physicalGraphs.has(graph)) return '';
+  return graph;
 }
 
 function rejectOversizedRdfLiterals(quads: Quad[], label: string): void {
@@ -3466,6 +3485,10 @@ export class DKGPublisher implements Publisher {
       // Descriptive SWM graph names are valid local/mock update scopes.
     }
     const localOnlyUpdate = this.chain.chainId === 'none';
+    const hasAttributionOverride = options.publisherNodeIdentityIdOverride !== undefined;
+    const attributionIdentityId: bigint = hasAttributionOverride
+      ? options.publisherNodeIdentityIdOverride!
+      : this.publisherNodeIdentityId;
     let resolvedPublisherAddress: string | undefined;
     if (localOnlyUpdate) {
       resolvedPublisherAddress = this.publisherAddress;
@@ -4047,6 +4070,7 @@ export class DKGPublisher implements Publisher {
             // then derives newTokenAmount itself as before.
             boundNewTokenAmount: boundUpdateTokenAmount,
             publisherAddress,
+            publisherNodeIdentityId: attributionIdentityId,
             v10Origin: true,
             authorAddress: effectiveAuthorAddress,
             authorR: updateSeal.signature.r,
@@ -5139,6 +5163,61 @@ export class DKGPublisher implements Publisher {
       : contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
   }
 
+  private async assertionScopedGraphUris(wmGraphUri: string): Promise<string[]> {
+    return listAssertionScopedGraphUris(this.store, wmGraphUri);
+  }
+
+  private async assertionScopedQuads(wmGraphUri: string): Promise<Quad[]> {
+    const quads: Quad[] = [];
+    for (const graph of await this.assertionScopedGraphUris(wmGraphUri)) {
+      const result = await this.store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`,
+      );
+      if (result.type !== 'quads') continue;
+      const originalGraph = assertionOriginalGraph(wmGraphUri, graph);
+      quads.push(...result.quads.map((quad) => ({ ...quad, graph: originalGraph })));
+    }
+    return quads;
+  }
+
+  private async assertionScopedHasQuads(wmGraphUri: string): Promise<boolean> {
+    for (const graph of await this.assertionScopedGraphUris(wmGraphUri)) {
+      const result = await this.store.query(`ASK { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`);
+      if (result.type === 'boolean' && result.value) return true;
+    }
+    return false;
+  }
+
+  private async deleteAssertionScopedQuads(wmGraphUri: string, quads: Quad[]): Promise<void> {
+    const byGraph = new Map<string, Quad[]>();
+    for (const quad of quads) {
+      const graph = assertionScopedGraphUri(wmGraphUri, quad.graph);
+      const scopedQuad = { ...quad, graph };
+      const bucket = byGraph.get(graph);
+      if (bucket) {
+        bucket.push(scopedQuad);
+      } else {
+        byGraph.set(graph, [scopedQuad]);
+      }
+    }
+    for (const [graph, bucket] of byGraph.entries()) {
+      await this.store.delete(bucket);
+      if (graph !== wmGraphUri) {
+        const stillHasQuads = await this.store.query(`ASK { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`);
+        if (stillHasQuads.type === 'boolean' && !stillHasQuads.value) {
+          await this.store.dropGraph(graph);
+        }
+      }
+    }
+  }
+
+  private async dropAssertionScopedGraphs(wmGraphUri: string): Promise<void> {
+    for (const graph of await listAssertionScopedGraphUris(this.store, wmGraphUri, 'named-only')) {
+      await this.store.dropGraph(graph);
+    }
+    await this.store.dropGraph(wmGraphUri);
+  }
+
   /** A promoted KA's SWM graph URI: per-KA `…/_shared_memory/{addr}/{number}` (resolved from the assertion), else the legacy bucket. */
   private async swmGraphUri(contextGraphId: string, agentAddress: string, name: string, subGraphName?: string): Promise<string> {
     const num = await this.resolveKaNumber(contextGraphId, agentAddress, name, subGraphName);
@@ -5361,9 +5440,27 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    const quads = input.map((t) => ({
-      subject: t.subject, predicate: t.predicate, object: t.object, graph: graphUri,
-    }));
+    const scopedGraphs = new Set<string>([graphUri]);
+    const quads = input.map((t) => {
+      const originalGraph = normalizeAssertionInputGraph(
+        contextGraphId,
+        subGraphName,
+        graphUri,
+        'graph' in t ? String(t.graph ?? '') : '',
+      );
+      if (originalGraph !== '') assertSafeIri(originalGraph);
+      const graph = assertionScopedGraphUri(graphUri, originalGraph);
+      scopedGraphs.add(graph);
+      return {
+        subject: t.subject,
+        predicate: t.predicate,
+        object: t.object,
+        graph,
+      };
+    });
+    for (const graph of scopedGraphs) {
+      await this.store.createGraph(graph);
+    }
     // Round 9 Bug 25: reject user-authored quads whose subject is in a
     // protocol-reserved URN namespace. See RESERVED_SUBJECT_PREFIXES above.
     rejectUserAuthoredProtocolMetadata(quads);
@@ -5379,10 +5476,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<Quad[]> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-    );
-    return result.type === 'quads' ? result.quads : [];
+    return this.assertionScopedQuads(graphUri);
   }
 
   /**
@@ -5424,8 +5518,7 @@ export class DKGPublisher implements Publisher {
     // NB: the actual DROP happens only AFTER the source is validated non-empty
     // (below) — PR #972/335e8d8: dropping first could destroy an open draft when
     // the pull turns out to have no source quads.
-    const draftProbe = await this.store.query(`ASK { GRAPH <${wmGraph}> { ?s ?p ?o } }`);
-    const hasDraft = draftProbe.type === 'boolean' && draftProbe.value === true;
+    const hasDraft = await this.assertionScopedHasQuads(wmGraph);
     if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
         new Error(`A WM draft already exists for "${name}" in context graph "${contextGraphId}"; pass onConflict:"replace" to overwrite it.`),
@@ -5559,7 +5652,7 @@ export class DKGPublisher implements Publisher {
     // Source validated — now (re)open a fresh WM draft (clears stale
     // lifecycle/seal) and seed it.
     if (hasDraft) {
-      await this.store.dropGraph(wmGraph); // 'replace' — git force-checkout, after source validation
+      await this.dropAssertionScopedGraphs(wmGraph); // 'replace' — git force-checkout, after source validation
     }
     await this.assertionCreate(contextGraphId, name, agentAddress, subGraphName);
     // #1094: `assertionCreate`'s clean-slate wipe only covers subjects under
@@ -5631,10 +5724,8 @@ export class DKGPublisher implements Publisher {
       }
     };
 
-    const result = await this.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graphUri}> { ?s ?p ?o } }`,
-    );
-    if (result.type !== 'quads' || result.quads.length === 0) {
+    const assertionQuads = await this.assertionScopedQuads(graphUri);
+    if (assertionQuads.length === 0) {
       // Issue #864 — when the assertion data graph is empty, distinguish two
       // failure modes so the caller (and ultimately the UI) gets an
       // actionable signal instead of a silent "Promoted 0 triples":
@@ -5664,7 +5755,7 @@ export class DKGPublisher implements Publisher {
       return { promotedCount: 0, promotedAllRoots: false };
     }
 
-    let quadsToPromote = result.quads;
+    let quadsToPromote = assertionQuads;
 
     // ── Bug 8 (Codex Round 4) + Round 9 Bug 25 — import-bookkeeping filter ──
     // Defense-in-depth: reserved-prefix subjects SHOULD already have
@@ -5762,6 +5853,20 @@ export class DKGPublisher implements Publisher {
     if (quadsToPromote.length === 0) {
       await maintainMarker(false);
       return { promotedCount: 0, promotedAllRoots: false };
+    }
+
+    const namedGraphs = [...new Set(quadsToPromote
+      .map((q) => q.graph)
+      .filter((graph): graph is string => typeof graph === 'string' && graph.length > 0))];
+    if (namedGraphs.length > 0) {
+      await maintainMarker(false);
+      throw Object.assign(
+        new Error(
+          'Knowledge Asset contains RDF named-graph quads, but SWM share and VM publish do not yet preserve original graph identity. '
+          + 'Rewrite the payload into the default graph before sharing, or keep the KA in WM until graph-preserving SWM/VM semantics are implemented.',
+        ),
+        { code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED', namedGraphs },
+      );
     }
 
     const operationId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -5936,9 +6041,7 @@ export class DKGPublisher implements Publisher {
     const effectivePromoteQuads = skippedRoots.size > 0
       ? quadsToPromote.filter(q => !skippedRoots.has(q.subject) && !skippedRoots.has(q.subject.split('/.well-known/genid/')[0]))
       : quadsToPromote;
-    await this.store.delete(
-      [...effectivePromoteQuads, ...trustedGeneratedCatalogQuads].map((q) => ({ ...q, graph: graphUri })),
-    );
+    await this.deleteAssertionScopedQuads(graphUri, [...effectivePromoteQuads, ...trustedGeneratedCatalogQuads]);
 
     // Update the assertion's memory layer from WM → SWM in _meta
     const assertionMetaGraph = contextGraphMetaUri(contextGraphId);
@@ -6166,7 +6269,7 @@ export class DKGPublisher implements Publisher {
       // (non-published) asset must leave NO seal.
       await this.clearAssertionSeal(contextGraphId, name, agentAddress, subGraphName);
     }
-    await this.store.dropGraph(graphUri);
+    await this.dropAssertionScopedGraphs(graphUri);
   }
 
   /**
@@ -6202,7 +6305,7 @@ export class DKGPublisher implements Publisher {
     const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
     const metaGraph = contextGraphMetaUri(contextGraphId);
     await this.store.deleteByPattern({ subject: graphUri, graph: metaGraph });
-    await this.store.dropGraph(graphUri);
+    await this.dropAssertionScopedGraphs(graphUri);
 
     // #1116 FIX 2 — retire the stale WM lifecycle pointer once the WM draft is
     // gone, but only for SWM-resident content (swmCurrentAssertion set). The WM

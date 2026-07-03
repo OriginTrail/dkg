@@ -962,11 +962,14 @@ describe('DKGQueryEngine', () => {
 
   it('allows scoped GRAPH variable count scans across registered same-CG content partitions', async () => {
     const rootAssertionGraph = `${GRAPH}/_working_memory/0xAgent/1`;
+    const rootAssertionNamedGraph = `${rootAssertionGraph}/_named_graph/ZGlkOmRrZzpjb250ZXh0LWdyYXBoOmFnZW50LXJlZ2lzdHJ5`;
     const rootSharedMemoryGraph = `${GRAPH}/_shared_memory/0xAgent/1`;
     const rootVerifiedGraph = `${GRAPH}/_verifiable_memory/vm-1`;
     const rootVerifiedStagingGraph = `${GRAPH}/_verifiable_memory/staging/vm-1`;
     const subGraph = `${GRAPH}/code`;
     const subGraphAssertionGraph = `${GRAPH}/code/_working_memory/0xAgent/2`;
+    const subGraphAssertionNamedGraph = `${subGraphAssertionGraph}/_named_graph/ZGlkOmRrZzpjb250ZXh0LWdyYXBoOmFnZW50LXJlZ2lzdHJ5L2NvZGU`;
+    const unregisteredAssertionNamedGraph = `${GRAPH}/_working_memory/0xAgent/999/_named_graph/ZGlkOmRrZzpjb250ZXh0LWdyYXBoOmFnZW50LXJlZ2lzdHJ5`;
     const subGraphSharedMemoryGraph = `${GRAPH}/code/_shared_memory/0xAgent/2`;
     const subGraphVerifiedGraph = `${GRAPH}/code/_verifiable_memory/vm-1`;
     const subGraphVerifiedStagingGraph = `${GRAPH}/code/_verifiable_memory/staging/vm-1`;
@@ -979,16 +982,19 @@ describe('DKGQueryEngine', () => {
       assertionGraphRegistration(rootAssertionGraph, 'root-draft'),
       assertionGraphRegistration(subGraphAssertionGraph, 'code-draft'),
       q('urn:root:wm', SCHEMA_NAME, '"RootWM"', rootAssertionGraph),
+      q('urn:root:wm:named', SCHEMA_NAME, '"RootWMNamedGraph"', rootAssertionNamedGraph),
       q('urn:root:swm', SCHEMA_NAME, '"RootSWM"', rootSharedMemoryGraph),
       q('urn:root:vm', SCHEMA_NAME, '"RootVM"', rootVerifiedGraph),
       q('urn:root:staging', SCHEMA_NAME, '"RootStaging"', rootVerifiedStagingGraph),
       q('urn:code:data', SCHEMA_NAME, '"CodeData"', subGraph),
       q('urn:code:wm', SCHEMA_NAME, '"CodeWM"', subGraphAssertionGraph),
+      q('urn:code:wm:named', SCHEMA_NAME, '"CodeWMNamedGraph"', subGraphAssertionNamedGraph),
       q('urn:code:swm', SCHEMA_NAME, '"CodeSWM"', subGraphSharedMemoryGraph),
       q('urn:code:vm', SCHEMA_NAME, '"CodeVM"', subGraphVerifiedGraph),
       q('urn:code:staging', SCHEMA_NAME, '"CodeStaging"', subGraphVerifiedStagingGraph),
       q('urn:code:meta', SCHEMA_NAME, '"CodeMeta"', subGraphMeta),
       q('urn:code:private', SCHEMA_NAME, '"CodePrivate"', subGraphPrivate),
+      q('urn:unregistered:wm:named', SCHEMA_NAME, '"UnregisteredWMNamedGraph"', unregisteredAssertionNamedGraph),
       q('urn:other:swm', SCHEMA_NAME, '"OtherSWM"', otherGraph),
     ]);
 
@@ -1004,10 +1010,12 @@ describe('DKGQueryEngine', () => {
       GRAPH,
       META,
       rootAssertionGraph,
+      rootAssertionNamedGraph,
       rootSharedMemoryGraph,
       rootVerifiedGraph,
       subGraph,
       subGraphAssertionGraph,
+      subGraphAssertionNamedGraph,
       subGraphSharedMemoryGraph,
       subGraphVerifiedGraph,
     ]) {
@@ -1017,6 +1025,7 @@ describe('DKGQueryEngine', () => {
     expect(graphs.has(subGraphVerifiedStagingGraph)).toBe(false);
     expect(graphs.has(subGraphMeta)).toBe(false);
     expect(graphs.has(subGraphPrivate)).toBe(false);
+    expect(graphs.has(unregisteredAssertionNamedGraph)).toBe(false);
     expect(graphs.has(otherGraph)).toBe(false);
   });
 

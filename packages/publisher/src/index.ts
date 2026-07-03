@@ -3,6 +3,14 @@ export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } fro
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export {
+  ASSERTION_NAMED_GRAPH_PREFIX,
+  assertionOriginalGraph,
+  assertionScopedGraphUri,
+  listAssertionScopedGraphUris,
+  listGraphsByPrefix,
+  type AssertionScopedGraphRootMode,
+} from './assertion-scoped-graphs.js';
+export {
   canonicalPublishPayload,
   type CanonicalPublishPayload,
   type CanonicalManifestEntry,

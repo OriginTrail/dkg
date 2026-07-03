@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { jsonResponse, readBody, SMALL_BODY_BYTES, respondIfChainRpcTransportError } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const FEATURE_UNAVAILABLE_503 = {
@@ -90,8 +91,6 @@ function parseAccountId(idStr: string): bigint | null {
 // sentinel — but the daemon does not expose `setPrimaryNode`, so a PCA created
 // here with node 0 would be permanently inert (it funds nobody and cannot be
 // re-pointed). We therefore REQUIRE an explicit, non-zero node at creation.
-const MAX_UINT72 = (1n << 72n) - 1n;
-
 function parsePrimaryNode(raw: unknown): bigint | { error: string } {
   if (typeof raw === 'number') {
     // A uint72 identityId can exceed Number.MAX_SAFE_INTEGER. By the time we
@@ -109,16 +108,21 @@ function parsePrimaryNode(raw: unknown): bigint | { error: string } {
   if (!/^\d+$/.test(s)) {
     return { error: 'primaryNode must be a positive integer node identityId' };
   }
-  let id: bigint;
-  try {
-    id = BigInt(s);
-  } catch (e: any) {
-    return { error: `primaryNode parse error: ${e?.message ?? String(e)}` };
+  const parsed = parseUint72Decimal(s);
+  if (!parsed.ok) {
+    if (parsed.reason === 'range') {
+      return { error: 'primaryNode exceeds the uint72 node identityId range' };
+    }
+    return {
+      error: parsed.message
+        ? `primaryNode parse error: ${parsed.message}`
+        : 'primaryNode must be a positive integer node identityId',
+    };
   }
+  const id = parsed.value;
   if (id <= 0n) {
     return { error: 'primaryNode must be > 0 (0 designates no node; daemon-created PCAs must allocate to a node)' };
   }
-  if (id > MAX_UINT72) return { error: 'primaryNode exceeds the uint72 node identityId range' };
   return id;
 }
 

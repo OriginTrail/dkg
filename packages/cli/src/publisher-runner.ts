@@ -11,7 +11,13 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
+  readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
+}
+
+export interface PublisherRuntimeWallet {
+  readonly address: string;
+  readonly identityId: bigint;
 }
 
 export interface PublisherInspector {
@@ -31,6 +37,10 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
   | Promise<Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'> | undefined>
   | Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>
   | undefined;
+
+interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
+  readonly publisher: DKGPublisher;
+}
 
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
@@ -70,6 +80,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
+    logPublisherWalletAttribution(runtime.wallets, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
@@ -220,8 +231,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   const eventBus = new TypedEventBus();
-  const publishers = new Map<string, DKGPublisher>();
-  const invalidWallets: string[] = [];
+  const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -236,13 +246,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    if (args.chainBase && identityId === 0n) {
-      invalidWallets.push(wallet.address);
-      continue;
-    }
-    publishers.set(
-      wallet.address,
-      new DKGPublisher({
+    wallets.push({
+      address: wallet.address,
+      identityId,
+      publisher: new DKGPublisher({
         store: args.store,
         chain,
         eventBus,
@@ -251,24 +258,12 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
       }),
-    );
+    });
   }
 
-  if (invalidWallets.length > 0) {
-    if (publishers.size === 0) {
-      const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
-      throw new Error(
-        `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-        'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
-      );
-    }
-    const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';
-    console.warn(
-      `[publisher] Skipping ${invalidWallets.length} ${noun} missing on-chain identity: ${invalidWallets.join(', ')}. ` +
-      `Continuing with ${publishers.size} valid wallet(s).`,
-    );
-  }
-
+  const publishers = new Map<string, DKGPublisher>(
+    wallets.map((wallet) => [wallet.address, wallet.publisher]),
+  );
   const hasChainRecovery = [...publishers.values()].some((p) => {
     const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
     return typeof chain?.resolvePublishByTxHash === 'function';
@@ -350,6 +345,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
+    wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
@@ -357,6 +353,32 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       }
     },
   };
+}
+
+function logPublisherWalletAttribution(
+  wallets: readonly PublisherRuntimeWallet[],
+  log: (message: string) => void,
+): void {
+  const attributedWallets = wallets
+    .filter((wallet) => wallet.identityId !== 0n)
+    .map((wallet) => `${wallet.address} (identityId=${wallet.identityId.toString()})`);
+  const noAttributionWallets = wallets
+    .filter((wallet) => wallet.identityId === 0n)
+    .map((wallet) => wallet.address);
+
+  if (attributedWallets.length > 0) {
+    const verb = attributedWallets.length === 1 ? 'has' : 'have';
+    log(
+      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
+      `${verb} node attribution: ${attributedWallets.join(', ')}`,
+    );
+  }
+  if (noAttributionWallets.length > 0) {
+    log(
+      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
+      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
+    );
+  }
 }
 
 function createV10ACKProviderForPublisher(
@@ -532,22 +554,6 @@ function createChainRecoveryResolver(
       },
     };
   };
-}
-
-export function parsePositiveMsOption(value: string, optionName: '--poll-interval' | '--error-backoff'): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer in milliseconds`);
-  }
-  return parsed;
-}
-
-export function parsePositiveIntegerOption(value: string, optionName: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer`);
-  }
-  return parsed;
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
