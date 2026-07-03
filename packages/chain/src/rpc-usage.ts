@@ -237,8 +237,22 @@ export function createCountingJsonRpcProvider(
   tracker: RpcUsageTracker,
   options: JsonRpcApiProviderOptions,
 ): CountingJsonRpcProvider {
-  const fetchRequest = boundedRetryFetchRequest(url, maxRetries, (body) => {
-    for (const method of jsonRpcMethodsFromBody(body)) tracker.record(method);
-  });
+  // boundedRetryFetchRequest stays PURE retry policy; the accounting
+  // composition lives HERE, with the rest of the accounting. Ethers' throttle
+  // retries happen BELOW JsonRpcProvider._send (one dispatch can issue 1 + N
+  // HTTP attempts under 429/5xx) and every attempt bills at the provider, so
+  // the retryFunc is decorated to record each RE-attempt's methods; the first
+  // attempt is counted at _send by CountingJsonRpcProvider.
+  const fetchRequest = boundedRetryFetchRequest(url, maxRetries);
+  const pureRetry = fetchRequest.retryFunc!;
+  fetchRequest.retryFunc = async (attemptReq, response, attempt) => {
+    const retry = await pureRetry(attemptReq, response, attempt);
+    if (retry) {
+      try {
+        for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) tracker.record(method);
+      } catch { /* accounting must never break the retry path */ }
+    }
+    return retry;
+  };
   return new CountingJsonRpcProvider(fetchRequest, undefined, options, (method) => tracker.record(method));
 }
