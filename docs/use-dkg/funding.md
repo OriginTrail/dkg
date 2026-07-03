@@ -13,6 +13,8 @@ Verifiable Memory publishing, updates, endorsement, verification, and other chai
 
 Your node's network is chosen at setup (default: **mainnet-gnosis**) and persisted as `config.networkConfig`; pass `--network <name>` to pick another (`mainnet-base`, `testnet`).
 
+Async publisher wallets also need native gas, plus PCA agent registration or TRAC for direct spend. Publisher wallet identity is optional attribution, not a funding prerequisite. See [Async Publisher Wallets](async-publisher-wallets.md).
+
 **On mainnet (gnosis / base) there is no faucet** — fund the node's operational wallets yourself with the chain's native gas token (xDAI on Gnosis, ETH on Base) and TRAC before publishing.
 
 **On testnet**, setup flows auto-fund the generated wallets when a faucet is configured (the bundled testnet config provides one); this is skipped automatically on mainnet:

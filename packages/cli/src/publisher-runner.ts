@@ -12,7 +12,13 @@ export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
   readonly publisher: AsyncLiftPublisher;
   readonly walletIds: string[];
+  readonly wallets: readonly PublisherRuntimeWallet[];
   readonly stop: () => Promise<void>;
+}
+
+export interface PublisherRuntimeWallet {
+  readonly address: string;
+  readonly identityId: bigint;
 }
 
 export interface PublisherInspector {
@@ -24,6 +30,10 @@ type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
   | Promise<Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'> | undefined>
   | Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>
   | undefined;
+
+interface ConfiguredPublisherWallet extends PublisherRuntimeWallet {
+  readonly publisher: DKGPublisher;
+}
 
 export async function startPublisherRuntimeIfEnabled(args: {
   dataDir: string;
@@ -63,6 +73,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       knowledgeAssetVmPublishPreflight: args.knowledgeAssetVmPublishPreflight,
     });
     await runtime.runner.start();
+    logPublisherWalletAttribution(runtime.wallets, args.log);
     args.log(`Async publisher runner started (${runtime.walletIds.length} wallet${runtime.walletIds.length === 1 ? '' : 's'})`);
     return runtime;
   } catch (err: any) {
@@ -213,8 +224,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
   }
 
   const eventBus = new TypedEventBus();
-  const publishers = new Map<string, DKGPublisher>();
-  const invalidWallets: string[] = [];
+  const wallets: ConfiguredPublisherWallet[] = [];
 
   for (const wallet of publisherWallets.wallets) {
     const chain = args.chainBase
@@ -229,13 +239,10 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         })
       : new NoChainAdapter();
     const identityId = await chain.getIdentityId();
-    if (args.chainBase && identityId === 0n) {
-      invalidWallets.push(wallet.address);
-      continue;
-    }
-    publishers.set(
-      wallet.address,
-      new DKGPublisher({
+    wallets.push({
+      address: wallet.address,
+      identityId,
+      publisher: new DKGPublisher({
         store: args.store,
         chain,
         eventBus,
@@ -244,24 +251,12 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
         publisherPrivateKey: wallet.privateKey,
         publicSnapshotStore: args.publicSnapshotStore,
       }),
-    );
+    });
   }
 
-  if (invalidWallets.length > 0) {
-    if (publishers.size === 0) {
-      const noun = invalidWallets.length === 1 ? 'wallet is' : 'wallets are';
-      throw new Error(
-        `Publisher startup blocked: the following publisher ${noun} missing an on-chain identity: ${invalidWallets.join(', ')}. ` +
-        'Run `dkg identity create` for each wallet or remove it from publisher-wallets.json.',
-      );
-    }
-    const noun = invalidWallets.length === 1 ? 'wallet' : 'wallets';
-    console.warn(
-      `[publisher] Skipping ${invalidWallets.length} ${noun} missing on-chain identity: ${invalidWallets.join(', ')}. ` +
-      `Continuing with ${publishers.size} valid wallet(s).`,
-    );
-  }
-
+  const publishers = new Map<string, DKGPublisher>(
+    wallets.map((wallet) => [wallet.address, wallet.publisher]),
+  );
   const hasChainRecovery = [...publishers.values()].some((p) => {
     const chain = (p as unknown as { chain?: { resolvePublishByTxHash?: unknown } }).chain;
     return typeof chain?.resolvePublishByTxHash === 'function';
@@ -343,12 +338,178 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     runner,
     publisher: asyncPublisher,
     walletIds: validWalletIds,
+    wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     stop: async () => {
       await runner.stop();
       if (args.closeStoreOnStop) {
         await args.store.close();
       }
     },
+  };
+}
+
+function logPublisherWalletAttribution(
+  wallets: readonly PublisherRuntimeWallet[],
+  log: (message: string) => void,
+): void {
+  const attributedWallets = wallets
+    .filter((wallet) => wallet.identityId !== 0n)
+    .map((wallet) => `${wallet.address} (identityId=${wallet.identityId.toString()})`);
+  const noAttributionWallets = wallets
+    .filter((wallet) => wallet.identityId === 0n)
+    .map((wallet) => wallet.address);
+
+  if (attributedWallets.length > 0) {
+    const verb = attributedWallets.length === 1 ? 'has' : 'have';
+    log(
+      `[publisher] ${attributedWallets.length} publisher wallet${attributedWallets.length === 1 ? '' : 's'} ` +
+      `${verb} node attribution: ${attributedWallets.join(', ')}`,
+    );
+  }
+  if (noAttributionWallets.length > 0) {
+    log(
+      `[publisher] ${noAttributionWallets.length} publisher wallet${noAttributionWallets.length === 1 ? '' : 's'} ` +
+      `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
+    );
+  }
+}
+
+function createV10ACKProviderForPublisher(
+  publisher: DKGPublisher,
+  transport?: ACKTransportFactory,
+): PublishOptions['v10ACKProvider'] | undefined {
+  if (!transport) return undefined;
+  const chain = (publisher as unknown as {
+    chain?: {
+      isV10Ready?: () => boolean;
+      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+      verifyACKIdentityDetailed?: (
+        recoveredAddress: string,
+        claimedIdentityId: bigint,
+      ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
+      getMinimumRequiredSignatures?: () => Promise<number>;
+      getEvmChainId?: () => Promise<bigint>;
+      getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
+    };
+  }).chain;
+  // `isV10Ready()` is the authoritative capability gate — rejects
+  // NoChainAdapter (returns false) and unresolved EVM adapters.
+  if (!chain?.isV10Ready?.()) return undefined;
+  if (typeof chain.verifyACKIdentity !== 'function') return undefined;
+  // The H5 prefix requires both a numeric chain id AND the deployed KAV10
+  // address. Without them the collector cannot build a digest that matches
+  // what core-node handlers sign, so refuse to hand back a provider at all.
+  if (typeof chain.getEvmChainId !== 'function') return undefined;
+  if (typeof chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
+
+  const collector = new ACKCollector({
+    gossipPublish: transport.gossipPublish,
+    sendP2P: transport.sendP2P,
+    getConnectedCorePeers: transport.getConnectedCorePeers,
+    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
+    // Prefer the structured verifier when the chain adapter exposes it
+    // so the rejection log can report the specific failing gate.
+    ...(typeof chain.verifyACKIdentityDetailed === 'function' ? {
+      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint) =>
+        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId),
+    } : {}),
+    log: transport.log,
+  });
+
+  return async (
+    merkleRoot,
+    contextGraphId,
+    kaCount,
+    rootEntities,
+    publicByteSize,
+    stagingQuads,
+    epochs,
+    tokenAmount,
+    swmGraphId,
+    subGraphName,
+    merkleLeafCount,
+    isEncryptedPayload,
+    catalogCommitment,
+  ) => {
+    // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
+    // a real on-chain context graph; `ZeroContextGraphId` at
+    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. Reject `<= 0n`
+    // rather than `=== 0n` so `BigInt("-1") === -1n` is caught here instead
+    // of dying in ethers' uint256 encoder inside the evm-adapter.
+    // `contextGraphId` here is the TARGET on-chain numeric id; `swmGraphId`
+    // (optional) is the source SWM graph name and is NOT required to be
+    // numeric.
+    let cgIdBigInt: bigint;
+    try {
+      cgIdBigInt = BigInt(contextGraphId);
+    } catch {
+      throw new Error(
+        `Async V10 publish requires a numeric on-chain context graph id; ` +
+        `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (cgIdBigInt <= 0n) {
+      throw new Error(
+        `Async V10 publish requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
+        `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+      );
+    }
+    if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+      throw new Error(
+        `Async V10 publish requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+        'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
+      );
+    }
+    // PR3 / RC11: wrap each chain pre-flight read in its own try/catch
+    // so a failure is promoted to the typed `RpcPreconditionError`
+    // (rather than the opaque "V10 ACK collection failed" string).
+    // Mirrors the agent-side V10 ACK provider in
+    // `dkg-agent.ts:createV10ACKProvider` so the daemon log surfaces
+    // the same shape regardless of which entry point produced the
+    // publish. `wrapAsRpcPreconditionIfApplicable` is a no-op when
+    // the error is already typed.
+    let requiredACKs: number | undefined;
+    if (typeof chain.getMinimumRequiredSignatures === 'function') {
+      try {
+        requiredACKs = await chain.getMinimumRequiredSignatures();
+      } catch (err) {
+        throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
+      }
+    }
+    let chainIdBig: bigint;
+    try {
+      chainIdBig = await chain.getEvmChainId!();
+    } catch (err) {
+      throw wrapAsRpcPreconditionIfApplicable(err, 'getEvmChainId');
+    }
+    let kav10Address: string;
+    try {
+      kav10Address = await chain.getKnowledgeAssetsLifecycleAddress!();
+    } catch (err) {
+      throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
+    }
+    const result = await collector.collect({
+      merkleRoot,
+      contextGraphId: cgIdBigInt,
+      contextGraphIdStr: contextGraphId,
+      publisherPeerId: transport.publisherPeerId,
+      publicByteSize,
+      isPrivate: isEncryptedPayload === true,
+      kaCount,
+      rootEntities,
+      chainId: chainIdBig,
+      kav10Address,
+      requiredACKs,
+      stagingQuads,
+      epochs,
+      tokenAmount,
+      swmGraphId,
+      subGraphName,
+      merkleLeafCount,
+      isEncryptedPayload,
+      catalogCommitment,
+    });
+    return result.acks;
   };
 }
 
@@ -386,22 +547,6 @@ function createChainRecoveryResolver(
       },
     };
   };
-}
-
-export function parsePositiveMsOption(value: string, optionName: '--poll-interval' | '--error-backoff'): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer in milliseconds`);
-  }
-  return parsed;
-}
-
-export function parsePositiveIntegerOption(value: string, optionName: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
-    throw new Error(`${optionName} must be a positive integer`);
-  }
-  return parsed;
 }
 
 async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {

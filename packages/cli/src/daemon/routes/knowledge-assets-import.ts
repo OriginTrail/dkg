@@ -29,7 +29,7 @@ import {
   isDkgContentHash,
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
-import { findReservedSubjectPrefix, isSkolemizedUri } from "@origintrail-official/dkg-publisher";
+import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
 import type { RequestContext } from "./context.js";
 import {
   jsonResponse,
@@ -1637,10 +1637,12 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
     //
     // `assertion.create` still runs first to register the assertion graph
     // container (idempotent on "already exists"). The write itself
-    // bypasses `assertion.write` so the daemon can set per-quad graph
-    // fields directly — `publisher.assertionWrite` hardcodes every quad to
-    // the assertion graph URI, which defeats the multi-graph atomicity
-    // we need here. Sub-graph registration is already validated by
+    // bypasses `assertion.write` so the daemon can atomically insert both
+    // data-graph and `_meta` rows in one store operation. Generic assertion
+    // writes preserve user named-graph metadata inside KA-scoped storage, but
+    // they are still content writes; this import path also owns daemon-stamped
+    // provenance rows and must commit those graphs together. Sub-graph
+    // registration is already validated by
     // `assertion.create`, so bypassing `assertion.write` doesn't skip any
     // safety checks.
     let assertionGraph = contextGraphAssertionUri(
@@ -1944,6 +1946,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
         object: string;
         graph: string;
       }> = [];
+      let dataGraphs = [assertionGraph];
       let metaSnapshot: Array<{
         subject: string;
         predicate: string;
@@ -1962,6 +1965,18 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
             ...q,
             graph: assertionGraph,
           }));
+        }
+        dataGraphs = await listAssertionScopedGraphUris(agent.store, assertionGraph, 'always');
+        for (const graph of dataGraphs.filter((candidate) => candidate !== assertionGraph)) {
+          const childResult = await agent.store.query(
+            `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+          );
+          if (childResult.type === "quads") {
+            dataSnapshot.push(...childResult.quads.map((q) => ({
+              ...q,
+              graph,
+            })));
+          }
         }
       } catch (err: any) {
         const message = err?.message ?? String(err);
@@ -2033,7 +2048,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       // correspond to state we actually corrupted:
       //
       //  - `metaCleanupSucceeded` → restore `metaSnapshot`
-      //  - `dataDropSucceeded` → restore `dataSnapshot`
+      //  - a graph added to `droppedDataGraphs` → restore its `dataSnapshot`
       //  - insert succeeded → no rollback
       //  - `deleteByPattern` itself failed → no rollback (nothing
       //    changed, retry converges cleanly)
@@ -2043,14 +2058,23 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
       // error so the 500 envelope matches what the caller experienced.
       let metaCleanupSucceeded = false;
       let dataDropSucceeded = false;
+      const droppedDataGraphs = new Set<string>();
       try {
         await agent.store.deleteByPattern({
           subject: assertionUri,
           graph: metaGraph,
         });
         metaCleanupSucceeded = true;
-        await agent.store.dropGraph(assertionGraph);
-        dataDropSucceeded = true;
+        const dataGraphsToDrop = [...dataGraphs].sort((a, b) => {
+          if (a === assertionGraph) return 1;
+          if (b === assertionGraph) return -1;
+          return a.localeCompare(b);
+        });
+        for (const graph of dataGraphsToDrop) {
+          await agent.store.dropGraph(graph);
+          droppedDataGraphs.add(graph);
+          dataDropSucceeded = true;
+        }
         // ── Atomic multi-graph insert: rows 1-13 + rows 14-20 in one call ──
         // A single `store.insert` across two graphs — either both
         // land or neither does, per the adapter contracts.
@@ -2060,14 +2084,15 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
         const rollbackErrors: string[] = [];
         // Restore each side we corrupted, in reverse order of the
         // forward sequence (insert → dropGraph → deleteByPattern).
-        // `dataSnapshot` is restored only if `dropGraph` succeeded
-        // (before then the old data is still in the store); likewise
+        // `dataSnapshot` is restored only for graphs whose `dropGraph`
+        // succeeded (before then the old data is still in the store); likewise
         // `metaSnapshot` is restored only if `deleteByPattern`
         // succeeded. On a `deleteByPattern`-only failure both flags
         // are false and no rollback fires — the state is unchanged.
-        if (dataDropSucceeded && dataSnapshot.length > 0) {
+        const droppedDataSnapshot = dataSnapshot.filter((q) => droppedDataGraphs.has(q.graph));
+        if (dataDropSucceeded && droppedDataSnapshot.length > 0) {
           try {
-            await agent.store.insert(dataSnapshot);
+            await agent.store.insert(droppedDataSnapshot);
           } catch (dataRollbackErr: any) {
             rollbackErrors.push(
               `data rollback failed: ${dataRollbackErr?.message ?? dataRollbackErr}`,

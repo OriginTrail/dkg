@@ -10,6 +10,7 @@ import {
   type PublicProjectionInput,
   type ProjectionEmitDeps,
 } from '../src/context-graph-public-projection.js';
+import { buildPrivateCatalogDefaultGraphQuads } from '../src/dkg-agent-publish.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 const q = (subject: string, predicate: string, object: string, graph = 'g'): Quad => ({ subject, predicate, object, graph });
@@ -184,6 +185,17 @@ describe('combined-model partition — catalog vs everything else (identity-base
   // injection writes and the publisher threads in (round-3 SECURITY). NOT a
   // forgeable type marker.
   const CG_DID = 'did:dkg:context-graph:acme-supply';
+
+  it('normalizes generated private catalog quads to the assertion default graph', () => {
+    const assertionUri = `${CG_DID}/_assertions/agent/notes`;
+    const rawCatalog = buildPublicProjection({ ual: CG_DID, accessPolicy: 'private', graph: assertionUri });
+    const normalized = buildPrivateCatalogDefaultGraphQuads(CG_DID, assertionUri);
+
+    expect(rawCatalog.length).toBeGreaterThan(0);
+    expect(rawCatalog.every((quad) => quad.graph === assertionUri)).toBe(true);
+    expect(normalized).toEqual(rawCatalog.map((quad) => ({ ...quad, graph: '' })));
+    expect(normalized.every((quad) => quad.graph === '')).toBe(true);
+  });
 
   it('separates the catalog entry from data by CG-DID identity; total + order-preserving', () => {
     const data = [

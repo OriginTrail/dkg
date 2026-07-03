@@ -70,6 +70,7 @@ export default defineConfig({
           'test/http-literal-size-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/assertion-cli-smoke.test.ts',
+          'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/epcis-route-readiness.test.ts',

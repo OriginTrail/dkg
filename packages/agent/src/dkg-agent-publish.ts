@@ -432,6 +432,13 @@ function rejectOversizedRdfLiterals(quads: Quad[] | undefined, label: string): v
   assertQuadLiteralsMutf8Safe(quads, { label });
 }
 
+export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri: string): Quad[] {
+  // `graph` is a non-empty placeholder only (buildPublicProjection requires
+  // one); normalize it back to the default assertion graph before writing.
+  return buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri })
+    .map((quad) => ({ ...quad, graph: '' }));
+}
+
 /**
  * Record the publish outcome metric (total + duration) for BOTH publish entry
  * points (`_publish` direct + `_publishFromSharedMemory`). A module-level
@@ -2127,9 +2134,7 @@ export class PublishMethods extends DKGAgentBase {
       : undefined;
     if (trustedGeneratedCatalogTriples) {
       const cgDid = contextGraphDataUri(contextGraphId);
-      // `graph` is a non-empty placeholder only (buildPublicProjection requires
-      // one); assertionWrite re-stamps it with the correct wmGraphUri.
-      const catalogQuads = buildPublicProjection({ ual: cgDid, accessPolicy: 'private', graph: assertionUri });
+      const catalogQuads = buildPrivateCatalogDefaultGraphQuads(cgDid, assertionUri);
       await this.publisher.assertionWrite(contextGraphId, name, agentAddress, catalogQuads, opts?.subGraphName);
       quads.push(...catalogQuads);
     }
