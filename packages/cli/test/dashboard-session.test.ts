@@ -1,7 +1,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
+  DASHBOARD_SESSION_COOKIE,
   DashboardSessionStore,
+  createDashboardSessionAuthSource,
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
@@ -11,6 +13,13 @@ const VALID_TOKEN = 'dashboard-backed-token';
 const AGENT_TOKEN = 'dkg_at_agent-token';
 const DEFAULT_AGENT_ADDRESS = 'did:dkg:agent:default';
 const TOKEN_AGENT_ADDRESS = 'did:dkg:agent:token';
+
+function loopbackBootstrapInit(baseUrl: string): RequestInit {
+  return {
+    method: 'POST',
+    headers: { Origin: baseUrl },
+  };
+}
 
 function cookieFrom(res: Response): string {
   const setCookie = res.headers.get('set-cookie');
@@ -24,6 +33,10 @@ async function startServer(): Promise<{ server: Server; baseUrl: string }> {
   const resolvePrincipal = (token: string) => token === AGENT_TOKEN
     ? { kind: 'agent' as const, agentAddress: TOKEN_AGENT_ADDRESS }
     : { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
+  const dashboardAuthSource = createDashboardSessionAuthSource({
+    authenticate: (request) => sessions.authenticate(request),
+    verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
+  });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (await handleDashboardSessionRequest(req, res, url, sessions, {
@@ -36,10 +49,7 @@ async function startServer(): Promise<{ server: Server; baseUrl: string }> {
     }
     if (!(await httpAuthGuard(req, res, true, validTokens, null, {
       resolvePrincipal,
-      dashboardSession: {
-        authenticate: (request) => sessions.authenticate(request),
-        verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
-      },
+      authSources: [dashboardAuthSource],
     }))) {
       return;
     }
@@ -104,7 +114,7 @@ describe('dashboard browser sessions', () => {
     const started = await startServer();
     server = started.server;
 
-    const res = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     expect(res.status).toBe(200);
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('dkg_ui_session=');
@@ -150,10 +160,23 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('rejects loopback bootstrap without local browser origin proof even with localhost upstream Host', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const url = new URL(started.baseUrl);
+    const res = await rawRequest(started.baseUrl, '/api/dashboard/session/loopback', {
+      method: 'POST',
+      headers: { Host: `${url.hostname}:${url.port}` },
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['set-cookie']).toBeUndefined();
+  });
+
   it('authenticates protected GETs with the dashboard cookie and no Authorization header from the browser', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
 
     const res = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
@@ -245,10 +268,30 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({ error: 'Invalid dashboard session token' });
   });
 
+  it('rejects and prunes expired dashboard session cookies', () => {
+    const store = new DashboardSessionStore();
+    const issuedAt = 1_000;
+    const principal = { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
+    const created = store.create(VALID_TOKEN, 'loopback', principal, issuedAt);
+    const req = {
+      headers: {
+        cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
+      },
+    } as IncomingMessage;
+
+    expect(store.authenticate(req, created.record.expiresAt - 1)).toMatchObject({
+      sessionId: created.sessionId,
+      compatToken: VALID_TOKEN,
+      principal,
+    });
+    expect(store.authenticate(req, created.record.expiresAt + 1)).toBeNull();
+    expect(store.authenticate(req, created.record.expiresAt + 2)).toBeNull();
+  });
+
   it('rejects unsafe session-authenticated requests without CSRF', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
 
     const res = await fetch(`${started.baseUrl}/api/protected`, { method: 'POST', headers: { Cookie: cookie } });
@@ -258,7 +301,7 @@ describe('dashboard browser sessions', () => {
   it('allows unsafe session-authenticated requests with CSRF', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
     const body = await bootstrap.json() as { csrfToken: string };
 
@@ -272,7 +315,7 @@ describe('dashboard browser sessions', () => {
   it('allows unsafe session-authenticated requests with same-origin browser metadata', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
     const body = await bootstrap.json() as { csrfToken: string };
 
@@ -290,7 +333,7 @@ describe('dashboard browser sessions', () => {
   it('rejects unsafe session-authenticated requests with valid CSRF but hostile Origin', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
     const body = await bootstrap.json() as { csrfToken: string };
 
@@ -311,7 +354,7 @@ describe('dashboard browser sessions', () => {
   it('rejects unsafe session-authenticated requests with valid CSRF but cross-site fetch metadata', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
     const body = await bootstrap.json() as { csrfToken: string };
 
@@ -332,7 +375,7 @@ describe('dashboard browser sessions', () => {
   it('keeps invalid explicit Authorization from falling back to a valid cookie', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
 
     const res = await fetch(`${started.baseUrl}/api/protected`, {
@@ -344,7 +387,7 @@ describe('dashboard browser sessions', () => {
   it('logout revokes the cookie-backed session', async () => {
     const started = await startServer();
     server = started.server;
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, { method: 'POST' });
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
 
     const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {

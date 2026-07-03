@@ -3,8 +3,11 @@ import {
   type DashboardSessionStatus,
 } from '../../src/ui/dashboardSessionClient.js';
 
-export function useAuthenticatedDashboardSession(overrides: DashboardSessionStatus = {}): void {
+type AuthenticatedDashboardSession = Extract<DashboardSessionStatus, { state: 'authenticated' }>;
+
+export function useAuthenticatedDashboardSession(overrides: Partial<AuthenticatedDashboardSession> = {}): void {
   setDashboardSessionForTesting({
+    state: 'authenticated',
     authenticated: true,
     source: 'test',
     csrfToken: 'csrf-test',
@@ -13,6 +16,8 @@ export function useAuthenticatedDashboardSession(overrides: DashboardSessionStat
   });
 }
 
-export function resetDashboardSession(session: DashboardSessionStatus = { authenticated: false }): void {
+export function resetDashboardSession(
+  session: DashboardSessionStatus = { state: 'unauthenticated', authenticated: false },
+): void {
   setDashboardSessionForTesting(session);
 }

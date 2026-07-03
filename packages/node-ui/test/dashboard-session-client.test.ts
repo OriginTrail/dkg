@@ -30,6 +30,21 @@ describe('dashboard session client', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('does not bootstrap a session for ordinary transport calls', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ synced: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await apiFetch('/api/status');
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ synced: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/status');
+  });
+
   it('refreshes a stale browser session and retries once after a protected API 401', async () => {
     const calls: Array<{ url: string; method: string; headers?: HeadersInit }> = [];
     let protectedCalls = 0;

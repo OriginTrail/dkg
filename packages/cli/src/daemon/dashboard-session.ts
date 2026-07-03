@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractBearerToken, verifyToken } from "../auth.js";
-import type { RequestAuthPrincipal } from "../auth.js";
+import type { RequestAuthDecision, RequestAuthPrincipal, RequestAuthSource } from "../auth.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "./http-utils.js";
 
 export const DASHBOARD_SESSION_COOKIE = "dkg_ui_session";
@@ -198,6 +198,57 @@ export function verifyDashboardCsrf(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+export interface DashboardSessionAuthSourceOptions {
+  authenticate: (req: IncomingMessage) => AuthenticatedDashboardSession | null;
+  verifyCsrf: (req: IncomingMessage, session: AuthenticatedDashboardSession) => boolean;
+}
+
+export function createDashboardSessionAuthSource(
+  options: DashboardSessionAuthSourceOptions,
+): RequestAuthSource {
+  return {
+    resolve(req: IncomingMessage, validTokens: Set<string>, corsOrigin?: string | null): RequestAuthDecision | null {
+      const session = options.authenticate(req);
+      if (!session || !verifyToken(session.compatToken, validTokens)) return null;
+
+      const unsafe = isUnsafeHttpMethod(req.method);
+      const csrfValidated = unsafe ? options.verifyCsrf(req, session) : false;
+      if (unsafe && !csrfValidated) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Invalid or missing dashboard CSRF token",
+        };
+      }
+      if (unsafe && !hasTrustedDashboardOrigin(req, corsOrigin)) {
+        return {
+          ok: false,
+          status: 403,
+          error: "Untrusted dashboard request origin",
+        };
+      }
+
+      return {
+        ok: true,
+        credentialToken: session.compatToken,
+        context: {
+          source: "dashboard-session",
+          compatToken: session.compatToken,
+          principal: session.principal,
+          csrf: {
+            required: unsafe,
+            validated: csrfValidated,
+          },
+          dashboardSession: {
+            source: session.source,
+            expiresAt: session.expiresAt,
+          },
+        },
+      };
+    },
+  };
+}
+
 function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken" | "source" | "expiresAt">) {
   return {
     authenticated: true,
@@ -274,7 +325,7 @@ function isLoopbackRequest(req: IncomingMessage): boolean {
   const remote = req.socket.remoteAddress ?? "";
   if (!isLoopbackAddress(remote)) return false;
   if (hasProxyForwardingHeaders(req)) return false;
-  return isAllowedLoopbackHost(req.headers.host);
+  return isAllowedLoopbackHost(req.headers.host) && hasLocalBrowserAddressing(req);
 }
 
 function isLoopbackAddress(addr: string): boolean {
@@ -290,7 +341,7 @@ function isAllowedLoopbackHost(hostHeader: string | undefined): boolean {
   const host = rawHost.startsWith("[")
     ? rawHost.slice(1, rawHost.indexOf("]"))
     : rawHost.split(":")[0];
-  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  return isAllowedLoopbackHostname(host);
 }
 
 const PROXY_FORWARDING_HEADERS = [
@@ -311,4 +362,77 @@ function hasProxyForwardingHeaders(req: IncomingMessage): boolean {
 function headerHasValue(value: string | string[] | undefined): boolean {
   if (Array.isArray(value)) return value.some((item) => item.trim().length > 0);
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function isUnsafeHttpMethod(method: string | undefined): boolean {
+  return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+}
+
+function parseOrigin(value: string | undefined): string | undefined {
+  if (!value || value === "*") return undefined;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const host = firstHeaderValue(req.headers.host);
+  if (!host) return undefined;
+  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"])
+    ?.split(",")[0]
+    ?.trim()
+    ?.toLowerCase();
+  const proto = forwardedProto === "https" ? "https" : "http";
+  return parseOrigin(`${proto}://${host}`);
+}
+
+function trustedDashboardOrigins(req: IncomingMessage, corsOrigin?: string | null): Set<string> {
+  const origins = new Set<string>();
+  const ownOrigin = requestOrigin(req);
+  if (ownOrigin) origins.add(ownOrigin);
+  const allowedCorsOrigin = parseOrigin(corsOrigin ?? undefined);
+  if (allowedCorsOrigin) origins.add(allowedCorsOrigin);
+  return origins;
+}
+
+function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | null): boolean {
+  const fetchSite = firstHeaderValue(req.headers["sec-fetch-site"])?.toLowerCase();
+  if (fetchSite === "cross-site") return false;
+
+  const allowed = trustedDashboardOrigins(req, corsOrigin);
+  const originHeader = firstHeaderValue(req.headers.origin);
+  if (originHeader && !allowed.has(parseOrigin(originHeader) ?? "")) return false;
+
+  const refererHeader = firstHeaderValue(req.headers.referer);
+  if (refererHeader && !allowed.has(parseOrigin(refererHeader) ?? "")) return false;
+
+  return true;
+}
+
+function hasLocalBrowserAddressing(req: IncomingMessage): boolean {
+  return isLocalOrigin(firstHeaderValue(req.headers.origin)) ||
+    isLocalOrigin(firstHeaderValue(req.headers.referer));
+}
+
+function isLocalOrigin(raw: string | undefined): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      isAllowedLoopbackHostname(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedLoopbackHostname(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }

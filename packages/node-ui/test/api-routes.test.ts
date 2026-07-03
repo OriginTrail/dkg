@@ -621,6 +621,93 @@ describe('handleNodeUIRequest CORS origin handling', () => {
   });
 });
 
+describe('handleNodeUIRequest legacy positional tail compatibility', () => {
+  let server: Server | undefined;
+  let base: string;
+
+  afterEach(async () => {
+    if (server) {
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      server = undefined;
+    }
+  });
+
+  async function startLegacyServer(): Promise<void> {
+    const metricsCollector = {
+      collect: async () => ({ liveMetric: true }),
+    } as any;
+    const memoryManager = {
+      getStats: async () => ({ initialized: true, sessionCount: 7 }),
+    } as any;
+    const relayStatsProvider = () => ({
+      capacity: 10,
+      reservationCount: 2,
+      activeCircuits: 1,
+      bytesIn: 3n,
+      bytesOut: 4n,
+      reservations: [],
+    });
+    const db = {
+      getLatestSnapshot: () => ({ fallback: true }),
+      getSnapshotHistory: () => [],
+      getOperations: () => [],
+      getErrors: () => [],
+      getMetrics: () => [],
+      getErrorHotspots: () => [],
+    } as any;
+
+    server = createServer((req, res) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      void handleNodeUIRequest(
+        req,
+        res,
+        url,
+        db,
+        '.',
+        undefined,
+        metricsCollector,
+        'legacy-browser-token-must-be-ignored',
+        memoryManager,
+        undefined,
+        undefined,
+        'https://legacy.example',
+        relayStatsProvider,
+      ).then((handled) => {
+        if (!handled && !res.headersSent) {
+          res.statusCode = 404;
+          res.end('Not Found');
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', () => resolve()));
+    const addr = server.address() as AddressInfo;
+    base = `http://127.0.0.1:${addr.port}`;
+  }
+
+  it('maps old positional metrics, memory, CORS, and relay arguments into options', async () => {
+    await startLegacyServer();
+
+    const metrics = await fetch(`${base}/api/metrics`);
+    expect(metrics.status).toBe(200);
+    expect(metrics.headers.get('access-control-allow-origin')).toBe('https://legacy.example');
+    await expect(metrics.json()).resolves.toMatchObject({ liveMetric: true });
+
+    const memory = await fetch(`${base}/api/memory/stats`);
+    expect(memory.status).toBe(200);
+    await expect(memory.json()).resolves.toMatchObject({ initialized: true, sessionCount: 7 });
+
+    const relay = await fetch(`${base}/api/relay/stats`);
+    expect(relay.status).toBe(200);
+    await expect(relay.json()).resolves.toMatchObject({
+      capacity: 10,
+      reservationCount: 2,
+      activeCircuits: 1,
+      bytesIn: '3',
+      bytesOut: '4',
+    });
+  });
+});
+
 describe('handleNodeUIRequest replication routes (Phase F)', () => {
   let db: DashboardDB;
   let dir: string;

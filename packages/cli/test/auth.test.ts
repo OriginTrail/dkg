@@ -122,13 +122,18 @@ describe('resolveRequestAuthDecision', () => {
   });
 
   it('does not fall back to dashboard-cookie auth after an invalid explicit bearer attempt', () => {
-    const authenticate = vi.fn(() => ({
-      compatToken: VALID_TOKEN,
-      principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-      csrfToken: 'csrf',
-      source: 'loopback' as const,
-      expiresAt: Date.now() + 60_000,
-    }));
+    const authSource = {
+      resolve: vi.fn(() => ({
+        ok: true as const,
+        credentialToken: VALID_TOKEN,
+        context: {
+          source: 'dashboard-session' as const,
+          compatToken: VALID_TOKEN,
+          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+          csrf: { required: false, validated: false },
+        },
+      })),
+    };
 
     const decision = resolveRequestAuthDecision(
       request('/api/agents', {
@@ -139,15 +144,12 @@ describe('resolveRequestAuthDecision', () => {
       }),
       validTokens,
       {
-        dashboardSession: {
-          authenticate,
-          verifyCsrf: () => true,
-        },
+        authSources: [authSource],
       },
     );
 
     expect(decision).toBeNull();
-    expect(authenticate).not.toHaveBeenCalled();
+    expect(authSource.resolve).not.toHaveBeenCalled();
   });
 });
 

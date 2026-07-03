@@ -18,20 +18,9 @@ export type RequestAuthPrincipal = {
   agentAddress: string;
 };
 
-export interface DashboardSessionAuthResult {
-  compatToken: string;
-  principal: RequestAuthPrincipal;
-  csrfToken: string;
-  source?: 'loopback' | 'exchange';
-  expiresAt?: number;
-}
-
 export interface HttpAuthGuardOptions {
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
-  dashboardSession?: {
-    authenticate: (req: IncomingMessage) => DashboardSessionAuthResult | null;
-    verifyCsrf: (req: IncomingMessage, session: DashboardSessionAuthResult) => boolean;
-  };
+  authSources?: RequestAuthSource[];
 }
 
 export interface RequestAuthContext {
@@ -813,56 +802,12 @@ export type RequestAuthDecision =
   | { ok: true; context: RequestAuthContext; credentialToken: string }
   | { ok: false; status: 403; error: string };
 
-function firstHeaderValue(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-function isUnsafeHttpMethod(method: string | undefined): boolean {
-  return method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
-}
-
-function parseOrigin(value: string | undefined): string | undefined {
-  if (!value || value === '*') return undefined;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return undefined;
-  }
-}
-
-function requestOrigin(req: IncomingMessage): string | undefined {
-  const host = firstHeaderValue(req.headers.host);
-  if (!host) return undefined;
-  const forwardedProto = firstHeaderValue(req.headers['x-forwarded-proto'])
-    ?.split(',')[0]
-    ?.trim()
-    ?.toLowerCase();
-  const proto = forwardedProto === 'https' ? 'https' : 'http';
-  return parseOrigin(`${proto}://${host}`);
-}
-
-function trustedDashboardOrigins(req: IncomingMessage, corsOrigin?: string | null): Set<string> {
-  const origins = new Set<string>();
-  const ownOrigin = requestOrigin(req);
-  if (ownOrigin) origins.add(ownOrigin);
-  const allowedCorsOrigin = parseOrigin(corsOrigin ?? undefined);
-  if (allowedCorsOrigin) origins.add(allowedCorsOrigin);
-  return origins;
-}
-
-function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | null): boolean {
-  const fetchSite = firstHeaderValue(req.headers['sec-fetch-site'])?.toLowerCase();
-  if (fetchSite === 'cross-site') return false;
-
-  const allowed = trustedDashboardOrigins(req, corsOrigin);
-  const originHeader = firstHeaderValue(req.headers.origin);
-  if (originHeader && !allowed.has(parseOrigin(originHeader) ?? '')) return false;
-
-  const refererHeader = firstHeaderValue(req.headers.referer);
-  if (refererHeader && !allowed.has(parseOrigin(refererHeader) ?? '')) return false;
-
-  return true;
+export interface RequestAuthSource {
+  resolve: (
+    req: IncomingMessage,
+    validTokens: Set<string>,
+    corsOrigin?: string | null,
+  ) => RequestAuthDecision | null;
 }
 
 function defaultRequestPrincipal(): RequestAuthPrincipal {
@@ -914,45 +859,14 @@ export function resolveRequestAuthDecision(
   }
 
   const explicitAuthAttempt = Boolean(token) || hasEventsQueryToken;
-  if (explicitAuthAttempt || !options?.dashboardSession) return null;
+  if (explicitAuthAttempt) return null;
 
-  const session = options.dashboardSession.authenticate(req);
-  if (!session || !verifyToken(session.compatToken, validTokens)) return null;
-
-  const unsafe = isUnsafeHttpMethod(req.method);
-  const csrfValidated = unsafe ? options.dashboardSession.verifyCsrf(req, session) : false;
-  if (unsafe && !csrfValidated) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'Invalid or missing dashboard CSRF token',
-    };
-  }
-  if (unsafe && !hasTrustedDashboardOrigin(req, corsOrigin)) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'Untrusted dashboard request origin',
-    };
+  for (const source of options?.authSources ?? []) {
+    const decision = source.resolve(req, validTokens, corsOrigin);
+    if (decision) return decision;
   }
 
-  return {
-    ok: true,
-    credentialToken: session.compatToken,
-    context: {
-      source: 'dashboard-session',
-      compatToken: session.compatToken,
-      principal: session.principal,
-      csrf: {
-        required: unsafe,
-        validated: csrfValidated,
-      },
-      dashboardSession: {
-        source: session.source,
-        expiresAt: session.expiresAt,
-      },
-    },
-  };
+  return null;
 }
 
 /**

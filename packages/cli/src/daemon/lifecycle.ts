@@ -144,6 +144,7 @@ import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import {
   DashboardSessionStore,
+  createDashboardSessionAuthSource,
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
@@ -2875,6 +2876,10 @@ export async function runDaemonInner(
     log("API authentication disabled (auth.enabled = false)");
   }
   const dashboardSessions = new DashboardSessionStore();
+  const dashboardSessionAuthSource = createDashboardSessionAuthSource({
+    authenticate: (request) => dashboardSessions.authenticate(request),
+    verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
+  });
   const resolveDashboardPrincipal = (token: string) => {
     const agentAddress = agent.resolveAgentAddress(token);
     return {
@@ -3081,10 +3086,7 @@ export async function runDaemonInner(
         resolveCorsOrigin(req, corsAllowed),
         {
           resolvePrincipal: resolveDashboardPrincipal,
-          dashboardSession: {
-            authenticate: (request) => dashboardSessions.authenticate(request),
-            verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
-          },
+          authSources: [dashboardSessionAuthSource],
         },
       );
       if (!authAllowed) return;

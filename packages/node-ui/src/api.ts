@@ -93,14 +93,61 @@ export interface HandleNodeUIRequestOptions {
  * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
  */
+export function handleNodeUIRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  options?: HandleNodeUIRequestOptions,
+): Promise<boolean>;
+export function handleNodeUIRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  _legacyRemovedArg?: unknown,
+  metricsCollector?: MetricsCollector,
+  _authTokenRemoved?: string,
+  memoryManager?: ChatMemoryManager,
+  llmSettings?: LlmSettingsCallbacks,
+  telemetrySettings?: TelemetrySettingsCallbacks,
+  corsOrigin?: string | null,
+  relayStatsProvider?: RelayStatsProvider,
+): Promise<boolean>;
 export async function handleNodeUIRequest(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
   db: DashboardDB,
   staticDir: string,
-  options: HandleNodeUIRequestOptions = {},
+  optionsOrLegacyRemovedArg: HandleNodeUIRequestOptions | unknown = {},
+  legacyMetricsCollector?: MetricsCollector,
+  _authTokenRemoved?: string,
+  legacyMemoryManager?: ChatMemoryManager,
+  legacyLlmSettings?: LlmSettingsCallbacks,
+  legacyTelemetrySettings?: TelemetrySettingsCallbacks,
+  legacyCorsOrigin?: string | null,
+  legacyRelayStatsProvider?: RelayStatsProvider,
 ): Promise<boolean> {
+  const hasLegacyTail = legacyMetricsCollector !== undefined ||
+    _authTokenRemoved !== undefined ||
+    legacyMemoryManager !== undefined ||
+    legacyLlmSettings !== undefined ||
+    legacyTelemetrySettings !== undefined ||
+    legacyCorsOrigin !== undefined ||
+    legacyRelayStatsProvider !== undefined;
+  const options = hasLegacyTail
+    ? {
+        metricsCollector: legacyMetricsCollector,
+        memoryManager: legacyMemoryManager,
+        llmSettings: legacyLlmSettings,
+        telemetrySettings: legacyTelemetrySettings,
+        corsOrigin: legacyCorsOrigin,
+        relayStatsProvider: legacyRelayStatsProvider,
+      }
+    : (isHandleNodeUIRequestOptions(optionsOrLegacyRemovedArg) ? optionsOrLegacyRemovedArg : {});
   const {
     metricsCollector,
     memoryManager,
@@ -681,6 +728,10 @@ export async function handleNodeUIRequest(
   }
 
   return false;
+}
+
+function isHandleNodeUIRequestOptions(value: unknown): value is HandleNodeUIRequestOptions {
+  return Boolean(value) && typeof value === 'object';
 }
 
 async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string): Promise<true> {
