@@ -79,11 +79,13 @@ export {
 } from './ack-errors.js';
 export {
   StorageACKHandler,
+  type StorageACKHandlerConfig,
+} from './storage-ack-handler.js';
+export {
   withSignerRegistrationCache,
   SIGNER_REGISTRATION_CACHE_TTL_MS,
   SIGNER_REGISTRATION_STALE_WINDOW_MS,
-  type StorageACKHandlerConfig,
-} from './storage-ack-handler.js';
+} from './signer-registration-cache.js';
 export {
   VerifyCollector,
   type VerifyCollectorDeps,

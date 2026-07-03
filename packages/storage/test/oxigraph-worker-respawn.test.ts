@@ -37,7 +37,14 @@ function makeStore(persistPath?: string, opts?: { operationTimeoutMs?: number })
 // instead of scattering `as any` casts around. `lifecycle` is the explicit
 // state field the respawn/close/in-memory-loss logic keys off (see the
 // WorkerLifecycle model in the adapter); asserting on it pins the state model.
-type WorkerLifecycle = 'live' | 'respawning' | 'closing' | 'closed' | 'gave_up' | 'in_memory_lost';
+type WorkerLifecycle =
+  | 'initializing'
+  | 'live'
+  | 'respawning'
+  | 'closing'
+  | 'closed'
+  | 'gave_up'
+  | 'in_memory_lost';
 function internals(store: OxigraphWorkerStore): {
   worker: Worker;
   lifecycle: WorkerLifecycle;
@@ -302,6 +309,37 @@ describe('OxigraphWorkerStore in-memory fail-closed on unexpected worker exit', 
         await expect(store.countQuads('urn:test:g')).rejects.toThrow(/cannot be recovered/);
         expect(internals(store).lifecycle).toBe('in_memory_lost');
         expect(internals(store).respawnPromise).toBeNull();
+      }
+    } finally {
+      await store.close().catch(() => {});
+    }
+  });
+
+  it('otReviewAgent #1408: the spawn→live transition is guarded — a spawn from a terminal state THROWS (never resurrects the store), but the two legal predecessors enter live', async () => {
+    // The spawn path (spawnWorker → markSpawnedLive) is the one writer that
+    // enters 'live'. It must still enforce terminal permanence: were a future
+    // respawn/close code path to call it after close/give-up/in-memory-loss, it
+    // has to throw rather than silently reopen the store. Poke the state field
+    // directly (decoupled from the real worker) to drive the guard.
+    const store = makeStore(undefined);
+    const seam = store as unknown as {
+      lifecycle: WorkerLifecycle;
+      markSpawnedLive: () => void;
+    };
+    try {
+      for (const terminal of ['closed', 'gave_up', 'in_memory_lost'] as const) {
+        seam.lifecycle = terminal;
+        expect(() => seam.markSpawnedLive()).toThrow(/illegal spawn transition|terminal/i);
+        expect(seam.lifecycle).toBe(terminal); // stayed terminal — not resurrected
+      }
+      // 'closing' is likewise not a legal spawn predecessor.
+      seam.lifecycle = 'closing';
+      expect(() => seam.markSpawnedLive()).toThrow(/illegal spawn transition/i);
+      // The two legal predecessors DO enter 'live'.
+      for (const start of ['initializing', 'respawning'] as const) {
+        seam.lifecycle = start;
+        expect(() => seam.markSpawnedLive()).not.toThrow();
+        expect(seam.lifecycle).toBe('live');
       }
     } finally {
       await store.close().catch(() => {});

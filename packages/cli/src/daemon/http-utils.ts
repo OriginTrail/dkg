@@ -863,6 +863,90 @@ async function rescueWriteTargetWithoutStore(
 }
 
 /**
+ * The outcome of the EXACT write-preflight probe leg, as a single discriminated
+ * value so the list-fallback leg branches on one result instead of a cluster of
+ * distant mutable booleans (otReviewAgent #1408):
+ *   - `accept`        — fast-accept; the caller returns the candidate id.
+ *   - `rejectUnknown` — a definitive, store-backed deny of a non-bare id; the
+ *                       caller returns 404.
+ *   - `deferReject`   — a definitive deny of a BARE id; continue to the list leg
+ *                       and reject only if that leg ALSO misses (a name may
+ *                       resolve differently there).
+ *   - `unavailable`   — the probe threw or degraded (`storeUnavailable`); this
+ *                       is the ONLY verdict that makes the both-legs-failed
+ *                       store-free rescue eligible. `errorMessage` feeds the 503.
+ *   - `continueToList`— no probe, or a definitive miss with nothing to carry.
+ */
+type ExactPreflightDecision =
+  | { kind: "accept" }
+  | { kind: "rejectUnknown" }
+  | { kind: "deferReject" }
+  | { kind: "unavailable"; errorMessage: string }
+  | { kind: "continueToList" };
+
+/**
+ * Run the exact write-preflight probe and reduce it to one {@link
+ * ExactPreflightDecision}. Owns the probe interpretation (fast-accept,
+ * degraded-store, authoritative deny) so `resolveRequiredWriteContextGraphId`
+ * never re-synchronises availability/deferral/diagnostic flags across branches.
+ * Deliberately takes no `ServerResponse` — HTTP responses stay with the caller.
+ */
+async function evaluateExactWritePreflight(
+  agent: {
+    probeContextGraphWritePreflight?: (
+      contextGraphId: string,
+      opts?: { callerAgentAddress?: string | null },
+    ) => Promise<ContextGraphWritePreflightProbe>;
+  },
+  candidateId: string,
+  opts: {
+    callerAgentAddress: string | null;
+    requireLocalWritable: boolean;
+    isBareCandidateId: boolean;
+  },
+): Promise<ExactPreflightDecision> {
+  if (!agent.probeContextGraphWritePreflight) return { kind: "continueToList" };
+  const { callerAgentAddress, requireLocalWritable, isBareCandidateId } = opts;
+  try {
+    const probe = await agent.probeContextGraphWritePreflight(candidateId, {
+      callerAgentAddress,
+    });
+    // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
+    // store fields), so check it before any deny/unavailable interpretation.
+    if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
+      return { kind: "accept" };
+    }
+    if (probe.storeUnavailable === true) {
+      // The probe survived a store failure and degraded its store-derived
+      // fields to UNKNOWN. Deny-ish verdicts are NOT trustworthy from unknowns
+      // (that would turn a store outage into a 400), so carry the store error
+      // for the both-legs-failed 503 and leave the verdict to the list/rescue.
+      return {
+        kind: "unavailable",
+        errorMessage: probe.storeErrorMessage ?? "local store unavailable",
+      };
+    }
+    // Store answered definitively — a deny-ish verdict is authoritative. Bare
+    // ids defer (the list leg may resolve the name); qualified ids reject now.
+    if (
+      exactProbeIsStaleSubscription(probe) ||
+      exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)
+    ) {
+      return isBareCandidateId ? { kind: "deferReject" } : { kind: "rejectUnknown" };
+    }
+    return { kind: "continueToList" };
+  } catch (err) {
+    // The exact probe could not answer local existence at all (store down / read
+    // broke). The ONLY degraded case that makes the both-legs-failed rescue
+    // eligible: there is no authoritative local-miss verdict to override.
+    return {
+      kind: "unavailable",
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
  * Resolve a write target to a known, canonical context graph id.
  *
  * The storage layer auto-materializes named graphs on first insert, so syntax
@@ -919,69 +1003,27 @@ export async function resolveRequiredWriteContextGraphId(
     opts.callerAgentAddress,
   );
   const isBareCandidateId = !candidateId.includes("/");
-  let deferredExactProbeReject = false;
-  let exactProbeErrorMessage: string | null = null;
-  // Track B (rescue gating): the store-free on-chain rescue may run ONLY when
-  // the exact probe could NOT authoritatively answer local existence — i.e. it
-  // THREW or degraded (`storeUnavailable`). A probe that SUCCEEDED with a
-  // definitive local miss is authoritative: if only the list leg then throws,
-  // we must keep the fail-closed 503 and NEVER let the chain rescue override
-  // that definitive miss. This flag is the gate.
-  let exactProbeUnavailable = false;
-  if (agent.probeContextGraphWritePreflight) {
-    try {
-      const probe = await agent.probeContextGraphWritePreflight(candidateId, {
-        callerAgentAddress,
-      });
-      if (probe.storeUnavailable === true) {
-        // Track B: the probe survived a store failure and degraded its
-        // store-derived fields to UNKNOWN instead of throwing. Carry the
-        // original store error so the both-legs-failed 503 below keeps its
-        // legacy "exact preflight failed: X; list validation failed: Y" shape.
-        // The store-free rescue that runs there re-derives its own evidence
-        // (on-chain active+public proof) from the id alone, so the probe object
-        // itself is not needed past this point.
-        exactProbeErrorMessage = probe.storeErrorMessage ?? 'local store unavailable';
-        exactProbeUnavailable = true;
-      }
-      if (exactProbeCanFastAccept(probe, requireLocalWritable, callerAgentAddress)) {
-        return candidateId;
-      }
-      // Deny-ish probe interpretations require trustworthy store-derived
-      // evidence. When the store was unavailable, `exists` /
-      // `hasLocalContent` are UNKNOWN (undefined), not false — deciding
-      // "stale subscription" or "authoritative deny" from unknowns would
-      // convert a store outage into a 400. Leave the verdict to the list
-      // leg (or the rescue path if that leg fails too), matching the
-      // pre-resilience behavior where a store failure threw past both
-      // checks.
-      if (probe.storeUnavailable !== true) {
-        if (exactProbeIsStaleSubscription(probe)) {
-          if (isBareCandidateId) {
-            deferredExactProbeReject = true;
-          } else {
-            return rejectUnknownContextGraph(res, raw);
-          }
-        }
-        if (exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)) {
-          if (isBareCandidateId) {
-            deferredExactProbeReject = true;
-          } else {
-            return rejectUnknownContextGraph(res, raw);
-          }
-        }
-      }
-    } catch (err) {
-      exactProbeErrorMessage = err instanceof Error ? err.message : String(err);
-      // The exact probe could not answer local existence at all — the store
-      // was down (or the read otherwise broke). This is the ONLY case (with a
-      // degraded probe) where the both-legs-failed rescue may run: there is no
-      // authoritative local-miss verdict to override.
-      exactProbeUnavailable = true;
-      // Fall back to the composite list path. If that is also unavailable,
-      // the caller receives the bounded validation-unavailable response below.
-    }
+  // Exact write-preflight leg reduced to ONE decision (see
+  // ExactPreflightDecision) so this resolver never keeps availability, deferral
+  // and diagnostic-text flags in sync across distant branches.
+  const exactDecision = await evaluateExactWritePreflight(agent, candidateId, {
+    callerAgentAddress,
+    requireLocalWritable,
+    isBareCandidateId,
+  });
+  if (exactDecision.kind === "accept") return candidateId;
+  if (exactDecision.kind === "rejectUnknown") {
+    return rejectUnknownContextGraph(res, raw);
   }
+  // Immutable carry-forward for the list leg. Track B (rescue gating): the
+  // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
+  // exact probe THREW or degraded (`storeUnavailable`) and so has no
+  // authoritative local-miss to override. A definitive local miss (any other
+  // kind) keeps the fail-closed 503 if the list leg then fails.
+  const deferredExactProbeReject = exactDecision.kind === "deferReject";
+  const exactProbeUnavailable = exactDecision.kind === "unavailable";
+  const exactProbeErrorMessage =
+    exactDecision.kind === "unavailable" ? exactDecision.errorMessage : null;
 
   let contextGraphs: ExistingContextGraphRow[];
   try {

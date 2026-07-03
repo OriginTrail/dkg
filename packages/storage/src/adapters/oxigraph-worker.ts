@@ -129,7 +129,14 @@ export interface OxigraphWorkerTimeoutError extends Error {
  * a replacement is on the way, so parked ops wait it out (see callAfterRespawn).
  * Every other non-`live` state means "no usable worker" and fails ops fast.
  */
-type WorkerLifecycle = 'live' | 'respawning' | 'closing' | 'closed' | 'gave_up' | 'in_memory_lost';
+type WorkerLifecycle =
+  | 'initializing'
+  | 'live'
+  | 'respawning'
+  | 'closing'
+  | 'closed'
+  | 'gave_up'
+  | 'in_memory_lost';
 
 /** Terminal states: the store will never serve another op and never respawns. */
 const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
@@ -156,7 +163,9 @@ export class OxigraphWorkerStore implements TripleStore {
    * needs, so the give-up/close/data-lost verdicts can never disagree the way
    * an ad-hoc cluster of interdependent booleans could. Set to 'live' the
    * moment spawnWorker() arms a fresh thread; only ever moves along the
-   * documented transitions (enforced by setLifecycle's terminal guard).
+   * documented transitions (every write is guarded — `setLifecycle` for the
+   * non-spawn hops and `markSpawnedLive` for the spawn → 'live' hop — so a
+   * terminal state can never silently reopen).
    *
    * `workerExited` below stays as a separate, lower-level FACT ("the current
    * thread has exited") because it is genuinely orthogonal to policy: during a
@@ -167,10 +176,14 @@ export class OxigraphWorkerStore implements TripleStore {
    * into one discriminated field removes that.
    *
    * The initializer is a pre-construction placeholder only: the constructor
-   * always calls spawnWorker() (which assigns 'live' directly, bypassing the
-   * setLifecycle terminal guard), so no op ever observes this 'closed' value.
+   * always calls spawnWorker() (whose `markSpawnedLive` accepts the
+   * non-terminal 'initializing' placeholder), so no op ever observes this
+   * value. 'initializing' is deliberately NON-terminal so the spawn guard can
+   * enforce terminal permanence uniformly — a placeholder of 'closed' (a
+   * terminal state) would have made the first legal spawn indistinguishable
+   * from illegally reopening a closed store.
    */
-  private lifecycle: WorkerLifecycle = 'closed';
+  private lifecycle: WorkerLifecycle = 'initializing';
   /** Set once the CURRENT worker thread has exited (graceful close, crash, or kill); cleared by spawnWorker(). */
   private workerExited = false;
   /** Memoized close so repeat/concurrent close() calls share one teardown. */
@@ -254,6 +267,28 @@ export class OxigraphWorkerStore implements TripleStore {
     this.lifecycle = next;
   }
 
+  /**
+   * The ONE guarded transition INTO 'live' — used by spawnWorker() for both the
+   * constructor's first spawn (from the 'initializing' placeholder) and a
+   * respawn (from 'respawning'). `setLifecycle` can't own this hop because
+   * entering 'live' is legal only from those two non-terminal states, but the
+   * terminal-permanence invariant must still hold: a spawn attempted after
+   * 'closed' / 'gave_up' / 'in_memory_lost' (e.g. a future respawn/close code
+   * path calling spawnWorker() by mistake) MUST throw rather than silently
+   * resurrect a store that promised it would never serve another op.
+   */
+  private markSpawnedLive(): void {
+    if (this.lifecycle === 'live') return;
+    if (this.lifecycle !== 'initializing' && this.lifecycle !== 'respawning') {
+      throw new Error(
+        `oxigraph-worker: illegal spawn transition ${this.lifecycle} → live ` +
+          '(a worker may only be spawned from initializing or respawning; ' +
+          'terminal states are permanent) — this is a bug in the respawn supervisor.',
+      );
+    }
+    this.lifecycle = 'live';
+  }
+
   /** True once an operator-initiated close() has begun (closing or closed). */
   private get isClosing(): boolean {
     return this.lifecycle === 'closing' || this.lifecycle === 'closed';
@@ -275,15 +310,16 @@ export class OxigraphWorkerStore implements TripleStore {
     });
     this.worker = worker;
     this.workerExited = false;
-    // Arming a fresh thread IS the transition into 'live'. This is the one
-    // writer that may enter 'live' from the initial placeholder or from
-    // 'respawning', so it assigns the field directly rather than going through
-    // setLifecycle() (whose terminal guard would reject the constructor's very
-    // first spawn out of the placeholder value). close() and the respawn
-    // supervisor are the only other writers and they never race this: a spawn
-    // only happens either in the constructor or from within respawn(), which
+    // Arming a fresh thread IS the transition into 'live'. Route it through the
+    // guarded `markSpawnedLive` (not `setLifecycle`, which forbids ALL entries
+    // to 'live'): it permits the two legal predecessors — the 'initializing'
+    // placeholder (constructor's first spawn) and 'respawning' (a respawn) —
+    // while still throwing on terminal states, so a stray spawn after close /
+    // give-up / in-memory-loss can never silently resurrect the store. close()
+    // and the respawn supervisor are the only other writers and never race
+    // this: a spawn only happens in the constructor or within respawn(), which
     // bails the moment a close() is seen.
-    this.lifecycle = 'live';
+    this.markSpawnedLive();
     worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the

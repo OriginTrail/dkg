@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   StorageACKHandler,
-  withSignerRegistrationCache,
   type StorageACKHandlerConfig,
 } from '../src/storage-ack-handler.js';
+import { withSignerRegistrationCache } from '../src/signer-registration-cache.js';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { QuorumUnmetError } from '../src/ack-errors.js';
 import {
