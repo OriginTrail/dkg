@@ -380,35 +380,9 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-import type { ProbedConfirmationOutcome, PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
-
-// Production confirmation policy: a bounded post-mine probe (fixed constants).
-const PCA_CONFIRM_ATTEMPTS = 3;
-const PCA_CONFIRM_BACKOFF_MS = 300;
-
-/**
- * Bounded-probe retry state machine, kept MODULE-PRIVATE next to the facade —
- * the only public confirmation surface is
- * `confirmPublishingConvictionAgentRegistration`. `probe` yields the registration
- * read: true (registered) | false (not yet — retry) | throws (RPC read failure).
- * A definitive not_observed (a false read) is never downgraded by a later throw;
- * only a later true upgrades it to confirmed.
- */
-async function confirmPcaAgentRegistration(
-  probe: () => Promise<boolean>,
-): Promise<ProbedConfirmationOutcome> {
-  let sawNotObserved = false;
-  for (let i = 0; i < PCA_CONFIRM_ATTEMPTS; i++) {
-    try {
-      if (await probe()) return 'confirmed';
-      sawNotObserved = true;
-    } catch {
-      // An RPC read failure does not downgrade a prior not_observed.
-    }
-    if (i < PCA_CONFIRM_ATTEMPTS - 1) await new Promise((r) => setTimeout(r, PCA_CONFIRM_BACKOFF_MS));
-  }
-  return sawNotObserved ? 'not_observed' : 'inconclusive';
-}
+// The bounded-probe retry helper is co-located with its outcome model in the
+// confirmation module (imported here for the facade, not re-exported from index).
+import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
