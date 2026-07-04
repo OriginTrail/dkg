@@ -14,6 +14,7 @@ packages:
   - "devnet/edge-update-flow"
   - "devnet/greenfield-10min"
   - "devnet/rich-scenario"
+  - "devnet/rpc-quiet-window"
   - "devnet/v10-rs-prune"
   - "devnet/_bootstrap"
   - "devnet/pr1386-term-canon"

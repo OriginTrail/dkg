@@ -185,6 +185,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // (no mock equivalent — mock raises typed reverts directly).
   'requireConvictionNFT',
   'pcaWrite',
+  'pcaWriteAndInvalidate',
+  // Identity read-cache helpers are EVM-only: the mock's identity registry is
+  // in-memory and its writes are already immediately visible.
+  'clearIdentityIdForAddress',
+  'seedIdentityIdForAddress',
   // The seven V10 Publishing Conviction NFT methods (issue #519 /
   // TB-0002) are now mirrored on MockChainAdapter (in-memory account
   // map + agent reverse map + owner gating) — no longer exempt.
@@ -193,6 +198,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // round-trips to cache in the first place; a no-op shim would just
   // pad parity for no behavioural reason.
   'invalidatePublishPreflightCache',
+  'ensureConfiguredStaticChainIdValidated',
   // #820 (RFC-39 ciphertext/immutable ACK binding): EVM-only surfaces.
   //  - `computeV10UpdateAckDigest` mirrors the on-chain
   //    `KnowledgeAssetsLifecycle._executeUpdateCore` ACK-digest packing for

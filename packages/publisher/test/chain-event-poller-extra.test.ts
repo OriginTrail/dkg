@@ -20,10 +20,9 @@
  * This file covers:
  *   - cursor persistence across restart (load + advance)
  *   - load() errors are non-fatal
- *   - head-seed skip for old events when no pending publishes
- *   - early-block events NOT skipped when hasPendingPublishes (scan
- *     must cover the full history — losing them is a durability bug)
- *   - MAX_RANGE (9000-block) capping → multiple polls needed for large gaps
+ *   - live context graph tail starts near the chain head
+ *   - pending publishes do not force unrelated context graph backfill
+ *   - historical context graph recovery is left to the daemon chain scan
  *   - callback failures must NOT abort the poll (fault isolation)
  *   - double-start() is a no-op (no duplicate timers)
  *   - stop() is idempotent and clears the interval
@@ -54,7 +53,13 @@ import {
   HARDHAT_KEYS,
 } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
-import { ChainEventPoller, type CursorPersistence } from '../src/chain-event-poller.js';
+import {
+  ChainEventPoller,
+  type ChainEventPollerLane,
+  type CursorPersistence,
+  type LaneCursorPersistence,
+  type LegacyCursorPersistence,
+} from '../src/chain-event-poller.js';
 import { PublishHandler } from '../src/publish-handler.js';
 
 // Track adapters across the file so afterEach can release their HTTP
@@ -80,11 +85,21 @@ afterEach(() => {
   }
 });
 
-class InMemoryCursor implements CursorPersistence {
+class InMemoryCursor implements LegacyCursorPersistence {
   public saved: number[] = [];
   constructor(public loaded?: number) {}
   async load(): Promise<number | undefined> { return this.loaded; }
   async save(n: number): Promise<void> { this.saved.push(n); }
+}
+
+class InMemoryLaneCursor implements LaneCursorPersistence {
+  public saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
+  constructor(private readonly loaded = new Map<ChainEventPollerLane, number>()) {}
+  async loadLane(lane: ChainEventPollerLane): Promise<number | undefined> { return this.loaded.get(lane); }
+  async saveLane(lane: ChainEventPollerLane, block: number): Promise<void> {
+    this.saved.push({ lane, block });
+    this.loaded.set(lane, block);
+  }
 }
 
 async function pollOnce(_poller: ChainEventPoller, timeoutMs = 300): Promise<void> {
@@ -151,7 +166,7 @@ describe('ChainEventPoller — cursor persistence', () => {
     // observable: the first poll must start at `eventBlock` and pick up
     // the ContextGraphCreated that would otherwise be missed if the cursor
     // reset to 0 (slow / redundant) or to head (skips the event).
-    const cursor = new InMemoryCursor(eventBlock - 1);
+    const cursor = new InMemoryLaneCursor(new Map([['contextGraphDiscovery', eventBlock - 1]]));
     const received: Array<{ id: string; blockNumber: number }> = [];
 
     const poller = new ChainEventPoller({
@@ -174,16 +189,19 @@ describe('ChainEventPoller — cursor persistence', () => {
     expect(mine, `expected ContextGraphCreated at block ${eventBlock}; received=${JSON.stringify(received)}`).toBeDefined();
 
     // Cursor must have advanced past the event block (not regressed).
-    expect(cursor.saved.length).toBeGreaterThan(0);
-    expect(cursor.saved.at(-1)).toBeGreaterThanOrEqual(eventBlock);
+    const savedBlocks = cursor.saved
+      .filter((entry) => entry.lane === 'contextGraphDiscovery')
+      .map((entry) => entry.block);
+    expect(savedBlocks.length).toBeGreaterThan(0);
+    expect(savedBlocks.at(-1)).toBeGreaterThanOrEqual(eventBlock);
     const head = await provider.getBlockNumber();
-    expect(cursor.saved.at(-1)).toBeLessThanOrEqual(head);
+    expect(savedBlocks.at(-1)).toBeLessThanOrEqual(head);
   }, 30_000);
 
   it('persists advancing cursor to survive restart', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
-    const cursor = new InMemoryCursor();
+    const cursor = new InMemoryLaneCursor();
 
     // Take a snapshot of current head, then emit an event.
     const result = await createV10Cg(chain);
@@ -201,9 +219,12 @@ describe('ChainEventPoller — cursor persistence', () => {
     await pollOnce(poller);
     await poller.stop();
 
-    expect(cursor.saved.length).toBeGreaterThan(0);
+    const savedBlocks = cursor.saved
+      .filter((entry) => entry.lane === 'contextGraphDiscovery')
+      .map((entry) => entry.block);
+    expect(savedBlocks.length).toBeGreaterThan(0);
     // Final cursor must cover the block we emitted at.
-    expect(cursor.saved.at(-1)).toBeGreaterThanOrEqual(eventBlock);
+    expect(savedBlocks.at(-1)).toBeGreaterThanOrEqual(eventBlock);
   }, 30_000);
 
   it('load() errors are non-fatal (poller still starts)', async () => {
@@ -227,8 +248,8 @@ describe('ChainEventPoller — cursor persistence', () => {
   }, 15_000);
 });
 
-describe('ChainEventPoller — head seeding & range capping', () => {
-  it('seeds cursor near head (head - 500) when no pending publishes and no cursor persistence', async () => {
+describe('ChainEventPoller — context graph live tail', () => {
+  it('does not replay old context graph events outside the live tail window', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const provider = createProvider();
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
@@ -249,26 +270,26 @@ describe('ChainEventPoller — head seeding & range capping', () => {
       onContextGraphCreated: async (e) => { received.push(e.blockNumber); },
     });
 
-    // No cursor persistence + no pendings → poller seeds at head-500.
-    // Our old event (block oldEventBlock) is > 500 blocks behind head,
-    // so it MUST NOT be received on the first (seeded) poll.
+    // Context graph event polling is the live tail. Historical recovery runs
+    // through DKGAgent.discoverContextGraphsFromChain, not this event lane.
     await poller.start();
     await pollOnce(poller);
     await poller.stop();
 
-    expect(received.includes(oldEventBlock), `expected block ${oldEventBlock} to be skipped (head=${head}, seed=${head - 500}); received=${received.join(',')}`).toBe(false);
+    expect(received.includes(oldEventBlock), `old block ${oldEventBlock} should be left to chain discovery (head=${head}); received=${received.join(',')}`).toBe(false);
   }, 45_000);
 
-  it('does NOT skip early-block events when hasPendingPublishes (cursor is not seeded near head)', async () => {
+  it('does not let live pending publishes force context graph backfill from genesis', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const provider = createProvider();
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
 
-    // Plant a pending publish sentinel so `hasPendingPublishes === true` and
-    // the poller is FORCED to start scanning from lastBlock=0 (full history).
+    // Plant a live pending publish sentinel. The publish lane may become
+    // active, but it must not change the context graph lane into a historical
+    // backfill lane.
     (handler as unknown as { pendingPublishes: Map<string, unknown> }).pendingPublishes.set(
       'sentinel',
-      { expectedMerkleRoot: new Uint8Array(32) } as never,
+      { expectedMerkleRoot: new Uint8Array(32), restoredFromJournal: false } as never,
     );
     expect(handler.hasPendingPublishes).toBe(true);
 
@@ -277,8 +298,8 @@ describe('ChainEventPoller — head seeding & range capping', () => {
     const earlyBlock = result.blockNumber;
     expect(earlyBlock).toBeGreaterThan(beforeHead);
 
-    // Mine far past the early block — head would trigger head-500 seeding
-    // if hasPendingPublishes were false. This assertion proves it isn't.
+    // Mine far past the early block so it is outside the context live-tail
+    // window.
     await mineBlocks(2000);
 
     const received: number[] = [];
@@ -293,28 +314,26 @@ describe('ChainEventPoller — head seeding & range capping', () => {
     await pollOnce(poller, 500);
     await poller.stop();
 
-    // Early event must be picked up in the first poll. Scan range is
-    // [1, min(9000, head)]; earlyBlock < 9000 for a fresh Hardhat, so the
-    // event is reachable on the first poll even though head is far beyond.
-    expect(received.includes(earlyBlock), `expected block ${earlyBlock} to be picked up; received=${received.join(',')}`).toBe(true);
+    expect(received.includes(earlyBlock), `context graph block ${earlyBlock} should be left to chain discovery; received=${received.join(',')}`).toBe(false);
   }, 45_000);
 
-  it('caps scan range at MAX_RANGE (9000 blocks) — multiple polls needed to cover large gaps', async () => {
+  it('delivers near-head context graph events without walking the historical gap first', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const provider = createProvider();
     const handler = new PublishHandler(new OxigraphStore(), new TypedEventBus());
 
-    // Pending publish forces full-history scan.
+    // Live pending publishes must not force unrelated context graph backfill.
     (handler as unknown as { pendingPublishes: Map<string, unknown> }).pendingPublishes.set(
       'sentinel',
-      { expectedMerkleRoot: new Uint8Array(32) } as never,
+      { expectedMerkleRoot: new Uint8Array(32), restoredFromJournal: false } as never,
     );
 
     // Emit an early event (current head + 1 after this tx).
     const earlyResult = await createV10Cg(chain);
     const earlyBlock = earlyResult.blockNumber;
 
-    // Mine past MAX_RANGE so cursor cannot cover the gap in one poll.
+    // Mine far enough that a genesis backfill would need multiple MAX_RANGE
+    // pages before it could reach the fresh event.
     await mineBlocks(10_000);
 
     // Emit a late event near current head — two events straddle the cap.
@@ -333,14 +352,13 @@ describe('ChainEventPoller — head seeding & range capping', () => {
     });
 
     await poller.start();
-    // Wait long enough for multiple polls (intervalMs=50, head-early > 9000
-    // means at least 2 polls are required to close the gap).
+    // Wait long enough for the live tail to catch the near-head event.
     await pollOnce(poller, 1500);
     await poller.stop();
 
-    // Both events are observed, but NOT in a single poll — the cursor
-    // had to advance through the MAX_RANGE boundary first.
-    expect(received.includes(earlyBlock), `earlyBlock ${earlyBlock} missing; received=${received.join(',')}`).toBe(true);
+    // The old event is left to chain discovery; the near-head event is
+    // observed promptly.
+    expect(received.includes(earlyBlock), `earlyBlock ${earlyBlock} should be left to chain discovery; received=${received.join(',')}`).toBe(false);
     expect(received.includes(lateBlock),  `lateBlock  ${lateBlock}  missing; received=${received.join(',')}`).toBe(true);
   }, 60_000);
 });
@@ -414,6 +432,7 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
     // real node runtimes. Here we also check the `running` flag flipped
     // exactly once and that the second start() was a no-op.
     const pollCalls: number[] = [];
+    const cursor = new InMemoryLaneCursor(new Map([['contextGraphDiscovery', ourBlock - 1]]));
     const poller = new ChainEventPoller({
       chain,
       publishHandler: handler,
@@ -426,11 +445,8 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
           pollCalls.push(e.blockNumber);
         }
       },
+      cursorPersistence: cursor,
     });
-
-    // Seed cursor right before our event so the first poll is guaranteed to
-    // reach it in the initial synchronous poll triggered by start().
-    (poller as unknown as { lastBlock: number }).lastBlock = ourBlock - 1;
 
     await poller.start();
     // Capture timer + running snapshot before the second start() call.

@@ -15,7 +15,12 @@ import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY } from './chain-adapter.js';
-import type { ApprovalPolicy, V10PublishParams, OnChainPublishResult, ConvictionReader } from './chain-adapter.js';
+import type {
+  ApprovalPolicy,
+  V10PublishParams,
+  OnChainPublishResult,
+  ConvictionReader,
+} from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -28,6 +33,8 @@ import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
+import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { PcaReadCache } from './pca-read-cache.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -160,6 +167,25 @@ function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
     ? Math.floor(value)
     : fallback;
+}
+
+function configuredStaticChainId(config: Pick<EVMAdapterConfig, 'chainId' | 'staticNetwork'>): bigint | undefined {
+  if (config.staticNetwork === false) return undefined;
+  const { chainId } = config;
+  if (!chainId) return undefined;
+  const tail = chainId.includes(':') ? chainId.split(':').pop() : chainId;
+  if (!tail || !/^[0-9]+$/.test(tail)) {
+    return undefined;
+  }
+  try {
+    const numeric = BigInt(tail);
+    if (numeric > 0n) return numeric;
+  } catch {
+    // Fall through to the uniform configuration error below.
+  }
+  throw new Error(
+    `EVMAdapterConfig.chainId must end with a positive decimal chain id when staticNetwork is enabled (got ${chainId}); set staticNetwork: false to use dynamic detection`,
+  );
 }
 
 /**
@@ -383,6 +409,8 @@ export class EVMChainAdapterBase {
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
 
+  protected readonly configuredStaticChainId?: bigint;
+
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
   /** Primary signer — used for identity/profile/staking operations. */
@@ -474,12 +502,24 @@ export class EVMChainAdapterBase {
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
 
+  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
+
+  protected static readonly IDENTITY_ID_NEGATIVE_TTL_MS = 0;
+
   /**
    * OT-RFC-39 — per-process cache for `getIdentityIdForAddress`.
-   * Only positive (non-zero) hits are memoised; see the method body
-   * for the rationale (negative-hit invalidation hazard).
+   * Positive hits are memoised with a bounded TTL; negative hits are only
+   * single-flighted so a later external registration is visible immediately.
+   * Local mutations seed/invalidate through the cache so stale in-flight reads
+   * cannot win.
    */
-  protected readonly identityIdByAddressCache: Map<string, bigint> = new Map();
+  protected readonly identityIdByAddressCache = new ReadThroughTtlCache<string, bigint>({
+    ttlMs: (value) => value > 0n
+      ? EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS
+      : EVMChainAdapterBase.IDENTITY_ID_NEGATIVE_TTL_MS,
+  });
+
+  protected readonly pcaReadCache = new PcaReadCache();
 
   protected hubRotationListenerStarted = false;
 
@@ -556,6 +596,16 @@ export class EVMChainAdapterBase {
 
   protected cachedChainId: { value: bigint; cachedAt: number } | undefined;
 
+  protected readonly configuredStaticChainIdsByProvider = new Map<
+    JsonRpcProvider,
+    { value: bigint; cachedAt: number }
+  >();
+
+  protected readonly configuredStaticChainIdValidationsByProvider = new Map<
+    JsonRpcProvider,
+    Promise<bigint>
+  >();
+
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
   protected cachedMinRequiredSignatures: { value: number; cachedAt: number } | undefined;
@@ -591,10 +641,22 @@ export class EVMChainAdapterBase {
    */
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
+    this.configuredStaticChainIdsByProvider.clear();
+    this.configuredStaticChainIdValidationsByProvider.clear();
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
     this.contextGraphRegistryScanWatermarks.clear();
+  }
+
+  protected clearIdentityIdForAddress(address: string): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.identityIdByAddressCache.invalidate(cacheKey);
+  }
+
+  protected seedIdentityIdForAddress(address: string, identityId: bigint): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.identityIdByAddressCache.seed(cacheKey, identityId);
   }
 
   protected static preflightCacheFresh(
@@ -677,12 +739,16 @@ export class EVMChainAdapterBase {
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
     // see createCountingJsonRpcProvider for the invariant.
+    this.configuredStaticChainId = configuredStaticChainId(config);
+    const staticNetwork = this.configuredStaticChainId == null
+      ? undefined
+      : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
       (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
         cacheTimeout: -1,
         polling: true,
         batchMaxCount: 1,
-      }),
+      }, staticNetwork),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
@@ -717,6 +783,7 @@ export class EVMChainAdapterBase {
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
+      async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
     );
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
@@ -1103,7 +1170,7 @@ export class EVMChainAdapterBase {
    * pre-broadcast — the caller owns the WAL split and broadcasts the single
    * returned tx.
    */
-  protected populateAndSignAcrossProviders(
+  protected async populateAndSignAcrossProviders(
     contract: Contract,
     method: string,
     args: readonly unknown[],
@@ -2113,12 +2180,17 @@ export class EVMChainAdapterBase {
             : eligible;
         let pageError: unknown;
         for (const { provider } of ordered) {
-          let contract = connected.get(provider);
-          if (!contract) {
-            contract = baseContract.connect(provider) as Contract;
-            connected.set(provider, contract);
-          }
           try {
+            await withTimeout(
+              this.ensureConfiguredStaticChainIdValidated(provider),
+              RPC_READ_STALL_TIMEOUT_MS,
+              `${label} chainId validation`,
+            );
+            let contract = connected.get(provider);
+            if (!contract) {
+              contract = baseContract.connect(provider) as Contract;
+              connected.set(provider, contract);
+            }
             const logs = await withTimeout(
               contract.queryFilter(filter as any, lo, hi),
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
@@ -2209,6 +2281,11 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
+        await withTimeout(
+          this.ensureConfiguredStaticChainIdValidated(provider),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `${operationLabel} chainId validation`,
+        );
         const backendHead = await withTimeout(
           provider.getBlockNumber(),
           RPC_READ_STALL_TIMEOUT_MS,
@@ -2245,6 +2322,11 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
+        await withTimeout(
+          this.ensureConfiguredStaticChainIdValidated(provider),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `${operationLabel} chainId validation`,
+        );
         // Bound the probe: these are direct per-backend reads (not via the
         // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
         // stall the whole resolution instead of failing over. A stall rejects and
@@ -2418,9 +2500,44 @@ export class EVMChainAdapterBase {
     if (EVMChainAdapterBase.preflightCacheFresh(this.cachedChainId, now)) {
       return this.cachedChainId!.value;
     }
-    const network = await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork());
-    this.cachedChainId = { value: network.chainId, cachedAt: now };
-    return network.chainId;
+    const chainId = this.configuredStaticChainId == null
+      ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
+      : await this.rpcFailover.read(
+          'validate configured chainId',
+          (p) => this.ensureConfiguredStaticChainIdValidated(p),
+        );
+    this.cachedChainId = { value: chainId, cachedAt: now };
+    return chainId;
+  }
+
+  protected async ensureConfiguredStaticChainIdValidated(provider: JsonRpcProvider): Promise<bigint> {
+    if (this.configuredStaticChainId == null) return 0n;
+    const now = Date.now();
+    const cached = this.configuredStaticChainIdsByProvider.get(provider);
+    if (EVMChainAdapterBase.preflightCacheFresh(cached, now)) {
+      return cached!.value;
+    }
+
+    let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
+    if (!validation) {
+      validation = (async () => {
+        const raw = await provider.send('eth_chainId', []);
+        const live = BigInt(raw);
+        if (live !== this.configuredStaticChainId) {
+          throw new Error(
+            `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+          );
+        }
+        this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
+        this.cachedChainId = { value: live, cachedAt: Date.now() };
+        return live;
+      })().finally(() => {
+        this.configuredStaticChainIdValidationsByProvider.delete(provider);
+      });
+      this.configuredStaticChainIdValidationsByProvider.set(provider, validation);
+    }
+
+    return validation;
   }
 
   /**
@@ -3025,6 +3142,11 @@ export class EVMChainAdapterBase {
       }
     };
     try {
+      await withTimeout(
+        this.ensureConfiguredStaticChainIdValidated(this.primaryProvider),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'Hub rotation listener chainId validation',
+      );
       await this.contracts.hub.on('ContractChanged', onChange);
       await this.contracts.hub.on('NewContract', onChange);
       await this.contracts.hub.on('AssetStorageChanged', onChange);

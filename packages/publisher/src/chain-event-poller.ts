@@ -1,7 +1,19 @@
-import type { ChainAdapter, EventFilter, ChainEvent } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
+import {
+  ChainEventLaneRunner,
+  type ChainEventPollerLaneSpec,
+} from './chain-event-lane-runner.js';
+import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
+
+export type { ChainEventPollerLane } from './chain-event-lane-runner.js';
+export type {
+  CursorPersistence,
+  LaneCursorPersistence,
+  LegacyCursorPersistence,
+} from './chain-event-lane-cursor-store.js';
 
 /** Callback invoked when a ContextGraphCreated event is detected. */
 export type OnContextGraphCreated = (info: {
@@ -66,17 +78,13 @@ export type OnKARegisteredToContextGraph = (info: {
  */
 export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }) => void | Promise<void>;
 
-/** Persistence interface for saving/loading the last processed block. */
-export interface CursorPersistence {
-  load(): Promise<number | undefined>;
-  save(blockNumber: number): Promise<void>;
-}
-
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
   publishHandler: PublishHandler;
   /** Polling interval in ms. Default: 12000 (roughly 1 L2 block). */
   intervalMs?: number;
+  /** Test seam for deterministic lane-cadence assertions. */
+  clock?: () => number;
   /** Called when a ContextGraphCreated event is detected on-chain. */
   onContextGraphCreated?: OnContextGraphCreated;
   /** Called when a KnowledgeAssetUpdated event is detected. */
@@ -90,7 +98,7 @@ export interface ChainEventPollerConfig {
   /** Called when a KnowledgeAssetCreated event is detected (OT-RFC-43 Option-1 allocator reconciliation). */
   onKnowledgeAssetCreated?: OnKnowledgeAssetCreated;
   /** Persistent cursor for surviving restarts. */
-  cursorPersistence?: CursorPersistence;
+  cursorPersistence?: RunnerCursorPersistence;
 }
 
 /**
@@ -114,16 +122,15 @@ export class ChainEventPoller {
   private readonly chain: ChainAdapter;
   private readonly publishHandler: PublishHandler;
   private readonly intervalMs: number;
+  private readonly clock: () => number;
   private readonly onContextGraphCreated?: OnContextGraphCreated;
   private readonly onCollectionUpdated?: OnCollectionUpdated;
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly onKARegisteredToContextGraph?: OnKARegisteredToContextGraph;
   private readonly onKnowledgeAssetCreated?: OnKnowledgeAssetCreated;
-  private readonly cursorPersistence?: CursorPersistence;
+  private readonly laneRunner: ChainEventLaneRunner;
   private readonly log = new Logger('ChainEventPoller');
-  private lastBlock = 0;
-  private headKnown = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   /**
@@ -145,13 +152,21 @@ export class ChainEventPoller {
     this.chain = config.chain;
     this.publishHandler = config.publishHandler;
     this.intervalMs = config.intervalMs ?? 12_000;
+    this.clock = config.clock ?? (() => Date.now());
     this.onContextGraphCreated = config.onContextGraphCreated;
     this.onCollectionUpdated = config.onCollectionUpdated;
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.onKARegisteredToContextGraph = config.onKARegisteredToContextGraph;
     this.onKnowledgeAssetCreated = config.onKnowledgeAssetCreated;
-    this.cursorPersistence = config.cursorPersistence;
+    this.laneRunner = new ChainEventLaneRunner({
+      chain: this.chain,
+      lanes: this.laneSpecs(),
+      maxRange: ChainEventPoller.MAX_RANGE,
+      clock: this.clock,
+      log: this.log,
+      cursorPersistence: config.cursorPersistence,
+    });
   }
 
   async start(): Promise<void> {
@@ -161,17 +176,8 @@ export class ChainEventPoller {
     const ctx = createOperationContext('system');
 
     // Restore cursor from persistent storage (spec §5.1: scan from last processed block)
-    if (this.cursorPersistence) {
-      try {
-        const saved = await this.cursorPersistence.load();
-        if (saved != null && saved > 0) {
-          this.lastBlock = saved;
-          this.log.info(ctx, `Restored poller cursor from persistence: block ${saved}`);
-        }
-      } catch (err) {
-        this.log.warn(ctx, `Failed to load persisted cursor: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    await this.laneRunner.restoreCurrentlyActive(ctx);
+    if (!this.running) return;
 
     this.log.info(ctx, `Starting chain event poller (interval=${this.intervalMs}ms)`);
 
@@ -234,141 +240,84 @@ export class ChainEventPoller {
     this.log.info(ctx, 'Chain event poller stopped');
   }
 
+  private laneSpecs(): ChainEventPollerLaneSpec[] {
+    return [
+      {
+        name: 'publish',
+        enabled: () => this.publishHandler.hasPendingPublishes,
+        eventTypes: () => ['KCCreated'],
+        requiresFullHistory: () => this.publishHandler.hasRestoredPendingPublishes,
+        canUseLegacyAggregateCursor: () => this.publishHandler.hasRestoredPendingPublishes,
+        // A live publish can be activated after its KCCreated event is already
+        // beyond the generic live-tail window on fast chains. Scan one full RPC
+        // page on activation without falling back to a genesis backfill.
+        liveSeedLookbackBlocks: ChainEventPoller.MAX_RANGE,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleBatchCreated(event, ctx),
+      },
+      {
+        name: 'allocatorReconcile',
+        enabled: () => !!this.onKnowledgeAssetCreated,
+        eventTypes: () => ['KCCreated'],
+        requiresFullHistory: () => true,
+        canUseLegacyAggregateCursor: () => false,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleKACreated(event, ctx),
+        onBackfillFromGenesis: (ctx) => {
+          if (!this.onKnowledgeAssetCreated) return;
+          this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
+        },
+      },
+      {
+        name: 'contextGraphDiscovery',
+        enabled: () => !!this.onContextGraphCreated,
+        eventTypes: () => ['NameClaimed', 'ContextGraphCreated'],
+        // This poller is the low-latency live tail for new context graphs.
+        // Historical recovery is handled by the daemon's
+        // discoverContextGraphsFromChain scan, which has its own bounded
+        // incremental watermark.
+        requiresFullHistory: () => false,
+        canUseLegacyAggregateCursor: () => true,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleContextGraphCreated(event, ctx),
+      },
+      {
+        name: 'vmReconcile',
+        enabled: () => !!this.onKARegisteredToContextGraph,
+        eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
+        requiresFullHistory: () => false,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
+      },
+      {
+        name: 'collectionUpdates',
+        enabled: () => !!this.onCollectionUpdated,
+        eventTypes: () => ['KnowledgeAssetUpdated'],
+        requiresFullHistory: () => false,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleCollectionUpdated(event, ctx),
+      },
+      {
+        name: 'allowListUpdates',
+        enabled: () => !!this.onAllowListUpdated,
+        eventTypes: () => ['AllowListUpdated'],
+        requiresFullHistory: () => false,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleAllowListUpdated(event, ctx),
+      },
+      {
+        name: 'profileEvents',
+        enabled: () => !!this.onProfileEvent,
+        eventTypes: () => ['ProfileCreated', 'ProfileUpdated'],
+        requiresFullHistory: () => false,
+        cadenceMs: this.intervalMs,
+        dispatch: (event, ctx) => this.handleProfileEvent(event, ctx),
+      },
+    ];
+  }
+
   private async poll(): Promise<void> {
-    const hasPending = this.publishHandler.hasPendingPublishes;
-    const watchContextGraphs = !!this.onContextGraphCreated;
-    const watchUpdates = !!this.onCollectionUpdated;
-    const watchAllowList = !!this.onAllowListUpdated;
-    const watchProfiles = !!this.onProfileEvent;
-    const watchKARegistered = !!this.onKARegisteredToContextGraph;
-    const watchKACreated = !!this.onKnowledgeAssetCreated;
-    if (!hasPending && !watchContextGraphs && !watchUpdates && !watchAllowList && !watchProfiles && !watchKARegistered && !watchKACreated) return;
-
-    const ctx = createOperationContext('publish');
-
-    // Resolve the actual chain head so we can bound the scan precisely.
-    // Without a known head we cannot safely advance the cursor.
-    let head: number | undefined;
-    if (this.chain.getBlockNumber) {
-      try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
-    }
-
-    // On first successful head fetch, seed cursor near the tip — but only
-    // when no subscriber depends on full chain history. The head-seed is
-    // a latency optimisation for the "watch for our own pending tx
-    // confirmation" use case: confirmations land at the tip, so scanning
-    // from `head - 500` is sufficient and avoids re-walking the chain on
-    // every cold start.
-    //
-    // Full-history context graph discovery is handled separately by
-    // `discoverContextGraphsFromChain()`.
-    //
-    // The OT-RFC-43 Option-1 allocator-reconciliation watcher
-    // (`onKnowledgeAssetCreated`) MUST observe every historical
-    // `KCCreated` event (codex PR #976 F9) — otherwise a fresh daemon
-    // would miss every author whose last mint was >500 blocks ago, the
-    // per-author floor would stay at 0, and a downstream
-    // `markReconciled()` would be unsound (the allocator would happily
-    // re-issue a number already minted on-chain). Treat this watcher
-    // exactly like `hasPending`: when wired AND there is no persisted
-    // cursor, refuse to seed near head and scan from block 0.
-    //
-    // Once a `cursorPersistence` round-trip lands (so `lastBlock > 0` on
-    // restart) the watcher resumes incrementally from that cursor like
-    // every other subscription — there is no extra cost beyond the
-    // first cold start.
-    if (head != null && !this.headKnown) {
-      this.headKnown = true;
-      const requiresFullHistory = hasPending || watchKACreated;
-      if (this.lastBlock === 0 && !requiresFullHistory) {
-        this.lastBlock = Math.max(0, head - 500);
-        this.log.info(ctx, `Seeded poller cursor near chain head: ${head} → scanning from ${this.lastBlock}`);
-      } else if (this.lastBlock === 0 && watchKACreated) {
-        this.log.info(ctx, `Allocator-reconciliation watcher wired and no persisted cursor → scanning from block 0 (codex PR #976 F9 backfill)`);
-      }
-    }
-
-    // V10-only event subscription. The archived V9 batch-created event is
-    // intentionally absent — see the file-level docblock and CHANGELOG.
-    const eventTypes: string[] = ['KCCreated'];
-    if (watchContextGraphs) {
-      eventTypes.push('NameClaimed');
-      eventTypes.push('ContextGraphCreated');
-    }
-    if (this.onCollectionUpdated) eventTypes.push('KnowledgeAssetUpdated');
-    if (this.onAllowListUpdated) eventTypes.push('AllowListUpdated');
-    if (this.onProfileEvent) {
-      eventTypes.push('ProfileCreated');
-      eventTypes.push('ProfileUpdated');
-    }
-    if (watchKARegistered) eventTypes.push('KnowledgeAssetRegisteredToContextGraph');
-    // OT-RFC-43 Option-1 allocator reconciliation (codex PR #976 F5):
-    // The chain adapter's `listenForEvents()` decodes both the V10 greenfield
-    // `KnowledgeAssetCreated` event and the legacy V8/V9 batch-create event
-    // into a SINGLE normalized `{ type: 'KCCreated', data: { kaId, author, ... } }`
-    // surface (see packages/chain/src/evm-adapter-events.ts ~L119 and L193).
-    // A redundant `KnowledgeAssetCreated` subscription used to live here, but
-    // the adapter never yielded events with that type, so the dead branch
-    // below this loop never fired and allocator reconciliation never ran.
-    // Subscribe to `KCCreated` always (already implicit at the top of the
-    // list) and fan out to both `handleBatchCreated` AND `handleKACreated`
-    // inline below. When `onKnowledgeAssetCreated` is the ONLY subscriber
-    // wired (i.e. no PublishHandler pending state), still enter the poll
-    // loop — `watchKACreated` covers that case in the gating check above.
-
-    const fromBlock = this.lastBlock + 1;
-    const upperBound = head != null
-      ? Math.min(fromBlock + ChainEventPoller.MAX_RANGE - 1, head)
-      : fromBlock + ChainEventPoller.MAX_RANGE - 1;
-
-    if (fromBlock > upperBound) return;
-
-    const filter: EventFilter = {
-      eventTypes,
-      fromBlock,
-      toBlock: upperBound,
-    };
-
-    let maxEventBlock = this.lastBlock;
-    for await (const event of this.chain.listenForEvents(filter)) {
-      if (event.blockNumber > maxEventBlock) maxEventBlock = event.blockNumber;
-      if (event.type === 'KCCreated') {
-        await this.handleBatchCreated(event, ctx);
-        // OT-RFC-43 Option-1 allocator reconciliation (codex PR #976 F5).
-        // The adapter normalizes the greenfield `KnowledgeAssetCreated` event
-        // to `type: 'KCCreated'`, so there is no separate dispatch branch —
-        // we fan out off the same event here. `handleKACreated` is a no-op
-        // when `onKnowledgeAssetCreated` is not wired, when `kaId` is missing
-        // (legacy batch-create paths), or when `kaId` is zero (sentinel for
-        // `getKnowledgeAssetId`'s "not part of any KA" return — never minted).
-        await this.handleKACreated(event, ctx);
-      } else if (event.type === 'NameClaimed' || event.type === 'ContextGraphCreated') {
-        await this.handleContextGraphCreated(event, ctx);
-      } else if (event.type === 'KnowledgeAssetUpdated') {
-        await this.handleCollectionUpdated(event, ctx);
-      } else if (event.type === 'AllowListUpdated') {
-        await this.handleAllowListUpdated(event, ctx);
-      } else if (event.type === 'ProfileCreated' || event.type === 'ProfileUpdated') {
-        await this.handleProfileEvent(event, ctx);
-      } else if (event.type === 'KnowledgeAssetRegisteredToContextGraph') {
-        await this.handleKARegistered(event, ctx);
-      }
-    }
-
-    // Always advance cursor to upperBound. When head is known, upperBound
-    // is capped to it. When head is unknown, upperBound is an estimate — but
-    // the RPC successfully returned results (or empty) for this range, so
-    // those blocks have been scanned and we must progress past them.
-    this.lastBlock = upperBound;
-
-    // Persist cursor for restart recovery (spec §5.1)
-    if (this.cursorPersistence && this.lastBlock > 0) {
-      try {
-        await this.cursorPersistence.save(this.lastBlock);
-      } catch {
-        // Non-fatal — cursor will be re-seeded on restart
-      }
-    }
+    await this.laneRunner.poll();
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {

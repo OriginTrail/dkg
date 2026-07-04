@@ -258,6 +258,7 @@ export function createCountingJsonRpcProvider(
   maxRetries: number | undefined,
   tracker: RpcUsageTracker,
   options: JsonRpcApiProviderOptions,
+  network?: Networkish,
 ): CountingJsonRpcProvider {
   // boundedRetryFetchRequest stays PURE retry policy; the accounting
   // composition lives HERE, with the rest of the accounting. Ethers' throttle
@@ -276,5 +277,15 @@ export function createCountingJsonRpcProvider(
     }
     return retry;
   };
-  return new CountingJsonRpcProvider(fetchRequest, undefined, options, (method) => tracker.record(method));
+  const providerOptions = network == null
+    ? options
+    : {
+        ...options,
+        // `network` is supplied from static node config. Passing it here tells
+        // ethers not to re-detect the same chain with eth_chainId on every
+        // internal network check, while malformed/absent config keeps the old
+        // dynamic detection behavior.
+        staticNetwork: network as JsonRpcApiProviderOptions['staticNetwork'],
+      };
+  return new CountingJsonRpcProvider(fetchRequest, network, providerOptions, (method) => tracker.record(method));
 }

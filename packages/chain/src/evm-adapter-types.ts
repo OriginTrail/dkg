@@ -26,6 +26,13 @@ export interface EVMAdapterBaseConfig {
   tokenAddress?: string;
   chainId?: string;
   /**
+   * When true (default), a configured numeric chainId such as `evm:31337`
+   * is passed to ethers as a static network to avoid steady `eth_chainId`
+   * detection calls. Set to false only when a test or caller intentionally
+   * wants dynamic provider network detection.
+   */
+  staticNetwork?: boolean;
+  /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
    * treated as "use default" and intentionally NOT supported as a

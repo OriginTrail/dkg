@@ -28,11 +28,35 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
   };
 }
 
-function makeAdapter(opts: { admin?: boolean; identityId?: bigint; adminPurposeWallets?: string[]; operationalPurposeWallets?: string[] } = {}) {
+function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
+  const calls: A[] = [];
+  const fn = (...args: A): R => { calls.push(args); return impl(...args); };
+  return Object.assign(fn, { calls });
+}
+
+function makeAdapter(opts: {
+  admin?: boolean;
+  identityId?: bigint;
+  adminPurposeWallets?: string[];
+  operationalPurposeWallets?: string[];
+  identityLookupValues?: bigint[];
+} = {}) {
   const cfg = minimalConfig(opts.admin === false ? {} : { adminPrivateKey: ADMIN_PK });
   const a = new EVMChainAdapter(cfg);
   (a as any).init = async () => undefined;
   (a as any).getIdentityStorage = async () => ({ __isIdentityStorage: true });
+  (a as any).resolveContract = async (name: string) => ({ __name: name });
+  let identityLookupIndex = 0;
+  const readContract = recorder(async (_contract: any, _label: string, method: string) => {
+    if (method === 'getIdentityId') {
+      const values = opts.identityLookupValues ?? [0n];
+      const value = values[Math.min(identityLookupIndex, values.length - 1)];
+      identityLookupIndex++;
+      return value;
+    }
+    return 0n;
+  });
+  (a as any).readContract = readContract;
   // Purpose-aware: the configured admin key (plus any extras the test marks)
   // reads back as an on-chain ADMIN_KEY; everything else does not. The default
   // lets removing an ordinary external op wallet proceed while still exercising
@@ -60,7 +84,7 @@ function makeAdapter(opts: { admin?: boolean; identityId?: bigint; adminPurposeW
   };
   (a as any).contracts.profile = { __name: 'profile', getAddress: async () => '0xprofile' };
   (a as any).contracts.identity = { __name: 'identity', getAddress: async () => '0xidentity' };
-  return { a, calls };
+  return { a, calls, readContract };
 }
 
 describe('EVMChainAdapter.addOperationalWallet', () => {
@@ -76,6 +100,18 @@ describe('EVMChainAdapter.addOperationalWallet', () => {
     // MUST be signed by the admin key (onlyAdmin), not the primary op signer.
     expect(calls[0].signer).toBe(new ethers.Wallet(ADMIN_PK).address);
     expect(calls[0].signer).not.toBe((a as any).signer.address);
+  });
+
+  it('seeds the identity lookup cache after a successful public add', async () => {
+    const { a, readContract } = makeAdapter({ identityId: 5n, identityLookupValues: [0n, 99n] });
+
+    await expect(a.getIdentityIdForAddress(EXTERNAL)).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(1);
+
+    await a.addOperationalWallet(EXTERNAL);
+
+    await expect(a.getIdentityIdForAddress(EXTERNAL)).resolves.toBe(5n);
+    expect(readContract.calls).toHaveLength(1);
   });
 
   it('throws when no admin key is configured', async () => {
@@ -106,6 +142,18 @@ describe('EVMChainAdapter.removeOperationalWallet', () => {
     const expectedHash = ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(EXTERNAL)]));
     expect(calls[0].args[1]).toBe(expectedHash);
     expect(calls[0].signer).toBe(new ethers.Wallet(ADMIN_PK).address);
+  });
+
+  it('clears the identity lookup cache after a successful public removal', async () => {
+    const { a, readContract } = makeAdapter({ identityId: 5n, identityLookupValues: [5n, 0n] });
+
+    await expect(a.getIdentityIdForAddress(EXTERNAL)).resolves.toBe(5n);
+    expect(readContract.calls).toHaveLength(1);
+
+    await a.removeOperationalWallet(EXTERNAL);
+
+    await expect(a.getIdentityIdForAddress(EXTERNAL)).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(2);
   });
 
   it('REFUSES to remove the bound primary operational wallet, before any tx', async () => {

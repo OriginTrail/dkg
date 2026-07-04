@@ -49,6 +49,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     hubAddress: HUB,
     chainId: 'evm:31337',
     allowNoAdminSigner: true,
+    staticNetwork: false,
     ...overrides,
   };
 }

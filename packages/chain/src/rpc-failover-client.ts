@@ -9,7 +9,8 @@
  * SAFETY BOUNDARY: this module holds NO transaction-safety state — no WAL, no
  * per-wallet serializer, no approval latch. The adapter's tx-orchestration owns
  * all of that and calls into this surface. The module never references the
- * adapter; it is constructed with exactly two capabilities:
+ * adapter; it is constructed with two required capabilities and one optional
+ * per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
  *      `{ provider, rpcUrl }` pair. One object per endpoint keeps the
  *      `provider ↔ rpcUrl` pairing explicit inside every failover loop (not an
@@ -83,6 +84,9 @@ export type SignPopulatedFn = (
   populated: ethers.TransactionRequest,
 ) => Promise<{ signedTx: string; txHash: string }>;
 
+/** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
+export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
+
 /**
  * Failover classifier for CONTRACT VIEW reads (`readContract`'s default): the
  * generic `isRetryableRpcError` transient set MINUS `BAD_DATA`. A view `BAD_DATA`
@@ -125,6 +129,7 @@ export class RpcFailoverClient {
     // construct this client BEFORE its own `chainId` field is assigned and still
     // have the label resolve correctly at metric-record time.
     private readonly chainId: () => string,
+    private readonly validateEndpoint?: ValidateEndpointFn,
   ) {}
 
   /**
@@ -259,8 +264,14 @@ export class RpcFailoverClient {
     const endpoints = this.getEndpoints();
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
-      const rpcSigner = this.rebindSigner(signer, endpoints[i].provider);
+      const endpoint = endpoints[i];
       try {
+        await this.validateEndpointForAttempt(
+          endpoint,
+          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+          `${label} chainId validation via RPC #${i + 1}`,
+        );
+        const rpcSigner = this.rebindSigner(signer, endpoint.provider);
         const connected = this.rebindContract(contract, rpcSigner) as any;
         const populated = await withTimeout<ethers.TransactionRequest>(
           connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
@@ -349,9 +360,15 @@ export class RpcFailoverClient {
           const endpoints = this.getEndpoints();
           let lastRetryable: unknown;
           for (let i = 0; i < endpoints.length; i += 1) {
-            const provider = endpoints[i].provider;
+            const endpoint = endpoints[i];
+            const provider = endpoint.provider;
             span.addEvent('broadcast.attempt', { attempt: i + 1 });
             try {
+              await this.validateEndpointForAttempt(
+                endpoint,
+                RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+                `${label} chainId validation via RPC #${i + 1}`,
+              );
               await withTimeout(
                 provider.broadcastTransaction(signedTx),
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
@@ -421,9 +438,15 @@ export class RpcFailoverClient {
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
           for (let i = 0; i < endpoints.length; i += 1) {
-            const provider = endpoints[i].provider;
+            const endpoint = endpoints[i];
+            const provider = endpoint.provider;
             span.addEvent('receipt.attempt', { attempt: i + 1 });
             try {
+              await this.validateEndpointForAttempt(
+                endpoint,
+                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                `receipt lookup chainId validation via RPC #${i + 1}`,
+              );
               const receipt = await withTimeout(
                 provider.getTransactionReceipt(txHash),
                 RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -492,9 +515,17 @@ export class RpcFailoverClient {
     const capMs = resolveCapMs(policy, endpoints.length);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
+      const endpoint = endpoints[i];
       const isLast = i === endpoints.length - 1;
       try {
-        const attempt = fn(endpoints[i].provider);
+        const attempt = (async () => {
+          await this.validateEndpointForAttempt(
+            endpoint,
+            capMs,
+            `${label} chainId validation via RPC #${i + 1}`,
+          );
+          return fn(endpoint.provider);
+        })();
         return await (capMs == null
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
@@ -532,6 +563,20 @@ export class RpcFailoverClient {
    */
   private rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
     return contract.connect(runner) as Contract;
+  }
+
+  private async validateEndpointForAttempt(
+    endpoint: RpcEndpoint,
+    timeoutMs: number | undefined,
+    timeoutLabel: string,
+  ): Promise<void> {
+    if (!this.validateEndpoint) return;
+    const validation = this.validateEndpoint(endpoint);
+    if (timeoutMs == null) {
+      await validation;
+      return;
+    }
+    await withTimeout(validation, timeoutMs, timeoutLabel);
   }
 
   /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */
