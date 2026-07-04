@@ -102,6 +102,19 @@ describe('resolveRequestAuthDecision', () => {
     });
   });
 
+  it('accepts a valid bearer credential without inventing an unresolved principal context', () => {
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
+      validTokens,
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+    });
+    expect(decision?.ok === true ? decision.context : undefined).toBeUndefined();
+  });
+
   it('returns an events-query context with a resolved principal for a valid SSE credential', () => {
     const decision = resolveRequestAuthDecision(
       request(`/api/events?token=${VALID_TOKEN}`),

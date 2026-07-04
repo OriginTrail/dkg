@@ -145,6 +145,7 @@ import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens 
 import {
   DashboardSessionStore,
   createDashboardSessionAuthSource,
+  getDashboardSessionCookie,
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
@@ -2904,7 +2905,7 @@ export async function runDaemonInner(
   }
   const dashboardSessions = new DashboardSessionStore();
   const dashboardSessionAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => dashboardSessions.authenticate(request),
+    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
   const resolveDashboardPrincipal = (token: string) => {

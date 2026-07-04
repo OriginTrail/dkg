@@ -4,7 +4,10 @@ import {
   DASHBOARD_SESSION_COOKIE,
   DashboardSessionStore,
   createDashboardSessionAuthSource,
+  getDashboardSessionCookie,
   handleDashboardSessionRequest,
+  isAllowedLoopbackHostname,
+  isLoopbackAddress,
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
@@ -15,6 +18,23 @@ const ROTATED_TOKEN = 'dashboard-rotated-token';
 const AGENT_TOKEN = 'dkg_at_agent-token';
 const DEFAULT_AGENT_ADDRESS = 'did:dkg:agent:default';
 const TOKEN_AGENT_ADDRESS = 'did:dkg:agent:token';
+
+describe('dashboard session trust policy helpers', () => {
+  it('recognizes the loopback address forms accepted for browser bootstrap', () => {
+    expect(isLoopbackAddress('127.0.0.1')).toBe(true);
+    expect(isLoopbackAddress('127.10.20.30')).toBe(true);
+    expect(isLoopbackAddress('::1')).toBe(true);
+    expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true);
+    expect(isLoopbackAddress('10.0.0.1')).toBe(false);
+  });
+
+  it('keeps loopback hostnames narrow for browser-origin proof', () => {
+    expect(isAllowedLoopbackHostname('localhost')).toBe(true);
+    expect(isAllowedLoopbackHostname('127.0.0.1')).toBe(true);
+    expect(isAllowedLoopbackHostname('[::1]')).toBe(true);
+    expect(isAllowedLoopbackHostname('example.com')).toBe(false);
+  });
+});
 
 function loopbackBootstrapInit(baseUrl: string): RequestInit {
   return {
@@ -54,7 +74,7 @@ async function startServer(options: {
     publisher: { getIdentityId: () => 1n },
   };
   const dashboardAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => sessions.authenticate(request),
+    authenticate: (request) => sessions.authenticateSessionId(getDashboardSessionCookie(request)),
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -390,13 +410,13 @@ describe('dashboard browser sessions', () => {
       },
     } as IncomingMessage;
 
-    expect(store.authenticate(req, created.record.expiresAt - 1)).toMatchObject({
+    expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt - 1)).toMatchObject({
       sessionId: created.sessionId,
       compatToken: VALID_TOKEN,
       principal,
     });
-    expect(store.authenticate(req, created.record.expiresAt + 1)).toBeNull();
-    expect(store.authenticate(req, created.record.expiresAt + 2)).toBeNull();
+    expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt + 1)).toBeNull();
+    expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt + 2)).toBeNull();
   });
 
   it('rejects unsafe session-authenticated requests without CSRF', async () => {

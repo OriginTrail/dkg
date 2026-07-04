@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { setDashboardSessionForTesting } from '../src/ui/dashboardSessionTestSupport.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const MENTIONS = 'http://schema.org/mentions';
@@ -66,6 +67,7 @@ describe('useMemoryEntities canonical layer counts', () => {
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    setDashboardSessionForTesting({ state: 'auth-disabled', authenticated: true, authDisabled: true });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -108,6 +110,7 @@ describe('useMemoryEntities canonical layer counts', () => {
     act(() => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    setDashboardSessionForTesting({ state: 'unauthenticated', authenticated: false });
   });
 
   it('counts each visible entity once in its current highest layer', async () => {

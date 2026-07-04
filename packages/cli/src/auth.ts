@@ -815,7 +815,7 @@ function isPublicPath(method: string, pathname: string): boolean {
 }
 
 export type RequestAuthDecision =
-  | { ok: true; context: RequestAuthContext; credentialToken: string }
+  | { ok: true; context?: RequestAuthContext; credentialToken: string }
   | { ok: false; status: 403; error: string };
 
 export interface RequestAuthSource {
@@ -826,12 +826,22 @@ export interface RequestAuthSource {
   ) => RequestAuthDecision | null;
 }
 
-function defaultRequestPrincipal(): RequestAuthPrincipal {
-  return { kind: 'node-admin', agentAddress: 'unknown' };
+function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal | undefined {
+  return options?.resolvePrincipal?.(token);
 }
 
-function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal {
-  return options?.resolvePrincipal?.(token) ?? defaultRequestPrincipal();
+function bearerRequestAuthContext(
+  source: 'authorization-header' | 'events-query',
+  token: string,
+  principal: RequestAuthPrincipal | undefined,
+): RequestAuthContext | undefined {
+  if (!principal) return undefined;
+  return {
+    source,
+    token,
+    principal,
+    csrf: { required: false, validated: false },
+  };
 }
 
 export function resolveRequestAuthDecision(
@@ -845,15 +855,11 @@ export function resolveRequestAuthDecision(
   const token = extractBearerToken(req.headers.authorization);
 
   if (token && verifyToken(token, validTokens)) {
+    const principal = resolveRequestPrincipal(token, options);
     return {
       ok: true,
       credentialToken: token,
-      context: {
-        source: 'authorization-header',
-        token,
-        principal: resolveRequestPrincipal(token, options),
-        csrf: { required: false, validated: false },
-      },
+      context: bearerRequestAuthContext('authorization-header', token, principal),
     };
   }
 
@@ -861,15 +867,11 @@ export function resolveRequestAuthDecision(
   if (hasEventsQueryToken) {
     const queryToken = url.searchParams.get('token') ?? undefined;
     if (queryToken && verifyToken(queryToken, validTokens)) {
+      const principal = resolveRequestPrincipal(queryToken, options);
       return {
         ok: true,
         credentialToken: queryToken,
-        context: {
-          source: 'events-query',
-          token: queryToken,
-          principal: resolveRequestPrincipal(queryToken, options),
-          csrf: { required: false, validated: false },
-        },
+        context: bearerRequestAuthContext('events-query', queryToken, principal),
       };
     }
   }
@@ -968,7 +970,7 @@ export function httpAuthGuard(
   }
 
   if (authDecision?.ok === true) {
-    setRequestAuthContext(req, authDecision.context);
+    if (authDecision.context) setRequestAuthContext(req, authDecision.context);
     const acceptedCredentialToken = authDecision.credentialToken;
 
     const now = Date.now();

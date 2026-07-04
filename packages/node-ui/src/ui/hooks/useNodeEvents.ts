@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  dashboardSessionAuthKey,
+  ensureDashboardSession,
+  getDashboardSession,
+  isDashboardSessionReady,
+  subscribeDashboardSession,
+  type DashboardSessionStatus,
+} from '../dashboardSessionClient.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -34,8 +42,14 @@ type Listener = (event: NodeEvent) => void;
 
 const listeners = new Set<Listener>();
 let source: EventSource | null = null;
+let sourceAuthKey = '';
+let connectPromise: Promise<void> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let unsubscribeDashboardSession: (() => void) | null = null;
 export const MEMORY_GRAPH_REFRESH_DEBOUNCE_MS = 350;
+const EVENT_SOURCE_RECONNECT_MS = 3000;
+const EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS = 5000;
 
 function isMemoryGraphLayer(value: unknown): value is MemoryGraphLayer {
   return value === 'wm' || value === 'swm' || value === 'vm';
@@ -62,49 +76,137 @@ export function isMemoryGraphEventRelevant(
   return layers.some(layer => eventLayers.includes(layer));
 }
 
-function connect() {
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+function clearSessionRefreshTimer() {
+  if (sessionRefreshTimer) {
+    clearTimeout(sessionRefreshTimer);
+    sessionRefreshTimer = null;
+  }
+}
+
+function closeSource() {
+  clearSessionRefreshTimer();
+  source?.close();
+  source = null;
+  sourceAuthKey = '';
+}
+
+function shouldRefreshSessionForSse(session: DashboardSessionStatus): boolean {
+  return session.state === 'authenticated' &&
+    session.expiresAt <= Date.now() + EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS;
+}
+
+function scheduleConnect(delayMs = 0) {
+  if (listeners.size === 0) return;
+  if (typeof EventSource === 'undefined') return;
+  clearReconnectTimer();
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void connect();
+  }, delayMs);
+}
+
+function scheduleSessionRefresh(session: DashboardSessionStatus) {
+  clearSessionRefreshTimer();
+  if (session.state !== 'authenticated') return;
+  const delayMs = Math.max(0, session.expiresAt - Date.now() - EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS);
+  sessionRefreshTimer = setTimeout(() => {
+    closeSource();
+    scheduleConnect(0);
+  }, delayMs);
+}
+
+function watchDashboardSession() {
+  if (unsubscribeDashboardSession) return;
+  unsubscribeDashboardSession = subscribeDashboardSession(() => {
+    const nextAuthKey = dashboardSessionAuthKey();
+    if (source && nextAuthKey !== sourceAuthKey) {
+      closeSource();
+      scheduleConnect(0);
+    } else if (!source && listeners.size > 0) {
+      scheduleConnect(0);
+    }
+  });
+}
+
+function unwatchDashboardSession() {
+  unsubscribeDashboardSession?.();
+  unsubscribeDashboardSession = null;
+}
+
+async function connect() {
   if (source) return;
+  if (connectPromise) return connectPromise;
 
   if (listeners.size === 0) return;
   if (typeof EventSource === 'undefined') return;
-  const nextSource = new EventSource('/api/events');
-  source = nextSource;
 
-  const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
-    let data: Record<string, unknown> = {};
-    try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
-    const event: NodeEvent = { type, data };
-    for (const fn of listeners) {
-      try { fn(event); } catch { /* never crash listeners */ }
-    }
-  };
+  clearReconnectTimer();
 
-  nextSource.addEventListener('join_request', handleEvent('join_request'));
-  nextSource.addEventListener('join_approved', handleEvent('join_approved'));
-  nextSource.addEventListener('join_rejected', handleEvent('join_rejected'));
-  nextSource.addEventListener('project_synced', handleEvent('project_synced'));
-  nextSource.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
-  nextSource.addEventListener('notification', handleEvent('notification'));
-  nextSource.addEventListener('connected', handleEvent('connected'));
+  connectPromise = (async () => {
+    const session = await ensureDashboardSession();
+    if (!isDashboardSessionReady(session)) return;
+    if (source || listeners.size === 0 || typeof EventSource === 'undefined') return;
 
-  nextSource.onerror = () => {
-    source?.close();
-    source = null;
-    if (listeners.size > 0) {
-      reconnectTimer = setTimeout(connect, 3000);
-    }
-  };
+    const nextSource = new EventSource('/api/events');
+    source = nextSource;
+    sourceAuthKey = dashboardSessionAuthKey();
+    scheduleSessionRefresh(session);
+
+    const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
+      let data: Record<string, unknown> = {};
+      try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
+      const event: NodeEvent = { type, data };
+      for (const fn of listeners) {
+        try { fn(event); } catch { /* never crash listeners */ }
+      }
+    };
+
+    nextSource.addEventListener('join_request', handleEvent('join_request'));
+    nextSource.addEventListener('join_approved', handleEvent('join_approved'));
+    nextSource.addEventListener('join_rejected', handleEvent('join_rejected'));
+    nextSource.addEventListener('project_synced', handleEvent('project_synced'));
+    nextSource.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
+    nextSource.addEventListener('notification', handleEvent('notification'));
+    nextSource.addEventListener('connected', handleEvent('connected'));
+
+    nextSource.onerror = () => {
+      if (source === nextSource) {
+        closeSource();
+      } else {
+        nextSource.close();
+      }
+      if (listeners.size > 0) {
+        scheduleConnect(shouldRefreshSessionForSse(getDashboardSession()) ? 0 : EVENT_SOURCE_RECONNECT_MS);
+      }
+    };
+  })();
+
+  try {
+    await connectPromise;
+  } finally {
+    connectPromise = null;
+  }
 }
 
 function disconnect() {
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  source?.close();
-  source = null;
+  clearReconnectTimer();
+  closeSource();
+  unwatchDashboardSession();
 }
 
 function subscribe(fn: Listener): () => void {
   listeners.add(fn);
-  if (listeners.size === 1) connect();
+  if (listeners.size === 1) {
+    watchDashboardSession();
+    void connect();
+  }
   return () => {
     listeners.delete(fn);
     if (listeners.size === 0) disconnect();

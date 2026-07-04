@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { setDashboardSessionForTesting } from '../src/ui/dashboardSessionTestSupport.js';
 
 // ─────────────────────────────────────────────────────────────────────
 // Header mounts <NotificationsBell/> — the bell + dropdown were EXTRACTED
@@ -88,6 +89,7 @@ describe('Header — notifications bell + status wiring', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
+    setDashboardSessionForTesting({ state: 'auth-disabled', authenticated: true, authDisabled: true });
     // EventSource stub for useNodeEvents — happy-dom doesn't provide one.
     (globalThis as any).EventSource = class StubEventSource {
       url: string;
@@ -123,6 +125,7 @@ describe('Header — notifications bell + status wiring', () => {
       container.remove();
     }
     vi.useRealTimers();
+    setDashboardSessionForTesting({ state: 'unauthenticated', authenticated: false });
   });
 
   it('Header mounts the notifications bell with a Notifications aria-label/tooltip (BUG-002 a11y wiring)', async () => {
