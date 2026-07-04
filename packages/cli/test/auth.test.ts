@@ -165,6 +165,36 @@ describe('resolveRequestAuthDecision', () => {
     expect(authSource.resolve).not.toHaveBeenCalled();
   });
 
+  it('does not fall back to dashboard-cookie auth after an invalid explicit SSE query token', () => {
+    const authSource = {
+      resolve: vi.fn(() => ({
+        ok: true as const,
+        credentialToken: VALID_TOKEN,
+        context: {
+          source: 'dashboard-session' as const,
+          internalCredentialToken: VALID_TOKEN,
+          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+          csrf: { required: false, validated: false },
+        },
+      })),
+    };
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/events?token=wrong-token', {
+        headers: {
+          cookie: 'dkg_ui_session=present',
+        },
+      }),
+      validTokens,
+      {
+        authSources: [authSource],
+      },
+    );
+
+    expect(decision).toBeNull();
+    expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+
   it('does not fall back to dashboard-cookie auth after an empty explicit authorization header', () => {
     const authSource = {
       resolve: vi.fn(() => ({

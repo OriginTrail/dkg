@@ -673,6 +673,27 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('rejects unsafe session-authenticated requests with valid CSRF but hostile Referer', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Referer: 'https://attacker.example/page',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
+  });
+
   it('rejects unsafe session-authenticated requests with valid CSRF but cross-site fetch metadata', async () => {
     const started = await startServer();
     server = started.server;
