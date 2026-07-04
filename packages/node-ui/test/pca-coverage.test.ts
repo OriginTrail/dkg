@@ -5,7 +5,8 @@
 // pins the extracted pure functions so the surfaces can't re-diverge.
 
 import { describe, expect, it } from 'vitest';
-import { bigGt0, pcaBudgetState, isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
+import { isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
+import { bigGt0, pcaBudgetState } from '../src/ui/pca/pca-primitives.js';
 import { makePcaSnapshot } from '../src/ui/mocks/pca.js';
 
 const FUTURE = Math.floor(Date.now() / 1000) + 60 * 86_400;

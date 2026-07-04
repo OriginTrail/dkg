@@ -25,11 +25,11 @@ import {
 } from '../src/ui/components/Pca/index.js';
 import {
   healthForSnapshot,
-  isPcaExpired,
   PCA_CAP_NEAR_THRESHOLD,
   PCA_EXPIRING_SOON_SECONDS,
   type PcaHealthState,
 } from '../src/ui/pca/health.js';
+import { isPcaExpired } from '../src/ui/pca/pca-primitives.js';
 import { EmptyState } from '../src/ui/components/ContextGraphPrimitives.js';
 
 async function render(node: React.ReactElement): Promise<{
@@ -219,6 +219,26 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     // insolvent wins over cap-near and expiring
     expect(healthForSnapshot({ ...base, ...zero, agentCount: 100 }, NOW)).toBe('insolvent');
     expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW + 100 }, NOW)).toBe('insolvent');
+  });
+
+  it('does NOT over-fire insolvent when remainingAllowance is positive (#1349)', () => {
+    // Base + top-up empty, but a definitively-known positive remainingAllowance → healthy.
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '1000000000000000000', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('healthy');
+  });
+
+  it('remainingAllowance=0 supersedes a positive baseEpochAllowance proxy → insolvent (#1349)', () => {
+    // Extended read: the precise remainingAllowance (0) overrides the coarse base proxy (>0).
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '0', baseEpochAllowance: '850000000000000000000', remainingAllowance: '0', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('insolvent');
   });
 
   it('treats a missing/zero expiry as "no expiry data" (never expired/expiring)', () => {

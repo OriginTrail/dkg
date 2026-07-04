@@ -1,63 +1,17 @@
-// Shared PCA coverage primitives (#1344 — ends the coverage-drift class that
-// recurred across C1/O4/Q2/S2/U2/V3). PURE leaf rules consumed by every surface
-// (usePublishEligibility / usePcaOverview / GetSponsoredPanel); each surface keeps
-// its own iteration / aggregation / verdict logic.
+// Shared PCA coverage DECISIONS (#1344 — ends the coverage-drift class that recurred
+// across C1/O4/Q2/S2/U2/V3). Built on the pure snapshot predicates in
+// `pca-primitives.ts` (the acyclic leaf this module and the health taxonomy share);
+// here we add the spendability composite + the canonical probe classification that
+// every surface (usePublishEligibility / usePcaOverview / GetSponsoredPanel) consumes,
+// each keeping its own iteration / aggregation / verdict logic.
 
-import { isPcaExpired } from './health.js';
+import { isPcaDead, hasPcaBudget, pcaBudgetState } from './pca-primitives.js';
 import type { PcaSnapshot, PcaProbedKey } from '../api.js';
-
-/** True when a wei decimal-string is a positive amount (> 0). Tolerant of
- *  undefined / non-numeric (→ false). */
-export function bigGt0(wei: string | undefined): boolean {
-  if (!wei) return false;
-  try {
-    return BigInt(wei) > 0n;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The account can't cover a publish because it's expired or fully swept. Built from
- * the shared `isPcaExpired` liveness primitive (NOT the full health taxonomy) so
- * spendability doesn't depend on cap-near/expiring/agentCount. Byte-identical to the
- * old `healthForSnapshot`-derived form: `health==='expired' ⟺ isPcaExpired`, and
- * `health==='swept' ⟺ !isPcaExpired && fullySwept` (swept is checked after expired),
- * so `expired || swept = isPcaExpired || fullySwept`.
- */
-export function isPcaDead(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept'>,
-  nowSec?: number,
-): boolean {
-  return isPcaExpired(snap, nowSec) || !!snap.fullySwept;
-}
-
-/**
- * Account budget state. Non-extended reads use the coarse `baseEpochAllowance`
- * proxy. Extended reads use precise `remainingAllowance` when top-up is empty;
- * if the daemon fail-softed the extended read and omitted it, the budget is
- * unknown and callers must not claim coverage.
- */
-export function pcaBudgetState(
-  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
-): boolean | null {
-  if (bigGt0(snap.topUpBuffer)) return true;
-  if (snap.remainingAllowance !== undefined) return bigGt0(snap.remainingAllowance);
-  if (snap.extendedRequested) return null;
-  return bigGt0(snap.baseEpochAllowance);
-}
-
-/** The account has confirmed budget capacity. Unknown extended-read budget -> false. */
-export function hasPcaBudget(
-  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
-): boolean {
-  return pcaBudgetState(snap) === true;
-}
 
 /**
  * The coarse P0 spendability proxy: a PCA can cover a publish only if it is NOT dead
- * (expired/swept) AND has budget. Composed from the two predicates above so the
- * eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
+ * (expired/swept) AND has budget. Composed from the shared `pca-primitives` predicates
+ * so the eligibility breakdown (dead vs out-of-budget) reuses the SAME rules.
  */
 export function isPcaSpendable(
   snap: Pick<PcaSnapshot, 'expiresAtTimestamp' | 'fullySwept' | 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
@@ -107,7 +61,7 @@ export type PcaCoverageOutcome = PcaCoverageResult['outcome'];
  * `snap.probedKey` (no separate param — a split snapshot/probe pair can't be
  * mismatched). The `dead`/`hasBudget` reason facets are carried ONLY on `'uncovered'`,
  * where S5's breakdown sets sawExpired/sawInsolvent from them INDEPENDENTLY. Composed
- * from the building blocks above, which stay exported: `usePcaOverview` still needs
+ * from the shared `pca-primitives` predicates; `usePcaOverview` still needs the exported
  * `isPcaSpendable` for its account-level `bestCoveringDiscountBps` filter (no probe).
  */
 export function classifyCoverage(snap: PcaSnapshot, nowSec?: number): PcaCoverageResult {

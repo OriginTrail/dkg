@@ -1,5 +1,5 @@
 import { pcaAgentAccount, fetchPca } from '../api.js';
-import { isPcaDead, hasPcaBudget } from './coverage.js';
+import { isPcaDead, hasPcaBudget } from './pca-primitives.js';
 
 // Pre-flight wallet-binding probe — READ-ONLY.
 //

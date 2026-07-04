@@ -2,11 +2,10 @@
 // HealthChip.tsx so domain code (coverage.ts, the hooks) doesn't import a React
 // component file (layer inversion). HealthChip.tsx re-imports these for its pill.
 //
-// #1349 — the `insolvent` derivation reuses coverage.ts's `hasPcaBudget` so health
-// and eligibility agree on "has budget". coverage.ts imports `isPcaExpired` back
-// from here; the resulting reference cycle is safe because both sides are hoisted
-// function declarations only ever called at RUNTIME (never at module-init time).
-import { hasPcaBudget } from './coverage.js';
+// #1349 — the `insolvent` derivation reuses the shared `hasPcaBudget` snapshot
+// predicate so this pill and S5 eligibility agree on "has budget". Both it and the
+// liveness `isPcaExpired` live in the acyclic leaf `pca-primitives.ts`.
+import { hasPcaBudget, isPcaExpired } from './pca-primitives.js';
 import type { PcaSnapshot } from '../api.js';
 
 /**
@@ -26,20 +25,6 @@ export type PcaHealthState =
 export const PCA_CAP_NEAR_THRESHOLD = 90;
 /** Window (seconds) before expiry at which a PCA is flagged "Expiring soon" (7 days). */
 export const PCA_EXPIRING_SOON_SECONDS = 7 * 24 * 60 * 60;
-
-/**
- * The SINGLE expiry (liveness) source — the one check `healthForSnapshot`'s
- * `'expired'` state and coverage's `isPcaDead` both consume, so coverage liveness
- * doesn't have to drag in the whole health taxonomy. `expiresAtTimestamp` 0 / absent
- * means "no lock period" → never expired.
- */
-export function isPcaExpired(
-  snap: Pick<PcaSnapshot, 'expiresAtTimestamp'>,
-  nowSec: number = Math.floor(Date.now() / 1000),
-): boolean {
-  const { expiresAtTimestamp } = snap;
-  return typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0 && nowSec >= expiresAtTimestamp;
-}
 
 /**
  * The SINGLE source of truth for deriving a PCA's `HealthChip` state from its
