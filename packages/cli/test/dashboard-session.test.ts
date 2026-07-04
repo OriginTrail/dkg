@@ -355,6 +355,47 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('exchanges a valid bearer token for a usable dashboard session cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${VALID_TOKEN}` },
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    await expect(exchange.json()).resolves.toMatchObject({ authenticated: true, source: 'exchange' });
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: setCookie.split(';')[0] },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      requestAuth: {
+        source: 'dashboard-session',
+        internalCredentialToken: VALID_TOKEN,
+        principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
+      },
+    });
+  });
+
+  it('rejects invalid bearer-token dashboard exchange attempts without setting a cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wrong-token' },
+    });
+    expect(exchange.status).toBe(401);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    await expect(exchange.json()).resolves.toMatchObject({
+      error: 'Invalid dashboard session token',
+    });
+  });
+
   it('emits credentialed CORS headers and cross-site cookie attributes for configured dashboard origins', async () => {
     const dashboardOrigin = 'https://dashboard.example';
     const started = await startServer({ corsOrigin: dashboardOrigin });

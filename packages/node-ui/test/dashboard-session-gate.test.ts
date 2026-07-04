@@ -136,6 +136,49 @@ describe('DashboardSessionGate', () => {
     expect(calls.some((call) => call.url === '/api/status')).toBe(true);
   });
 
+  it('keeps the unlock gate active and re-enables submit after a failed token exchange', async () => {
+    await act(async () => {
+      root!.render(React.createElement(DashboardSessionGate, null, React.createElement(ProtectedProbe)));
+    });
+    await flush();
+
+    const input = container.querySelector('input[type="password"]') as HTMLInputElement | null;
+    const form = container.querySelector('form') as HTMLFormElement | null;
+    if (!input || !form) throw new Error('unlock form missing');
+
+    await act(async () => {
+      setInputValue(input, 'wrong-token');
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await flush();
+
+    const exchange = calls.find((call) => call.url === '/api/dashboard/session/exchange');
+    expect(exchange?.method).toBe('POST');
+    expect(exchange?.body).toBe(JSON.stringify({ token: 'wrong-token' }));
+
+    await act(async () => {
+      resolveExchange?.(new Response(JSON.stringify({
+        error: 'Invalid dashboard session token',
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await flush();
+
+    const alert = container.querySelector('[role="alert"]');
+    const submit = container.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+    expect(alert?.textContent).toContain('Invalid dashboard session token');
+    expect(submit?.disabled).toBe(false);
+    expect(submit?.textContent).toBe('Unlock');
+    expect(container.querySelector('[data-testid="dashboard-session-unlock"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="protected-probe"]')).toBeNull();
+    expect(calls.some((call) => call.url === '/api/status')).toBe(false);
+  });
+
   it('allows auth-disabled dashboards without unlock or loopback bootstrap', async () => {
     statusBody = { authenticated: true, authDisabled: true };
 
