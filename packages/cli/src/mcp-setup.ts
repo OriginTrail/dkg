@@ -201,6 +201,12 @@ export interface McpSetupActionDeps {
    */
   resolveDkgConfigHome: typeof import('@origintrail-official/dkg-core').resolveDkgConfigHome;
   /**
+   * Create dashboard username/password credentials when missing. CLI-owned
+   * setup flows inject this hook so generated passwords are printed only from
+   * explicit terminal setup/reset commands, never from daemon/UI paths.
+   */
+  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  /**
    * F31: per-client interactive confirm hook. Defaulted to the
    * production readline-based implementation. Injectable so tests
    * can stub deterministic answer streams without managing a real
@@ -1901,6 +1907,19 @@ export async function mcpSetupAction(
     } catch (err: any) {
       console.error(`[setup] Failed to load network config: ${err?.message ?? err}`);
       throw err;
+    }
+  }
+
+  // Ensure dashboard login credentials exist before wallet creation / daemon
+  // start. Existing credentials are authoritative: the injected helper prints a
+  // generated password only for first creation and logs configured state on
+  // reruns. Best-effort so MCP setup remains recoverable via reset-password.
+  if (!dryRun && deps.ensureDashboardCredentials) {
+    try {
+      await deps.ensureDashboardCredentials(dkgDirPath);
+    } catch (err: any) {
+      console.warn(`[setup] Could not create dashboard login credentials (${err?.message ?? String(err)}).`);
+      console.warn('[setup] Run "dkg auth dashboard reset-password" after setup to create or repair them.');
     }
   }
 

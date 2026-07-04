@@ -663,6 +663,11 @@ function rewriteActiveProviderLine(raw: string, newProvider: string): string | n
  */
 export interface RunHermesSetupDeps {
   /**
+   * Create dashboard username/password credentials when missing. Injected only
+   * by CLI setup entry points so daemon/UI-driven adapter setup stays silent.
+   */
+  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  /**
    * Eagerly create the node's operational wallets (generate-if-absent) after
    * the config bootstrap and before the daemon starts, so faucet funding and
    * manual mainnet funding have wallets even if the daemon never fully boots
@@ -748,6 +753,18 @@ export async function runHermesSetup(
     }
   } else if (dryRun) {
     console.log('[hermes-setup] [dry-run] Would bootstrap ~/.dkg/config.json if missing');
+  }
+
+  // Ensure dashboard login credentials exist after node config bootstrap and
+  // before wallets / daemon startup. Best-effort; reset-password can repair an
+  // invalid credential file after setup without marking this integration
+  // degraded.
+  if (!dryRun && deps.ensureDashboardCredentials) {
+    try {
+      await deps.ensureDashboardCredentials(dkgConfigHome);
+    } catch (err: any) {
+      console.warn(`[hermes-setup] Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" after setup to create or repair them.`);
+    }
   }
 
   // Eagerly ensure the node's wallets exist BEFORE the daemon starts (issue

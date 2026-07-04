@@ -88,7 +88,7 @@ describe('openclawSetupAction — --no-fund/--fund flag threading', () => {
     ).rejects.toThrow('adapter blew up');
   });
 
-  it('#1306: injects a loadOpWallets hook into runSetup (eager wallet creation)', async () => {
+  it('#1306/#1439: injects setup runtime hooks into runSetup', async () => {
     const runSetupArgs: any[] = [];
     const runSetup = async (...args: any[]) => { runSetupArgs.push(args); };
 
@@ -96,8 +96,10 @@ describe('openclawSetupAction — --no-fund/--fund flag threading', () => {
 
     expect(runSetupArgs).toHaveLength(1);
     // The 2nd arg is the injected runtime deps; loadOpWallets must be wired so
-    // the adapter can eagerly create wallets before the daemon starts.
+    // the adapter can eagerly create wallets before the daemon starts, and
+    // dashboard credentials can be created by explicit CLI setup flows.
     const [, runDeps] = runSetupArgs[0];
     expect(typeof runDeps?.loadOpWallets).toBe('function');
+    expect(typeof runDeps?.ensureDashboardCredentials).toBe('function');
   });
 });

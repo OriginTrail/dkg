@@ -1647,6 +1647,11 @@ export function verifyMemorySlotInvariants(configPath?: string): void {
  */
 export interface RunSetupDeps {
   /**
+   * Create dashboard username/password credentials when missing. Injected only
+   * by CLI setup entry points so daemon/UI-driven adapter setup stays silent.
+   */
+  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  /**
    * Eagerly create the node's operational wallets (generate-if-absent) after
    * the config write and before the daemon starts, so faucet funding and
    * manual mainnet funding have wallets even if the daemon never fully boots
@@ -1740,6 +1745,17 @@ export async function runSetup(options: SetupOptions, deps: RunSetupDeps = {}): 
     } catch { /* use pre-merge values */ }
   } else if (network) {
     log(`[dry-run] Would write ${join(dkgDir(), 'config.json')} (${network.networkName}, port ${apiPort})`);
+  }
+
+  // Create dashboard login credentials after the node config home is known and
+  // before wallets / daemon startup. Best-effort: the operator can repair an
+  // invalid file with the dashboard reset command without losing setup progress.
+  if (!dryRun && deps.ensureDashboardCredentials) {
+    try {
+      await deps.ensureDashboardCredentials(dkgDir());
+    } catch (err: any) {
+      warn(`Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" after setup to create or repair them.`);
+    }
   }
 
   // Eagerly ensure the node's wallets exist BEFORE the daemon starts (issue

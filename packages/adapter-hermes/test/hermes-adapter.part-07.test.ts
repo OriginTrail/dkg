@@ -115,6 +115,69 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
+  it('#1439: creates dashboard credentials via the injected hook, skipped on --dry-run', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-1439-'));
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      const ensureDashboardCredentials = vi.fn(async () => {});
+
+      await runSetup(
+        { hermesHome, verify: false, start: false, fund: false },
+        { ensureDashboardCredentials },
+      );
+      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(dkgHome);
+
+      ensureDashboardCredentials.mockClear();
+      await runSetup(
+        { hermesHome, verify: false, start: false, fund: false, dryRun: true },
+        { ensureDashboardCredentials },
+      );
+      expect(ensureDashboardCredentials).not.toHaveBeenCalled();
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      rmSync(hermesHome, { recursive: true, force: true });
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it('#1439: a failing dashboard credential hook does not flip setup to degraded', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-1439f-'));
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      const ensureDashboardCredentials = vi.fn(async () => { throw new Error('invalid credential file'); });
+      const result = await runHermesSetup(
+        { hermesHome, verify: false, start: false, fund: false },
+        { ensureDashboardCredentials },
+      );
+      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(result.warnings.join('\n')).not.toContain('dashboard login credentials');
+      expect(result.errors.join('\n')).not.toContain('dashboard login credentials');
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      rmSync(hermesHome, { recursive: true, force: true });
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   // issue #1306 — a failing wallet pre-creation is best-effort and must NOT push
   // into the status-bearing `warnings[]` (which would flip the integration to
   // `degraded` in the daemon-UI). It goes to console.warn instead. Call
