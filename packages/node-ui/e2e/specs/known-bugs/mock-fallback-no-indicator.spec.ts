@@ -25,9 +25,22 @@
  * + a `window.__DKG_USING_MOCKS__` flag — nothing rendered for the user.
  */
 import { test, expect } from '@playwright/test';
+import { readDevnetNode } from '../../helpers/devnet.js';
+import { UI_NODE } from '../../helpers/real-node.js';
 
 test.describe('KNOWN BUG: silent mock/demo-data fallback has no UI indicator', () => {
   test('UI must visibly indicate demo/mock data when the node is unreachable', async ({ page }) => {
+    // This raw spec intentionally bypasses the shared authenticated fixture
+    // because it must force mock mode. Open the dashboard session explicitly so
+    // the route gate does not stop the app before it probes `/api/status`.
+    const node = readDevnetNode(UI_NODE);
+    expect(node?.authToken, `devnet node${UI_NODE} auth token`).toBeTruthy();
+    const exchange = await page.request.post('/api/dashboard/session/exchange', {
+      data: { token: node!.authToken },
+      failOnStatusCode: false,
+    });
+    expect(exchange.status()).toBe(200);
+
     // Fault-inject: the node-health probe 5xx's, exactly as it would if the
     // daemon were down / restarting / returning errors.
     await page.route('**/api/status', (route) =>
