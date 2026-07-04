@@ -115,7 +115,10 @@ function scheduleConnect(delayMs = 0) {
 function scheduleSessionRefresh(session: DashboardSessionStatus) {
   clearSessionRefreshTimer();
   if (session.state !== 'authenticated') return;
-  const delayMs = Math.max(0, session.expiresAt - Date.now() - EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS);
+  const msUntilExpiry = session.expiresAt - Date.now();
+  const delayMs = msUntilExpiry > EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS
+    ? msUntilExpiry - EVENT_SOURCE_SESSION_REFRESH_MARGIN_MS
+    : Math.max(0, msUntilExpiry);
   sessionRefreshTimer = setTimeout(() => {
     closeSource();
     scheduleConnect(0);

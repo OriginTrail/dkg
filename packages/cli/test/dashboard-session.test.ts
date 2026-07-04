@@ -334,6 +334,24 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('marks dashboard session cookies Secure when forwarded protocol is https', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('Secure');
+  });
+
   it('stores a deterministic principal when exchanging an agent-scoped token', async () => {
     const started = await startServer();
     server = started.server;

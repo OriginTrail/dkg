@@ -134,4 +134,71 @@ describe('useNodeEvents dashboard sessions', () => {
       csrfToken: 'csrf-refreshed',
     });
   });
+
+  it('does not enter a zero-delay reconnect loop when status returns a near-expired session', async () => {
+    const initialNow = Date.now();
+    const expiresAt = initialNow + 10_000;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/dashboard/session/status') {
+        return new Response(JSON.stringify({
+          authenticated: true,
+          source: 'loopback',
+          csrfToken: 'csrf-still-current',
+          expiresAt,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const [{ setDashboardSessionForTesting }, { useNodeEvents }] = await Promise.all([
+      import('../src/ui/dashboardSessionTestSupport.js'),
+      import('../src/ui/hooks/useNodeEvents.js'),
+    ]);
+
+    setDashboardSessionForTesting({
+      state: 'authenticated',
+      authenticated: true,
+      source: 'loopback',
+      csrfToken: 'csrf-old',
+      expiresAt,
+    });
+
+    function Probe() {
+      useNodeEvents(() => {});
+      return React.createElement('div');
+    }
+
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(React.createElement(Probe));
+    });
+    await flush();
+    expect(MockEventSource.instances).toHaveLength(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    await flush();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    await flush();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[0].closed).toBe(true);
+    expect(MockEventSource.instances[1].closed).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(4_998);
+    });
+    await flush();
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[1].closed).toBe(false);
+  });
 });
