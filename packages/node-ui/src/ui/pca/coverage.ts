@@ -81,13 +81,17 @@ export function normalizeProbeRegistered(probedKey: PcaProbedKey | undefined): b
  * `outcome`, so each surface switches on ONE field and TS enforces which facets are
  * meaningful (a caller can't read `dead`/`hasBudget` on a probe that never resolved):
  *  - `inconclusive` — the probe couldn't be read → neutral, never DANGER (#9).
+ *                     `adapterUnsupported` (#1356) distinguishes a CAPABILITY GAP
+ *                     (the chain adapter can't answer PCA queries here — retrying is
+ *                     futile) from a transient RPC failure (retry). Set ONLY on the
+ *                     adapter-gap path; a transient/fail-soft leaves it undefined.
  *  - `unregistered` — confirmed NOT an approved publishing wallet here.
  *  - `covers`       — registered HERE AND the account is spendable (not dead, has budget).
  *  - `uncovered`    — registered HERE but the account can't cover; `dead`/`hasBudget`
  *                     are the reason facets, carried ONLY on this variant.
  */
 export type PcaCoverageResult =
-  | { outcome: 'inconclusive'; registered: null }
+  | { outcome: 'inconclusive'; registered: null; adapterUnsupported?: boolean }
   | { outcome: 'unregistered'; registered: false }
   | { outcome: 'covers'; registered: true }
   | { outcome: 'uncovered'; registered: true; dead: boolean; hasBudget: boolean };
@@ -108,7 +112,12 @@ export type PcaCoverageOutcome = PcaCoverageResult['outcome'];
  */
 export function classifyCoverage(snap: PcaSnapshot, nowSec?: number): PcaCoverageResult {
   const registered = normalizeProbeRegistered(snap.probedKey);
-  if (registered === null) return { outcome: 'inconclusive', registered: null };
+  if (registered === null) {
+    // #1356 — carry WHY it was inconclusive: `adapterSupported === false` is the
+    // chain-adapter capability gap (retrying won't help); any other null (a probe
+    // error / undefined registered) is transient. Only the gap sets the flag true.
+    return { outcome: 'inconclusive', registered: null, adapterUnsupported: snap.probedKey?.adapterSupported === false };
+  }
   if (registered === false) return { outcome: 'unregistered', registered: false };
   const dead = isPcaDead(snap, nowSec);
   const budget = pcaBudgetState(snap);

@@ -143,12 +143,14 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false } }));
     expect(c).toEqual({ outcome: 'unregistered', registered: false });
   });
-  it('adapterSupported:false → { outcome: inconclusive, registered: null }', () => {
+  it('adapterSupported:false → { outcome: inconclusive, registered: null, adapterUnsupported: true }', () => {
+    // #1356 — the capability gap flags adapterUnsupported so S6 can say "not supported".
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false, adapterSupported: false } }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: true });
   });
-  it('missing probedKey → { outcome: inconclusive, registered: null }', () => {
+  it('missing probedKey → { outcome: inconclusive, registered: null, adapterUnsupported: false }', () => {
+    // #1356 — a missing/transient probe is inconclusive but NOT a capability gap.
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: false });
   });
 });

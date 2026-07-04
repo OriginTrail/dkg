@@ -35,6 +35,13 @@ interface ProbeRow {
    * registered wallet on a dead PCA must not render "Ready" (#9 false coverage).
    */
   covers: boolean;
+  /**
+   * #1356 — this probe was inconclusive because the chain adapter can't answer PCA
+   * queries on this chain (a capability gap — retrying is futile), NOT a transient
+   * RPC failure. Lets the all-inconclusive message say "not supported here" instead
+   * of "the lookup failed. Retry.". Undefined on a transient/failed probe.
+   */
+  adapterUnsupported?: boolean;
 }
 
 /**
@@ -101,7 +108,13 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               // false not-approved; all-unsupported → wholesale "retry") + N1 covers =
               // outcome 'covers' (registered AND the PCA is spendable; S6 "Ready" == S5 GREEN).
               const c = classifyCoverage(snap);
-              return { wallet: w, registered: c.registered, covers: c.outcome === 'covers' };
+              return {
+                wallet: w,
+                registered: c.registered,
+                covers: c.outcome === 'covers',
+                // #1356 — capability gap only lives on the inconclusive variant.
+                adapterUnsupported: c.outcome === 'inconclusive' ? c.adapterUnsupported : false,
+              };
             })
             .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),
         ),
@@ -110,7 +123,15 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       // lookup failed wholesale (vs genuine 0-approved, which is registered:false).
       // Surface that as an error — don't render a false "0 of N approved".
       if (rows.length > 0 && rows.every((r) => r.registered === null)) {
-        setProbeError(`Couldn’t check approval on PCA #${id} right now — the chain lookup failed. Retry.`);
+        // #1356 — split the CAPABILITY GAP (the chain adapter can't answer PCA
+        // queries here — retrying is futile) from a transient RPC failure (retry).
+        // Only claim "not supported" when EVERY inconclusive probe is an adapter gap.
+        const allAdapterGap = rows.every((r) => r.adapterUnsupported);
+        setProbeError(
+          allAdapterGap
+            ? 'PCA approval isn’t verifiable on this chain’s adapter — not supported here. You can still publish without a discount.'
+            : `Couldn’t check approval on PCA #${id} right now — the chain lookup failed. Retry.`,
+        );
         setProbed(null);
         return;
       }
