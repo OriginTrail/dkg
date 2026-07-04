@@ -18,10 +18,15 @@ async function readWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promi
 test.describe('dashboard auth session', () => {
   test('loads without exposing a browser bearer token and uses session credentials', async ({ shell, page }) => {
     const eventUrls: string[] = [];
-    const eventResponsePromise = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === '/api/events',
-      { timeout: 30_000 },
-    );
+    let resolveEventResponse: ((response: { status(): number; headers(): Record<string, string> }) => void) | undefined;
+    const eventResponsePromise = new Promise<{ status(): number; headers(): Record<string, string> }>((resolve) => {
+      resolveEventResponse = resolve;
+    });
+    page.on('response', (response) => {
+      if (new URL(response.url()).pathname !== '/api/events') return;
+      resolveEventResponse?.(response);
+      resolveEventResponse = undefined;
+    });
     page.on('request', (request) => {
       const url = request.url();
       if (url.includes('/api/events')) eventUrls.push(url);
@@ -49,7 +54,9 @@ test.describe('dashboard auth session', () => {
       );
       eventUrls.push(eventRequest.url());
     }
-    const eventResponse = await eventResponsePromise;
+    const eventResponse = await readWithTimeout(eventResponsePromise, 30_000);
+    expect(eventResponse).not.toBe('timeout');
+    if (eventResponse === 'timeout') throw new Error('timed out waiting for /api/events response');
     expect(eventResponse.status()).toBe(200);
     expect(eventResponse.headers()['content-type']).toContain('text/event-stream');
     expect(eventUrls.length).toBeGreaterThan(0);
@@ -70,9 +77,13 @@ test.describe('dashboard auth session', () => {
     expect(connected).not.toBe('timeout');
 
     const logoutStatus = await page.evaluate(async () => {
+      const statusRes = await fetch('/api/dashboard/session/status', { credentials: 'same-origin' });
+      const status = statusRes.ok ? await statusRes.json() as { csrfToken?: string } : null;
+      if (!status?.csrfToken) return 'missing-csrf-token';
       const res = await fetch('/api/dashboard/session/logout', {
         method: 'POST',
         credentials: 'same-origin',
+        headers: { 'X-DKG-CSRF': status.csrfToken },
       });
       return res.status;
     });
