@@ -267,6 +267,39 @@ describe('GetSponsoredPanel', () => {
     await unmount();
   });
 
+  // #1356 — MIXED all-inconclusive: one capability-gap probe (adapterSupported:false)
+  // + one TRANSIENT failure (reject → null, no adapter flag). Since not EVERY probe is
+  // an adapter gap, the message must be the transient "chain lookup failed. Retry.",
+  // NOT "not supported here" — guards every() vs some() in the split.
+  it('a mix of capability-gap + transient inconclusive uses the transient message (#1356)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0, W1],
+      balances: [
+        { address: W0, eth: '0.08', trac: '0', symbol: 'TRAC' },
+        { address: W1, eth: '0', trac: '0', symbol: 'TRAC' },
+      ],
+      chainId: '84532',
+      rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => {
+      if (key && key.toLowerCase() === W1.toLowerCase()) throw new Error('rpc down'); // transient
+      return {
+        ...makePcaSnapshot({ accountId: '7' }),
+        probedKey: key ? { key, registered: false, adapterSupported: false } : undefined, // W0 capability gap
+      };
+    });
+    const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
+    await waitForText(container, "Can't find it automatically?");
+    setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
+    await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    await waitForText(container, 'the chain lookup failed');
+    expect(container.textContent).not.toContain('not supported here');
+    await unmount();
+  });
+
   it('shows a LOADING state (never a false-empty) while wallets are in flight, then the wallets', async () => {
     let resolve!: (v: unknown) => void;
     mocks.fetchWalletsBalances.mockReturnValue(new Promise((r) => { resolve = r; }));
