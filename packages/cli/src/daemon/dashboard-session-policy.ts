@@ -46,6 +46,13 @@ export function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: str
   return true;
 }
 
+export function isConfiguredDashboardCorsOrigin(req: IncomingMessage, corsOrigin?: string | null): boolean {
+  const allowedCorsOrigin = parseOrigin(corsOrigin ?? undefined);
+  const originHeader = firstHeaderValue(req.headers.origin);
+  if (!allowedCorsOrigin || parseOrigin(originHeader) !== allowedCorsOrigin) return false;
+  return parseOrigin(originHeader) !== requestOrigin(req);
+}
+
 export function hasTrustedForwardedProto(req: IncomingMessage, proto: "http" | "https"): boolean {
   return isLoopbackAddress(req.socket.remoteAddress ?? "") && requestForwardedProto(req) === proto;
 }

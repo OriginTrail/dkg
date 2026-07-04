@@ -91,7 +91,7 @@ export async function handleDashboardSessionRequest(
       return true;
     }
     const created = store.create(token!, "loopback");
-    setDashboardSessionCookie(req, res, created.sessionId);
+    setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
       source: created.record.source,
@@ -128,7 +128,7 @@ export async function handleDashboardSessionRequest(
       return true;
     }
     const created = store.create(token!, "exchange");
-    setDashboardSessionCookie(req, res, created.sessionId);
+    setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
       source: created.record.source,
@@ -138,8 +138,13 @@ export async function handleDashboardSessionRequest(
   }
 
   if (req.method === "POST" && path === "/api/dashboard/session/logout") {
+    const revokeSession = (active: AuthenticatedDashboardSession): void => {
+      store.revoke(active.sessionId);
+      options.onSessionRevoked?.(active.sessionId);
+    };
     if (!session || !verifyToken(session.compatToken, options.validTokens)) {
-      clearDashboardSessionCookie(req, res);
+      if (session) revokeSession(session);
+      clearDashboardSessionCookie(req, res, options.corsOrigin);
       jsonResponse(res, 200, { ok: true }, options.corsOrigin);
       return true;
     }
@@ -150,9 +155,8 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, authorization.status, { error: authorization.error }, options.corsOrigin);
       return true;
     }
-    store.revoke(session.sessionId);
-    options.onSessionRevoked?.(session.sessionId);
-    clearDashboardSessionCookie(req, res);
+    revokeSession(session);
+    clearDashboardSessionCookie(req, res, options.corsOrigin);
     jsonResponse(res, 200, { ok: true }, options.corsOrigin);
     return true;
   }

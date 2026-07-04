@@ -56,6 +56,7 @@ async function startServer(options: {
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
   corsOrigin?: string | null;
+  signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<unknown>;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
@@ -71,6 +72,8 @@ async function startServer(options: {
     ],
     nodeName: 'Default Agent',
     nodeFramework: 'node',
+    signJoinRequest: options.signJoinRequest ?? (async (contextGraphId: string, agentAddress: string) =>
+      ({ contextGraphId, agentAddress, signature: 'signed' })),
     peerId: '12D3KooWDashboardSessionTest',
     publisher: { getIdentityId: () => 1n },
   };
@@ -96,7 +99,10 @@ async function startServer(options: {
     }))) {
       return;
     }
-    if (url.pathname === '/api/agent/identity') {
+    if (
+      url.pathname === '/api/agent/identity' ||
+      /^\/api\/context-graph\/[^/]+\/sign-join$/.test(url.pathname)
+    ) {
       await handleRequest(
         req,
         res,
@@ -349,6 +355,42 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('emits credentialed CORS headers and cross-site cookie attributes for configured dashboard origins', async () => {
+    const dashboardOrigin = 'https://dashboard.example';
+    const started = await startServer({ corsOrigin: dashboardOrigin });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: dashboardOrigin,
+        'Sec-Fetch-Site': 'cross-site',
+      },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    expect(exchange.headers.get('access-control-allow-origin')).toBe(dashboardOrigin);
+    expect(exchange.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(exchange.headers.get('vary')).toBe('Origin');
+
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=None');
+    expect(setCookie).toContain('Secure');
+
+    const status = await fetch(`${started.baseUrl}/api/dashboard/session/status`, {
+      headers: {
+        Cookie: setCookie.split(';')[0],
+        Origin: dashboardOrigin,
+      },
+    });
+    expect(status.status).toBe(200);
+    expect(status.headers.get('access-control-allow-credentials')).toBe('true');
+    await expect(status.json()).resolves.toMatchObject({ authenticated: true });
+  });
+
   it('marks dashboard session cookies Secure when forwarded protocol is https', async () => {
     const started = await startServer();
     server = started.server;
@@ -542,6 +584,34 @@ describe('dashboard browser sessions', () => {
       peerId: '12D3KooWDashboardSessionTest',
       nodeIdentityId: '1',
     });
+  });
+
+  it('routes dashboard-cookie agent sessions through requestAgentAddress for sign-join', async () => {
+    const signJoinRequest = vi.fn(async (contextGraphId: string, agentAddress: string) => ({
+      contextGraphId,
+      agentAddress,
+      signature: 'signed-join',
+    }));
+    const started = await startServer({ signJoinRequest });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: AGENT_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    const cookie = cookieFrom(exchange);
+    const body = await exchange.json() as { csrfToken: string };
+
+    const signed = await fetch(`${started.baseUrl}/api/context-graph/cg-token/sign-join`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    expect(signed.status).toBe(200);
+    expect(signJoinRequest).toHaveBeenCalledWith('cg-token', TOKEN_AGENT_ADDRESS);
+    await expect(signed.json()).resolves.toMatchObject({ agentAddress: TOKEN_AGENT_ADDRESS });
   });
 
   it('rejects invalid dashboard session exchange tokens without setting a cookie', async () => {
@@ -888,5 +958,28 @@ describe('dashboard browser sessions', () => {
     expect(logout.status).toBe(200);
     expect(onSessionRevoked).toHaveBeenCalledTimes(1);
     expect(onSessionRevoked).toHaveBeenCalledWith(decodeURIComponent(cookie.split('=')[1]!));
+  });
+
+  it('revokes the server-side session on logout after the backing token rotates away', async () => {
+    const validTokens = new Set([VALID_TOKEN]);
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({ validTokens, onSessionRevoked });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+    validTokens.delete(VALID_TOKEN);
+
+    const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken },
+    });
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
+    expect(onSessionRevoked).toHaveBeenCalledTimes(1);
+    expect(onSessionRevoked).toHaveBeenCalledWith(decodeURIComponent(cookie.split('=')[1]!));
+
+    const protectedRes = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
+    expect(protectedRes.status).toBe(401);
   });
 });

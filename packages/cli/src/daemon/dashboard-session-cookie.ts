@@ -1,6 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DASHBOARD_SESSION_TTL_MS } from "./dashboard-session-store.js";
-import { hasTrustedForwardedProto } from "./dashboard-session-policy.js";
+import {
+  hasTrustedForwardedProto,
+  isConfiguredDashboardCorsOrigin,
+} from "./dashboard-session-policy.js";
 
 export const DASHBOARD_SESSION_COOKIE = "dkg_ui_session";
 const MAX_COOKIE_AGE_SECONDS = Math.floor(DASHBOARD_SESSION_TTL_MS / 1000);
@@ -23,27 +26,38 @@ export function getDashboardSessionCookie(req: IncomingMessage): string | null {
   return null;
 }
 
-export function setDashboardSessionCookie(req: IncomingMessage, res: ServerResponse, sessionId: string): void {
+export function setDashboardSessionCookie(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessionId: string,
+  corsOrigin?: string | null,
+): void {
+  const crossSite = isConfiguredDashboardCorsOrigin(req, corsOrigin);
   const attrs = [
     `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(sessionId)}`,
     "HttpOnly",
-    "SameSite=Strict",
+    crossSite ? "SameSite=None" : "SameSite=Strict",
     "Path=/",
     `Max-Age=${MAX_COOKIE_AGE_SECONDS}`,
   ];
-  if (isHttpsRequest(req)) attrs.push("Secure");
+  if (crossSite || isHttpsRequest(req)) attrs.push("Secure");
   appendSetCookie(res, attrs.join("; "));
 }
 
-export function clearDashboardSessionCookie(req: IncomingMessage, res: ServerResponse): void {
+export function clearDashboardSessionCookie(
+  req: IncomingMessage,
+  res: ServerResponse,
+  corsOrigin?: string | null,
+): void {
+  const crossSite = isConfiguredDashboardCorsOrigin(req, corsOrigin);
   const attrs = [
     `${DASHBOARD_SESSION_COOKIE}=`,
     "HttpOnly",
-    "SameSite=Strict",
+    crossSite ? "SameSite=None" : "SameSite=Strict",
     "Path=/",
     "Max-Age=0",
   ];
-  if (isHttpsRequest(req)) attrs.push("Secure");
+  if (crossSite || isHttpsRequest(req)) attrs.push("Secure");
   appendSetCookie(res, attrs.join("; "));
 }
 

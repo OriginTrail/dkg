@@ -3043,11 +3043,8 @@ export async function runDaemonInner(
           return;
         }
         res.writeHead(204, {
-          ...(reqCorsOrigin
-            ? { "Access-Control-Allow-Origin": reqCorsOrigin }
-            : {}),
+          ...corsHeaders(reqCorsOrigin),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-DKG-CSRF",
         });
         res.end();
         return;

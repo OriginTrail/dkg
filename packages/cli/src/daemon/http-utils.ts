@@ -1490,6 +1490,7 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-DKG-CSRF",
   };
+  if (origin !== "*") headers["Access-Control-Allow-Credentials"] = "true";
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;
 }
