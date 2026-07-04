@@ -505,6 +505,19 @@ describe('dashboard browser sessions', () => {
     expect(res.status).toBe(403);
   });
 
+  it.each(['POST', 'PUT', 'PATCH', 'DELETE'])('requires CSRF for dashboard-session %s requests', async (method) => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, { method, headers: { Cookie: cookie } });
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+    });
+  });
+
   it('allows unsafe session-authenticated requests with CSRF', async () => {
     const started = await startServer();
     server = started.server;
