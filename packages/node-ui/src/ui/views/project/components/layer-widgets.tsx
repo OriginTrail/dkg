@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
@@ -6,6 +6,7 @@ import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
+import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 
 // ─── Generative Widget Components ─────────────────────────────
@@ -107,9 +108,11 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
 /**
  * The busy/result/error lifecycle shared by the promote and publish CTAs — STATE only.
  * `run(body, formatError)` clears state, executes the body (which returns the success text,
- * or throws), lifts the outcome up via `onResult`, and fires `onComplete` on success. Error
- * COPY is owned by each caller via `formatError` (promote and publish word failures
- * differently — the runner stays generic and never leaks promote wording onto publish).
+ * or throws), and — in ONE place — sets result/error AND mirrors the outcome to `onResult`
+ * (which the strip lifts into its own state so the "✓ Promoted N" feedback survives this
+ * widget unmounting when the layer empties). `onComplete` fires on success. Error COPY is
+ * owned by each caller via `formatError` (promote and publish word failures differently —
+ * the runner stays generic and never leaks promote wording onto publish).
  */
 function useLayerAction(
   onResult?: (r: { ok: boolean; text: string } | null) => void,
@@ -118,12 +121,6 @@ function useLayerAction(
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Mirror the outcome up to the strip; it persists past this widget's unmount.
-  useEffect(() => {
-    if (result) onResult?.({ ok: true, text: result });
-    else if (error) onResult?.({ ok: false, text: error });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result, error]);
 
   const run = useCallback(
     async (body: () => Promise<string>, formatError: (err: unknown) => string) => {
@@ -133,14 +130,17 @@ function useLayerAction(
       try {
         const text = await body();
         setResult(text);
+        onResult?.({ ok: true, text });
         onComplete?.();
       } catch (err) {
-        setError(formatError(err));
+        const text = formatError(err);
+        setError(text);
+        onResult?.({ ok: false, text });
       } finally {
         setBusy(false);
       }
     },
-    [onComplete],
+    [onResult, onComplete],
   );
 
   return { busy, result, error, run };
@@ -302,8 +302,18 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
               renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
               predictive chip. */}
           <DiscountAppliedBadge convictionCostCovered={costCovered} />
-          {/* S5 — the PCA fall-through chip, off the gate's single eligibility read. */}
-          {gate.chip}
+          {/* S5 — the PCA fall-through chip, rendered off the gate's single eligibility read
+              (id=verdictId so the button can reference it). Shown only when a PCA is tracked. */}
+          {gate.chipVisible && (
+            <PublishEligibilityChipView
+              verdict={gate.verdict}
+              accountId={gate.accountId}
+              discountBps={gate.discountBps}
+              accountUntracked={gate.accountUntracked}
+              ownerPublish={gate.ownerPublish}
+              id={gate.verdictId}
+            />
+          )}
           {/* SR-only cause for the policy gate — referenced by aria-describedby so the
               announced reason matches the visual state. */}
           {gate.blocked && <span id={gate.reasonId} className="v10-sr-only">{gate.reason}</span>}
@@ -314,11 +324,13 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         data-testid="widget-publish-vm-btn"
         className="v10-decision-btn primary-cta publish-vm"
         style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
-        // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate
-        // uses aria-disabled (via gate.ariaProps) so SR/keyboard users keep focus + hear
-        // the reason (publish no-ops when blocked).
+        // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
+        // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when
+        // blocked). aria-describedby references only rendered targets (gate.describedByIds).
         disabled={busy}
-        {...gate.ariaProps}
+        aria-disabled={gate.blocked || undefined}
+        title={gate.blocked ? gate.reason : undefined}
+        aria-describedby={gate.describedByIds.join(' ') || undefined}
         onClick={publish}
       >
         {busy ? '...' : '◉ Publish to Verifiable Memory'}

@@ -3,7 +3,8 @@
 // B8 (#1365 round-3) — the SWM→VM publish CTA (`PublishVmWidget`) renders the confirmed
 // DiscountAppliedBadge from the BATCH-level convictionCostCovered, NOT off the headline
 // `sample` (chosen for cleanliness, not discount). Also covers the #1382 publish gate:
-// PublishVmWidget consumes `useVmPublishGate` (real) over a mocked eligibility verdict.
+// PublishVmWidget consumes `useVmPublishGate` (real) over a mocked eligibility verdict, and
+// renders the REAL PublishEligibilityChipView (so a dropped/mismatched chip id is caught).
 
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -11,31 +12,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiMocks = vi.hoisted(() => ({
   listAssertions: vi.fn(),
+  knowledgeAssetFinalize: vi.fn(),
+  promoteAssertion: vi.fn(),
   publishAssertionsToVm: vi.fn(),
   partialPublishWarning: vi.fn((d?: string) => (d ? `binding incomplete — ${d}` : 'binding incomplete')),
 }));
 
 // #1382 — PublishVmWidget drives the CTA gate + chip from `useVmPublishGate`, which owns the
 // single S5 read. Mock the eligibility hook so tests drive the verdict deterministically
-// (useVmPublishGate stays REAL), and spy the PURE chip VIEW to capture the props it receives.
+// (useVmPublishGate stays REAL, and the REAL chip view renders so its aria id is exercised).
 const eligMock = vi.hoisted(() => ({ usePublishEligibility: vi.fn() }));
-const chipViewMock = vi.hoisted(() => ({ PublishEligibilityChipView: vi.fn((_props: any) => null) }));
 
 vi.mock('../src/ui/api.js', async (orig) => ({
   ...(await orig<typeof import('../src/ui/api.js')>()),
   listAssertions: apiMocks.listAssertions,
+  knowledgeAssetFinalize: apiMocks.knowledgeAssetFinalize,
+  promoteAssertion: apiMocks.promoteAssertion,
   publishAssertionsToVm: apiMocks.publishAssertionsToVm,
   partialPublishWarning: apiMocks.partialPublishWarning,
 }));
 
 vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
   usePublishEligibility: eligMock.usePublishEligibility,
-}));
-
-// Spy the pure chip view (no fetch) so we can assert the widget passes it the exact
-// verdict from its single read, and isolate the CONFIRMED-badge render path.
-vi.mock('../src/ui/pages/conviction/PublishEligibilityChip.js', () => ({
-  PublishEligibilityChipView: chipViewMock.PublishEligibilityChipView,
 }));
 
 const { PromoteWidget, PublishVmWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
@@ -60,6 +58,8 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }]);
+  apiMocks.knowledgeAssetFinalize.mockResolvedValue(undefined);
+  apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 1 });
   // Track a PCA so the chip guard (trackedIds.length > 0) is satisfied by default.
   usePcaStore.setState({ trackedIds: ['7'], createPending: null });
   // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
@@ -183,9 +183,10 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   });
 
   // CTA POLICY: gate ONLY the terminal no-funds case. 'eligible'/'fallthrough' (has TRAC
-  // → pays direct) stay enabled; 'unknown' (inconclusive) and a still-loading/undefined
-  // verdict fail OPEN (#9 — never block on what we can't confirm).
-  it.each(['eligible', 'fallthrough', 'unknown', undefined])(
+  // → pays direct) stay enabled; 'unknown' (inconclusive, also the still-loading verdict —
+  // the hook returns 'unknown', never undefined) fails OPEN (#9 — never block on what we
+  // can't confirm).
+  it.each(['eligible', 'fallthrough', 'unknown'])(
     'keeps the VM publish CTA ENABLED on a %s verdict',
     async (verdict) => {
       setVerdict(verdict);
@@ -212,19 +213,26 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  // Shared-eligibility contract (#1382): the widget resolves the verdict ONCE and drives
-  // the pure chip view with it — button and chip can't disagree, and there's one poll.
-  it('drives the pure chip view with the exact verdict from its single read', async () => {
-    setVerdict('eligible');
-    const { unmount } = await render(
+  // Shared-eligibility contract (#1382): the widget resolves the verdict ONCE and drives the
+  // REAL chip view with it — button and chip can't disagree, one poll, and (OVzKw) the
+  // button's aria-describedby points at an element that actually EXISTS in the DOM.
+  it('drives the REAL chip from its single read; aria-describedby points at the rendered chip', async () => {
+    eligMock.usePublishEligibility.mockReturnValue({
+      verdict: 'eligible', ownerPublish: false, anyGasFunded: false, accountId: '7', discountBps: 3000,
+    } as any);
+    const { container, unmount } = await render(
       React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
-    // Single shared read via useVmPublishGate: the hook is called once with (cg, 30s).
+    // Single shared read via useVmPublishGate.
     expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000);
-    // The pure view received the exact verdict from that read.
-    expect(chipViewMock.PublishEligibilityChipView).toHaveBeenCalled();
-    const props = chipViewMock.PublishEligibilityChipView.mock.calls.at(-1)![0];
-    expect(props.verdict).toBe('eligible');
+    // The REAL chip rendered the supplied verdict.
+    const chip = container.querySelector('[data-testid="pca-publish-eligibility"]');
+    expect(chip).toBeTruthy();
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeTruthy();
+    // Not blocked → aria-describedby is exactly the chip's id AND that element exists.
+    const describedby = publishBtn(container).getAttribute('aria-describedby')!;
+    expect(describedby.trim().split(/\s+/)).toHaveLength(1);
+    expect(document.getElementById(describedby.trim())).toBe(chip);
     await unmount();
   });
 
@@ -234,11 +242,11 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   // over the REAL hook in pca-publish-eligibility.test.ts.)
   it('the promote (wm) widget never runs the eligibility probe and renders no chip', async () => {
     setVerdict('eligible');
-    const { unmount } = await render(
+    const { container, unmount } = await render(
       React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
     expect(eligMock.usePublishEligibility).not.toHaveBeenCalled();
-    expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeNull();
     await unmount();
   });
 
@@ -249,21 +257,33 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
       React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     // No chip rendered → its id isn't in the DOM…
-    expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="pca-publish-eligibility"]')).toBeNull();
     // …so the button must not reference it (OVs0A: describedByIds are atomic with targets).
     expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
     await unmount();
   });
+});
 
-  it('when a PCA is tracked but not blocked, aria-describedby references only the (rendered) chip', async () => {
-    setVerdict('eligible'); // tracked (default ['7']), not blocked
+describe('PromoteWidget — promote flow (#1382)', () => {
+  const clickPromote = async (c: HTMLElement) =>
+    act(async () => { (c.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement).click(); });
+
+  it('seals (finalize) each draft BEFORE promoting, threading subGraph through both calls', async () => {
+    const order: string[] = [];
+    apiMocks.listAssertions.mockResolvedValue([{ name: 'a1', subGraph: 'sg1' }]);
+    apiMocks.knowledgeAssetFinalize.mockImplementation(async () => { order.push('finalize'); });
+    apiMocks.promoteAssertion.mockImplementation(async () => { order.push('promote'); return { promotedCount: 3 }; });
     const { container, unmount } = await render(
-      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
+      React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
-    const describedby = publishBtn(container).getAttribute('aria-describedby');
-    // Exactly one id (the chip's verdictId) — no reason id, since not blocked.
-    expect(describedby).toBeTruthy();
-    expect(describedby!.trim().split(/\s+/)).toHaveLength(1);
+    await clickPromote(container);
+    for (let i = 0; i < 30 && order.length < 2; i++) await flush();
+    // finalize precedes promote for the draft (a dropped seal would fail this).
+    expect(order).toEqual(['finalize', 'promote']);
+    // subGraph threaded through BOTH calls (a dropped passthrough would fail this).
+    expect(apiMocks.knowledgeAssetFinalize).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
+    expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', 'all', 'sg1');
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
     await unmount();
   });
 });
