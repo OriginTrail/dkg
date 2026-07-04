@@ -192,6 +192,39 @@ export function buildInitAutoUpdate(opts: {
   } as AutoUpdateConfig;
 }
 
+export interface InitDashboardCredentialResult {
+  created: boolean;
+  path: string;
+  username: string;
+  password?: string;
+}
+
+export async function ensureDashboardCredentialsForInit(
+  enableAuth: boolean,
+): Promise<InitDashboardCredentialResult | null> {
+  if (!enableAuth) return null;
+  try {
+    const { ensureDashboardCredentials } = await import('../daemon/dashboard-credentials.js');
+    return await ensureDashboardCredentials();
+  } catch (err: any) {
+    console.warn(`\nWarning: could not create dashboard login credentials (${err?.message ?? String(err)}).`);
+    console.warn('Run "dkg auth dashboard reset-password" after setup to create them.');
+    return null;
+  }
+}
+
+export function printCreatedDashboardCredentialsForInit(
+  dashboardCredentialResult: InitDashboardCredentialResult | null,
+): void {
+  if (!dashboardCredentialResult?.created || !dashboardCredentialResult.password) return;
+  console.log('\nDashboard login created:');
+  console.log(`  Username: ${dashboardCredentialResult.username}`);
+  console.log(`  Password: ${dashboardCredentialResult.password}`);
+  console.log(`  Credential file: ${dashboardCredentialResult.path}`);
+  console.log('  Save this password securely. It will not be shown again.');
+  console.log('  Treat this terminal output as secret-bearing.');
+}
+
 export function registerInitCommand(program: Command): void {
 // ─── dkg init ────────────────────────────────────────────────────────
 
@@ -539,21 +572,7 @@ program
     };
     await saveConfig(config);
 
-    let dashboardCredentialResult: {
-      created: boolean;
-      path: string;
-      username: string;
-      password?: string;
-    } | null = null;
-    if (enableAuth) {
-      try {
-        const { ensureDashboardCredentials } = await import('../daemon/dashboard-credentials.js');
-        dashboardCredentialResult = await ensureDashboardCredentials();
-      } catch (err: any) {
-        console.warn(`\nWarning: could not create dashboard login credentials (${err?.message ?? String(err)}).`);
-        console.warn('Run "dkg auth dashboard reset-password" after setup to create them.');
-      }
-    }
+    const dashboardCredentialResult = await ensureDashboardCredentialsForInit(enableAuth);
 
     // Generate wallets eagerly so they're available for faucet funding
     let walletAddresses: string[] = [];
@@ -619,14 +638,7 @@ program
     if (walletAddresses.length) {
       console.log(`  wallets:    ${walletAddresses.join(', ')}`);
     }
-    if (dashboardCredentialResult?.created && dashboardCredentialResult.password) {
-      console.log('\nDashboard login created:');
-      console.log(`  Username: ${dashboardCredentialResult.username}`);
-      console.log(`  Password: ${dashboardCredentialResult.password}`);
-      console.log(`  Credential file: ${dashboardCredentialResult.path}`);
-      console.log('  Save this password securely. It will not be shown again.');
-      console.log('  Treat this terminal output as secret-bearing.');
-    }
+    printCreatedDashboardCredentialsForInit(dashboardCredentialResult);
 
     // Auto-fund from testnet faucet if available
     if (network?.faucet?.url && walletAddresses.length > 0) {

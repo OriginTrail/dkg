@@ -9,8 +9,11 @@ import {
   handleDashboardSessionRequest,
   isAllowedLoopbackHostname,
   isLoopbackAddress,
+  parseDashboardSessionExchange,
+  selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
   type DashboardLoginOptions,
+  type DashboardLoginVerification,
 } from '../src/daemon/dashboard-session.js';
 import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
 import { hasTrustedDashboardOrigin } from '../src/daemon/dashboard-session-policy.js';
@@ -69,6 +72,54 @@ describe('dashboard session trust policy helpers', () => {
       socket: { remoteAddress: '172.18.0.2' },
     } as IncomingMessage;
     expect(hasTrustedDashboardOrigin(hostile)).toBe(false);
+  });
+});
+
+describe('dashboard session exchange helpers', () => {
+  it('parses token, login, and mixed exchange requests explicitly', () => {
+    expect(parseDashboardSessionExchange({ token: ' dashboard-token ' }, undefined)).toEqual({
+      kind: 'token',
+      token: 'dashboard-token',
+    });
+    expect(parseDashboardSessionExchange({}, 'Bearer header-token')).toEqual({
+      kind: 'token',
+      token: 'header-token',
+    });
+    expect(parseDashboardSessionExchange({ username: ' node-admin ', password: 'secret' }, undefined)).toEqual({
+      kind: 'login',
+      username: 'node-admin',
+      password: 'secret',
+    });
+    expect(parseDashboardSessionExchange({ username: 'node-admin', token: 'dashboard-token' }, undefined)).toEqual({
+      kind: 'invalid',
+      status: 400,
+      error: 'Dashboard session exchange accepts either token or username/password',
+    });
+  });
+
+  it('selects a node-admin backing token for password-login sessions', () => {
+    const validTokens = new Set(['agent-token-a', 'node-admin-token', 'bridge-token']);
+    const resolveAgentByToken = (token: string) => token.startsWith('agent-token') ? TOKEN_AGENT_ADDRESS : undefined;
+    const refreshValidTokens = vi.fn();
+
+    expect(selectDashboardLoginCompatToken({
+      validTokens,
+      bridgeAuthToken: 'bridge-token',
+      resolveAgentByToken,
+      refreshValidTokens,
+    })).toBe('bridge-token');
+    expect(refreshValidTokens).toHaveBeenCalledTimes(1);
+
+    expect(selectDashboardLoginCompatToken({
+      validTokens,
+      bridgeAuthToken: 'stale-bridge-token',
+      resolveAgentByToken,
+    })).toBe('node-admin-token');
+
+    expect(selectDashboardLoginCompatToken({
+      validTokens: new Set(['agent-token-a', 'agent-token-b']),
+      resolveAgentByToken,
+    })).toBeUndefined();
   });
 });
 
@@ -563,6 +614,52 @@ describe('dashboard browser sessions', () => {
       error: 'Too many dashboard sign-in attempts. Try again later.',
     });
     expect(verifyCredentials).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts concurrent dashboard login attempts before credential verification finishes', async () => {
+    let now = 1_000;
+    const pending: Array<(value: DashboardLoginVerification) => void> = [];
+    const verifyCredentials = vi.fn(async () => new Promise<DashboardLoginVerification>((resolve) => {
+      pending.push(resolve);
+    }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+        attemptLimiter: new DashboardLoginAttemptLimiter({
+          maxFailures: 2,
+          failureWindowMs: 60_000,
+          lockoutMs: 60_000,
+          now: () => now,
+        }),
+      },
+    });
+    server = started.server;
+    const request = () => fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'wrong-password' }),
+    });
+
+    const requests = Array.from({ length: 6 }, () => request());
+    for (let i = 0; i < 20 && verifyCredentials.mock.calls.length < 2; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(verifyCredentials).toHaveBeenCalledTimes(2);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(verifyCredentials).toHaveBeenCalledTimes(2);
+
+    now += 1_000;
+    for (const resolve of pending.splice(0)) {
+      resolve({ ok: false, reason: 'mismatch' });
+    }
+
+    const responses = await Promise.all(requests);
+    const statuses = responses.map((res) => res.status);
+    expect(statuses.filter((status) => status === 401)).toHaveLength(2);
+    expect(statuses.filter((status) => status === 429)).toHaveLength(4);
+    const locked = responses.find((res) => res.status === 429);
+    expect(locked?.headers.get('retry-after')).toBe('60');
   });
 
   it('invalidates password-login sessions after the credential file fingerprint changes', async () => {

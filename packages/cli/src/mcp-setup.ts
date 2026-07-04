@@ -70,10 +70,9 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from
 import { dirname, join } from 'node:path';
 import { homedir, platform, release as osRelease } from 'node:os';
 import { execSync } from 'node:child_process';
-import yaml from 'js-yaml';
 import TOML from '@iarna/toml';
 import { resolveSetupNetworkName } from '@origintrail-official/dkg-core';
-import { assertSelectableNetwork } from './config.js';
+import { assertSelectableNetwork, readPersistedDkgConfig } from './config.js';
 
 export interface McpSetupCliOptions {
   /** Refresh every detected client regardless of current registration state. */
@@ -1599,24 +1598,6 @@ function mintFallbackAgentName(): string {
  * tolerate parse failure — downstream uses pre-merge defaults
  * silently rather than crashing setup).
  */
-function readPersistedConfig(dkgDirPath: string): Record<string, unknown> | undefined {
-  const jsonPath = join(dkgDirPath, 'config.json');
-  if (existsSync(jsonPath)) {
-    try {
-      const raw = JSON.parse(readFileSync(jsonPath, 'utf-8'));
-      if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
-    } catch { /* corrupt JSON; fall through to YAML attempt */ }
-  }
-  const yamlPath = join(dkgDirPath, 'config.yaml');
-  if (existsSync(yamlPath)) {
-    try {
-      const raw = yaml.load(readFileSync(yamlPath, 'utf-8'));
-      if (raw && typeof raw === 'object') return raw as Record<string, unknown>;
-    } catch { /* corrupt YAML; let writeDkgConfig handle */ }
-  }
-  return undefined;
-}
-
 /**
  * Read the persisted agent name from the DKG node config (JSON or
  * YAML). Returns `undefined` for missing/corrupt files. Used so a
@@ -1624,10 +1605,10 @@ function readPersistedConfig(dkgDirPath: string): Record<string, unknown> | unde
  * prior init doesn't regenerate a fresh random fallback.
  *
  * Codex Round-7 Fix 12: now accepts YAML configs in addition to
- * JSON via the shared `readPersistedConfig()` helper.
+ * JSON via the shared `readPersistedDkgConfig()` helper.
  */
 function readPersistedAgentName(dkgDirPath: string): string | undefined {
-  const persisted = readPersistedConfig(dkgDirPath);
+  const persisted = readPersistedDkgConfig(dkgDirPath);
   const name = persisted?.name;
   if (typeof name === 'string' && name.trim()) return name.trim();
   return undefined;
@@ -1799,7 +1780,7 @@ export async function mcpSetupAction(
   // persisted selector, the loaded network slice, and the faucet decision
   // (mainnet has no faucet) all agree.
   const existingNetworkConfig = ((): string | undefined => {
-    const nc = readPersistedConfig(dkgDirPath)?.networkConfig;
+    const nc = readPersistedDkgConfig(dkgDirPath)?.networkConfig;
     return typeof nc === 'string' ? nc : undefined;
   })();
   // `--network` is honored only for a FRESH node (existing nodes keep their
@@ -1844,14 +1825,14 @@ export async function mcpSetupAction(
    */
   const reconcileFromPersistedConfig = (): void => {
     // Codex Round-7 Fix 12: read JSON-or-YAML via the shared
-    // `readPersistedConfig()` helper. Pre-fix this branch only
+    // `readPersistedDkgConfig()` helper. Pre-fix this branch only
     // tried `config.json`, so a yaml-only install would silently
     // fall through with the CLI defaults (port 9200, random name)
     // and the daemon / funding / verify steps would target the
     // wrong values. Round-3's configExists short-circuit had
     // already established yaml-only homes; this completes the
     // contract.
-    const merged = readPersistedConfig(dkgDirPath);
+    const merged = readPersistedDkgConfig(dkgDirPath);
     if (!merged) return;
     const mergedPort = Number((merged as { apiPort?: unknown }).apiPort);
     if (Number.isInteger(mergedPort) && mergedPort >= 1 && mergedPort <= 65535) {
@@ -1888,7 +1869,7 @@ export async function mcpSetupAction(
       // network defaults + overrides. No OpenClaw migration step
       // — MCP-only configs never have the legacy openclawAdapter
       // / openclawChannel keys this setup never wrote.
-      const existing = readPersistedConfig(dkgDirPath) ?? {};
+      const existing = readPersistedDkgConfig(dkgDirPath) ?? {};
       deps.ensureDkgNodeConfig({
         agentName: effectiveAgentName,
         network,

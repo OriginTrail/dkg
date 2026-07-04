@@ -1,10 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import yaml from 'js-yaml';
 import {
   dashboardCredentialsPath,
   ensureDashboardCredentials,
 } from './daemon/dashboard-credentials.js';
+import { readPersistedDkgConfig } from './config.js';
 
 export interface DashboardCredentialSetupOptions {
   prefix?: string;
@@ -43,17 +41,6 @@ export async function ensureDashboardCredentialsForSetup(
 }
 
 function isDashboardAuthExplicitlyDisabled(dkgHome: string): boolean {
-  const config = readSetupConfig(join(dkgHome, 'config.json')) ??
-    readSetupConfig(join(dkgHome, 'config.yaml'));
+  const config = readPersistedDkgConfig(dkgHome);
   return (config as { auth?: { enabled?: unknown } } | null)?.auth?.enabled === false;
-}
-
-function readSetupConfig(path: string): unknown | null {
-  if (!existsSync(path)) return null;
-  try {
-    const raw = readFileSync(path, 'utf8');
-    return path.endsWith('.json') ? JSON.parse(raw) : yaml.load(raw);
-  } catch {
-    return null;
-  }
 }

@@ -82,6 +82,7 @@ export default defineConfig({
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
+          'test/init-dashboard-credentials.test.ts',
           'test/mcp-setup.test.ts',
           'test/hermes-setup-orchestration.test.ts',
           'test/hermes-setup-cli-args.test.ts',

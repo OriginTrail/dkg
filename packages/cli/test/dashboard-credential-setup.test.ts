@@ -74,6 +74,16 @@ describe('dashboard credential setup helper', () => {
     await expect(readFile(dashboardCredentialsPath(tempDir), 'utf8')).rejects.toThrow();
   });
 
+  it('skips credential creation when YAML-only persisted API auth is disabled', async () => {
+    await writeFile(join(tempDir, 'config.yaml'), 'auth:\n  enabled: false\n');
+
+    await ensureDashboardCredentialsForSetup(tempDir);
+
+    expect(logCapture.text()).toContain('Dashboard login: skipped');
+    expect(logCapture.text()).toContain('API authentication disabled');
+    await expect(readFile(dashboardCredentialsPath(tempDir), 'utf8')).rejects.toThrow();
+  });
+
   it('warns with reset-password guidance when the credential file is invalid', async () => {
     await writeFile(dashboardCredentialsPath(tempDir), '{"version":1,"password":"plaintext"}\n');
 

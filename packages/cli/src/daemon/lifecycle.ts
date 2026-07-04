@@ -148,6 +148,7 @@ import {
   createDashboardSessionAuthSource,
   getDashboardSessionCookie,
   handleDashboardSessionRequest,
+  selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
 import {
@@ -2898,14 +2899,12 @@ export async function runDaemonInner(
   }
   const dashboardSessions = new DashboardSessionStore();
   const dashboardLoginLimiter = new DashboardLoginAttemptLimiter();
-  const selectDashboardLoginCompatToken = () => {
-    reconcileValidTokens(validTokens);
-    if (bridgeAuthToken && validTokens.has(bridgeAuthToken)) return bridgeAuthToken;
-    for (const token of validTokens) {
-      if (!agent.resolveAgentByToken(token)) return token;
-    }
-    return undefined;
-  };
+  const selectDashboardLoginToken = () => selectDashboardLoginCompatToken({
+    validTokens,
+    bridgeAuthToken,
+    resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+    refreshValidTokens: () => reconcileValidTokens(validTokens),
+  });
   const isDashboardCredentialFingerprintCurrent = (credentialFingerprint: string) =>
     readDashboardCredentialFingerprintSync() === credentialFingerprint;
   const resolveDashboardPrincipal = (token: string) => {
@@ -3113,7 +3112,7 @@ export async function runDaemonInner(
               ? {
                   dashboardLogin: {
                     verifyCredentials: verifyDashboardCredentials,
-                    selectCompatToken: selectDashboardLoginCompatToken,
+                    selectCompatToken: selectDashboardLoginToken,
                     attemptLimiter: dashboardLoginLimiter,
                     isCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
                   },
