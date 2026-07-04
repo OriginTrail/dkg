@@ -104,10 +104,9 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
-// #1346 — the operator-facing `verified:` line for a register-agent advisory.
-// An exhaustive switch (the `never` default) forces a future
-// RegisterAgentAdvisoryStatus to add a case here rather than silently rendering
-// as `pending`.
+// The operator-facing `verified:` line for a register-agent advisory. The
+// exhaustive switch (`never` default) forces a future RegisterAgentAdvisoryStatus
+// to add a case here rather than silently mislabeling it.
 function describeRegisterAdvisory(advisory: RegisterAgentAdvisoryStatus): string {
   switch (advisory) {
     case 'confirmed':
@@ -176,8 +175,8 @@ pcaCmd
       const result = await client.registerPcaAgent(accountId, agent);
       console.log(`Registered agent on PCA ${result.accountId}:`);
       console.log(`  agent:      ${result.agent}`);
-      // #1346 — the client already normalized version-skew into
-      // `{ registered, advisory }`; render it directly.
+      // The client already normalized version-skew into { registered, advisory };
+      // render it directly.
       console.log(`  registered: ${result.registered}`);
       console.log(`  verified:   ${describeRegisterAdvisory(result.advisory)}`);
       console.log(`  txHash:     ${result.txHash}`);

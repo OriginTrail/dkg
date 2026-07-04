@@ -384,13 +384,11 @@ import type { DKGAgent } from './dkg-agent.js';
 // confirmation module (imported here for the facade, not re-exported from index).
 import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 
-// #1346 — the SINGLE PCA capability boundary for the "is this agent registered?"
-// chain read. Narrows the optional `chain.isPublishingConvictionAgent` into a
-// bound boolean probe, or `null` when the adapter has no such read. Both the
-// direct read (`isPublishingConvictionAgent`) and the post-mine confirmation
-// derive supported/unsupported from this one place — the "method present?" rule
-// is modeled once, with no duplicated `typeof` guard and no non-null assertion.
-// `.call(chain, …)` preserves the adapter's `this` binding.
+// The single PCA capability boundary: narrows the optional
+// `chain.isPublishingConvictionAgent` into a bound boolean probe, or `null` when
+// the adapter lacks the read, so both the direct read and the confirmation
+// derive supported/unsupported from one place. `.call(chain, …)` preserves the
+// adapter's `this` binding.
 function pcaRegisteredProbe(
   chain: { isPublishingConvictionAgent?: (accountId: bigint, agent: string) => Promise<boolean> },
   accountId: bigint,
@@ -1531,15 +1529,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return probe ? probe() : null;
   }
 
-  // #1346 — Best-effort on-chain confirmation of a just-mined agent
-  // registration. The tx receipt is already authoritative for `registered:true`;
-  // this only refines the ADVISORY picture, returned as a single domain
-  // `PcaConfirmationOutcome` (the daemon/CLI boundary derives the wire
-  // `{ verified, adapterSupported }` from it). A lagging or throwing read stays
-  // advisory and NEVER flips the authoritative registration. The STATIC adapter
-  // capability gap (`unsupported`) is decided HERE, once — via the shared
-  // `pcaRegisteredProbe` boundary — so the retry state machine only reasons
-  // about boolean reads (it never sees a `null`).
+  // Best-effort on-chain confirmation of a just-mined agent registration. The
+  // receipt is already authoritative for `registered:true`; this only refines the
+  // advisory `PcaConfirmationOutcome` and never flips the registration. The
+  // capability gap (`unsupported`) is decided here via `pcaRegisteredProbe`, so
+  // the retry state machine only reasons about boolean reads.
   async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
     accountId: bigint,
     agent: string,

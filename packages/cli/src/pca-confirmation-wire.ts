@@ -1,10 +1,9 @@
 import type { PcaConfirmationOutcome } from '@origintrail-official/dkg-agent';
 
-// #1346 — the daemon/CLI response contract for the register-agent advisory
-// confirmation, DERIVED at this boundary from the agent's domain
-// `PcaConfirmationOutcome`. The wire representation lives in the CLI layer (not
-// the agent facade) — the agent owns chain/domain semantics, this owns one
-// route's JSON shape.
+// The daemon/CLI response contract for the register-agent advisory confirmation,
+// derived at this boundary from the agent's domain `PcaConfirmationOutcome`. The
+// wire representation lives in the CLI layer — the agent owns chain/domain
+// semantics, this owns one route's JSON shape.
 
 /**
  * The WIRE shape of the advisory confirmation. A discriminated union so the
