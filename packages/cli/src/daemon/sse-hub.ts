@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 export interface SseDashboardSession {
   sessionId: string;
   expiresAt: number;
+  compatToken: string;
 }
 
 export interface SseSubscription {
@@ -12,6 +13,7 @@ export interface SseSubscription {
 interface SseClient {
   res: ServerResponse;
   dashboardSessionId?: string;
+  dashboardSessionCompatToken?: string;
   heartbeat?: ReturnType<typeof setInterval>;
   expiryTimer?: ReturnType<typeof setTimeout>;
 }
@@ -23,7 +25,10 @@ export interface SseHub {
   size(): number;
 }
 
-export function createSseHub(options: { heartbeatMs?: number } = {}): SseHub {
+export function createSseHub(options: {
+  heartbeatMs?: number;
+  isDashboardSessionTokenValid?: (token: string) => boolean;
+} = {}): SseHub {
   const heartbeatMs = options.heartbeatMs ?? 30_000;
   const clients = new Set<SseClient>();
 
@@ -44,6 +49,7 @@ export function createSseHub(options: { heartbeatMs?: number } = {}): SseHub {
     const client: SseClient = {
       res,
       dashboardSessionId: dashboardSession?.sessionId,
+      dashboardSessionCompatToken: dashboardSession?.compatToken,
     };
     if (dashboardSession) {
       const delayMs = Math.max(0, dashboardSession.expiresAt - Date.now());
@@ -51,6 +57,12 @@ export function createSseHub(options: { heartbeatMs?: number } = {}): SseHub {
     }
     clients.add(client);
     client.heartbeat = setInterval(() => {
+      const tokenStillValid = !client.dashboardSessionCompatToken ||
+        options.isDashboardSessionTokenValid?.(client.dashboardSessionCompatToken) !== false;
+      if (!tokenStillValid) {
+        close(client);
+        return;
+      }
       try { res.write(`: heartbeat\n\n`); } catch { close(client); }
     }, heartbeatMs);
     return { close: () => close(client) };

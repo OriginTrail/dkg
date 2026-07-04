@@ -18,6 +18,8 @@ export {
 
 export type DaemonPath = `/${string}`;
 
+const DASHBOARD_CSRF_ERROR_CODE = 'DASHBOARD_CSRF_INVALID';
+
 let dashboardSessionWriteVersion = 0;
 
 function invalidateDashboardSession(): void {
@@ -126,13 +128,14 @@ function isUnsafeMethod(method: string | undefined): boolean {
 
 async function isDashboardCsrfError(res: Response): Promise<boolean> {
   if (res.status !== 403) return false;
-  let body: { error?: unknown } | null = null;
+  let body: { code?: unknown; error?: unknown } | null = null;
   try {
-    body = await readJson<{ error?: unknown }>(res.clone());
+    body = await readJson<{ code?: unknown; error?: unknown }>(res.clone());
   } catch {
     return false;
   }
-  return body?.error === 'Invalid or missing dashboard CSRF token';
+  return body?.code === DASHBOARD_CSRF_ERROR_CODE ||
+    body?.error === 'Invalid or missing dashboard CSRF token';
 }
 
 export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {

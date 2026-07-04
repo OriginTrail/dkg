@@ -29,7 +29,7 @@ describe('createSseHub', () => {
     const second = fakeResponse();
 
     hub.add(first);
-    hub.add(second, { sessionId: 'session-2', expiresAt: Date.now() + 10_000 });
+    hub.add(second, { sessionId: 'session-2', compatToken: 'token-2', expiresAt: Date.now() + 10_000 });
     hub.broadcast('memory_graph_changed', { contextGraphId: 'cg-1', version: 2 });
 
     const expected = 'event: memory_graph_changed\ndata: {"contextGraphId":"cg-1","version":2}\n\n';
@@ -44,7 +44,7 @@ describe('createSseHub', () => {
     const hub = createSseHub();
     const res = fakeResponse();
 
-    hub.add(res, { sessionId: 'session-1', expiresAt: 1_050 });
+    hub.add(res, { sessionId: 'session-1', compatToken: 'token-1', expiresAt: 1_050 });
 
     expect(hub.size()).toBe(1);
     expect(res.end).not.toHaveBeenCalled();
@@ -54,6 +54,26 @@ describe('createSseHub', () => {
     expect(res.end).not.toHaveBeenCalled();
 
     vi.advanceTimersByTime(1);
+    expect(hub.size()).toBe(0);
+    expect(res.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes dashboard-session streams when their backing token is revoked', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    let tokenValid = true;
+    const hub = createSseHub({
+      heartbeatMs: 100,
+      isDashboardSessionTokenValid: () => tokenValid,
+    });
+    const res = fakeResponse();
+
+    hub.add(res, { sessionId: 'session-1', compatToken: 'token-1', expiresAt: 10_000 });
+    expect(hub.size()).toBe(1);
+
+    tokenValid = false;
+    vi.advanceTimersByTime(100);
+
     expect(hub.size()).toBe(0);
     expect(res.end).toHaveBeenCalledTimes(1);
   });

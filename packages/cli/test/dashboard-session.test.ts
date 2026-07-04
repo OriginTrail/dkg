@@ -700,6 +700,7 @@ describe('dashboard browser sessions', () => {
     expect(res.status).toBe(403);
     await expect(res.json()).resolves.toMatchObject({
       error: 'Invalid or missing dashboard CSRF token',
+      code: 'DASHBOARD_CSRF_INVALID',
     });
   });
 

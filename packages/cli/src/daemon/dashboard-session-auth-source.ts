@@ -5,6 +5,9 @@ import type { RequestAuthDecision, RequestAuthPrincipal, RequestAuthSource } fro
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import { hasTrustedDashboardOrigin, isUnsafeHttpMethod } from "./dashboard-session-policy.js";
 
+export const DASHBOARD_CSRF_ERROR_CODE = "DASHBOARD_CSRF_INVALID";
+export const DASHBOARD_CSRF_ERROR_MESSAGE = "Invalid or missing dashboard CSRF token";
+
 export function verifyDashboardCsrf(
   req: IncomingMessage,
   session: Pick<AuthenticatedDashboardSession, "csrfToken">,
@@ -24,7 +27,7 @@ export interface DashboardSessionAuthorizationOptions {
 
 export type DashboardSessionAuthorization =
   | { ok: true; csrfRequired: boolean; csrfValidated: boolean }
-  | { ok: false; status: 403; error: string };
+  | { ok: false; status: 403; error: string; code?: string };
 
 export function authorizeDashboardSessionRequest(
   req: IncomingMessage,
@@ -38,7 +41,8 @@ export function authorizeDashboardSessionRequest(
     return {
       ok: false,
       status: 403,
-      error: "Invalid or missing dashboard CSRF token",
+      error: DASHBOARD_CSRF_ERROR_MESSAGE,
+      code: DASHBOARD_CSRF_ERROR_CODE,
     };
   }
   if (unsafe && !hasTrustedDashboardOrigin(req, options.corsOrigin)) {
@@ -74,6 +78,7 @@ export function createDashboardSessionAuthSource(
           ok: false,
           status: authorization.status,
           error: authorization.error,
+          code: authorization.code,
         };
       }
       const principal = options.resolvePrincipal(session.compatToken);

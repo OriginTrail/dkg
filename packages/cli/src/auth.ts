@@ -816,7 +816,7 @@ function isPublicPath(method: string, pathname: string): boolean {
 
 export type RequestAuthDecision =
   | { ok: true; context?: RequestAuthContext; credentialToken: string }
-  | { ok: false; status: 403; error: string };
+  | { ok: false; status: 403; error: string; code?: string };
 
 export interface RequestAuthSource {
   resolve: (
@@ -978,7 +978,10 @@ export function httpAuthGuard(
       'Content-Type': 'application/json',
       ...authCorsHeaders(corsOrigin),
     });
-    res.end(JSON.stringify({ error: authDecision.error }));
+    res.end(JSON.stringify({
+      error: authDecision.error,
+      ...(authDecision.code ? { code: authDecision.code } : {}),
+    }));
     return false;
   }
 

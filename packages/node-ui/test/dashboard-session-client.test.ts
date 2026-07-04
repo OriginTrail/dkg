@@ -120,7 +120,10 @@ describe('dashboard session client', () => {
       if (url === '/api/protected') {
         protectedCalls += 1;
         if (protectedCalls === 1) {
-          return new Response(JSON.stringify({ error: 'Invalid or missing dashboard CSRF token' }), {
+          return new Response(JSON.stringify({
+            code: 'DASHBOARD_CSRF_INVALID',
+            error: 'CSRF token rejected by dashboard session policy',
+          }), {
             status: 403,
             headers: { 'Content-Type': 'application/json' },
           });

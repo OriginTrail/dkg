@@ -2552,7 +2552,14 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  const sseHub = createSseHub();
+  let sseValidTokens: Set<string> | undefined;
+  const sseHub = createSseHub({
+    isDashboardSessionTokenValid: (token) => {
+      if (!sseValidTokens) return true;
+      reconcileValidTokens(sseValidTokens);
+      return sseValidTokens.has(token);
+    },
+  });
   const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
   const sseBroadcast = (event: string, payload: Record<string, unknown>) => sseHub.broadcast(event, payload);
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
@@ -2853,6 +2860,7 @@ export async function runDaemonInner(
 
   const authEnabled = config.auth?.enabled !== false;
   const validTokens = await loadTokens(config.auth);
+  sseValidTokens = validTokens;
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0
@@ -3110,7 +3118,10 @@ export async function runDaemonInner(
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         const requestAuth = getRequestAuthContext(req);
         const dashboardSession = requestAuth?.source === "dashboard-session"
-          ? requestAuth.dashboardSession
+          ? {
+              ...requestAuth.dashboardSession,
+              compatToken: requestAuth.internalCredentialToken,
+            }
           : undefined;
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
