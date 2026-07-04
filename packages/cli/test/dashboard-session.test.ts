@@ -558,6 +558,40 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({ error: 'Invalid dashboard session token' });
   });
 
+  it('rejects cross-site dashboard session exchange attempts without setting a cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        Origin: 'https://attacker.example',
+        'Sec-Fetch-Site': 'cross-site',
+      },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    await expect(res.json()).resolves.toMatchObject({ error: 'Untrusted dashboard request origin' });
+  });
+
+  it('rejects non-json dashboard session exchange bodies without setting a cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(res.status).toBe(415);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Dashboard session exchange requires application/json',
+    });
+  });
+
   it('rejects and prunes expired dashboard session cookies', () => {
     const store = new DashboardSessionStore();
     const issuedAt = 1_000;

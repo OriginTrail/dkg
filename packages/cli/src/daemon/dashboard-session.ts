@@ -7,7 +7,7 @@ import {
   setDashboardSessionCookie,
 } from "./dashboard-session-cookie.js";
 import { authorizeDashboardSessionRequest, verifyDashboardCsrf } from "./dashboard-session-auth-source.js";
-import { isLoopbackRequest } from "./dashboard-session-policy.js";
+import { hasTrustedDashboardOrigin, isLoopbackRequest } from "./dashboard-session-policy.js";
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -101,10 +101,20 @@ export async function handleDashboardSessionRequest(
   }
 
   if (req.method === "POST" && path === "/api/dashboard/session/exchange") {
+    if (!hasTrustedDashboardOrigin(req, options.corsOrigin)) {
+      jsonResponse(res, 403, { error: "Untrusted dashboard request origin" }, options.corsOrigin);
+      return true;
+    }
     let body: unknown = {};
     try {
       const raw = await readBody(req, SMALL_BODY_BYTES);
-      body = raw ? JSON.parse(raw) : {};
+      if (raw) {
+        if (!hasJsonContentType(req)) {
+          jsonResponse(res, 415, { error: "Dashboard session exchange requires application/json" }, options.corsOrigin);
+          return true;
+        }
+        body = JSON.parse(raw);
+      }
     } catch {
       jsonResponse(res, 400, { error: "Invalid JSON body" }, options.corsOrigin);
       return true;
@@ -158,4 +168,10 @@ function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken
     csrfToken: session.csrfToken,
     expiresAt: session.expiresAt,
   };
+}
+
+function hasJsonContentType(req: IncomingMessage): boolean {
+  const raw = req.headers["content-type"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return value?.split(";")[0]?.trim().toLowerCase() === "application/json";
 }
