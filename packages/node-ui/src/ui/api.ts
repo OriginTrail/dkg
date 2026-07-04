@@ -1314,10 +1314,10 @@ export async function listAssertions(
   // for any CG no matter how many assertions actually existed.
   // Downstream that surfaced as:
   //   - `AssertionsList` rendered "no assertions" right after import.
-  //   - `LayerActionsWidget` showed the correct "Promote N to SWM" badge
+  //   - `PromoteWidget` showed the correct "Promote N to SWM" badge
   //     (the count comes from `useMemoryEntities`, which already opts
-  //     into `includeContextGraphPartitions`), but on click its
-  //     `handleAction` loop iterated zero times and hit the no-op
+  //     into `includeContextGraphPartitions`), but on click its promote
+  //     loop iterated zero times and hit the no-op
   //     bulk-promote branch — the exact "0 triples promoted" symptom
   //     the rc.12 issue reported even after the publisher-side
   //     `AssertionNotPersistedError` fix landed.

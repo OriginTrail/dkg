@@ -148,13 +148,14 @@ const SCENARIOS: Scenario[] = [
     name: 'adapterSupported:false → inconclusive (never a confirmed not-approved/DANGER)',
     snapOver: { expiresAtTimestamp: FUTURE },
     probe: { key: W0, registered: false, adapterSupported: false },
-    expected: { outcome: 'inconclusive', registered: null },
+    expected: { outcome: 'inconclusive', registered: null, adapterUnsupported: true },
     overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
     s5Verdict: 'unknown',
     s5Wait: 'PCA status unknown',
-    // All-inconclusive → S6 reports a wholesale "couldn't determine" (never a false
-    // "not approved"/"0 of N", never Ready) — still the inconclusive outcome.
-    s6: { wait: 'the chain lookup failed', ready: false, notText: ['0 of 1'] },
+    // #1356 — an all-adapterSupported:false probe is a CAPABILITY GAP: S6 says "not
+    // supported here" (retrying is futile), NOT a false "not approved"/"0 of N", never
+    // Ready, and NOT the transient "chain lookup failed" copy.
+    s6: { wait: 'not supported here', ready: false, notText: ['0 of 1', 'the chain lookup failed'] },
   },
   {
     name: 'requested extended budget missing → inconclusive (never base-allowance GREEN)',
@@ -166,7 +167,7 @@ const SCENARIOS: Scenario[] = [
       extendedRequested: true,
     },
     probe: { key: W0, registered: true },
-    expected: { outcome: 'inconclusive', registered: null },
+    expected: { outcome: 'inconclusive', registered: null, adapterUnsupported: false },
     overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
     s5Verdict: 'unknown',
     s5Wait: 'PCA status unknown',

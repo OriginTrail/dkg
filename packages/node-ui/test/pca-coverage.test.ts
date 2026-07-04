@@ -5,7 +5,8 @@
 // pins the extracted pure functions so the surfaces can't re-diverge.
 
 import { describe, expect, it } from 'vitest';
-import { bigGt0, pcaBudgetState, isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
+import { isPcaSpendable, normalizeProbeRegistered, classifyCoverage } from '../src/ui/pca/coverage.js';
+import { bigGt0, pcaBudgetState } from '../src/ui/pca/pca-primitives.js';
 import { makePcaSnapshot } from '../src/ui/mocks/pca.js';
 
 const FUTURE = Math.floor(Date.now() / 1000) + 60 * 86_400;
@@ -112,7 +113,8 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
         probedKey: { key: '0x', registered: true },
       }),
     );
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    // #1356 — a fail-softed budget read is inconclusive but NOT a capability gap.
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: false });
   });
   it('registered + expired → uncovered, dead:true (the reviewer’s example facet)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: PAST, probedKey: { key: '0x', registered: true } }));
@@ -143,12 +145,14 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false } }));
     expect(c).toEqual({ outcome: 'unregistered', registered: false });
   });
-  it('adapterSupported:false → { outcome: inconclusive, registered: null }', () => {
+  it('adapterSupported:false → { outcome: inconclusive, registered: null, adapterUnsupported: true }', () => {
+    // #1356 — the capability gap flags adapterUnsupported so S6 can say "not supported".
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE, probedKey: { key: '0x', registered: false, adapterSupported: false } }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: true });
   });
-  it('missing probedKey → { outcome: inconclusive, registered: null }', () => {
+  it('missing probedKey → { outcome: inconclusive, registered: null, adapterUnsupported: false }', () => {
+    // #1356 — a missing/transient probe is inconclusive but NOT a capability gap.
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: FUTURE }));
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: false });
   });
 });

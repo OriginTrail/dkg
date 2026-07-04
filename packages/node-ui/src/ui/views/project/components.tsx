@@ -11,7 +11,7 @@ export {
 export type { CuratorStatus } from './components/overview.js';
 export {
   GenWidget, TypeBreakdownWidget, LayerStatsWidget,
-  LayerActionsWidget, LayerWidgetStrip,
+  PromoteWidget, PublishVmWidget, LayerWidgetStrip,
 } from './components/layer-widgets.js';
 export {
   EntityList, LayerContent, VerifiableMemoryHeroBanner,
