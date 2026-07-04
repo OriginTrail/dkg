@@ -43,12 +43,14 @@
  *   entirely and DON'T persist the marker, so unsetting it re-triggers the
  *   wipe next boot. The operator guarantee is untouched: a real operator
  *   node with the env var unset still wipes by default on a marker change.
- * - By default `store.nq` is RENAMED to `store.nq.pre-wipe-<marker>-<ts>`
- *   rather than deleted (rotation keeps the newest `maxStoreBackups`, default
- *   3), so a wrongly-triggered wipe is recoverable by moving the file back.
- *   `backupStore: false` restores the hard-delete behaviour.
+ * - `store.nq` is ALWAYS backed up, not deleted: it is RENAMED to
+ *   `store.nq.pre-wipe-<marker>-<ts>` (marker bounded to 120 chars) so a
+ *   wrongly-triggered wipe is recoverable by moving the file back. The active
+ *   store is still cleared from its live path, so the wipe invariant holds.
+ *   Rotation retains the newest `MAX_STORE_BACKUPS` (3) snapshots, ranked by
+ *   filesystem mtime; the snapshot made this run is always retained.
  *
- * Files wiped: `store.nq` (backed up by default, see above), `store.nq.tmp`,
+ * Files wiped: `store.nq` (always backed up, see above), `store.nq.tmp`,
  *              `random-sampling.wal`, `publish-journal.*` (all variants from
  *              publisher-runner).
  *
@@ -151,9 +153,10 @@ export interface ChainResetWipeResult {
   /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
   removedFiles: string[];
   /**
-   * `store.nq` backup filenames created instead of deleting it (relative to
-   * dataDir, `store.nq.pre-wipe-<marker>-<ts>`). Empty unless a wipe ran with
-   * `backupStore` enabled and a `store.nq` was present.
+   * `store.nq` backup filenames created by renaming it instead of deleting it
+   * (relative to dataDir, `store.nq.pre-wipe-<marker>-<ts>`). Backup is
+   * always-on; this is empty only when the wipe ran with no `store.nq`
+   * present (or the rename failed — then the failure is in `failedFiles`).
    */
   backedUpFiles: string[];
   /**
@@ -206,24 +209,18 @@ export interface ChainResetWipeOptions {
    * `acceptNetworkSwitch` env-opt-out pattern used by the sibling detectors.
    */
   skip?: boolean;
-  /**
-   * When a wipe runs, back up `store.nq` by renaming it to
-   * `store.nq.pre-wipe-<marker>-<ts>` instead of deleting it, so a
-   * wrongly-triggered wipe (typically a dev branch switch) is recoverable by
-   * moving the file back. Defaults to `true` when undefined. Set `false` to
-   * restore the historical hard-delete behaviour. Only `store.nq` is backed
-   * up; `store.nq.tmp`, the RS WAL and publish journals are regenerable and
-   * always hard-deleted.
-   */
-  backupStore?: boolean;
-  /**
-   * Rotation cap for `store.nq.pre-wipe-*` backups. After a new backup is
-   * created, the oldest backups beyond this count are removed (best-effort;
-   * rotation failures are non-fatal and never block boot). Defaults to `3`.
-   */
-  maxStoreBackups?: number;
   /** Optional logger. Defaults to no-op so the function is silent in tests by default. */
   log?: (msg: string) => void;
+}
+
+/**
+ * Read the dev-loop opt-out switch. Extracted (and exported) so the
+ * documented user-facing env var `DKG_SKIP_CHAIN_RESET_WIPE=1` is unit
+ * testable without mutating the real `process.env`. `'1'` (exactly) enables
+ * the opt-out; anything else (unset, `'0'`, `'true'`) leaves the wipe on.
+ */
+export function skipChainResetWipe(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.DKG_SKIP_CHAIN_RESET_WIPE === '1';
 }
 
 function loadState(dataDir: string): PersistedNetworkState | null {
@@ -347,59 +344,54 @@ async function performExternalWipe(
 
 const STORE_BACKUP_PREFIX = 'store.nq.pre-wipe-';
 
+/** Number of `store.nq.pre-wipe-*` recovery snapshots retained after rotation. */
+const MAX_STORE_BACKUPS = 3;
+
 /**
- * Rotate `store.nq.pre-wipe-*` backups down to the newest `maxStoreBackups`.
+ * Rotate `store.nq.pre-wipe-*` backups down to the newest `max` snapshots.
  * Best-effort: any failure (listing, stat, unlink) is logged as a WARN and
  * swallowed — rotation must never fail a wipe or a boot.
  *
  * `keepName` is the backup created THIS run: it is ALWAYS retained and never a
  * rotation candidate, so a non-monotonic wall clock (NTP step-back, VM
- * snapshot/restore, or a planted large-timestamp filename) can never evict the
- * fresh recovery snapshot the wipe just made — that would silently defeat the
- * recoverability this backup exists for. It occupies one of the `maxStoreBackups`
- * slots, so we retain the newest `maxStoreBackups - 1` of the OTHER backups.
- * Those are ranked by filesystem mtime (robust to clock steps) with the embedded
- * trailing `-<Date.now()>` as a stable tiebreak.
+ * snapshot/restore) can never evict the fresh recovery snapshot the wipe just
+ * made — that would silently defeat the recoverability this backup exists for.
+ * It occupies one of the `max` slots, so we retain the newest `max - 1` of the
+ * OTHER backups, ranked by filesystem mtime (an unreadable stat sorts oldest,
+ * so a broken file is dropped first). Exported (with an injectable `max`) so
+ * the rotation model is unit-testable in isolation.
  */
-function rotateStoreBackups(
+export function rotateStoreBackups(
   dataDir: string,
-  maxStoreBackups: number,
   keepName: string,
   log: (msg: string) => void,
+  max: number = MAX_STORE_BACKUPS,
 ): void {
   try {
     // The just-created backup always survives and takes one slot.
-    const keepOthers = Math.max(0, maxStoreBackups - 1);
+    const keepOthers = Math.max(0, max - 1);
     const others = readdirSync(dataDir)
       .filter((f) => f.startsWith(STORE_BACKUP_PREFIX) && f !== keepName)
-      .map((f) => {
-        // Embedded timestamp is the trailing `-<Date.now()>`; Date.now() has no
-        // hyphens so the last `-digits` group is unambiguous even when the marker
-        // itself contains dates (e.g. `…-2026-05-25-1716…`). Falls back to mtime
-        // only when the timestamp can't be parsed. (These are all OLD backups —
-        // the fresh one is exempted above — so relative order among them only
-        // decides which stale recovery copy to drop, never the fresh snapshot.)
-        const tsMatch = f.match(/-(\d+)$/);
-        let ts: number;
-        if (tsMatch) {
-          ts = Number(tsMatch[1]);
-        } else {
-          try {
-            ts = statSync(join(dataDir, f)).mtimeMs;
-          } catch {
-            ts = 0;
-          }
+      .map((name) => {
+        // Rank by filesystem mtime (robust to clock steps and to markers that
+        // embed dates). An unreadable stat → mtimeMs 0 = treated oldest, so a
+        // broken backup file is the first to be rotated out.
+        let mtimeMs: number;
+        try {
+          mtimeMs = statSync(join(dataDir, name)).mtimeMs;
+        } catch {
+          mtimeMs = 0;
         }
-        return { file: f, ts };
+        return { name, mtimeMs };
       })
-      .sort((a, b) => b.ts - a.ts); // newest first
+      .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
 
     for (const stale of others.slice(keepOthers)) {
       try {
-        rmSync(join(dataDir, stale.file), { force: true });
-        log(`  rotated out old store backup: ${stale.file}`);
+        rmSync(join(dataDir, stale.name), { force: true });
+        log(`  rotated out old store backup: ${stale.name}`);
       } catch (err) {
-        log(`  WARN: failed to rotate out old store backup ${stale.file}: ${(err as Error).message}`);
+        log(`  WARN: failed to rotate out old store backup ${stale.name}: ${(err as Error).message}`);
       }
     }
   } catch (err) {
@@ -411,7 +403,7 @@ function performWipe(
   dataDir: string,
   walPath: string | undefined,
   log: (msg: string) => void,
-  backup: { currentMarker: string; backupStore: boolean; maxStoreBackups: number },
+  backup: { currentMarker: string },
 ): {
   removedFiles: string[];
   backedUpFiles: string[];
@@ -438,27 +430,33 @@ function performWipe(
     }
   };
 
-  // store.nq: back it up (rename, O(1) same-fs) instead of deleting so a
-  // wrongly-triggered wipe is recoverable, then rotate old backups. A rename
+  // store.nq: ALWAYS backed up (rename, O(1) same-fs) rather than deleted, so
+  // a wrongly-triggered wipe is recoverable by moving the file back; rotation
+  // then bounds disk to MAX_STORE_BACKUPS snapshots. The active store is still
+  // cleared from its live path, so the operator wipe invariant holds. A rename
   // failure is treated exactly like a wipe failure (pushed to failedFiles) so
-  // the marker isn't persisted and the wipe retries next boot. `backupStore:
-  // false` restores the hard-delete path.
+  // the marker isn't persisted and the wipe retries next boot.
   const storeAbs = join(dataDir, 'store.nq');
-  if (backup.backupStore && existsSync(storeAbs)) {
-    const sanitizedMarker = String(backup.currentMarker).replace(/[^A-Za-z0-9._-]/g, '_');
+  if (existsSync(storeAbs)) {
+    // Bound the marker portion so the total filename stays well under the
+    // 255-byte path-component limit (ENAMETOOLONG would otherwise make the
+    // rename fail → failedFiles → re-wipe every boot for long markers).
+    // Uniqueness comes from the trailing timestamp, not the marker, so
+    // truncation is safe; the RAW marker still persists in .network-state.json.
+    const sanitizedMarker = String(backup.currentMarker)
+      .replace(/[^A-Za-z0-9._-]/g, '_')
+      .slice(0, 120);
     const backupName = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${Date.now()}`;
     try {
       renameSync(storeAbs, join(dataDir, backupName));
       backedUpFiles.push(backupName);
       log(`  backed up: store.nq → ${backupName}`);
-      rotateStoreBackups(dataDir, backup.maxStoreBackups, backupName, log);
+      rotateStoreBackups(dataDir, backupName, log);
     } catch (err) {
       const message = (err as Error).message;
       failedFiles.push({ file: 'store.nq', error: message });
       log(`  WARN: failed to back up store.nq → ${backupName}: ${message}`);
     }
-  } else {
-    wipeAbs(storeAbs, 'store.nq');
   }
   wipeAbs(join(dataDir, 'store.nq.tmp'), 'store.nq.tmp');
 
@@ -559,11 +557,7 @@ export async function chainResetWipe(
       opts.dataDir,
       opts.randomSamplingWalPath,
       log,
-      {
-        currentMarker: opts.currentMarker,
-        backupStore: opts.backupStore !== false,
-        maxStoreBackups: opts.maxStoreBackups ?? 3,
-      },
+      { currentMarker: opts.currentMarker },
     ));
   } catch (err) {
     const message = (err as Error).message;

@@ -288,7 +288,12 @@ import {
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
-import { chainResetWipe, detectBackendSwitch, detectNetworkSwitch } from './chain-reset-wipe.js';
+import {
+  chainResetWipe,
+  detectBackendSwitch,
+  detectNetworkSwitch,
+  skipChainResetWipe,
+} from './chain-reset-wipe.js';
 import {
   checkExternalStoreReachable,
   checkOrSetStoreIdentity,
@@ -1162,7 +1167,7 @@ export async function runDaemonInner(
     // Dev-loop opt-out: when set, bypass the wipe entirely and don't persist
     // the marker (unsetting it re-triggers the wipe). Operator nodes leave it
     // unset and keep wiping by default on a marker change. See issue #679.
-    skip: process.env.DKG_SKIP_CHAIN_RESET_WIPE === '1',
+    skip: skipChainResetWipe(),
     // Honour operator's `randomSampling.walPath` override; the prover
     // writes its WAL there, so a fresh chain reset must wipe that file
     // (not the default ~/.dkg/random-sampling.wal which would be empty).
