@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  apiFetch,
+  daemonFetch,
   ensureDashboardSession,
   exchangeDashboardSession,
   getDashboardSession,
@@ -37,7 +37,7 @@ describe('dashboard session client', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(apiFetch('https://example.invalid/rpc')).rejects.toThrow(
+    await expect(daemonFetch('https://example.invalid/rpc' as any)).rejects.toThrow(
       'daemonFetch only accepts same-origin daemon paths',
     );
     expect(fetchMock).not.toHaveBeenCalled();
@@ -50,7 +50,7 @@ describe('dashboard session client', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const res = await apiFetch('/api/status');
+    const res = await daemonFetch('/api/status');
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ synced: true });
@@ -92,7 +92,7 @@ describe('dashboard session client', () => {
       return new Response('{}', { status: 404 });
     });
 
-    const res = await apiFetch('/api/protected', { method: 'POST' });
+    const res = await daemonFetch('/api/protected', { method: 'POST' });
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ ok: true });
@@ -148,7 +148,7 @@ describe('dashboard session client', () => {
     });
 
     const body = JSON.stringify({ contextGraphId: 'cg-1', name: 'memory' });
-    const res = await apiFetch('/api/protected', {
+    const res = await daemonFetch('/api/protected', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -189,7 +189,7 @@ describe('dashboard session client', () => {
       });
     });
 
-    const res = await apiFetch('/api/protected', { method: 'DELETE' });
+    const res = await daemonFetch('/api/protected', { method: 'DELETE' });
 
     expect(res.status).toBe(403);
     await expect(res.json()).resolves.toEqual({ error: 'NotAccountOwner' });

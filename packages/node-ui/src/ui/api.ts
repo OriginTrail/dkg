@@ -1,4 +1,4 @@
-import { daemonFetch as apiFetch } from './dashboardSessionClient.js';
+import { daemonFetch, daemonPath, type DaemonPath } from './dashboardSessionClient.js';
 
 const BASE = '';
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -6,7 +6,7 @@ const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
 
 export {
   daemonFetch,
-  daemonFetch as apiFetch,
+  daemonPath,
   dashboardSessionAuthKey,
   ensureDashboardSession,
   exchangeDashboardSession,
@@ -17,6 +17,12 @@ export {
   type DaemonPath,
   type DashboardSessionStatus,
 } from './dashboardSessionClient.js';
+
+export const apiFetch: typeof daemonFetch = daemonFetch;
+
+function apiDaemonPath(path: string): DaemonPath {
+  return daemonPath(`${BASE}${path}`);
+}
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -78,7 +84,7 @@ export class LocalAgentApiError extends Error {
   }
 }
 
-async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
+async function fetchWithTimeout(input: DaemonPath, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
   try {
     return await apiFetch(input, {
       ...init,
@@ -93,7 +99,7 @@ async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`);
+  const res = await apiFetch(apiDaemonPath(path));
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -108,7 +114,7 @@ async function get<T>(path: string): Promise<T> {
 // TRANSPORT 503/504 (transient RPC outage, `code: 'RPC_*'`) — see
 // `isPcaFeatureUnavailable` / `describePcaError`.
 async function getJson<T>(path: string): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`);
+  const res = await apiFetch(apiDaemonPath(path));
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -118,7 +124,7 @@ async function getJson<T>(path: string): Promise<T> {
 }
 
 async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, {}, timeoutMs);
+  const res = await fetchWithTimeout(apiDaemonPath(path), {}, timeoutMs);
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -128,7 +134,7 @@ async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
 }
 
 async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`, {
+  const res = await apiFetch(apiDaemonPath(path), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -142,7 +148,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`, {
+  const res = await apiFetch(apiDaemonPath(path), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -156,7 +162,7 @@ async function put<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`, { method: 'DELETE' });
+  const res = await apiFetch(apiDaemonPath(path), { method: 'DELETE' });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -172,7 +178,7 @@ async function del<T>(path: string): Promise<T> {
 // `describePcaError`) route through this instead. Both are kept so existing
 // `del` callers keep their current contract.
 async function delJson<T>(path: string): Promise<T> {
-  const res = await apiFetch(`${BASE}${path}`, { method: 'DELETE' });
+  const res = await apiFetch(apiDaemonPath(path), { method: 'DELETE' });
   if (!res.ok) {
     const errBody = await res.json().catch(() => ({}));
     const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
@@ -401,7 +407,7 @@ export async function createContextGraph(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30_000);
   try {
-    const res = await apiFetch(`${BASE}/api/context-graph/create`, {
+    const res = await apiFetch(apiDaemonPath('/api/context-graph/create'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -671,7 +677,7 @@ export async function importFile(
   if (opts?.ontologyRef) form.append('ontologyRef', opts.ontologyRef);
   if (opts?.subGraphName) form.append('subGraphName', opts.subGraphName);
 
-  const res = await apiFetch(`${BASE}/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`, {
+  const res = await apiFetch(apiDaemonPath(`/api/knowledge-assets/${encodeURIComponent(assertionName)}/wm/import-file`), {
     method: 'POST',
     body: form,
   });
@@ -705,7 +711,7 @@ export function postQueryDeduped(body: Record<string, unknown>): Promise<{ resul
   const existing = inflightQuery.get(key);
   if (existing) return existing;
   const promise = (async () => {
-    const res = await apiFetch(`${BASE}/api/query`, {
+    const res = await apiFetch(apiDaemonPath('/api/query'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: key,
@@ -2135,12 +2141,12 @@ export const fetchExtractionStatus = (
 };
 
 /** Build a URL to serve a stored file by its hash (sha256: or keccak256:). */
-export function fileUrl(hash: string, contentType?: string): string {
+export function fileUrl(hash: string, contentType?: string): DaemonPath {
   const normalizedHash = hash.startsWith('sha256:') || hash.startsWith('keccak256:')
     ? hash
     : `sha256:${hash}`;
   const params = contentType ? `?contentType=${encodeURIComponent(contentType)}` : '';
-  return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
+  return apiDaemonPath(`/api/file/${encodeURIComponent(normalizedHash)}${params}`);
 }
 
 /**

@@ -106,7 +106,7 @@ function mergeHeaders(base?: HeadersInit, extra: Record<string, string> = {}): R
   return { ...headers, ...extra };
 }
 
-function assertDaemonPath(input: string): DaemonPath {
+export function daemonPath(input: string): DaemonPath {
   if (!input.startsWith('/') || input.startsWith('//')) {
     throw new Error('daemonFetch only accepts same-origin daemon paths');
   }
@@ -138,8 +138,8 @@ async function isDashboardCsrfError(res: Response): Promise<boolean> {
     body?.error === 'Invalid or missing dashboard CSRF token';
 }
 
-export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {
-  const path = assertDaemonPath(input);
+export async function daemonFetch(input: DaemonPath, init: RequestInit = {}): Promise<Response> {
+  const path = daemonPath(input);
   const sessionBeforeRequest = getDashboardSession();
   const withSession = () => fetch(path, withDashboardSessionCredentials(init));
 
@@ -154,8 +154,6 @@ export async function daemonFetch(input: string, init: RequestInit = {}): Promis
   if (!isDashboardSessionReady(refreshed)) return res;
   return withSession();
 }
-
-export const apiFetch = daemonFetch;
 
 function parseDashboardSessionStatus(value: unknown): DashboardSessionStatus | null {
   if (!value || typeof value !== 'object') return null;

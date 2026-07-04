@@ -4,14 +4,14 @@ import React, { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DashboardSessionGate } from '../src/ui/components/DashboardSessionGate.js';
-import { apiFetch } from '../src/ui/dashboardSessionClient.js';
+import { daemonFetch } from '../src/ui/dashboardSessionClient.js';
 import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
 function ProtectedProbe() {
   useEffect(() => {
-    void apiFetch('/api/status');
+    void daemonFetch('/api/status');
   }, []);
 
   return React.createElement('div', { 'data-testid': 'protected-probe' });
