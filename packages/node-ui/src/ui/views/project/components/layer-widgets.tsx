@@ -1,13 +1,11 @@
-import React, { useId, useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
-import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
-import { usePublishEligibility } from '../../../hooks/usePublishEligibility.js';
-import { usePcaStore } from '../../../stores/pca.js';
+import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 
 // ─── Generative Widget Components ─────────────────────────────
@@ -104,47 +102,21 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
 }
 
 
-export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, onResult }: {
-  layer: 'wm' | 'swm';
-  count: number;
-  contextGraphId: string;
-  entities: MemoryEntity[];
-  onComplete: () => void;
-  /** Lift the latest outcome to the parent strip so it survives this widget
-   * unmounting when the promoted/published layer empties (entityCount → 0). */
-  onResult?: (r: { ok: boolean; text: string } | null) => void;
-}) {
+// ─── Shared layer-action scaffolding (promote + publish) ─────────────────────
+
+/**
+ * The busy/result/error lifecycle shared by the promote and publish CTAs. `run(body)`
+ * clears state, executes the body (which returns the success text, or throws), lifts the
+ * outcome up via `onResult`, and fires `onComplete` on success. `body` gets a `setAssertion`
+ * hook so a mid-loop failure can surface "<name>: …" (issue #864) via `describePromoteError`.
+ */
+function useLayerAction(
+  onResult?: (r: { ok: boolean; text: string } | null) => void,
+  onComplete?: () => void,
+) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // B8 — the CONFIRMED post-publish discount from the VM publish response's sample.
-  const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
-  const isWm = layer === 'wm';
-  // S5/#1382 — ONE eligibility read, shared by the CTA gate AND the chip below (passed
-  // via `elig`, so button and chip poll once and can't disagree). `enabled:!isWm` skips
-  // the O(wallets×PCAs) probe on the promote (wm) widget, which shows neither. Polls the
-  // chip's 30s cadence so the gate self-corrects once a wallet is funded; the hook also
-  // no-ops when no PCA is tracked.
-  const trackedIds = usePcaStore((s) => s.trackedIds);
-  const elig = usePublishEligibility(contextGraphId, 30_000, { enabled: !isWm });
-  const { verdict, ownerPublish, anyGasFunded } = elig;
-  // Hard-gate the SWM→VM publish CTA on the DANGER verdict — with a NARROW owner-CG
-  // exception: the registration escrow can cover the TRAC fee (the banner hedges "will
-  // FAIL … UNLESS this graph's registration escrow already covers it"), so an owner
-  // publish is only truly blocked when NO wallet can fund the gas. Escrow covers TRAC,
-  // NOT native gas — so the all-out-of-gas fall-through (`fallthrough-no-funds` with
-  // anyGasFunded=false) still fails on-chain even for an owner and MUST stay gated.
-  // Gate `fallthrough-no-funds` unless (ownerPublish && anyGasFunded); 'eligible'/
-  // 'fallthrough' (has TRAC) and 'unknown' (inconclusive → fail OPEN) stay enabled.
-  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds' && !(ownerPublish && anyGasFunded);
-  // Cause-agnostic reason: `fallthrough-no-funds` also fires when covered wallets are out
-  // of GAS (TRAC covered), so name the failure without pinning it to one remedy.
-  const gateReason = 'Publish will fail — no signing wallet can fund it (coverage or gas).';
-  // S5 — the publish button is aria-describedby'd to the verdict chip; when gated it ALSO
-  // points at a visually-hidden node carrying `gateReason`, so the SR announcement matches
-  // the visual state (the `title` alone is suppressed for SR by aria-describedby).
-  const verdictId = useId();
-  const gateReasonId = useId();
   // Mirror the outcome up to the strip; it persists past this widget's unmount.
   useEffect(() => {
     if (result) onResult?.({ ok: true, text: result });
@@ -152,132 +124,193 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [result, error]);
 
-  const handleAction = useCallback(async () => {
-    // The policy gate is aria-disabled (keeps the button focusable + announceable), not
-    // natively disabled, so the click still fires — block the action here.
-    if (publishBlocked) return;
-    setBusy(true);
-    setError(null);
-    setResult(null);
-    setCostCovered(null);
-    // Issue #864 (Codex review on #874) — track the in-flight
-    // assertion so mid-loop failures surface "<name>: …" instead of
-    // the generic "an assertion …".
-    let currentAssertion: string | null = null;
-    try {
-      if (isWm) {
-        // Seal each draft before sharing — promote moves content OUT of Working
-        // Memory, after which it can no longer be finalized, and a later vm/publish
-        // requires a finalized assertion. The seal is CG-independent (#1116: finalize
-        // works on an unregistered CG with no chain write) and promote is off-chain, so
-        // no client-side CG pre-registration is needed — /vm/publish registers the CG
-        // later, only after publish preconditions pass. (See OT-RFC-44 Design B.)
-        const assertions = await listAssertions(contextGraphId, 'wm');
-        let promoted = 0;
-        let noopCount = 0;
-        for (const a of assertions) {
-          currentAssertion = a.name;
-          // Seal the draft first; tolerate already-sealed / nothing-to-seal so
-          // re-runs and empty drafts don't abort the batch (surface real errors).
-          try {
-            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-          } catch (e: any) {
-            const m = String(e?.message ?? '');
-            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
-          }
-          // PR #710 — thread `subGraph` so sub-graph-scoped assertions
-          // hit the correct daemon lookup key `(cg, name, subGraph)`.
-          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
-          promoted += res.promotedCount;
-          if (res.promotedCount === 0) noopCount += 1;
-        }
-        // Issue #864 — flag the "nothing was actually moved" case so
-        // users on the bulk-promote widget aren't lied to by a
-        // "Promoted 0 triples" success toast.
-        if (promoted > 0) {
-          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-          setResult(`Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`);
-        } else {
-          setResult('No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.');
-        }
-      } else {
-        // SWM -> VM: publish each shared assertion as ONE Knowledge Asset
-        // (Design B, any entity count) via the per-assertion vm/publish path —
-        // NOT the legacy single-root shared-memory publish. We go through the
-        // shared knowledgeAssetPublishWithSeal wrapper so this CTA gets the same
-        // seal-in-SWM retry + 207 partial-publish handling as the other publish
-        // surfaces. No pre-register: the daemon's /vm/publish runs preconditions
-        // first and only auto-registers (with the stored policy) on its
-        // CG_NOT_REGISTERED retry, so a doomed publish never burns gas.
-        const assertions = await listAssertions(contextGraphId, 'swm');
-        // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error
-        // accounting with the other batch-publish CTAs (carries the partial detail).
-        const r = await publishAssertionsToVm(contextGraphId, assertions);
-        if (r.published > 0) {
-          const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-          setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`);
-          // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH (not off the
-          // headline sample, which is picked for cleanliness not discount). Absent → hidden.
-          setCostCovered(r.convictionCostCovered ?? null);
-        } else if (assertions.length === 0) {
-          setResult('Nothing to publish — promote assertions to Shared Memory first.');
-        } else {
-          throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
-        }
+  const run = useCallback(
+    async (body: (ctx: { setAssertion: (name: string | null) => void }) => Promise<string>) => {
+      setBusy(true);
+      setError(null);
+      setResult(null);
+      let currentAssertion: string | null = null;
+      try {
+        const text = await body({ setAssertion: (name) => { currentAssertion = name; } });
+        setResult(text);
+        onComplete?.();
+      } catch (err: any) {
+        const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
+        setError(typed ? typed.message : (err?.message ?? 'Action failed'));
+      } finally {
+        setBusy(false);
       }
-      onComplete?.();
-    } catch (err: any) {
-      const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
-    } finally {
-      setBusy(false);
-    }
-  }, [isWm, contextGraphId, onComplete, publishBlocked]);
+    },
+    [onComplete],
+  );
 
-  if (count === 0) return null;
-  const color = isWm ? '#f59e0b' : '#22c55e';
-  const target = isWm ? 'Shared Working Memory' : 'Verifiable Memory';
-  const noun = layerNoun(layer, count).toLowerCase();
+  return { busy, result, error, run };
+}
 
+/** The GenWidget shell shared by the two CTAs: context line + result/error + optional
+ *  extras (badge/chip/gate) + the action button(s). */
+function LayerActionShell({ title, footnote, context, result, error, extras, children }: {
+  title: string;
+  footnote: string;
+  context: ReactNode;
+  result: string | null;
+  error: string | null;
+  extras?: ReactNode;
+  children: ReactNode;
+}) {
   return (
-    <GenWidget title={isWm ? 'Promote' : 'Publish'} footnote={`Moves ${noun} from this layer to ${target}.`}>
-      <div className="v10-decision-context" style={{ marginBottom: 10 }}>
-        {count} {noun} in this layer can be {isWm ? 'promoted to Shared Working Memory for collaborative review' : 'published to Verifiable Memory on-chain'}.
-      </div>
+    <GenWidget title={title} footnote={footnote}>
+      <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
       {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
       {error && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
-      {/* B8 — the CONFIRMED post-publish discount (from the on-chain CostCovered event);
-          renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
-          predictive chip below. */}
-      {!isWm && <DiscountAppliedBadge convictionCostCovered={costCovered} />}
-      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). Renders the
-          PURE view off this widget's single eligibility read so the chip and the button
-          never disagree; the `trackedIds` guard preserves "no tracked PCA → no chip". */}
-      {!isWm && trackedIds.length > 0 && <PublishEligibilityChipView {...elig} id={verdictId} />}
-      {/* SR-only cause for the policy gate — referenced by aria-describedby so the
-          announced reason matches the visual state (see gateReason). */}
-      {publishBlocked && <span id={gateReasonId} className="v10-sr-only">{gateReason}</span>}
-      <div className="v10-decision-actions">
-        <button
-          data-testid={isWm ? 'widget-promote-all-btn' : 'widget-publish-vm-btn'}
-          className={isWm ? 'v10-decision-btn approve' : 'v10-decision-btn primary-cta publish-vm'}
-          style={isWm
-            ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
-            : { opacity: busy || publishBlocked ? 0.5 : 1 }}
-          // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate
-          // uses aria-disabled so SR/keyboard users keep focus + hear the reason (handleAction
-          // no-ops when blocked).
-          disabled={busy}
-          aria-disabled={publishBlocked || undefined}
-          title={publishBlocked ? gateReason : undefined}
-          aria-describedby={!isWm ? (publishBlocked ? `${verdictId} ${gateReasonId}` : verdictId) : undefined}
-          onClick={handleAction}
-        >
-          {busy ? '...' : (isWm ? '✓ Promote All → Shared' : '◉ Publish to Verifiable Memory')}
-        </button>
-      </div>
+      {extras}
+      <div className="v10-decision-actions">{children}</div>
     </GenWidget>
+  );
+}
+
+interface LayerActionProps {
+  count: number;
+  contextGraphId: string;
+  onComplete?: () => void;
+  /** Lift the latest outcome to the parent strip so it survives this widget
+   * unmounting when the promoted/published layer empties (entityCount → 0). */
+  onResult?: (r: { ok: boolean; text: string } | null) => void;
+}
+
+/** WM → SWM bulk-promote CTA. Off-chain; never touches the PCA eligibility probe. */
+export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
+  const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  const promote = useCallback(() => {
+    void run(async ({ setAssertion }) => {
+      // Seal each draft before sharing — promote moves content OUT of Working Memory, after
+      // which it can no longer be finalized, and a later vm/publish requires a finalized
+      // assertion. The seal is CG-independent (#1116) and promote is off-chain, so no
+      // client-side CG pre-registration is needed. (See OT-RFC-44 Design B.)
+      const assertions = await listAssertions(contextGraphId, 'wm');
+      let promoted = 0;
+      let noopCount = 0;
+      for (const a of assertions) {
+        setAssertion(a.name);
+        // Seal the draft first; tolerate already-sealed / nothing-to-seal so re-runs and
+        // empty drafts don't abort the batch (surface real errors).
+        try {
+          await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+        } catch (e: any) {
+          const m = String(e?.message ?? '');
+          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+        }
+        // PR #710 — thread `subGraph` so sub-graph-scoped assertions hit the correct
+        // daemon lookup key `(cg, name, subGraph)`.
+        const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
+        promoted += res.promotedCount;
+        if (res.promotedCount === 0) noopCount += 1;
+      }
+      // Issue #864 — flag the "nothing was actually moved" case so users on the bulk-promote
+      // widget aren't lied to by a "Promoted 0 triples" success toast.
+      if (promoted > 0) {
+        const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
+        return `Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`;
+      }
+      return 'No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.';
+    });
+  }, [contextGraphId, run]);
+
+  if (count === 0) return null;
+  const color = '#f59e0b';
+  const noun = layerNoun('wm', count).toLowerCase();
+
+  return (
+    <LayerActionShell
+      title="Promote"
+      footnote={`Moves ${noun} from this layer to Shared Working Memory.`}
+      context={<>{count} {noun} in this layer can be promoted to Shared Working Memory for collaborative review.</>}
+      result={result}
+      error={error}
+    >
+      <button
+        data-testid="widget-promote-all-btn"
+        className="v10-decision-btn approve"
+        style={{ borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+        disabled={busy}
+        onClick={promote}
+      >
+        {busy ? '...' : '✓ Promote All → Shared'}
+      </button>
+    </LayerActionShell>
+  );
+}
+
+/** SWM → VM publish CTA. Consumes the PCA spend-gate (`useVmPublishGate`) for the DANGER
+ *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
+export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
+  const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
+  const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  const gate = useVmPublishGate(contextGraphId);
+
+  const publish = useCallback(() => {
+    // The policy gate is aria-disabled (button stays focusable/announceable), not natively
+    // disabled, so the click still fires — block the action here.
+    if (gate.blocked) return;
+    void run(async () => {
+      setCostCovered(null);
+      // SWM -> VM: publish each shared assertion as ONE Knowledge Asset (Design B) via the
+      // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
+      // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
+      // burns gas.
+      const assertions = await listAssertions(contextGraphId, 'swm');
+      // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
+      const r = await publishAssertionsToVm(contextGraphId, assertions);
+      if (r.published > 0) {
+        const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
+        const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+        // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
+        setCostCovered(r.convictionCostCovered ?? null);
+        return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`;
+      }
+      if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
+      throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
+    });
+  }, [contextGraphId, run, gate.blocked]);
+
+  if (count === 0) return null;
+  const noun = layerNoun('swm', count).toLowerCase();
+
+  return (
+    <LayerActionShell
+      title="Publish"
+      footnote={`Moves ${noun} from this layer to Verifiable Memory.`}
+      context={<>{count} {noun} in this layer can be published to Verifiable Memory on-chain.</>}
+      result={result}
+      error={error}
+      extras={
+        <>
+          {/* B8 — the CONFIRMED post-publish discount (from the on-chain CostCovered event);
+              renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
+              predictive chip. */}
+          <DiscountAppliedBadge convictionCostCovered={costCovered} />
+          {/* S5 — the PCA fall-through chip, off the gate's single eligibility read. */}
+          {gate.chip}
+          {/* SR-only cause for the policy gate — referenced by aria-describedby so the
+              announced reason matches the visual state. */}
+          {gate.blocked && <span id={gate.reasonId} className="v10-sr-only">{gate.reason}</span>}
+        </>
+      }
+    >
+      <button
+        data-testid="widget-publish-vm-btn"
+        className="v10-decision-btn primary-cta publish-vm"
+        style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
+        // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate
+        // uses aria-disabled (via gate.ariaProps) so SR/keyboard users keep focus + hear
+        // the reason (publish no-ops when blocked).
+        disabled={busy}
+        {...gate.ariaProps}
+        onClick={publish}
+      >
+        {busy ? '...' : '◉ Publish to Verifiable Memory'}
+      </button>
+    </LayerActionShell>
   );
 }
 
@@ -291,7 +324,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
   contextGraphId?: string;
   onComplete?: () => void;
 }) {
-  // Latest promote/publish outcome, lifted from LayerActionsWidget so the "✓ Promoted
+  // Latest promote/publish outcome, lifted from the action widget so the "✓ Promoted
   // N triples" feedback survives that widget unmounting the instant the acted-on layer
   // empties (entityCount → 0) and the strip swaps to the empty state.
   const [lastAction, setLastAction] = useState<{ ok: boolean; text: string } | null>(null);
@@ -329,9 +362,11 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
         <LayerStatsWidget entities={entities} entityCount={entityCount} triples={tripleCount} layer={layer} />
         <TypeBreakdownWidget entities={entities} />
       </div>
-      {(layer === 'wm' || layer === 'swm') && (
+      {(layer === 'wm' || layer === 'swm') && contextGraphId && (
         <div className="v10-layer-widgets-strip-action">
-          <LayerActionsWidget layer={layer} count={entityCount} entities={entities} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
+          {layer === 'wm'
+            ? <PromoteWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />
+            : <PublishVmWidget count={entityCount} contextGraphId={contextGraphId} onComplete={onComplete} onResult={setLastAction} />}
         </div>
       )}
     </div>

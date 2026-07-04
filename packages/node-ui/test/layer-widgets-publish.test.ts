@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 //
-// B8 (#1365 round-3) — the SWM→VM publish CTA in `layer-widgets` (LayerActionsWidget)
-// renders the confirmed DiscountAppliedBadge from the BATCH-level convictionCostCovered,
-// NOT off the headline `sample` (which is chosen for cleanliness, not discount). This is
-// the layer-widgets badge render path the round-3 reviewer flagged as uncovered.
+// B8 (#1365 round-3) — the SWM→VM publish CTA (`PublishVmWidget`) renders the confirmed
+// DiscountAppliedBadge from the BATCH-level convictionCostCovered, NOT off the headline
+// `sample` (chosen for cleanliness, not discount). Also covers the #1382 publish gate:
+// PublishVmWidget consumes `useVmPublishGate` (real) over a mocked eligibility verdict.
 
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -15,9 +15,9 @@ const apiMocks = vi.hoisted(() => ({
   partialPublishWarning: vi.fn((d?: string) => (d ? `binding incomplete — ${d}` : 'binding incomplete')),
 }));
 
-// #1382 — LayerActionsWidget reads the S5 verdict directly (single shared read) to gate
-// the VM publish CTA AND drive the chip. Mock the hook so tests drive the verdict
-// deterministically, and spy the PURE chip VIEW to capture the props it receives.
+// #1382 — PublishVmWidget drives the CTA gate + chip from `useVmPublishGate`, which owns the
+// single S5 read. Mock the eligibility hook so tests drive the verdict deterministically
+// (useVmPublishGate stays REAL), and spy the PURE chip VIEW to capture the props it receives.
 const eligMock = vi.hoisted(() => ({ usePublishEligibility: vi.fn() }));
 const chipViewMock = vi.hoisted(() => ({ PublishEligibilityChipView: vi.fn((_props: any) => null) }));
 
@@ -38,7 +38,7 @@ vi.mock('../src/ui/pages/conviction/PublishEligibilityChip.js', () => ({
   PublishEligibilityChipView: chipViewMock.PublishEligibilityChipView,
 }));
 
-const { LayerActionsWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
+const { PromoteWidget, PublishVmWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -68,7 +68,7 @@ beforeEach(() => {
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
-describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => {
+describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
   it('renders the badge from the BATCH convictionCostCovered even when the clean sample has none', async () => {
     apiMocks.publishAssertionsToVm.mockResolvedValue({
       published: 1, total: 1, sealed: 0, partial: 0, failures: [],
@@ -76,7 +76,7 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
       convictionCostCovered: { accountId: '7', epoch: 1284, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
     });
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     await clickPublish(container);
     await flush();
@@ -94,7 +94,7 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
       // no convictionCostCovered on the batch
     });
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     await clickPublish(container);
     await flush();
@@ -103,7 +103,7 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
   });
 });
 
-describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
+describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   const publishBtn = (c: HTMLElement) =>
     c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
   const setVerdict = (verdict: unknown, ownerPublish = false, anyGasFunded = false) =>
@@ -112,7 +112,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   it('GATES the VM publish CTA on a DANGER (fallthrough-no-funds) verdict via aria-disabled + tooltip', async () => {
     setVerdict('fallthrough-no-funds');
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     const btn = publishBtn(container);
     // Policy gate uses aria-disabled (SR/keyboard reachable), NOT native disabled.
@@ -130,7 +130,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   it('a gated click is a NO-OP (never starts the publish)', async () => {
     setVerdict('fallthrough-no-funds');
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     await clickPublish(container);
     await flush();
@@ -144,7 +144,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   it('does NOT gate on fallthrough-no-funds when ownerPublish AND a wallet has gas (escrow may cover)', async () => {
     setVerdict('fallthrough-no-funds', true, true);
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     const btn = publishBtn(container);
     expect(btn.getAttribute('aria-disabled')).toBeNull();
@@ -159,7 +159,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   it('STILL gates an owner publish when no wallet has gas (escrow does not cover gas)', async () => {
     setVerdict('fallthrough-no-funds', true, false);
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     const btn = publishBtn(container);
     expect(btn.getAttribute('aria-disabled')).toBe('true');
@@ -175,7 +175,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     async (verdict) => {
       setVerdict(verdict);
       const { container, unmount } = await render(
-        React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+        React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
       );
       const btn = publishBtn(container);
       expect(btn.getAttribute('aria-disabled')).toBeNull();
@@ -188,7 +188,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   it('never gates the PROMOTE (wm) CTA, even on a DANGER verdict', async () => {
     setVerdict('fallthrough-no-funds');
     const { container, unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'wm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
     const btn = container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement;
     expect(btn.getAttribute('aria-disabled')).toBeNull();
@@ -199,13 +199,13 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
 
   // Shared-eligibility contract (#1382): the widget resolves the verdict ONCE and drives
   // the pure chip view with it — button and chip can't disagree, and there's one poll.
-  it('drives the pure chip view with the exact verdict from its single swm read (enabled)', async () => {
+  it('drives the pure chip view with the exact verdict from its single read', async () => {
     setVerdict('eligible');
     const { unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
-    // Single shared read: the hook is called for the swm widget with enabled:true.
-    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000, { enabled: true });
+    // Single shared read via useVmPublishGate: the hook is called once with (cg, 30s).
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000);
     // The pure view received the exact verdict from that read.
     expect(chipViewMock.PublishEligibilityChipView).toHaveBeenCalled();
     const props = chipViewMock.PublishEligibilityChipView.mock.calls.at(-1)![0];
@@ -213,12 +213,16 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  it('skips the eligibility probe on the promote (wm) widget and renders no chip', async () => {
+  // OT2LV — the promote path never enters the eligibility probe BY CONSTRUCTION: PromoteWidget
+  // doesn't consume useVmPublishGate, so the hook isn't called and no chip renders. (The
+  // fetcher-level guarantee — no fetchWalletsBalances/fetchPca/fetchContextGraphs — is pinned
+  // over the REAL hook in pca-publish-eligibility.test.ts.)
+  it('the promote (wm) widget never runs the eligibility probe and renders no chip', async () => {
     setVerdict('eligible');
     const { unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'wm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
     );
-    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000, { enabled: false });
+    expect(eligMock.usePublishEligibility).not.toHaveBeenCalled();
     expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
     await unmount();
   });
@@ -227,7 +231,7 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     usePcaStore.setState({ trackedIds: [] });
     setVerdict('eligible');
     const { unmount } = await render(
-      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
     expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
     await unmount();

@@ -6,8 +6,8 @@ import type { PcaVerdict } from '../../components/Pca/EligibilityVerdictBanner.j
 
 /**
  * S5 — the PRESENTATION of the eligibility chip: a PURE view over an already-resolved
- * verdict (no hook, no fetch). Both the standalone `PublishEligibilityChip` container
- * and LayerActionsWidget (which resolves the verdict ONCE for its CTA gate and the chip
+ * verdict (no hook, no fetch). Both the standalone `PublishEligibilityChip` container and
+ * `useVmPublishGate` (which resolves the verdict ONCE for the publish CTA gate and the chip
  * together) render this, so the chip and the button can never disagree and there's no
  * duplicate poll. It carries its own aria-live (via EligibilityVerdictBanner: amber AND
  * danger = role=alert/assertive). `id` lets the publish button reference the verdict via
@@ -45,8 +45,8 @@ export function PublishEligibilityChipView({
 /**
  * Standalone container: resolves the verdict via its own 30s poll and renders the view.
  * Rendered only when the node tracks ≥1 PCA — a node not using conviction gets no chip
- * noise. (LayerActionsWidget bypasses this container and drives the view from its own
- * shared read; see that widget for the single-poll path.)
+ * noise. (The VM publish CTA bypasses this container and drives the view from
+ * `useVmPublishGate`'s shared read; see that hook for the single-poll path.)
  */
 export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId: string; id?: string }) {
   const trackedIds = usePcaStore((s) => s.trackedIds);

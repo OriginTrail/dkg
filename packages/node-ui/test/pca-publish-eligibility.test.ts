@@ -30,6 +30,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 
 const { PublishEligibilityChip, PublishEligibilityChipView } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
 const { usePublishEligibility } = await import('../src/ui/hooks/usePublishEligibility.js');
+const { PromoteWidget, PublishVmWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
 
@@ -591,7 +592,7 @@ describe('PublishEligibilityChip (S5)', () => {
 });
 
 // #1382 — the pure presentation view: renders a SUPPLIED verdict with no hook / no fetch,
-// so LayerActionsWidget can drive it from its single shared read.
+// so the VM publish CTA (via useVmPublishGate) can drive it from its single shared read.
 describe('PublishEligibilityChipView (pure view)', () => {
   it('renders a supplied GREEN verdict (PCA + discount) without any fetch', async () => {
     const { container, unmount } = await render(
@@ -670,5 +671,34 @@ describe('usePublishEligibility — anyGasFunded (hook boundary)', () => {
     const h = await renderElig();
     expect(latestElig!.anyGasFunded).toBe(true);
     await h.unmount();
+  });
+});
+
+// OT2LV — the two-widget split's real payoff: the PROMOTE path does NOT run the
+// O(wallets×PCAs) eligibility probe. Pinned here over the REAL usePublishEligibility hook
+// (this file mocks only the fetchers), so "PromoteWidget doesn't probe" is a fetcher-level
+// guarantee, not just a mock-boundary one.
+describe('VM publish gate — the promote path never probes (OT2LV)', () => {
+  it('PromoteWidget renders WITHOUT calling the eligibility fetchers', async () => {
+    const { unmount } = await render(React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    expect(mocks.fetchContextGraphs).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('PublishVmWidget DOES run the probe (control — proves the fetchers WOULD fire)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0], balances: [{ address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      (key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot()));
+    const { unmount } = await render(React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }));
+    for (let i = 0; i < 40 && mocks.fetchWalletsBalances.mock.calls.length === 0; i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    expect(mocks.fetchWalletsBalances).toHaveBeenCalled();
+    await unmount();
   });
 });
