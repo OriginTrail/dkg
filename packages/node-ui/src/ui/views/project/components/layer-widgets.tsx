@@ -6,6 +6,7 @@ import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { PublishEligibilityChip } from '../../../pages/conviction/PublishEligibilityChip.js';
+import { usePublishEligibility } from '../../../hooks/usePublishEligibility.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 
 // ─── Generative Widget Components ─────────────────────────────
@@ -118,6 +119,14 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   // B8 — the CONFIRMED post-publish discount from the VM publish response's sample.
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const isWm = layer === 'wm';
+  // S5/#1382 — hard-gate the SWM→VM publish CTA on a DANGER verdict: 'fallthrough-no-funds'
+  // means NO signing wallet can fund the publish, so it would fail on-chain. Polls at the
+  // chip's 30s cadence so the gate self-corrects once a wallet is funded. Gate ONLY this
+  // terminal case — 'eligible'/'fallthrough' (has TRAC) stay enabled, and 'unknown' (probe
+  // inconclusive) fails OPEN (never block on what we can't confirm, #9). The hook no-ops
+  // when no PCA is tracked, so non-conviction nodes never probe or gate.
+  const { verdict } = usePublishEligibility(contextGraphId, 30_000);
+  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds';
   // S5 — the PCA eligibility verdict the publish button is aria-describedby'd to,
   // so a screen-reader user activating Publish hears the direct-cost/fail state.
   const verdictId = useId();
@@ -232,8 +241,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           className={isWm ? 'v10-decision-btn approve' : 'v10-decision-btn primary-cta publish-vm'}
           style={isWm
             ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
-            : { opacity: busy ? 0.5 : 1 }}
-          disabled={busy}
+            : { opacity: busy || publishBlocked ? 0.5 : 1 }}
+          disabled={busy || publishBlocked}
+          title={publishBlocked ? 'Publish will fail — no wallet can cover the cost.' : undefined}
           aria-describedby={!isWm ? verdictId : undefined}
           onClick={handleAction}
         >

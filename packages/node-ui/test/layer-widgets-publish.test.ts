@@ -15,11 +15,19 @@ const apiMocks = vi.hoisted(() => ({
   partialPublishWarning: vi.fn((d?: string) => (d ? `binding incomplete — ${d}` : 'binding incomplete')),
 }));
 
+// #1382 — LayerActionsWidget now reads the S5 verdict directly to hard-gate the VM
+// publish CTA. Mock the hook so tests drive the verdict deterministically.
+const eligMock = vi.hoisted(() => ({ usePublishEligibility: vi.fn() }));
+
 vi.mock('../src/ui/api.js', async (orig) => ({
   ...(await orig<typeof import('../src/ui/api.js')>()),
   listAssertions: apiMocks.listAssertions,
   publishAssertionsToVm: apiMocks.publishAssertionsToVm,
   partialPublishWarning: apiMocks.partialPublishWarning,
+}));
+
+vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
+  usePublishEligibility: eligMock.usePublishEligibility,
 }));
 
 // The S5 PREDICTIVE chip is a separate surface (+ would pull in the PCA fetchers) — no-op
@@ -49,6 +57,9 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }]);
+  // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
+  // publish freely. Gate tests override per-verdict.
+  eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown' } as any);
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -83,6 +94,49 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
     await clickPublish(container);
     await flush();
     expect(container.querySelector('[data-testid="pca-discount-badge"]')).toBeNull();
+    await unmount();
+  });
+});
+
+describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
+  const publishBtn = (c: HTMLElement) =>
+    c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
+
+  it('DISABLES the VM publish CTA on a DANGER (fallthrough-no-funds) verdict, with a tooltip', async () => {
+    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'fallthrough-no-funds' } as any);
+    const { container, unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    const btn = publishBtn(container);
+    expect(btn.disabled).toBe(true);
+    expect(btn.getAttribute('title')).toContain('Publish will fail');
+    await unmount();
+  });
+
+  // CTA POLICY: gate ONLY the terminal no-funds case. 'eligible'/'fallthrough' (has
+  // TRAC → pays direct) stay enabled; 'unknown' (probe inconclusive) fails OPEN (#9).
+  it.each(['eligible', 'fallthrough', 'unknown'])(
+    'keeps the VM publish CTA ENABLED on a %s verdict',
+    async (verdict) => {
+      eligMock.usePublishEligibility.mockReturnValue({ verdict } as any);
+      const { container, unmount } = await render(
+        React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+      );
+      const btn = publishBtn(container);
+      expect(btn.disabled).toBe(false);
+      expect(btn.getAttribute('title')).toBeNull();
+      await unmount();
+    },
+  );
+
+  it('never gates the PROMOTE (wm) CTA, even on a DANGER verdict', async () => {
+    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'fallthrough-no-funds' } as any);
+    const { container, unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'wm', count: 1, contextGraphId: 'cg' }),
+    );
+    const btn = container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('title')).toBeNull();
     await unmount();
   });
 });
