@@ -223,6 +223,34 @@ export function skipChainResetWipe(env: NodeJS.ProcessEnv = process.env): boolea
   return env.DKG_SKIP_CHAIN_RESET_WIPE === '1';
 }
 
+/**
+ * Assemble the {@link ChainResetWipeOptions} the daemon passes to
+ * {@link chainResetWipe} at boot. Extracted (and exported) so the env→`skip`
+ * wiring is a single tested unit — a regression that drops `skip` from the
+ * built options now fails a unit test rather than only surfacing at runtime.
+ * Mirrors the `resolveMemoryAgentAddress` precedent. Pure: `env` defaults to
+ * `process.env` but is injectable for tests.
+ */
+export function buildChainResetWipeOptions(args: {
+  dataDir: string;
+  // `null` as well as `undefined`: the daemon's resolved network is
+  // `NetworkConfig | null`, and `?.` treats both as "no marker → no-op wipe".
+  network: { chainResetMarker?: string } | null | undefined;
+  randomSamplingWalPath?: string;
+  storeConfig?: ChainResetWipeStoreConfig;
+  log: (msg: string) => void;
+  env?: NodeJS.ProcessEnv;
+}): ChainResetWipeOptions {
+  return {
+    dataDir: args.dataDir,
+    currentMarker: args.network?.chainResetMarker,
+    skip: skipChainResetWipe(args.env),
+    randomSamplingWalPath: args.randomSamplingWalPath,
+    storeConfig: args.storeConfig,
+    log: args.log,
+  };
+}
+
 function loadState(dataDir: string): PersistedNetworkState | null {
   try {
     const raw = readFileSync(join(dataDir, STATE_FILE), 'utf8');
@@ -348,30 +376,49 @@ const STORE_BACKUP_PREFIX = 'store.nq.pre-wipe-';
 const MAX_STORE_BACKUPS = 3;
 
 /**
- * Rotate `store.nq.pre-wipe-*` backups down to the newest `max` snapshots.
- * Best-effort: any failure (listing, stat, unlink) is logged as a WARN and
- * swallowed — rotation must never fail a wipe or a boot.
+ * Pure rotation policy: given every `store.nq.pre-wipe-*` entry (name + mtime),
+ * return the names to EVICT so that only the newest `max` snapshots remain.
  *
- * `keepName` is the backup created THIS run: it is ALWAYS retained and never a
- * rotation candidate, so a non-monotonic wall clock (NTP step-back, VM
- * snapshot/restore) can never evict the fresh recovery snapshot the wipe just
- * made — that would silently defeat the recoverability this backup exists for.
- * It occupies one of the `max` slots, so we retain the newest `max - 1` of the
- * OTHER backups, ranked by filesystem mtime (an unreadable stat sorts oldest,
- * so a broken file is dropped first). Exported (with an injectable `max`) so
- * the rotation model is unit-testable in isolation.
+ * `keepName` is the backup created THIS run: it is dropped from the candidate
+ * set up front and can never be returned for eviction, so a non-monotonic wall
+ * clock (NTP step-back, VM snapshot/restore) can never evict the fresh recovery
+ * snapshot the wipe just made — that would silently defeat the recoverability
+ * this backup exists for. It occupies one of the `max` slots, so we retain the
+ * newest `max - 1` of the OTHER backups (ranked by mtime DESC; an unreadable
+ * stat is passed in as mtimeMs 0 = oldest, so a broken file is evicted first)
+ * and return the remainder. No filesystem, no logging — a plain-input seam
+ * that is unit-testable in isolation.
  */
-export function rotateStoreBackups(
+export function selectBackupsToRotate(
+  entries: { name: string; mtimeMs: number }[],
+  keepName: string,
+  max: number,
+): string[] {
+  const keepOthers = Math.max(0, max - 1);
+  return entries
+    .filter((e) => e.name !== keepName)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs) // newest first
+    .slice(keepOthers)
+    .map((e) => e.name);
+}
+
+/**
+ * Rotate `store.nq.pre-wipe-*` backups down to the newest `MAX_STORE_BACKUPS`
+ * snapshots. Side-effectful shell around the pure {@link selectBackupsToRotate}
+ * policy: read the dir, stat each backup (unreadable → mtimeMs 0 = oldest),
+ * then `rmSync` the names the policy selects. Best-effort throughout: any
+ * failure (listing, stat, unlink) is logged as a WARN and swallowed — rotation
+ * must never fail a wipe or a boot, and never contributes to `failedFiles`.
+ * `keepName` (the backup created this run) is always retained by the policy.
+ */
+function rotateStoreBackups(
   dataDir: string,
   keepName: string,
   log: (msg: string) => void,
-  max: number = MAX_STORE_BACKUPS,
 ): void {
   try {
-    // The just-created backup always survives and takes one slot.
-    const keepOthers = Math.max(0, max - 1);
-    const others = readdirSync(dataDir)
-      .filter((f) => f.startsWith(STORE_BACKUP_PREFIX) && f !== keepName)
+    const entries = readdirSync(dataDir)
+      .filter((f) => f.startsWith(STORE_BACKUP_PREFIX))
       .map((name) => {
         // Rank by filesystem mtime (robust to clock steps and to markers that
         // embed dates). An unreadable stat → mtimeMs 0 = treated oldest, so a
@@ -383,15 +430,14 @@ export function rotateStoreBackups(
           mtimeMs = 0;
         }
         return { name, mtimeMs };
-      })
-      .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+      });
 
-    for (const stale of others.slice(keepOthers)) {
+    for (const staleName of selectBackupsToRotate(entries, keepName, MAX_STORE_BACKUPS)) {
       try {
-        rmSync(join(dataDir, stale.name), { force: true });
-        log(`  rotated out old store backup: ${stale.name}`);
+        rmSync(join(dataDir, staleName), { force: true });
+        log(`  rotated out old store backup: ${staleName}`);
       } catch (err) {
-        log(`  WARN: failed to rotate out old store backup ${stale.name}: ${(err as Error).message}`);
+        log(`  WARN: failed to rotate out old store backup ${staleName}: ${(err as Error).message}`);
       }
     }
   } catch (err) {

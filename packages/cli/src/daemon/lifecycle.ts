@@ -289,10 +289,10 @@ import {
   performNpmUpdateEdge,
 } from './auto-update.js';
 import {
+  buildChainResetWipeOptions,
   chainResetWipe,
   detectBackendSwitch,
   detectNetworkSwitch,
-  skipChainResetWipe,
 } from './chain-reset-wipe.js';
 import {
   checkExternalStoreReachable,
@@ -1161,24 +1161,23 @@ export async function runDaemonInner(
     }
   }
 
-  const wipeResult = await chainResetWipe({
-    dataDir: dkgDir(),
-    currentMarker: network?.chainResetMarker,
-    // Dev-loop opt-out: when set, bypass the wipe entirely and don't persist
-    // the marker (unsetting it re-triggers the wipe). Operator nodes leave it
-    // unset and keep wiping by default on a marker change. See issue #679.
-    skip: skipChainResetWipe(),
-    // Honour operator's `randomSampling.walPath` override; the prover
-    // writes its WAL there, so a fresh chain reset must wipe that file
-    // (not the default ~/.dkg/random-sampling.wal which would be empty).
-    randomSamplingWalPath: config.randomSampling?.walPath,
-    // For external triple-store backends, the wipe extends from local
-    // files to a SPARQL DROP/DELETE on the remote endpoint; otherwise
-    // operators with a chain-reset marker bump would keep stale V10 data
-    // in Blazegraph / sparql-http even after the local store.nq is gone.
-    storeConfig: runtimeStore,
-    log,
-  });
+  // buildChainResetWipeOptions assembles the wipe options, notably wiring the
+  // dev-loop opt-out from DKG_SKIP_CHAIN_RESET_WIPE (skip → bypass the wipe and
+  // don't persist the marker; operator nodes leave it unset and keep wiping by
+  // default on a marker change — issue #679). Extracted so that env→skip wiring
+  // is a single tested unit. randomSamplingWalPath honours the operator's
+  // `randomSampling.walPath` override (the prover writes its WAL there). For
+  // external triple-store backends, storeConfig extends the wipe to a SPARQL
+  // DROP/DELETE so a marker bump doesn't leave stale V10 data in the endpoint.
+  const wipeResult = await chainResetWipe(
+    buildChainResetWipeOptions({
+      dataDir: dkgDir(),
+      network,
+      randomSamplingWalPath: config.randomSampling?.walPath,
+      storeConfig: runtimeStore,
+      log,
+    }),
+  );
   if (wipeResult.wiped) {
     log(
       `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +

@@ -30,8 +30,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  buildChainResetWipeOptions,
   chainResetWipe,
-  rotateStoreBackups,
+  selectBackupsToRotate,
   skipChainResetWipe,
 } from '../src/daemon/chain-reset-wipe.js';
 
@@ -326,50 +327,67 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
   });
 });
 
-describe('rotateStoreBackups (direct, mtime-ranked, #679)', () => {
-  it('keeps keepName + the newest (max-1) OTHERS by mtime and evicts the oldest', () => {
-    const keep = seedBackup('store.nq.pre-wipe-fresh-x', new Date('2026-01-01'));
-    seedBackup('store.nq.pre-wipe-a', new Date('2026-03-01')); // newest OTHER
-    seedBackup('store.nq.pre-wipe-b', new Date('2026-02-01')); // middle OTHER
-    seedBackup('store.nq.pre-wipe-c', new Date('2025-01-01')); // oldest OTHER
-
-    rotateStoreBackups(dataDir, keep, () => {}, 3); // keepOthers = 2
-
-    const left = readdirSync(dataDir).filter((f) => f.startsWith('store.nq.pre-wipe-'));
-    expect(left).toHaveLength(3);
-    expect(left).toContain(keep); // always exempt
-    expect(left).toContain('store.nq.pre-wipe-a'); // newest OTHER kept
-    expect(left).toContain('store.nq.pre-wipe-b'); // 2nd-newest OTHER kept
-    expect(left).not.toContain('store.nq.pre-wipe-c'); // oldest OTHER evicted
+describe('selectBackupsToRotate (pure rotation policy, #679)', () => {
+  // Pure seam: given (name, mtimeMs) entries + the fresh backup's keepName + a cap,
+  // return the names to EVICT. No filesystem — plain arrays, deterministic.
+  it('never returns keepName — even when keepName has the OLDEST mtimeMs (fresh-snapshot exemption)', () => {
+    const evict = selectBackupsToRotate(
+      [
+        { name: 'keep', mtimeMs: 1 }, // oldest, but it is the fresh snapshot
+        { name: 'a', mtimeMs: 9 },
+        { name: 'b', mtimeMs: 5 },
+      ],
+      'keep',
+      1, // keepOthers = 0 → every OTHER evicted, but keepName never is
+    );
+    expect(evict).toEqual(['a', 'b']);
+    expect(evict).not.toContain('keep');
   });
 
-  it('keepName survives even when an OTHER backup has a NEWER mtime (fresh-snapshot exemption)', () => {
-    const keep = seedBackup('store.nq.pre-wipe-fresh-x', new Date('2020-01-01')); // OLD mtime
-    seedBackup('store.nq.pre-wipe-newer', new Date('2030-01-01')); // NEWER than keepName
-
-    rotateStoreBackups(dataDir, keep, () => {}, 1); // keepOthers = 0 → evict ALL others
-
-    const left = readdirSync(dataDir).filter((f) => f.startsWith('store.nq.pre-wipe-'));
-    expect(left).toEqual([keep]); // exempt despite the older mtime; the newer OTHER is evicted
+  it('keeps the newest (max-1) OTHERS by mtimeMs DESC and returns the rest to evict', () => {
+    const evict = selectBackupsToRotate(
+      [
+        { name: 'k', mtimeMs: 999 },
+        { name: 'a', mtimeMs: 300 },
+        { name: 'b', mtimeMs: 200 },
+        { name: 'c', mtimeMs: 100 },
+      ],
+      'k',
+      2, // keepOthers = 1 → keep the newest OTHER (a=300); evict the older ones
+    );
+    expect(evict).toEqual(['b', 'c']);
   });
 
-  it('the oldest backup by mtime is evicted first (the same bucket an unreadable stat falls into)', () => {
-    const keep = seedBackup('store.nq.pre-wipe-fresh-x', new Date('2026-01-01'));
-    const healthy = seedBackup('store.nq.pre-wipe-healthy', new Date('2026-06-01')); // newest OTHER
-    // The source treats a stat FAILURE as mtimeMs 0 — i.e. the OLDEST bucket — so a
-    // broken backup is dropped first. Pinning a real file to a clearly-older mtime is
-    // the portable, deterministic representative of that bucket: a dangling symlink
-    // only makes statSync throw on POSIX (on Windows it resolves without throwing), so
-    // it can't stand in cross-platform. (Use a post-2000 date — near-epoch dates hit a
-    // timezone/epoch edge in Windows utimesSync and don't apply.)
-    const oldest = seedBackup('store.nq.pre-wipe-oldest', new Date('2001-01-01'));
+  it('max:1 evicts ALL others (keepName retained, everything else rotated out)', () => {
+    const evict = selectBackupsToRotate(
+      [
+        { name: 'k', mtimeMs: 5 },
+        { name: 'x', mtimeMs: 9 },
+        { name: 'y', mtimeMs: 1 },
+      ],
+      'k',
+      1,
+    );
+    expect(evict).toEqual(['x', 'y']); // newest-first among the evicted
+  });
 
-    rotateStoreBackups(dataDir, keep, () => {}, 2); // keepOthers = 1 → keep the newest OTHER only
+  it('an mtimeMs:0 entry (the unreadable-stat sentinel) sorts oldest and is evicted below a real mtime', () => {
+    const evict = selectBackupsToRotate(
+      [
+        { name: 'k', mtimeMs: 999 },
+        { name: 'a', mtimeMs: 300 },
+        { name: 'b', mtimeMs: 100 },
+        { name: 'broken', mtimeMs: 0 }, // unreadable-stat sentinel
+      ],
+      'k',
+      3, // keepOthers = 2 → a(300) + b(100) kept; only the mtimeMs:0 entry is dropped
+    );
+    expect(evict).toEqual(['broken']);
+  });
 
-    const left = readdirSync(dataDir).filter((f) => f.startsWith('store.nq.pre-wipe-'));
-    expect(left).toContain(keep); // exempt
-    expect(left).toContain(healthy); // newest OTHER kept
-    expect(left).not.toContain(oldest); // oldest bucket evicted first
+  it('returns [] for empty input and for keepName-only input', () => {
+    expect(selectBackupsToRotate([], 'k', 3)).toEqual([]);
+    expect(selectBackupsToRotate([{ name: 'k', mtimeMs: 1 }], 'k', 3)).toEqual([]);
   });
 });
 
@@ -448,5 +466,54 @@ describe('skipChainResetWipe (env switch, #679)', () => {
     expect(skipChainResetWipe({ DKG_SKIP_CHAIN_RESET_WIPE: '0' } as NodeJS.ProcessEnv)).toBe(false);
     expect(skipChainResetWipe({ DKG_SKIP_CHAIN_RESET_WIPE: 'true' } as NodeJS.ProcessEnv)).toBe(false);
     expect(skipChainResetWipe({} as NodeJS.ProcessEnv)).toBe(false);
+  });
+});
+
+describe('buildChainResetWipeOptions (env→skip wiring, #679)', () => {
+  const base = { dataDir: '/d', network: { chainResetMarker: 'M' }, log: () => {} };
+
+  it('wires DKG_SKIP_CHAIN_RESET_WIPE=1 → skip:true and passes marker + dataDir through', () => {
+    const opts = buildChainResetWipeOptions({
+      ...base,
+      env: { DKG_SKIP_CHAIN_RESET_WIPE: '1' } as NodeJS.ProcessEnv,
+    });
+    expect(opts.skip).toBe(true);
+    expect(opts.currentMarker).toBe('M');
+    expect(opts.dataDir).toBe('/d');
+  });
+
+  it('leaves skip:false for "0" and for an unset env (regression guard for the env→skip wire)', () => {
+    expect(
+      buildChainResetWipeOptions({ ...base, env: { DKG_SKIP_CHAIN_RESET_WIPE: '0' } as NodeJS.ProcessEnv })
+        .skip,
+    ).toBe(false);
+    expect(buildChainResetWipeOptions({ ...base, env: {} as NodeJS.ProcessEnv }).skip).toBe(false);
+  });
+
+  it('maps network null / undefined to currentMarker: undefined (a no-op wipe)', () => {
+    expect(
+      buildChainResetWipeOptions({ dataDir: '/d', network: null, log: () => {}, env: {} as NodeJS.ProcessEnv })
+        .currentMarker,
+    ).toBeUndefined();
+    expect(
+      buildChainResetWipeOptions({
+        dataDir: '/d',
+        network: undefined,
+        log: () => {},
+        env: {} as NodeJS.ProcessEnv,
+      }).currentMarker,
+    ).toBeUndefined();
+  });
+
+  it('passes through randomSamplingWalPath and storeConfig when provided', () => {
+    const storeConfig = { backend: 'blazegraph', options: { url: 'http://x/sparql' } };
+    const opts = buildChainResetWipeOptions({
+      ...base,
+      env: {} as NodeJS.ProcessEnv,
+      randomSamplingWalPath: '/var/wal',
+      storeConfig,
+    });
+    expect(opts.randomSamplingWalPath).toBe('/var/wal');
+    expect(opts.storeConfig).toBe(storeConfig);
   });
 });
