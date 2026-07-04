@@ -36,7 +36,7 @@ vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
   usePublishEligibility: eligMock.usePublishEligibility,
 }));
 
-const { PromoteWidget, PublishVmWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
+const { PromoteWidget, PublishVmWidget, LayerWidgetStrip } = await import('../src/ui/views/project/components/layer-widgets.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -286,6 +286,53 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     expect(apiMocks.knowledgeAssetFinalize).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', 'all', 'sg1');
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    await unmount();
+  });
+});
+
+// OVzK3 — the action outcome must survive the widget UNMOUNT. When promote/publish empties the
+// layer, `onComplete` flips entityCount→0 and LayerWidgetStrip swaps to its empty state, which
+// unmounts the action widget. Because `run()` calls `onResult` (which lifts the outcome into the
+// STRIP's own state) synchronously BEFORE `onComplete`, the "Promoted/Published …" feedback still
+// renders in the now-empty strip. (An effect-based onResult would miss — the unmounted widget's
+// effect never fires — losing user feedback; this pins the synchronous lift.)
+describe('LayerWidgetStrip — action-result survives the widget unmount (OVzK3)', () => {
+  function StripHarness({ layer }: { layer: 'wm' | 'swm' }) {
+    const [entityCount, setEntityCount] = React.useState(1);
+    return React.createElement(LayerWidgetStrip, {
+      layer,
+      entities: [],
+      entityCount,
+      tripleCount: 0,
+      contextGraphId: 'cg',
+      // Empties the layer on success → strip swaps to empty state → action widget unmounts.
+      onComplete: () => setEntityCount(0),
+    });
+  }
+  const clickBtn = async (c: HTMLElement, testid: string) =>
+    act(async () => { (c.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement).click(); });
+
+  it('keeps the "Promoted N triples" feedback after promote empties the wm layer', async () => {
+    apiMocks.promoteAssertion.mockResolvedValue({ promotedCount: 3 });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'wm' }));
+    expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeTruthy();
+    await clickBtn(container, 'widget-promote-all-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    // The layer emptied → the action widget unmounted…
+    expect(container.querySelector('[data-testid="widget-promote-all-btn"]')).toBeNull();
+    // …but the lifted outcome persists in the strip's own state.
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    await unmount();
+  });
+
+  it('keeps the "Published N knowledge assets" feedback after publish empties the swm layer', async () => {
+    apiMocks.publishAssertionsToVm.mockResolvedValue({ published: 2, total: 2, sealed: 0, partial: 0, failures: [] });
+    const { container, unmount } = await render(React.createElement(StripHarness, { layer: 'swm' }));
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeTruthy();
+    await clickBtn(container, 'widget-publish-vm-btn');
+    for (let i = 0; i < 40 && !container.querySelector('[data-testid="layer-action-result"]'); i++) await flush();
+    expect(container.querySelector('[data-testid="widget-publish-vm-btn"]')).toBeNull();
+    expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Published 2 knowledge assets to Verifiable Memory');
     await unmount();
   });
 });
