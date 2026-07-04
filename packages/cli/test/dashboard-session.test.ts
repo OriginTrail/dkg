@@ -1097,6 +1097,21 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('requires login sessions to carry a credential fingerprint', () => {
+    const store = new DashboardSessionStore();
+    const issuedAt = 1_000;
+    if (false) {
+      // @ts-expect-error Login sessions must be created with a fingerprint.
+      store.create(VALID_TOKEN, 'login', issuedAt);
+    }
+
+    const created = store.createLoginSession(VALID_TOKEN, 'credential-a', issuedAt);
+    const authenticated = store.authenticateSessionId(created.sessionId, issuedAt + 1);
+
+    expect(created.record).toMatchObject({ source: 'login', credentialFingerprint: 'credential-a' });
+    expect(authenticated).toMatchObject({ source: 'login', credentialFingerprint: 'credential-a' });
+  });
+
   it('rejects and prunes expired dashboard session cookies', () => {
     const store = new DashboardSessionStore();
     const issuedAt = 1_000;

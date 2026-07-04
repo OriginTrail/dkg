@@ -398,11 +398,10 @@ async function handleDashboardLoginExchange(
     jsonResponse(res, 503, { error: "Dashboard login is unavailable until an API token is configured" }, options.corsOrigin);
     return;
   }
-  const created = store.create(
+  const created = store.createLoginSession(
     compatToken!,
-    "login",
+    verified.credentialFingerprint,
     Date.now(),
-    { credentialFingerprint: verified.credentialFingerprint },
   );
   setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
   jsonResponse(res, 200, sessionResponse({
