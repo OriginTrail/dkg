@@ -106,7 +106,6 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
-import { resolveRegisterPublishPolicy } from './context-graph-register-policy.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -660,15 +659,29 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
-      // Effective register-time publishPolicy (body-wins, lazy store rehydrate,
-      // best-effort fallback) — see the route-owned resolveRegisterPublishPolicy
-      // in ./context-graph-register-policy; the publish auto-register path reads
-      // the same store reader but stays fail-loud.
-      const effectivePublishPolicy = await resolveRegisterPublishPolicy(
-        agent,
-        resolvedContextGraphId,
-        publishPolicy,
-      );
+      // Effective register-time publishPolicy, resolved inline (like the sibling
+      // PCA routes): an explicit body value wins with no store read; an omitted
+      // policy LAZILY rehydrates the create-time policy from the stored
+      // registration options. Best-effort — a stored-read failure must NOT fail
+      // the registration, so it warns and falls back to the request/default
+      // policy. (The publish auto-register path reads the same store reader
+      // directly and stays FAIL-LOUD: it must never register under the wrong
+      // on-chain policy.) The stored PCA id is not consulted here — pcaAccountId
+      // is explicit-only for /register (validated just below against the
+      // EFFECTIVE policy, which governs on-chain publish authority).
+      let effectivePublishPolicy = publishPolicy;
+      if (publishPolicy === undefined) {
+        try {
+          effectivePublishPolicy = (
+            await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId)
+          ).publishPolicy;
+        } catch (err) {
+          console.warn(
+            `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+          );
+          effectivePublishPolicy = publishPolicy;
+        }
+      }
       // The pcaAccountId request-validation stays at the route boundary:
       // pcaAccountId is curated-only, so reject it against the EFFECTIVE
       // (post-rehydration) policy.
