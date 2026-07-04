@@ -534,6 +534,28 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('fails closed when password-login verification omits the credential fingerprint', async () => {
+    const verifyCredentials = vi.fn(async () => ({ ok: true } as DashboardLoginVerification));
+    const selectCompatToken = vi.fn(() => VALID_TOKEN);
+    const started = await startServer({
+      dashboardLogin: { verifyCredentials, selectCompatToken },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+
+    expect(exchange.status).toBe(503);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    expect(selectCompatToken).not.toHaveBeenCalled();
+    await expect(exchange.json()).resolves.toMatchObject({
+      error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
+    });
+  });
+
   it('rejects wrong dashboard username/password without setting a cookie', async () => {
     const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason: 'mismatch' as const }));
     const started = await startServer({

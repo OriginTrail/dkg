@@ -145,8 +145,8 @@ import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens 
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
+  authenticateDashboardSessionRequest,
   createDashboardSessionAuthSource,
-  getDashboardSessionCookie,
   handleDashboardSessionRequest,
   selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
@@ -2914,17 +2914,13 @@ export async function runDaemonInner(
       agentAddress,
     };
   };
-  const authenticateDashboardSession = (request: IncomingMessage) => {
-    const session = dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request));
-    if (session?.source === "login") {
-      if (!session.credentialFingerprint || !isDashboardCredentialFingerprintCurrent(session.credentialFingerprint)) {
-        dashboardSessions.revoke(session.sessionId);
-        closeDashboardSessionSseClients(session.sessionId);
-        return null;
-      }
-    }
-    return session;
-  };
+  const authenticateDashboardSession = (request: IncomingMessage) =>
+    authenticateDashboardSessionRequest(request, dashboardSessions, {
+      dashboardLogin: {
+        isCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
+      },
+      onSessionRevoked: closeDashboardSessionSseClients,
+    });
   const dashboardSessionAuthSource = createDashboardSessionAuthSource({
     authenticate: authenticateDashboardSession,
     resolvePrincipal: resolveDashboardPrincipal,
@@ -3108,6 +3104,7 @@ export async function runDaemonInner(
             refreshValidTokens: () => reconcileValidTokens(validTokens),
             corsOrigin: reqCorsOrigin,
             onSessionRevoked: closeDashboardSessionSseClients,
+            authenticateSession: authenticateDashboardSession,
             ...(authEnabled
               ? {
                   dashboardLogin: {

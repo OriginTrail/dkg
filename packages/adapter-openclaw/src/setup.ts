@@ -1751,10 +1751,11 @@ export async function runSetup(options: SetupOptions, deps: RunSetupDeps = {}): 
   // before wallets / daemon startup. Best-effort: the operator can repair an
   // invalid file with the dashboard reset command without losing setup progress.
   if (!dryRun && deps.ensureDashboardCredentials) {
+    const dashboardCredentialHome = dkgDir();
     try {
-      await deps.ensureDashboardCredentials(dkgDir());
+      await deps.ensureDashboardCredentials(dashboardCredentialHome);
     } catch (err: any) {
-      warn(`Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" after setup to create or repair them.`);
+      warn(`Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" with DKG_HOME=${dashboardCredentialHome} after setup to create or repair them.`);
     }
   }
 

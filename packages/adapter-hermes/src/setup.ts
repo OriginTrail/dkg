@@ -764,7 +764,7 @@ export async function runHermesSetup(
     try {
       await deps.ensureDashboardCredentials(dashboardCredentialHome);
     } catch (err: any) {
-      console.warn(`[hermes-setup] Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" after setup to create or repair them.`);
+      console.warn(`[hermes-setup] Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" with DKG_HOME=${dashboardCredentialHome} after setup to create or repair them.`);
     }
   }
 

@@ -84,14 +84,10 @@ describe('dashboard credential setup helper', () => {
     await expect(readFile(dashboardCredentialsPath(tempDir), 'utf8')).rejects.toThrow();
   });
 
-  it('warns with reset-password guidance when the credential file is invalid', async () => {
+  it('throws invalid credential files to the setup orchestrator best-effort boundary', async () => {
     await writeFile(dashboardCredentialsPath(tempDir), '{"version":1,"password":"plaintext"}\n');
 
-    await ensureDashboardCredentialsForSetup(tempDir);
-
-    const warning = warnCapture.text();
-    expect(warning).toContain('could not create dashboard login credentials');
-    expect(warning).toContain('dkg auth dashboard reset-password');
-    expect(warning).toContain(`DKG_HOME=${tempDir}`);
+    await expect(ensureDashboardCredentialsForSetup(tempDir)).rejects.toThrow();
+    expect(warnCapture.text()).toBe('');
   });
 });

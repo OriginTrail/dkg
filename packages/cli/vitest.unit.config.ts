@@ -24,6 +24,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/auth.test.ts',
+          'test/auth-dashboard-command.test.ts',
           'test/dashboard-credentials.test.ts',
           'test/dashboard-credential-setup.test.ts',
           'test/dashboard-session.test.ts',

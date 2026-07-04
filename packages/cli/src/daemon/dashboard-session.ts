@@ -38,11 +38,12 @@ export interface DashboardSessionHandlerOptions {
   refreshValidTokens?: () => void;
   corsOrigin?: string | null;
   onSessionRevoked?: (sessionId: string) => void;
+  authenticateSession?: (req: IncomingMessage) => AuthenticatedDashboardSession | null;
   dashboardLogin?: DashboardLoginOptions;
 }
 
 export type DashboardLoginVerification =
-  | { ok: true; credentialFingerprint?: string }
+  | { ok: true; credentialFingerprint: string }
   | { ok: false; reason?: "missing" | "invalid" | "mismatch" };
 
 export interface DashboardLoginOptions {
@@ -180,6 +181,25 @@ export class DashboardLoginAttemptLimiter {
   }
 }
 
+export interface DashboardSessionAuthenticatorOptions {
+  dashboardLogin?: Pick<DashboardLoginOptions, "isCredentialFingerprintCurrent">;
+  onSessionRevoked?: (sessionId: string) => void;
+}
+
+export function authenticateDashboardSessionRequest(
+  req: IncomingMessage,
+  store: DashboardSessionStore,
+  options: DashboardSessionAuthenticatorOptions = {},
+): AuthenticatedDashboardSession | null {
+  const sessionId = getDashboardSessionCookie(req);
+  const session = store.authenticateSessionId(sessionId);
+  if (!session) return null;
+  if (!isStaleDashboardLoginSession(session, options)) return session;
+  store.revoke(session.sessionId);
+  options.onSessionRevoked?.(session.sessionId);
+  return null;
+}
+
 export async function handleDashboardSessionRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -190,13 +210,9 @@ export async function handleDashboardSessionRequest(
   const path = url.pathname;
   if (!path.startsWith("/api/dashboard/session")) return false;
 
-  const sessionId = getDashboardSessionCookie(req);
-  const rawSession = store.authenticateSessionId(sessionId);
-  const session = isStaleDashboardLoginSession(rawSession, options) ? null : rawSession;
-  if (rawSession && !session) {
-    store.revoke(rawSession.sessionId);
-    options.onSessionRevoked?.(rawSession.sessionId);
-  }
+  const authenticateSession = options.authenticateSession ?? ((request: IncomingMessage) =>
+    authenticateDashboardSessionRequest(request, store, options));
+  const session = authenticateSession(req);
 
   if (req.method === "GET" && path === "/api/dashboard/session/status") {
     if (!options.authEnabled) {
@@ -368,6 +384,14 @@ async function handleDashboardLoginExchange(
     return;
   }
 
+  if (!verified.credentialFingerprint) {
+    options.dashboardLogin.attemptLimiter?.releaseReservation(attemptKey);
+    jsonResponse(res, 503, {
+      error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
+    }, options.corsOrigin);
+    return;
+  }
+
   options.dashboardLogin.attemptLimiter?.recordSuccess(attemptKey);
   const compatToken = options.dashboardLogin.selectCompatToken();
   if (!verifyToken(compatToken, options.validTokens)) {
@@ -378,7 +402,7 @@ async function handleDashboardLoginExchange(
     compatToken!,
     "login",
     Date.now(),
-    verified.credentialFingerprint ? { credentialFingerprint: verified.credentialFingerprint } : {},
+    { credentialFingerprint: verified.credentialFingerprint },
   );
   setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
   jsonResponse(res, 200, sessionResponse({
@@ -458,7 +482,7 @@ function dashboardLoginAttemptKey(req: IncomingMessage, username: string): strin
 
 function isStaleDashboardLoginSession(
   session: AuthenticatedDashboardSession | null,
-  options: DashboardSessionHandlerOptions,
+  options: DashboardSessionAuthenticatorOptions,
 ): boolean {
   if (!session || session.source !== "login") return false;
   if (!options.dashboardLogin?.isCredentialFingerprintCurrent) return false;

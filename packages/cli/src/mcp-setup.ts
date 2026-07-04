@@ -1900,7 +1900,7 @@ export async function mcpSetupAction(
       await deps.ensureDashboardCredentials(dkgDirPath);
     } catch (err: any) {
       console.warn(`[setup] Could not create dashboard login credentials (${err?.message ?? String(err)}).`);
-      console.warn('[setup] Run "dkg auth dashboard reset-password" after setup to create or repair them.');
+      console.warn(`[setup] Run "dkg auth dashboard reset-password" with DKG_HOME=${dkgDirPath} after setup to create or repair them.`);
     }
   }
 
