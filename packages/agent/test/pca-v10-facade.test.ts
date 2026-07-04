@@ -302,4 +302,25 @@ describe('DKGAgent.confirmPublishingConvictionAgentRegistration (advisory outcom
     const agent = await makeAgent(new NoChainAdapter());
     expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR)).toBe('unsupported');
   });
+
+  // OS373 — the shared `pcaRegisteredProbe` boundary extracts the adapter method
+  // before invoking it, so preserving the adapter's `this` binding (via
+  // `.call(chain, …)`) is real behavior to pin. The scripted probes above use
+  // ARROW functions, which can't detect an unbound call; this uses a NORMAL
+  // method that reads a marker off `this`, so a regression to an unbound
+  // `read(accountId, agent)` would make `this` undefined and fail here. Covers
+  // both facade readers that route through the shared boundary.
+  it('preserves the adapter `this` binding through the shared capability probe', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    (chain as any).__pcaMarker = true;
+    (chain as any).isPublishingConvictionAgent = async function (this: any, _accountId: bigint, _agent: string) {
+      // A real adapter method reads adapter state off `this`; an unbound call
+      // makes `this` undefined and throws, failing this test.
+      if (this?.__pcaMarker !== true) throw new Error('lost adapter this-binding');
+      return true;
+    };
+    const agent = await makeAgent(chain);
+    expect(await agent.isPublishingConvictionAgent(ACCOUNT_ID, AGENT_ADDR)).toBe(true);
+    expect(await agent.confirmPublishingConvictionAgentRegistration(ACCOUNT_ID, AGENT_ADDR)).toBe('confirmed');
+  });
 });
