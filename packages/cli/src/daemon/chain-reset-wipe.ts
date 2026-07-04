@@ -70,6 +70,7 @@ import {
   rmSync,
   renameSync,
   statSync,
+  utimesSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint } from '@origintrail-official/dkg-storage';
@@ -223,34 +224,6 @@ export function skipChainResetWipe(env: NodeJS.ProcessEnv = process.env): boolea
   return env.DKG_SKIP_CHAIN_RESET_WIPE === '1';
 }
 
-/**
- * Assemble the {@link ChainResetWipeOptions} the daemon passes to
- * {@link chainResetWipe} at boot. Extracted (and exported) so the env→`skip`
- * wiring is a single tested unit — a regression that drops `skip` from the
- * built options now fails a unit test rather than only surfacing at runtime.
- * Mirrors the `resolveMemoryAgentAddress` precedent. Pure: `env` defaults to
- * `process.env` but is injectable for tests.
- */
-export function buildChainResetWipeOptions(args: {
-  dataDir: string;
-  // `null` as well as `undefined`: the daemon's resolved network is
-  // `NetworkConfig | null`, and `?.` treats both as "no marker → no-op wipe".
-  network: { chainResetMarker?: string } | null | undefined;
-  randomSamplingWalPath?: string;
-  storeConfig?: ChainResetWipeStoreConfig;
-  log: (msg: string) => void;
-  env?: NodeJS.ProcessEnv;
-}): ChainResetWipeOptions {
-  return {
-    dataDir: args.dataDir,
-    currentMarker: args.network?.chainResetMarker,
-    skip: skipChainResetWipe(args.env),
-    randomSamplingWalPath: args.randomSamplingWalPath,
-    storeConfig: args.storeConfig,
-    log: args.log,
-  };
-}
-
 function loadState(dataDir: string): PersistedNetworkState | null {
   try {
     const raw = readFileSync(join(dataDir, STATE_FILE), 'utf8');
@@ -395,7 +368,9 @@ export function selectBackupsToRotate(
   max: number,
 ): string[] {
   const keepOthers = Math.max(0, max - 1);
-  return entries
+  // Clone before sorting so this stays non-mutating even if the filter (which
+  // currently returns a fresh array) is later reordered or removed.
+  return [...entries]
     .filter((e) => e.name !== keepName)
     .sort((a, b) => b.mtimeMs - a.mtimeMs) // newest first
     .slice(keepOthers)
@@ -492,9 +467,22 @@ function performWipe(
     const sanitizedMarker = String(backup.currentMarker)
       .replace(/[^A-Za-z0-9._-]/g, '_')
       .slice(0, 120);
-    const backupName = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${Date.now()}`;
+    const now = Date.now();
+    const backupName = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${now}`;
     try {
       renameSync(storeAbs, join(dataDir, backupName));
+      // Stamp the backup's mtime to NOW. `renameSync` preserves store.nq's
+      // CONTENT mtime, which can be far older than this backup's creation (the
+      // #679 dev case: store.nq untouched between quick branch switches). If
+      // rotation ranked by that inherited mtime it could evict a NEWER recovery
+      // snapshot and keep an older one — so we make mtime reflect backup-creation
+      // time. Best-effort: on failure the keepName exemption still protects the
+      // fresh snapshot this run, so a missed stamp never loses today's backup.
+      try {
+        utimesSync(join(dataDir, backupName), new Date(now), new Date(now));
+      } catch (err) {
+        log(`  WARN: could not stamp backup mtime for ${backupName}: ${(err as Error).message}`);
+      }
       backedUpFiles.push(backupName);
       log(`  backed up: store.nq → ${backupName}`);
       rotateStoreBackups(dataDir, backupName, log);

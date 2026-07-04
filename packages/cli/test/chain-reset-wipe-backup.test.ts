@@ -26,11 +26,11 @@ import {
   mkdirSync,
   readdirSync,
   utimesSync,
+  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  buildChainResetWipeOptions,
   chainResetWipe,
   selectBackupsToRotate,
   skipChainResetWipe,
@@ -325,6 +325,32 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
       nowSpy.mockRestore();
     }
   });
+
+  it('stamps the backup mtime to CREATION time, not store.nq\'s inherited content mtime', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), 'STALE_CONTENT');
+    // Backdate store.nq far into the past — the #679 dev case where store.nq is
+    // untouched across quick branch switches. renameSync carries this stale content
+    // mtime onto the backup; the source re-stamps it to NOW so mtime-ranked rotation
+    // can't evict a NEWER recovery snapshot in favour of this one. (Post-2000 date —
+    // near-epoch dates don't apply via Windows utimesSync.)
+    const stale = new Date('2001-01-01');
+    utimesSync(join(dataDir, 'store.nq'), stale, stale);
+
+    const testStart = Date.now();
+    const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
+
+    expect(result.backedUpFiles).toHaveLength(1);
+    const backupMtime = statSync(join(dataDir, result.backedUpFiles[0])).mtimeMs;
+    // NOT the inherited 2001 content mtime (~9.78e11)...
+    expect(backupMtime).toBeGreaterThan(Date.parse('2020-01-01'));
+    // ...but the backup's creation time (this run), within a small clock slack.
+    expect(backupMtime).toBeGreaterThanOrEqual(testStart - 5_000);
+    expect(backupMtime).toBeLessThanOrEqual(Date.now() + 5_000);
+  });
 });
 
 describe('selectBackupsToRotate (pure rotation policy, #679)', () => {
@@ -458,62 +484,36 @@ describe('chainResetWipe — retention via rotation (#679)', () => {
 });
 
 describe('skipChainResetWipe (env switch, #679)', () => {
-  it('is true only for exactly "1"', () => {
+  afterEach(() => {
+    // Don't leak a vi.stubEnv into sibling tests / describes.
+    vi.unstubAllEnvs();
+  });
+
+  it('is true only for exactly "1" (injected env)', () => {
     expect(skipChainResetWipe({ DKG_SKIP_CHAIN_RESET_WIPE: '1' } as NodeJS.ProcessEnv)).toBe(true);
   });
 
-  it('is false for "0", "true", and unset', () => {
+  it('is false for "0", "true", and unset (injected env)', () => {
     expect(skipChainResetWipe({ DKG_SKIP_CHAIN_RESET_WIPE: '0' } as NodeJS.ProcessEnv)).toBe(false);
     expect(skipChainResetWipe({ DKG_SKIP_CHAIN_RESET_WIPE: 'true' } as NodeJS.ProcessEnv)).toBe(false);
     expect(skipChainResetWipe({} as NodeJS.ProcessEnv)).toBe(false);
   });
-});
 
-describe('buildChainResetWipeOptions (env→skip wiring, #679)', () => {
-  const base = { dataDir: '/d', network: { chainResetMarker: 'M' }, log: () => {} };
-
-  it('wires DKG_SKIP_CHAIN_RESET_WIPE=1 → skip:true and passes marker + dataDir through', () => {
-    const opts = buildChainResetWipeOptions({
-      ...base,
-      env: { DKG_SKIP_CHAIN_RESET_WIPE: '1' } as NodeJS.ProcessEnv,
-    });
-    expect(opts.skip).toBe(true);
-    expect(opts.currentMarker).toBe('M');
-    expect(opts.dataDir).toBe('/d');
+  // OXBb5 — production calls skipChainResetWipe() with NO arg, reading the REAL
+  // process.env. The injected-object tests above don't exercise that default, so
+  // cover it via vi.stubEnv (the env→skip entry point the deleted builder used to guard).
+  it('reads real process.env on the no-arg path: "1" → true', () => {
+    vi.stubEnv('DKG_SKIP_CHAIN_RESET_WIPE', '1');
+    expect(skipChainResetWipe()).toBe(true);
   });
 
-  it('leaves skip:false for "0" and for an unset env (regression guard for the env→skip wire)', () => {
-    expect(
-      buildChainResetWipeOptions({ ...base, env: { DKG_SKIP_CHAIN_RESET_WIPE: '0' } as NodeJS.ProcessEnv })
-        .skip,
-    ).toBe(false);
-    expect(buildChainResetWipeOptions({ ...base, env: {} as NodeJS.ProcessEnv }).skip).toBe(false);
+  it('reads real process.env on the no-arg path: "0" → false', () => {
+    vi.stubEnv('DKG_SKIP_CHAIN_RESET_WIPE', '0');
+    expect(skipChainResetWipe()).toBe(false);
   });
 
-  it('maps network null / undefined to currentMarker: undefined (a no-op wipe)', () => {
-    expect(
-      buildChainResetWipeOptions({ dataDir: '/d', network: null, log: () => {}, env: {} as NodeJS.ProcessEnv })
-        .currentMarker,
-    ).toBeUndefined();
-    expect(
-      buildChainResetWipeOptions({
-        dataDir: '/d',
-        network: undefined,
-        log: () => {},
-        env: {} as NodeJS.ProcessEnv,
-      }).currentMarker,
-    ).toBeUndefined();
-  });
-
-  it('passes through randomSamplingWalPath and storeConfig when provided', () => {
-    const storeConfig = { backend: 'blazegraph', options: { url: 'http://x/sparql' } };
-    const opts = buildChainResetWipeOptions({
-      ...base,
-      env: {} as NodeJS.ProcessEnv,
-      randomSamplingWalPath: '/var/wal',
-      storeConfig,
-    });
-    expect(opts.randomSamplingWalPath).toBe('/var/wal');
-    expect(opts.storeConfig).toBe(storeConfig);
+  it('reads real process.env on the no-arg path: unset → false', () => {
+    // No stub → the var is absent from the runner env.
+    expect(skipChainResetWipe()).toBe(false);
   });
 });
