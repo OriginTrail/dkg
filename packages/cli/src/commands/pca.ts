@@ -112,12 +112,14 @@ function describeRegisterAdvisory(advisory: RegisterAgentAdvisoryStatus): string
   switch (advisory) {
     case 'confirmed':
       return 'confirmed on-chain';
+    case 'not_observed':
+      return 'pending (tx mined; on-chain read has not observed the agent yet — follower-RPC lag)';
+    case 'inconclusive':
+      return 'pending (tx mined; on-chain confirmation was inconclusive — the advisory read failed)';
     case 'unsupported':
       return 'not verifiable on this adapter (registration is authoritative via the mined tx)';
     case 'legacy-unverified':
       return 'unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify';
-    case 'pending':
-      return 'pending (tx mined; on-chain confirmation not yet observed — follower RPC lag)';
     default: {
       const _exhaustive: never = advisory;
       return _exhaustive;

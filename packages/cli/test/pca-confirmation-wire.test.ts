@@ -21,10 +21,12 @@ describe('parseRegisterPcaAgentResult', () => {
   it('current daemon → normalized advisory for every shape', () => {
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: true, adapterSupported: true }))
       .toEqual({ ...BASE, registered: true, advisory: 'confirmed' });
+    // The canonical outcome is preserved (not collapsed): verified:false ⟹
+    // not_observed (read didn't see it yet), verified:null ⟹ inconclusive (read failed).
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: false, adapterSupported: true }))
-      .toEqual({ ...BASE, registered: true, advisory: 'pending' });
+      .toEqual({ ...BASE, registered: true, advisory: 'not_observed' });
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: null, adapterSupported: true }))
-      .toEqual({ ...BASE, registered: true, advisory: 'pending' });
+      .toEqual({ ...BASE, registered: true, advisory: 'inconclusive' });
     expect(parseRegisterPcaAgentResult({ ...BASE, registered: true, verified: null, adapterSupported: false }))
       .toEqual({ ...BASE, registered: true, advisory: 'unsupported' });
   });

@@ -47,10 +47,18 @@ describe('pca register-agent — advisory output rendering', () => {
     expect(out).toMatch(/verified:\s+confirmed on-chain/);
   });
 
-  it('pending → "pending"', async () => {
-    const out = await runRegisterAgent({ registered: true, advisory: 'pending' });
+  // not_observed / inconclusive both render as operator-facing "pending …" text
+  // but stay distinct in the model (the canonical outcome is preserved).
+  it('not_observed → "pending" (follower-RPC lag)', async () => {
+    const out = await runRegisterAgent({ registered: true, advisory: 'not_observed' });
     expect(out).toMatch(/registered: true/);
-    expect(out).toMatch(/verified:\s+pending/);
+    expect(out).toMatch(/verified:\s+pending.*follower-RPC lag/);
+  });
+
+  it('inconclusive → "pending" (read failed)', async () => {
+    const out = await runRegisterAgent({ registered: true, advisory: 'inconclusive' });
+    expect(out).toMatch(/registered: true/);
+    expect(out).toMatch(/verified:\s+pending.*inconclusive/);
   });
 
   it('unsupported → "not verifiable on this adapter"', async () => {

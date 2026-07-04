@@ -52,9 +52,14 @@ export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgent
   }
 }
 
-/** The register-agent advisory confirmation status, for display. `legacy-unverified`
- *  = a pre-#1346 daemon that could not confirm and whose success we cannot assert. */
-export type RegisterAgentAdvisoryStatus = 'confirmed' | 'pending' | 'unsupported' | 'legacy-unverified';
+/** The register-agent advisory confirmation status. Mirrors the agent's canonical
+ *  `PcaConfirmationOutcome` (confirmed / not_observed / inconclusive / unsupported)
+ *  so the client boundary PRESERVES the outcome rather than collapsing
+ *  not_observed and inconclusive into one lossy status — plus the single
+ *  skew-only status `legacy-unverified` (a pre-#1346 daemon that could not
+ *  confirm and whose tx success we cannot assert). Display text is derived at the
+ *  command layer. */
+export type RegisterAgentAdvisoryStatus = PcaConfirmationOutcome | 'legacy-unverified';
 
 /**
  * The stable, CLI-facing result of `ApiClient.registerPcaAgent` — the
@@ -103,7 +108,15 @@ export function parseRegisterPcaAgentResult(raw: unknown): RegisterPcaAgentResul
     // No probe surface can only be inconclusive: adapterSupported:false ⟹ verified:null.
     if (r.adapterSupported === false && r.verified !== null) return reject('incoherent verified/adapterSupported');
     registered = true;
-    advisory = r.verified === true ? 'confirmed' : r.adapterSupported === false ? 'unsupported' : 'pending';
+    // Translate the wire booleans back into the canonical outcome (no lossy
+    // collapse): verified true ⟹ confirmed; no probe surface ⟹ unsupported (its
+    // verified is null, validated above); else verified false ⟹ not_observed
+    // (read didn't see it yet) and verified null ⟹ inconclusive (read failed).
+    advisory =
+      r.verified === true ? 'confirmed'
+        : r.adapterSupported === false ? 'unsupported'
+          : r.verified === false ? 'not_observed'
+            : 'inconclusive';
   } else {
     // LEGACY daemon (verified absent). If the old read OBSERVED it registered
     // (registered:true + adapterSupported:true) the tx succeeded → confirmed.
