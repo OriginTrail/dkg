@@ -74,8 +74,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
     adapters.push(a);
 
-    await expect(a.getEvmChainId()).resolves.toBe(31337n);
-    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    await expect(a.getBlockNumber()).resolves.toBe(16);
+    await expect(a.getBlockNumber()).resolves.toBe(16);
 
     // Source of truth: the server's own per-method request log. The tracker's
     // window must EQUAL it — no over- or under-counting.
@@ -87,19 +87,185 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     }
     // ...and per-method the other way: every server-observed method was counted.
     // (The harness has no method-list accessor, so probe the ones this read issues.)
-    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
+    expect(usage.byMethod['eth_blockNumber'] ?? 0).toBe(rpc.hits('eth_blockNumber'));
 
     // OTel counter: bounded labels only.
     const pts = await requestPoints();
     expect(pts.length).toBeGreaterThanOrEqual(1);
     const keys = new Set(pts.flatMap((p) => Object.keys(p)));
     expect([...keys].sort()).toEqual(['chain_id', 'rpc_method']);
-    expect(pts.some((p) => p.rpc_method === 'eth_chainId' && p.chain_id === 'evm:31337')).toBe(true);
+    expect(pts.some((p) => p.rpc_method === 'eth_blockNumber' && p.chain_id === 'evm:31337')).toBe(true);
 
     // Drain semantics: deltas, not cumulative; lifetime monotonic.
     const drained = a.drainRpcUsage();
     expect(rpcUsageWindowTotal(drained)).toBe(0);
     expect(drained.lifetimeTotal).toBe(usage.lifetimeTotal);
+  });
+
+  it('STATIC NETWORK: getEvmChainId validates configured chain id once, then caches it', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+    expect(rpcUsageWindowTotal(usage)).toBe(1);
+  });
+
+  it('STATIC NETWORK: ordinary reads validate configured chain id once, then avoid steady eth_chainId calls', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    adapters.push(a);
+
+    await expect(a.getBlockNumber()).resolves.toBe(16);
+    await expect(a.getBlockNumber()).resolves.toBe(16);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+    expect(usage.byMethod['eth_blockNumber']).toBe(rpc.hits('eth_blockNumber'));
+    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+  });
+
+  it('STATIC NETWORK: ordinary reads fail closed on configured/live chain-id mismatch', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ results: { eth_chainId: '0x14a34' } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    adapters.push(a);
+
+    await expect(a.getBlockNumber()).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(rpc.hits('eth_blockNumber')).toBe(0);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+    expect(usage.byMethod['eth_blockNumber'] ?? 0).toBe(0);
+  });
+
+  it('STATIC NETWORK: event log scans fail closed before probing mismatched providers', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ results: { eth_chainId: '0x14a34' } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    adapters.push(a);
+
+    await expect(a.resolveLogScanHead('unit log scan'))
+      .rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(rpc.hits('eth_blockNumber')).toBe(0);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+    expect(usage.byMethod['eth_blockNumber'] ?? 0).toBe(0);
+  });
+
+  it('STATIC NETWORK: failover validates a backup endpoint before it can serve reads', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_blockNumber'] });
+    const backup = await startLoopbackRpc({ results: { eth_chainId: '0x14a34', eth_blockNumber: '0x20' } });
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(a.getBlockNumber()).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    const usage = a.drainRpcUsage();
+    expect(primary.hits('eth_chainId')).toBe(1);
+    expect(primary.hits('eth_blockNumber')).toBe(1);
+    expect(backup.hits('eth_chainId')).toBe(1);
+    expect(backup.hits('eth_blockNumber')).toBe(0);
+    expect(usage.byMethod['eth_chainId']).toBe(2);
+    expect(usage.byMethod['eth_blockNumber']).toBe(1);
+    expect(rpcUsageWindowTotal(usage)).toBe(primary.totalHits() + backup.totalHits());
+  });
+
+  it('STATIC NETWORK: configured chain ids stay bigint-only above JS safe-integer range', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ results: { eth_chainId: '0x20000000000001' } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      chainId: 'evm:9007199254740993',
+    }));
+    adapters.push(a);
+
+    await expect(a.getBlockNumber()).resolves.toBe(16);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+    expect(usage.byMethod['eth_blockNumber']).toBe(rpc.hits('eth_blockNumber'));
+  });
+
+  it('STATIC NETWORK: getEvmChainId preserves configured bigint chain ids above JS safe-integer range', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ results: { eth_chainId: '0x20000000000001' } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      chainId: 'evm:9007199254740993',
+    }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).resolves.toBe(9007199254740993n);
+
+    const usage = a.drainRpcUsage();
+    expect(rpc.hits('eth_chainId')).toBe(1);
+    expect(usage.byMethod['eth_chainId']).toBe(1);
+  });
+
+  it('STATIC NETWORK: non-numeric chain labels fall back to dynamic detection for compatibility', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      chainId: 'dynamic-test',
+    }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    expect(rpc.hits('eth_chainId')).toBeGreaterThan(0);
+  });
+
+  it('STATIC NETWORK: getEvmChainId fails when configured chain id does not match the RPC', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ results: { eth_chainId: '0x14a34' } });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    const usage = a.drainRpcUsage();
+    expect(usage.byMethod['eth_chainId']).toBe(rpc.hits('eth_chainId'));
+    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+  });
+
+  it('STATIC NETWORK: getEvmChainId still surfaces endpoint exhaustion during validation', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    adapters.push(a);
+
+    await expect(a.getEvmChainId()).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+
+    const usage = a.drainRpcUsage();
+    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
+    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
   });
 
   it('RETRIES BILL: ethers 429-retry attempts below _send are counted (tracker == server hits)', async () => {
@@ -111,7 +277,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     // must match exactly (this is the undercount the review flagged).
     const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
     servers.push(rpc);
-    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url }));
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, staticNetwork: false }));
     adapters.push(a);
 
     await expect(a.getEvmChainId()).rejects.toBeTruthy(); // perpetual 429 → bounded failure
@@ -140,7 +306,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const rpcA = await startLoopbackRpc({ throttle: ['eth_chainId'] });
     const rpcB = await startLoopbackRpc();
     servers.push(rpcA, rpcB);
-    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpcA.url, rpcUrls: [rpcA.url, rpcB.url] }));
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpcA.url, rpcUrls: [rpcA.url, rpcB.url], staticNetwork: false }));
     adapters.push(a);
 
     await expect(a.getEvmChainId()).resolves.toBe(31337n); // failover succeeds via B

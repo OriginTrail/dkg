@@ -42,6 +42,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     adminPrivateKey: ADMIN_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
+    staticNetwork: false,
     ...overrides,
   };
 }

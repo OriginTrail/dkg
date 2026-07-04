@@ -472,7 +472,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
     // Unreachable below (kept for type-completeness until the mirror is removed);
     // the unsupported-mirror guard above throws before any on-chain side effect.
-    const v10ChainId = (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId;
+    const v10ChainId = await this.getEvmChainId();
     const v10KavAddress = await this.contracts.knowledgeAssetsLifecycle!.getAddress();
     const authorTypedData = buildAuthorAttestationTypedData({
       chainId: v10ChainId,

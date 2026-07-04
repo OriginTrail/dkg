@@ -37,6 +37,73 @@ beforeEach(() => {
   _resetRpcFailoverStatsForTest();
 });
 
+describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
+  const ADDR = '0x00000000000000000000000000000000000000a1';
+
+  function makeIdentityLookupAdapter(values: bigint[]) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.resolveContract = recorder(async () => ({}));
+    let i = 0;
+    const readContract = recorder(async () => {
+      const value = values[Math.min(i, values.length - 1)];
+      i++;
+      return value;
+    });
+    a.readContract = readContract;
+    return { a, readContract };
+  }
+
+  it('invalid addresses return 0 without an RPC read', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([1n]);
+    await expect(a.getIdentityIdForAddress('not-an-address')).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+
+  it('coalesces concurrent negative lookups but does not cache the negative result', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityIdForAddress(ADDR)),
+    );
+    expect(results.every((value) => value === 0n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('refreshes positive lookups after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('local registration and removal update the bounded positive cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n]);
+
+    a.seedIdentityIdForAddress(ADDR, 7n);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(0);
+
+    a.clearIdentityIdForAddress(ADDR);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+});
+
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
@@ -58,6 +125,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     adminPrivateKey: ADMIN_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
+    staticNetwork: false,
     ...overrides,
   };
 }
@@ -1076,6 +1144,48 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
+  it('startHubRotationListener skips optional listener setup when primary static validation fails but backup reads still work', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+      staticNetwork: true,
+    }));
+    const primaryError = new Error('429 too many requests');
+    (primaryError as any).status = 429;
+    const primaryProvider = {
+      send: recorder(async () => { throw primaryError; }),
+      getBlockNumber: recorder(async () => {
+        throw new Error('primary read should fail before blockNumber');
+      }),
+    };
+    const backupProvider = {
+      send: recorder(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        return '0x7a69';
+      }),
+      getBlockNumber: recorder(async () => 123),
+    };
+    const on = recorder(async () => {
+      throw new Error('listener subscription should be skipped');
+    });
+
+    a.primaryProvider = primaryProvider;
+    a.provider = primaryProvider;
+    a.providers = [primaryProvider, backupProvider];
+    a.rpcUrls = ['https://primary.example', 'https://backup.example'];
+    a.contracts.hub = { on };
+    a.hubRotationListenerStarted = false;
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    expect(on.calls).toEqual([]);
+    expect(a.hubRotationListenerStarted).toBe(false);
+
+    await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
+      .resolves.toBe(123);
+    expect(primaryProvider.getBlockNumber.calls).toEqual([]);
+    expect(backupProvider.getBlockNumber.calls).toEqual([[]]);
+  });
+
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).contracts.randomSampling = { dummy: 'rs' };
@@ -1624,7 +1734,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
     // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
@@ -1671,7 +1781,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
 
   it('refreshes after the 1h TTL expires', async () => {
     vi.useFakeTimers({ now: 0 });
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let returned = 31337n;
     const getNetwork = recorder(async () => ({ chainId: returned }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
@@ -1696,7 +1806,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
     // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
@@ -1715,7 +1825,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('does NOT cache failures (next call retries the underlying read)', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let attempts = 0;
     const getNetwork = recorder(async () => {
       attempts += 1;
@@ -2585,6 +2695,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     const tracByAddr = funding?.trac ?? new Map<string, bigint>();
     (a as any).provider.getBalance = recorder(async (addr: string) =>
       nativeByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x7a69';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
 
     // R1/#1336: readTracBalance now reads via readContractWith (failOpenFundingRead
     // policy) → rebindContract does `token.connect(p).balanceOf(addr)`, so the
@@ -2772,12 +2886,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
-    // `provider.getNetwork()` is called for chainId; stub it so the update path
-    // doesn't hit the placeholder RPC. R1/#1336: getEvmChainId reads via
-    // readProvider over this.providers[0] (=== this.provider), so MUTATE
-    // getNetwork on the shared object — REPLACING this.provider would orphan
-    // this.providers[0] (and the helper's getBalance mock) and the read would
-    // dial the dead RPC instead.
+    // `getEvmChainId()` validates chainId through this.providers[0]
+    // (=== this.provider), so mutate the shared object — replacing
+    // this.provider would orphan this.providers[0] and the read would dial the
+    // dead placeholder RPC instead.
     (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
 
     const updateParams: any = {
@@ -2827,6 +2939,48 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     // Assert the signer ADDRESS, not object identity (#870 "publish signed by
     // walletB, no mid-flight rotation" invariant is preserved).
     expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
+  });
+
+  it('update path: validates live chain id before approval/signing on static-network providers', async () => {
+    const allowanceByOwner = makeAllowanceByOwner();
+    const { a, walletB, sendSpy, signSpy, tokenWithSigner } =
+      makeMultiWalletV10Adapter(allowanceByOwner, undefined, [], { staticNetwork: true });
+
+    const kaId = 42n;
+    (a as any).contracts.knowledgeAssetStorage = connectable({
+      getLatestMerkleRootPublisher: recorder(async () => walletB.address),
+      getMerkleRoots: recorder(async () => []),
+    });
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x14a34';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+
+    const updateParams: any = {
+      kaId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('umr'))),
+      newByteSize: 100,
+      newMerkleLeafCount: 1,
+      newTokenAmount: 0n,
+      authorAddress: walletB.address,
+      authorR: new Uint8Array(32),
+      authorVS: new Uint8Array(32),
+      authorSchemeVersion: 1,
+      ackSignatures: [{
+        identityId: 1n,
+        r: new Uint8Array(32),
+        vs: new Uint8Array(32),
+      }],
+    };
+
+    await expect(
+      a.updateKnowledgeCollectionV10(updateParams),
+    ).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    expect(tokenWithSigner.allowance.calls).toHaveLength(0);
+    expect(sendSpy.calls).toHaveLength(0);
+    expect(signSpy.calls).toHaveLength(0);
   });
 
 // -----------------------------------------------------------------------------

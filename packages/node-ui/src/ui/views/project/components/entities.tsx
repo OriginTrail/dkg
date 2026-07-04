@@ -580,10 +580,24 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           {busy === '__all__' ? '...' : actionAllLabel}
         </button>
       </div>
-      {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
-      {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
+      {result && (
+        <div
+          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
+          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}
+        >
+          ✓ {result}
+        </div>
+      )}
+      {error && (
+        <div
+          data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
+          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
+        >
+          ✕ {error}
+        </div>
+      )}
       {assertions.map(a => (
-        <div key={a.graphUri} className="v10-item-row">
+        <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
           <span className="v10-item-icon">▤</span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
@@ -609,6 +623,7 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
             </div>
           </div>
           <button
+            data-testid="assertion-row-action"
             className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
             disabled={busy !== null}
             onClick={ev => { ev.stopPropagation(); handlePromote(a); }}

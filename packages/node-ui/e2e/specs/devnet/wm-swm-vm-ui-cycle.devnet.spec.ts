@@ -57,6 +57,7 @@ test.describe.configure({ mode: 'serial' });
 const run: {
   cgId?: string;
   cgName?: string;
+  assertionName?: string;
   dataGraph?: string;
   markerUri?: string;
   rootUri?: string;
@@ -114,12 +115,19 @@ async function openImportModal(page: Page) {
   await importBtn.click();
 }
 
-/** A promote control on whichever layer-view surface renders (testid-agnostic). */
-function promoteControl(page: Page) {
-  return page
-    .getByTestId('widget-promote-all-btn')
-    .or(page.getByTestId('list-promote-all-btn'))
-    .or(page.getByTestId('mlv-promote-all-btn'));
+async function promoteImportedAssertion(page: Page, assertionName: string) {
+  const assertionsTab = page.getByRole('button', { name: 'Assertions' }).first();
+  await expect(assertionsTab).toBeVisible({ timeout: 10_000 });
+  await assertionsTab.click();
+
+  const row = page.getByTestId('assertion-list-row').filter({ hasText: assertionName });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.getByTestId('assertion-row-action').click();
+
+  const result = page.getByTestId('assertion-promote-result');
+  await expect(result).toBeVisible({ timeout: 20_000 });
+  await expect(result).toContainText(/Promoted \d+ triple/i);
+  await expect(result).not.toContainText(/No triples were promoted/i);
 }
 
 /** A publish control on whichever layer-view surface renders. */
@@ -128,20 +136,6 @@ function publishControl(page: Page) {
     .getByTestId('widget-publish-vm-btn')
     .or(page.getByTestId('list-publish-all-btn'))
     .or(page.getByTestId('mlv-publish-all-btn'));
-}
-
-/** Any rendered promote/publish result container's combined text. */
-async function resultText(page: Page): Promise<string> {
-  const containers = page
-    .getByTestId('layer-action-result')
-    .or(page.getByTestId('list-action-result'))
-    .or(page.getByTestId('mlv-promote-result'));
-  const n = await containers.count();
-  let text = '';
-  for (let i = 0; i < n; i++) {
-    text += (await containers.nth(i).textContent()) ?? '';
-  }
-  return text;
 }
 
 test.describe('WM → SWM → VM via the UI', () => {
@@ -171,6 +165,7 @@ test.describe('WM → SWM → VM via the UI', () => {
     // The assertion now exists in WM. Discover its data graph + marker URI.
     await expect(async () => {
       const a = await findWmAssertion(run.cgId!, FIXTURE_NAME_PART);
+      run.assertionName = a.name;
       run.dataGraph = a.dataGraphUri;
       run.markerUri = a.markerUri;
     }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
@@ -191,27 +186,18 @@ test.describe('WM → SWM → VM via the UI', () => {
   });
 
   test('promotes WM → SWM via the UI and the triples actually migrate', async ({ shell, page }) => {
-    test.skip(!run.dataGraph || !run.rootUri, 'Import step did not produce an assertion');
+    test.skip(!run.assertionName || !run.dataGraph || !run.rootUri, 'Import step did not produce an assertion');
     await shell.goto();
     await openProjectTab(page, run.cgName!);
 
-    // Switch to the Working Memory layer where the promote control lives.
+    // Switch to the Working Memory layer where the assertion promote control lives.
     await page.locator('button.v10-layer-switch-btn[data-layer="wm"]').first().click();
 
-    const promote = promoteControl(page);
-    await expect(promote).toBeVisible({ timeout: 15_000 });
-    await promote.click();
-
-    // UI contract: the result must NOT be the misleading "No triples were
-    // promoted" no-op that the blank-node DELETE bug produced. Wait for a
-    // result to render, then assert it isn't the no-op message.
-    await expect(async () => {
-      const text = await resultText(page);
-      expect(text.length, 'a promote result must render').toBeGreaterThan(0);
-      expect(text, 'promote must not report the no-op (the bug symptom)').not.toMatch(
-        /No triples were promoted/i,
-      );
-    }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
+    // UI contract: promote the assertion imported by this spec, not the shared
+    // devnet's bulk "Promote All" surface. The bulk widget can hit unrelated
+    // seeded assertions first, including named-graph KAs that are intentionally
+    // blocked from SWM sharing.
+    await promoteImportedAssertion(page, run.assertionName!);
 
     // Migration contract (surface-independent): the assertion's content left
     // WM (blank nodes included), landed in SWM (root + skolemized children),

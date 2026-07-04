@@ -26,6 +26,7 @@
     "ka-lifecycle-cli",
     "rfc51-publishing-allocation",
     "rich-scenario",
+    "rpc-quiet-window",
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",
