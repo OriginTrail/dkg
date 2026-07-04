@@ -7,8 +7,8 @@ import {
   getDashboardSessionCookie,
   setDashboardSessionCookie,
 } from "./dashboard-session-cookie.js";
-import { verifyDashboardCsrf } from "./dashboard-session-auth-source.js";
-import { hasTrustedDashboardOrigin, isLoopbackRequest } from "./dashboard-session-policy.js";
+import { authorizeDashboardSessionRequest, verifyDashboardCsrf } from "./dashboard-session-auth-source.js";
+import { isLoopbackRequest } from "./dashboard-session-policy.js";
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -16,8 +16,11 @@ import {
 
 export { DASHBOARD_SESSION_COOKIE, getDashboardSessionCookie } from "./dashboard-session-cookie.js";
 export {
+  authorizeDashboardSessionRequest,
   createDashboardSessionAuthSource,
   verifyDashboardCsrf,
+  type DashboardSessionAuthorization,
+  type DashboardSessionAuthorizationOptions,
   type DashboardSessionAuthSourceOptions,
 } from "./dashboard-session-auth-source.js";
 export {
@@ -133,12 +136,11 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 200, { ok: true }, options.corsOrigin);
       return true;
     }
-    if (!verifyDashboardCsrf(req, session)) {
-      jsonResponse(res, 403, { error: "Invalid or missing dashboard CSRF token" }, options.corsOrigin);
-      return true;
-    }
-    if (!hasTrustedDashboardOrigin(req, options.corsOrigin)) {
-      jsonResponse(res, 403, { error: "Untrusted dashboard request origin" }, options.corsOrigin);
+    const authorization = authorizeDashboardSessionRequest(req, session, {
+      corsOrigin: options.corsOrigin,
+    });
+    if (!authorization.ok) {
+      jsonResponse(res, authorization.status, { error: authorization.error }, options.corsOrigin);
       return true;
     }
     store.revoke(session.sessionId);

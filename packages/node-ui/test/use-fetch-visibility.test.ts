@@ -15,17 +15,21 @@ interface HostProps {
 }
 
 function FetchHost({ fetcher, intervalMs }: HostProps) {
-  useFetch(fetcher, [], intervalMs);
-  return null;
+  const result = useFetch(fetcher, [], intervalMs);
+  return React.createElement('span', {
+    'data-error': result.error ?? '',
+    'data-loading': String(result.loading),
+  });
 }
 
-function mount(props: HostProps): void {
+function mount(props: HostProps): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => { root.render(React.createElement(FetchHost, props)); });
   mountedRoots.push(root);
   mountedContainers.push(container);
+  return container;
 }
 
 function setHidden(hidden: boolean): void {
@@ -42,6 +46,7 @@ describe('useFetch visibility-pause (BUG-007 path B)', () => {
   beforeEach(() => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     vi.useFakeTimers();
+    sessionStorage.clear();
     Object.defineProperty(document, 'hidden', { value: false, configurable: true });
   });
 
@@ -52,6 +57,8 @@ describe('useFetch visibility-pause (BUG-007 path B)', () => {
       act(() => { root.unmount(); });
       container.remove();
     }
+    sessionStorage.clear();
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
 
@@ -145,5 +152,30 @@ describe('useFetch visibility-pause (BUG-007 path B)', () => {
     await act(async () => { vi.advanceTimersByTime(10_000); });
     await flush();
     expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('reloads once and marks the session when the initial request returns 401', async () => {
+    const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => undefined);
+    const fetcher = vi.fn().mockRejectedValue({ status: 401 });
+
+    const container = mount({ fetcher, intervalMs: 0 });
+    await flush();
+
+    expect(sessionStorage.getItem('__dkg_401_reloaded')).toBe('1');
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('span')?.getAttribute('data-error')).toBe('');
+  });
+
+  it('does not reload repeatedly after a 401 reload has already been attempted', async () => {
+    const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => undefined);
+    sessionStorage.setItem('__dkg_401_reloaded', '1');
+    const fetcher = vi.fn().mockRejectedValue({ status: 401 });
+
+    const container = mount({ fetcher, intervalMs: 0 });
+    await flush();
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(container.querySelector('span')?.getAttribute('data-error'))
+      .toBe('Authentication expired — please refresh the page.');
   });
 });

@@ -17,6 +17,40 @@ export function verifyDashboardCsrf(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+export interface DashboardSessionAuthorizationOptions {
+  corsOrigin?: string | null;
+  verifyCsrf?: (req: IncomingMessage, session: AuthenticatedDashboardSession) => boolean;
+}
+
+export type DashboardSessionAuthorization =
+  | { ok: true; csrfRequired: boolean; csrfValidated: boolean }
+  | { ok: false; status: 403; error: string };
+
+export function authorizeDashboardSessionRequest(
+  req: IncomingMessage,
+  session: AuthenticatedDashboardSession,
+  options: DashboardSessionAuthorizationOptions = {},
+): DashboardSessionAuthorization {
+  const unsafe = isUnsafeHttpMethod(req.method);
+  const verifyCsrfForRequest = options.verifyCsrf ?? verifyDashboardCsrf;
+  const csrfValidated = unsafe ? verifyCsrfForRequest(req, session) : false;
+  if (unsafe && !csrfValidated) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Invalid or missing dashboard CSRF token",
+    };
+  }
+  if (unsafe && !hasTrustedDashboardOrigin(req, options.corsOrigin)) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Untrusted dashboard request origin",
+    };
+  }
+  return { ok: true, csrfRequired: unsafe, csrfValidated };
+}
+
 export interface DashboardSessionAuthSourceOptions {
   authenticate: (req: IncomingMessage) => AuthenticatedDashboardSession | null;
   verifyCsrf: (req: IncomingMessage, session: AuthenticatedDashboardSession) => boolean;
@@ -30,20 +64,15 @@ export function createDashboardSessionAuthSource(
       const session = options.authenticate(req);
       if (!session || !verifyToken(session.compatToken, validTokens)) return null;
 
-      const unsafe = isUnsafeHttpMethod(req.method);
-      const csrfValidated = unsafe ? options.verifyCsrf(req, session) : false;
-      if (unsafe && !csrfValidated) {
+      const authorization = authorizeDashboardSessionRequest(req, session, {
+        corsOrigin,
+        verifyCsrf: options.verifyCsrf,
+      });
+      if (!authorization.ok) {
         return {
           ok: false,
-          status: 403,
-          error: "Invalid or missing dashboard CSRF token",
-        };
-      }
-      if (unsafe && !hasTrustedDashboardOrigin(req, corsOrigin)) {
-        return {
-          ok: false,
-          status: 403,
-          error: "Untrusted dashboard request origin",
+          status: authorization.status,
+          error: authorization.error,
         };
       }
 
@@ -55,8 +84,8 @@ export function createDashboardSessionAuthSource(
           internalCredentialToken: session.compatToken,
           principal: session.principal,
           csrf: {
-            required: unsafe,
-            validated: csrfValidated,
+            required: authorization.csrfRequired,
+            validated: authorization.csrfValidated,
           },
           dashboardSession: {
             sessionId: session.sessionId,
