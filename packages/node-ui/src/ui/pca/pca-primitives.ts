@@ -67,3 +67,17 @@ export function hasPcaBudget(
 ): boolean {
   return pcaBudgetState(snap) === true;
 }
+
+/**
+ * True ONLY when the budget is DEFINITIVELY known-empty — the precise (extended)
+ * `remainingAllowance` is present AND every spendable source is empty. This is a DISTINCT
+ * contract from `pcaBudgetState(...) === false`, which ALSO fires for the COARSE
+ * `baseEpochAllowance === 0` proxy on a non-extended snapshot; #1349's #9 rule defers that
+ * as unprovable. `healthForSnapshot` derives `insolvent` from THIS predicate (so it needs no
+ * caller-side guard), while coverage keeps the coarse `pcaBudgetState` for its own spendability.
+ */
+export function pcaBudgetDefinitivelyEmpty(
+  snap: Pick<PcaSnapshot, 'topUpBuffer' | 'baseEpochAllowance' | 'remainingAllowance' | 'extendedRequested'>,
+): boolean {
+  return snap.remainingAllowance !== undefined && pcaBudgetState(snap) === false;
+}
