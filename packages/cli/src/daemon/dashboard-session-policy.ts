@@ -43,6 +43,19 @@ export function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: str
   return true;
 }
 
+export function hasTrustedForwardedProto(req: IncomingMessage, proto: "http" | "https"): boolean {
+  return isLoopbackAddress(req.socket.remoteAddress ?? "") && requestForwardedProto(req) === proto;
+}
+
+function requestForwardedProto(req: IncomingMessage): "http" | "https" | undefined {
+  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"])
+    ?.split(",")[0]
+    ?.trim()
+    ?.toLowerCase();
+  if (forwardedProto === "http" || forwardedProto === "https") return forwardedProto;
+  return forwardedHeaderProto(req.headers.forwarded);
+}
+
 function isAllowedLoopbackHost(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
   const rawHost = hostHeader.trim().toLowerCase();
@@ -66,6 +79,22 @@ function firstHeaderValue(value: string | string[] | undefined): string | undefi
   return value;
 }
 
+function forwardedHeaderProto(value: string | string[] | undefined): "http" | "https" | undefined {
+  const headers = Array.isArray(value) ? value : value ? [value] : [];
+  for (const header of headers) {
+    for (const element of header.split(",")) {
+      for (const param of element.split(";")) {
+        const [rawKey, ...rawValueParts] = param.split("=");
+        if (rawKey.trim().toLowerCase() !== "proto") continue;
+        const rawValue = rawValueParts.join("=").trim();
+        const unquoted = rawValue.replace(/^"|"$/g, "").toLowerCase();
+        if (unquoted === "http" || unquoted === "https") return unquoted;
+      }
+    }
+  }
+  return undefined;
+}
+
 function parseOrigin(value: string | undefined): string | undefined {
   if (!value || value === "*") return undefined;
   try {
@@ -78,11 +107,7 @@ function parseOrigin(value: string | undefined): string | undefined {
 function requestOrigin(req: IncomingMessage): string | undefined {
   const host = firstHeaderValue(req.headers.host);
   if (!host) return undefined;
-  const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"])
-    ?.split(",")[0]
-    ?.trim()
-    ?.toLowerCase();
-  const proto = forwardedProto === "https" ? "https" : "http";
+  const proto = hasTrustedForwardedProto(req, "https") ? "https" : "http";
   return parseOrigin(`${proto}://${host}`);
 }
 

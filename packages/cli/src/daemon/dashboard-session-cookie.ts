@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DASHBOARD_SESSION_TTL_MS } from "./dashboard-session-store.js";
+import { hasTrustedForwardedProto } from "./dashboard-session-policy.js";
 
 export const DASHBOARD_SESSION_COOKIE = "dkg_ui_session";
 const MAX_COOKIE_AGE_SECONDS = Math.floor(DASHBOARD_SESSION_TTL_MS / 1000);
@@ -59,39 +60,5 @@ function appendSetCookie(res: ServerResponse, value: string): void {
 
 function isHttpsRequest(req: IncomingMessage): boolean {
   if (Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted)) return true;
-  if (!isTrustedForwardedHeaderSource(req)) return false;
-
-  const forwardedProto = req.headers["x-forwarded-proto"];
-  const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  return firstForwardedValue(proto) === "https" ||
-    forwardedHeaderHasHttpsProto(req.headers.forwarded);
-}
-
-function isTrustedForwardedHeaderSource(req: IncomingMessage): boolean {
-  const addr = req.socket.remoteAddress ?? "";
-  return addr === "::1" ||
-    addr === "127.0.0.1" ||
-    addr === "::ffff:127.0.0.1" ||
-    addr.startsWith("127.");
-}
-
-function firstForwardedValue(value: string | string[] | undefined): string | undefined {
-  const raw = Array.isArray(value) ? value[0] : value;
-  return raw?.split(",")[0]?.trim()?.toLowerCase();
-}
-
-function forwardedHeaderHasHttpsProto(value: string | string[] | undefined): boolean {
-  const headers = Array.isArray(value) ? value : value ? [value] : [];
-  for (const header of headers) {
-    for (const element of header.split(",")) {
-      for (const param of element.split(";")) {
-        const [rawKey, ...rawValueParts] = param.split("=");
-        if (rawKey.trim().toLowerCase() !== "proto") continue;
-        const rawValue = rawValueParts.join("=").trim();
-        const unquoted = rawValue.replace(/^"|"$/g, "").toLowerCase();
-        if (unquoted === "https") return true;
-      }
-    }
-  }
-  return false;
+  return hasTrustedForwardedProto(req, "https");
 }

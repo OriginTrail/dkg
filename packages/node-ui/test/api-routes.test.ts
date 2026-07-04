@@ -632,7 +632,7 @@ describe('handleNodeUIRequest legacy positional tail compatibility', () => {
     }
   });
 
-  async function startLegacyServer(): Promise<void> {
+  async function startLegacyServer(staticDir = '.'): Promise<void> {
     const metricsCollector = {
       collect: async () => ({ liveMetric: true }),
     } as any;
@@ -663,7 +663,7 @@ describe('handleNodeUIRequest legacy positional tail compatibility', () => {
         res,
         url,
         db,
-        '.',
+        staticDir,
         undefined,
         metricsCollector,
         'legacy-browser-token-must-be-ignored',
@@ -705,6 +705,23 @@ describe('handleNodeUIRequest legacy positional tail compatibility', () => {
       bytesIn: '3',
       bytesOut: '4',
     });
+  });
+
+  it('serves legacy positional /ui HTML without injecting the old auth-token slot', async () => {
+    const staticDir = mkdtempSync(join(tmpdir(), 'dkg-legacy-ui-'));
+    try {
+      writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><body>legacy ui</body></html>');
+      await startLegacyServer(staticDir);
+
+      const res = await fetch(`${base}/ui/`);
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      expect(body).toContain('legacy ui');
+      expect(body).not.toContain('window.__DKG_TOKEN__');
+      expect(body).not.toContain('legacy-browser-token-must-be-ignored');
+    } finally {
+      rmSync(staticDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -23,6 +23,21 @@ describe('createSseHub', () => {
     vi.useRealTimers();
   });
 
+  it('broadcasts named event frames to every connected client', () => {
+    const hub = createSseHub();
+    const first = fakeResponse();
+    const second = fakeResponse();
+
+    hub.add(first);
+    hub.add(second, { sessionId: 'session-2', expiresAt: Date.now() + 10_000 });
+    hub.broadcast('memory_graph_changed', { contextGraphId: 'cg-1', version: 2 });
+
+    const expected = 'event: memory_graph_changed\ndata: {"contextGraphId":"cg-1","version":2}\n\n';
+    expect(first.writes).toEqual([expected]);
+    expect(second.writes).toEqual([expected]);
+    expect(hub.size()).toBe(2);
+  });
+
   it('closes dashboard-session streams when their session expires', () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);

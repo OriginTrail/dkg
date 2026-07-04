@@ -554,6 +554,9 @@ jobs:
             throw new Error('dist-ui/index.html did not reference any JS/CSS assets');
           }
           for (const ref of refs) {
+            if (ref.startsWith('/') && !ref.startsWith('/ui/')) {
+              throw new Error(`UI asset reference must be relative or rooted under /ui/: ${ref}`);
+            }
             const normalized = ref.startsWith('/ui/') ? ref.slice('/ui/'.length) : ref.replace(/^\.\//, '');
             const assetPath = join(dirname(indexPath), normalized);
             if (!existsSync(assetPath)) throw new Error(`Missing referenced UI asset: ${ref}`);
