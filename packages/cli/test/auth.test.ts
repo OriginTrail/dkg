@@ -128,7 +128,7 @@ describe('resolveRequestAuthDecision', () => {
         credentialToken: VALID_TOKEN,
         context: {
           source: 'dashboard-session' as const,
-          compatToken: VALID_TOKEN,
+          internalCredentialToken: VALID_TOKEN,
           principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
           csrf: { required: false, validated: false },
         },

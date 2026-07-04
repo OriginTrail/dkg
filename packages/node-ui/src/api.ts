@@ -131,6 +131,35 @@ export async function handleNodeUIRequest(
   legacyCorsOrigin?: string | null,
   legacyRelayStatsProvider?: RelayStatsProvider,
 ): Promise<boolean> {
+  return handleNodeUIRequestCore(
+    req,
+    res,
+    url,
+    db,
+    staticDir,
+    normalizeHandleNodeUIRequestOptions(
+      optionsOrLegacyRemovedArg,
+      legacyMetricsCollector,
+      _authTokenRemoved,
+      legacyMemoryManager,
+      legacyLlmSettings,
+      legacyTelemetrySettings,
+      legacyCorsOrigin,
+      legacyRelayStatsProvider,
+    ),
+  );
+}
+
+function normalizeHandleNodeUIRequestOptions(
+  optionsOrLegacyRemovedArg: HandleNodeUIRequestOptions | unknown,
+  legacyMetricsCollector?: MetricsCollector,
+  _authTokenRemoved?: string,
+  legacyMemoryManager?: ChatMemoryManager,
+  legacyLlmSettings?: LlmSettingsCallbacks,
+  legacyTelemetrySettings?: TelemetrySettingsCallbacks,
+  legacyCorsOrigin?: string | null,
+  legacyRelayStatsProvider?: RelayStatsProvider,
+): HandleNodeUIRequestOptions {
   const hasLegacyTail = legacyMetricsCollector !== undefined ||
     _authTokenRemoved !== undefined ||
     legacyMemoryManager !== undefined ||
@@ -138,7 +167,7 @@ export async function handleNodeUIRequest(
     legacyTelemetrySettings !== undefined ||
     legacyCorsOrigin !== undefined ||
     legacyRelayStatsProvider !== undefined;
-  const options = hasLegacyTail
+  return hasLegacyTail
     ? {
         metricsCollector: legacyMetricsCollector,
         memoryManager: legacyMemoryManager,
@@ -148,6 +177,16 @@ export async function handleNodeUIRequest(
         relayStatsProvider: legacyRelayStatsProvider,
       }
     : (isHandleNodeUIRequestOptions(optionsOrLegacyRemovedArg) ? optionsOrLegacyRemovedArg : {});
+}
+
+async function handleNodeUIRequestCore(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  options: HandleNodeUIRequestOptions = {},
+): Promise<boolean> {
   const {
     metricsCollector,
     memoryManager,

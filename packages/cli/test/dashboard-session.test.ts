@@ -7,6 +7,7 @@ import {
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
+import { handleRequest } from '../src/daemon/handle-request.js';
 import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
 
 const VALID_TOKEN = 'dashboard-backed-token';
@@ -40,6 +41,18 @@ async function startServer(options: {
   const resolvePrincipal = (token: string) => token === AGENT_TOKEN
     ? { kind: 'agent' as const, agentAddress: TOKEN_AGENT_ADDRESS }
     : { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
+  const agent = {
+    resolveAgentByToken: (token: string | undefined) => token === AGENT_TOKEN ? TOKEN_AGENT_ADDRESS : undefined,
+    resolveAgentAddress: (token: string | undefined) => token === AGENT_TOKEN ? TOKEN_AGENT_ADDRESS : DEFAULT_AGENT_ADDRESS,
+    listLocalAgents: () => [
+      { agentAddress: DEFAULT_AGENT_ADDRESS, name: 'Default Agent', framework: 'node' },
+      { agentAddress: TOKEN_AGENT_ADDRESS, name: 'Token Agent', framework: 'test' },
+    ],
+    nodeName: 'Default Agent',
+    nodeFramework: 'node',
+    peerId: '12D3KooWDashboardSessionTest',
+    publisher: { getIdentityId: () => 1n },
+  };
   const dashboardAuthSource = createDashboardSessionAuthSource({
     authenticate: (request) => sessions.authenticate(request),
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
@@ -61,6 +74,37 @@ async function startServer(options: {
       resolvePrincipal,
       authSources: [dashboardAuthSource],
     }))) {
+      return;
+    }
+    if (url.pathname === '/api/agent/identity') {
+      await handleRequest(
+        req,
+        res,
+        agent as any,
+        {} as any,
+        null,
+        { auth: { enabled: true } } as any,
+        Date.now(),
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        undefined,
+        'test-version',
+        'test-commit',
+        {} as any,
+        {} as any,
+        new Map(),
+        new Map(),
+        {} as any,
+        null,
+        validTokens,
+        '127.0.0.1',
+        { value: 0 },
+        [],
+        {} as any,
+      );
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -161,7 +205,7 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({
       requestAuth: {
         source: 'dashboard-session',
-        compatToken: ROTATED_TOKEN,
+        internalCredentialToken: ROTATED_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
       },
     });
@@ -228,7 +272,7 @@ describe('dashboard browser sessions', () => {
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
-        compatToken: VALID_TOKEN,
+        internalCredentialToken: VALID_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
         dashboardSession: { source: 'loopback' },
         csrf: { required: false, validated: false },
@@ -263,7 +307,7 @@ describe('dashboard browser sessions', () => {
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
-        compatToken: VALID_TOKEN,
+        internalCredentialToken: VALID_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
         dashboardSession: { source: 'exchange' },
       },
@@ -289,10 +333,35 @@ describe('dashboard browser sessions', () => {
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
-        compatToken: AGENT_TOKEN,
+        internalCredentialToken: AGENT_TOKEN,
         principal: { kind: 'agent', agentAddress: TOKEN_AGENT_ADDRESS },
         dashboardSession: { source: 'exchange' },
       },
+    });
+  });
+
+  it('routes dashboard-cookie agent sessions through requestAgentAddress for agent identity', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: AGENT_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+
+    const identity = await fetch(`${started.baseUrl}/api/agent/identity`, {
+      headers: { Cookie: cookieFrom(exchange) },
+    });
+    expect(identity.status).toBe(200);
+    await expect(identity.json()).resolves.toMatchObject({
+      agentAddress: TOKEN_AGENT_ADDRESS,
+      agentDid: `did:dkg:agent:${TOKEN_AGENT_ADDRESS}`,
+      name: 'Token Agent',
+      framework: 'test',
+      peerId: '12D3KooWDashboardSessionTest',
+      nodeIdentityId: '1',
     });
   });
 

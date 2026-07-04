@@ -374,7 +374,9 @@ export async function handleRequest(
   // requestToken remains as a compatibility credential for routes that still need
   // token-backed self-calls or node-admin checks.
   const requestAuth = getRequestAuthContext(req);
-  const credentialToken = requestAuth?.token ?? requestAuth?.compatToken ?? extractBearerToken(req.headers.authorization);
+  const credentialToken = requestAuth?.source === "dashboard-session"
+    ? requestAuth.internalCredentialToken
+    : requestAuth?.token ?? extractBearerToken(req.headers.authorization);
   const requestPrincipal = requestAuth?.principal ?? {
     kind: credentialToken && agent.resolveAgentByToken(credentialToken) ? "agent" as const : "node-admin" as const,
     agentAddress: agent.resolveAgentAddress(credentialToken),

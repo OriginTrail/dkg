@@ -239,7 +239,7 @@ export function createDashboardSessionAuthSource(
         credentialToken: session.compatToken,
         context: {
           source: "dashboard-session",
-          compatToken: session.compatToken,
+          internalCredentialToken: session.compatToken,
           principal: session.principal,
           csrf: {
             required: unsafe,

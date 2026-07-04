@@ -23,21 +23,32 @@ export interface HttpAuthGuardOptions {
   authSources?: RequestAuthSource[];
 }
 
-export interface RequestAuthContext {
-  source: 'authorization-header' | 'events-query' | 'dashboard-session';
-  token?: string;
-  compatToken?: string;
+interface RequestAuthBaseContext {
   principal: RequestAuthPrincipal;
   csrf: {
     required: boolean;
     validated: boolean;
   };
-  dashboardSession?: {
-    sessionId?: string;
-    source?: 'loopback' | 'exchange';
-    expiresAt?: number;
-  };
 }
+
+export type RequestAuthContext =
+  | (RequestAuthBaseContext & {
+      source: 'authorization-header';
+      token: string;
+    })
+  | (RequestAuthBaseContext & {
+      source: 'events-query';
+      token: string;
+    })
+  | (RequestAuthBaseContext & {
+      source: 'dashboard-session';
+      internalCredentialToken: string;
+      dashboardSession: {
+        sessionId?: string;
+        source?: 'loopback' | 'exchange';
+        expiresAt?: number;
+      };
+    });
 
 const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
 
