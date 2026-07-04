@@ -379,12 +379,6 @@ export async function handleRequest(
     kind: credentialToken && agent.resolveAgentByToken(credentialToken) ? "agent" as const : "node-admin" as const,
     agentAddress: agent.resolveAgentAddress(credentialToken),
   };
-  const credentialAgentAddress = credentialToken ? agent.resolveAgentByToken(credentialToken) : undefined;
-  const authEnabled = config.auth?.enabled !== false;
-  const authCapabilities = {
-    nodeAdmin: !authEnabled || (!!credentialToken && validTokens.has(credentialToken) && !credentialAgentAddress),
-    agentToken: !!credentialAgentAddress,
-  };
   const requestToken = credentialToken;
   const requestAgentAddress = requestPrincipal.agentAddress;
 
@@ -418,13 +412,9 @@ export async function handleRequest(
     admission,
     url,
     path,
-    requestPrincipal,
-    authSource: requestAuth?.source,
-    credentialToken,
-    authCapabilities,
+    requestAuth,
     requestToken,
     requestAgentAddress,
-    requestAuth,
     emitMemoryGraphChanged,
     emitNotification,
   };

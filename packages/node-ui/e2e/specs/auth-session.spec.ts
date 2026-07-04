@@ -1,9 +1,27 @@
 import { test, expect } from '../fixtures/base.js';
 import { fetchApiInPage } from '../helpers/page-api.js';
 
+async function readWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 test.describe('dashboard auth session', () => {
   test('loads without exposing a browser bearer token and uses session credentials', async ({ shell, page }) => {
     const eventUrls: string[] = [];
+    const eventResponsePromise = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === '/api/events',
+      { timeout: 30_000 },
+    );
     page.on('request', (request) => {
       const url = request.url();
       if (url.includes('/api/events')) eventUrls.push(url);
@@ -31,7 +49,37 @@ test.describe('dashboard auth session', () => {
       );
       eventUrls.push(eventRequest.url());
     }
+    const eventResponse = await eventResponsePromise;
+    expect(eventResponse.status()).toBe(200);
+    expect(eventResponse.headers()['content-type']).toContain('text/event-stream');
     expect(eventUrls.length).toBeGreaterThan(0);
     expect(eventUrls.every((url) => !new URL(url).searchParams.has('token'))).toBe(true);
+
+    const origin = new URL(page.url()).origin;
+    const cookies = await page.context().cookies(origin);
+    const cookieHeader = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+    expect(cookieHeader).toContain('dkg_ui_session=');
+
+    const stream = await fetch(`${origin}/api/events`, { headers: { Cookie: cookieHeader } });
+    expect(stream.status).toBe(200);
+    expect(stream.headers.get('content-type')).toContain('text/event-stream');
+    const reader = stream.body?.getReader();
+    expect(reader).toBeTruthy();
+
+    const connected = await readWithTimeout(reader!.read(), 5_000);
+    expect(connected).not.toBe('timeout');
+
+    const logoutStatus = await page.evaluate(async () => {
+      const res = await fetch('/api/dashboard/session/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      return res.status;
+    });
+    expect(logoutStatus).toBe(200);
+
+    const closed = await readWithTimeout(reader!.read(), 5_000);
+    expect(closed).not.toBe('timeout');
+    expect(closed).toMatchObject({ done: true });
   });
 });

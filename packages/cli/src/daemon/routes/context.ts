@@ -23,7 +23,7 @@ import type { VectorStore, EmbeddingProvider } from '../../vector-store.js';
 import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
-import type { RequestAuthContext, RequestAuthPrincipal } from '../../auth.js';
+import type { RequestAuthContext } from '../../auth.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -95,15 +95,10 @@ export interface RequestContext {
   // here keeps every group on the same fast path.
   url: URL;
   path: string;
-  requestPrincipal?: RequestAuthPrincipal;
-  authSource?: RequestAuthContext['source'];
-  credentialToken?: string;
-  authCapabilities?: {
-    nodeAdmin: boolean;
-    agentToken: boolean;
-  };
-  requestToken: string | undefined;
   requestAuth?: RequestAuthContext;
+  // Compatibility aliases for route modules that still need token-backed
+  // self-calls or node-admin checks. New code should prefer `requestAuth`.
+  requestToken: string | undefined;
   requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */

@@ -1,7 +1,7 @@
 import {
   setDashboardSessionForTesting,
   type DashboardSessionStatus,
-} from '../../src/ui/dashboardSessionClient.js';
+} from '../../src/ui/dashboardSessionTestSupport.js';
 
 type AuthenticatedDashboardSession = Extract<DashboardSessionStatus, { state: 'authenticated' }>;
 

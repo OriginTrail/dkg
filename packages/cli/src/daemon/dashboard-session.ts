@@ -87,9 +87,11 @@ export interface DashboardSessionHandlerOptions {
   authEnabled: boolean;
   validTokens: Set<string>;
   loopbackToken?: string;
+  refreshValidTokens?: () => void;
   resolveLoopbackToken?: () => string | undefined;
   resolvePrincipal: (token: string) => RequestAuthPrincipal;
   corsOrigin?: string | null;
+  onSessionRevoked?: (sessionId: string) => void;
 }
 
 export async function handleDashboardSessionRequest(
@@ -178,7 +180,9 @@ export async function handleDashboardSessionRequest(
   }
 
   if (req.method === "POST" && path === "/api/dashboard/session/logout") {
-    store.revoke(session?.sessionId ?? getCookie(req, DASHBOARD_SESSION_COOKIE));
+    const sessionId = session?.sessionId ?? getCookie(req, DASHBOARD_SESSION_COOKIE);
+    store.revoke(sessionId);
+    if (sessionId) options.onSessionRevoked?.(sessionId);
     clearSessionCookie(req, res);
     jsonResponse(res, 200, { ok: true }, options.corsOrigin);
     return true;
@@ -242,6 +246,7 @@ export function createDashboardSessionAuthSource(
             validated: csrfValidated,
           },
           dashboardSession: {
+            sessionId: session.sessionId,
             source: session.source,
             expiresAt: session.expiresAt,
           },
@@ -261,13 +266,9 @@ function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken
 }
 
 function resolveCurrentLoopbackToken(options: DashboardSessionHandlerOptions): string | undefined {
-  let token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
-  if (token && verifyToken(token, options.validTokens)) return token;
-
-  // verifyToken() reconciles file-backed token rotation as a side effect. Resolve
-  // once more so a daemon can use the freshly reconciled admin token without a restart.
-  token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
-  return token && verifyToken(token, options.validTokens) ? token : undefined;
+  options.refreshValidTokens?.();
+  const token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
+  return token && options.validTokens.has(token) ? token : undefined;
 }
 
 function hashSessionId(sessionId: string): string {
@@ -420,12 +421,23 @@ function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | n
 
   const allowed = trustedDashboardOrigins(req, corsOrigin);
   const originHeader = firstHeaderValue(req.headers.origin);
-  if (originHeader && !allowed.has(parseOrigin(originHeader) ?? "")) return false;
+  if (originHeader && !isTrustedDashboardHeaderOrigin(req, originHeader, allowed)) return false;
 
   const refererHeader = firstHeaderValue(req.headers.referer);
-  if (refererHeader && !allowed.has(parseOrigin(refererHeader) ?? "")) return false;
+  if (refererHeader && !isTrustedDashboardHeaderOrigin(req, refererHeader, allowed)) return false;
 
   return true;
+}
+
+function isTrustedDashboardHeaderOrigin(req: IncomingMessage, raw: string, allowed: Set<string>): boolean {
+  const origin = parseOrigin(raw);
+  if (!origin) return false;
+  if (allowed.has(origin)) return true;
+  return isLoopbackDashboardRequest(req) && isLocalOrigin(raw);
+}
+
+function isLoopbackDashboardRequest(req: IncomingMessage): boolean {
+  return isLoopbackAddress(req.socket.remoteAddress ?? "") && isAllowedLoopbackHost(req.headers.host);
 }
 
 function hasLocalBrowserAddressing(req: IncomingMessage): boolean {

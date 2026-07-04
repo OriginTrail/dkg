@@ -1,34 +1,25 @@
-export type DashboardSessionStatus =
-  | { state: 'unauthenticated'; authenticated: false }
-  | { state: 'auth-disabled'; authenticated: true; authDisabled: true }
-  | {
-      state: 'authenticated';
-      authenticated: true;
-      authDisabled?: false;
-      source: string;
-      csrfToken: string;
-      expiresAt: number;
-    };
+import {
+  clearDashboardSessionPromise,
+  getDashboardSession,
+  getDashboardSessionPromise,
+  isDashboardSessionReady,
+  setDashboardSession,
+  setDashboardSessionPromise,
+  type DashboardSessionStatus,
+} from './dashboardSessionState.js';
+
+export {
+  dashboardSessionAuthKey,
+  getDashboardSession,
+  isDashboardSessionReady,
+  subscribeDashboardSession,
+  type DashboardSessionStatus,
+} from './dashboardSessionState.js';
 
 export type DaemonPath = `/${string}`;
 
-let dashboardSession: DashboardSessionStatus = { state: 'unauthenticated', authenticated: false };
-let dashboardSessionPromise: Promise<DashboardSessionStatus> | null = null;
-
-const sessionListeners = new Set<() => void>();
-
-function emitSessionChange(): void {
-  for (const listener of sessionListeners) listener();
-}
-
-function setDashboardSession(session: DashboardSessionStatus): DashboardSessionStatus {
-  dashboardSession = session;
-  emitSessionChange();
-  return dashboardSession;
-}
-
 function invalidateDashboardSession(): void {
-  dashboardSessionPromise = null;
+  clearDashboardSessionPromise();
   setDashboardSession({ state: 'unauthenticated', authenticated: false });
 }
 
@@ -51,41 +42,17 @@ async function requestLoopbackSession(): Promise<DashboardSessionStatus | null> 
   }).then(async (res) => res.ok ? parseDashboardSessionStatus(await readJson<unknown>(res)) : null).catch(() => null);
 }
 
-export function getDashboardSession(): DashboardSessionStatus {
-  return dashboardSession;
-}
-
-export function subscribeDashboardSession(listener: () => void): () => void {
-  sessionListeners.add(listener);
-  return () => {
-    sessionListeners.delete(listener);
-  };
-}
-
-export function isDashboardSessionReady(session = dashboardSession): boolean {
-  return session.state === 'authenticated' || session.state === 'auth-disabled';
-}
-
-export function dashboardSessionAuthKey(): string {
-  if (!isDashboardSessionReady()) return '';
-  if (dashboardSession.state === 'auth-disabled') return 'auth-disabled';
-  return `${dashboardSession.source}:${dashboardSession.expiresAt}`;
-}
-
-export function setDashboardSessionForTesting(session: DashboardSessionStatus): void {
-  dashboardSessionPromise = null;
-  setDashboardSession(session);
-}
-
 export async function ensureDashboardSession(): Promise<DashboardSessionStatus> {
+  const dashboardSession = getDashboardSession();
   if (typeof window === 'undefined') return dashboardSession;
-    if (dashboardSession.state === 'auth-disabled') return dashboardSession;
-    if (dashboardSession.state === 'authenticated' && dashboardSession.expiresAt > Date.now() + 5000) {
-      return dashboardSession;
-    }
-  if (dashboardSessionPromise) return dashboardSessionPromise;
+  if (dashboardSession.state === 'auth-disabled') return dashboardSession;
+  if (dashboardSession.state === 'authenticated' && dashboardSession.expiresAt > Date.now() + 5000) {
+    return dashboardSession;
+  }
+  const existingPromise = getDashboardSessionPromise();
+  if (existingPromise) return existingPromise;
 
-  dashboardSessionPromise = (async () => {
+  const nextPromise = (async () => {
     const status = await requestSessionStatus();
     if (isDashboardSessionReady(status ?? undefined)) {
       return setDashboardSession(status!);
@@ -98,16 +65,17 @@ export async function ensureDashboardSession(): Promise<DashboardSessionStatus> 
 
     return setDashboardSession({ state: 'unauthenticated', authenticated: false });
   })();
+  setDashboardSessionPromise(nextPromise);
 
   try {
-    return await dashboardSessionPromise;
+    return await nextPromise;
   } finally {
-    dashboardSessionPromise = null;
+    clearDashboardSessionPromise();
   }
 }
 
 export async function exchangeDashboardSession(token: string): Promise<DashboardSessionStatus> {
-  dashboardSessionPromise = null;
+  clearDashboardSessionPromise();
   const res = await fetch('/api/dashboard/session/exchange', {
     method: 'POST',
     cache: 'no-store',
@@ -124,6 +92,7 @@ export async function exchangeDashboardSession(token: string): Promise<Dashboard
 }
 
 function dashboardSessionHeaders(): Record<string, string> {
+  const dashboardSession = getDashboardSession();
   if (dashboardSession.state === 'authenticated') return { 'X-DKG-CSRF': dashboardSession.csrfToken };
   return {};
 }
@@ -159,7 +128,7 @@ export function withDashboardSessionCredentials(init: RequestInit = {}): Request
 
 export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const path = assertDaemonPath(input);
-  const sessionBeforeRequest = dashboardSession;
+  const sessionBeforeRequest = getDashboardSession();
   const withSession = () => fetch(path, withDashboardSessionCredentials(init));
 
   const res = await withSession();

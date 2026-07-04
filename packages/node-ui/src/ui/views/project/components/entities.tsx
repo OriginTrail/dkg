@@ -580,8 +580,8 @@ export function AssertionsList({ contextGraphId, layer, onComplete, scrollKey }:
           {busy === '__all__' ? '...' : actionAllLabel}
         </button>
       </div>
-      {result && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
-      {error && <div style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
+      {result && <div data-testid="list-action-result" style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}>✓ {result}</div>}
+      {error && <div data-testid="list-action-result" style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}>✕ {error}</div>}
       {assertions.map(a => (
         <div key={a.graphUri} className="v10-item-row">
           <span className="v10-item-icon">▤</span>

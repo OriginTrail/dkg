@@ -33,6 +33,7 @@ export interface RequestAuthContext {
     validated: boolean;
   };
   dashboardSession?: {
+    sessionId?: string;
     source?: 'loopback' | 'exchange';
     expiresAt?: number;
   };
@@ -310,9 +311,13 @@ function reconcileFileTokens(validTokens: Set<string>): void {
  * Performs an mtime-gated hot-reload of the on-disk `auth.token` file
  * on every call — see `reconcileFileTokens` above for the rationale.
  */
+export function reconcileValidTokens(validTokens: Set<string>): void {
+  reconcileFileTokens(validTokens);
+}
+
 export function verifyToken(token: string | undefined, validTokens: Set<string>): boolean {
   if (!token) return false;
-  reconcileFileTokens(validTokens);
+  reconcileValidTokens(validTokens);
   return validTokens.has(token);
 }
 

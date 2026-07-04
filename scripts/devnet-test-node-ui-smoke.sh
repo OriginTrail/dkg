@@ -103,7 +103,7 @@ if [ "$ready" = true ]; then
     fail "protected API without session returned HTTP $protected_code"
   fi
 
-  bootstrap_code=$(curl -s -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -D "$HEADER_FILE" -o /tmp/rc12-ui-session-after.json -w "%{http_code}" "http://localhost:$UI_PORT/api/dashboard/session/loopback" 2>/dev/null || echo "000")
+  bootstrap_code=$(curl -s -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -D "$HEADER_FILE" -H "Origin: http://localhost:$UI_PORT" -o /tmp/rc12-ui-session-after.json -w "%{http_code}" "http://localhost:$UI_PORT/api/dashboard/session/loopback" 2>/dev/null || echo "000")
   if [ "$bootstrap_code" = "200" ] && grep -qi "httponly" "$HEADER_FILE" && grep -qi "samesite=strict" "$HEADER_FILE"; then
     ok "loopback dashboard session bootstrap sets HttpOnly SameSite cookie"
   else

@@ -141,7 +141,7 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens } from '../auth.js';
 import {
   DashboardSessionStore,
   createDashboardSessionAuthSource,
@@ -2551,12 +2551,39 @@ export async function runDaemonInner(
   });
 
   // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  const sseClients = new Set<ServerResponse>();
+  interface SseClient {
+    res: ServerResponse;
+    dashboardSessionId?: string;
+    heartbeat?: ReturnType<typeof setInterval>;
+    expiryTimer?: ReturnType<typeof setTimeout>;
+  }
+
+  const sseClients = new Set<SseClient>();
+
+  function removeSseClient(client: SseClient): void {
+    if (!sseClients.delete(client)) return;
+    if (client.heartbeat) clearInterval(client.heartbeat);
+    if (client.expiryTimer) clearTimeout(client.expiryTimer);
+  }
+
+  function closeSseClient(client: SseClient): void {
+    removeSseClient(client);
+    if (!client.res.writableEnded) {
+      try { client.res.end(); } catch { /* already closed */ }
+    }
+  }
+
+  function closeDashboardSessionSseClients(sessionId: string): void {
+    for (const client of Array.from(sseClients)) {
+      if (client.dashboardSessionId === sessionId) closeSseClient(client);
+    }
+  }
+
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
     for (const client of sseClients) {
-      try { client.write(msg); } catch { sseClients.delete(client); }
+      try { client.res.write(msg); } catch { closeSseClient(client); }
     }
   }
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
@@ -3069,9 +3096,11 @@ export async function runDaemonInner(
           {
             authEnabled,
             validTokens,
+            refreshValidTokens: () => reconcileValidTokens(validTokens),
             resolveLoopbackToken: resolveDashboardLoopbackToken,
             resolvePrincipal: resolveDashboardPrincipal,
             corsOrigin: reqCorsOrigin,
+            onSessionRevoked: closeDashboardSessionSseClients,
           },
         );
         if (handledSession) return;
@@ -3118,6 +3147,18 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
+        const requestAuth = getRequestAuthContext(req);
+        const dashboardSession = requestAuth?.source === "dashboard-session"
+          ? requestAuth.dashboardSession
+          : undefined;
+        const client: SseClient = {
+          res,
+          dashboardSessionId: dashboardSession?.sessionId,
+        };
+        if (dashboardSession?.expiresAt) {
+          const delayMs = Math.max(0, dashboardSession.expiresAt - Date.now());
+          client.expiryTimer = setTimeout(() => closeSseClient(client), delayMs);
+        }
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3125,11 +3166,11 @@ export async function runDaemonInner(
           ...corsHeaders(resolveCorsOrigin(req, corsAllowed)),
         });
         res.write(`event: connected\ndata: {}\n\n`);
-        sseClients.add(res);
-        const heartbeat = setInterval(() => {
-          try { res.write(`: heartbeat\n\n`); } catch { /* closed */ }
+        sseClients.add(client);
+        client.heartbeat = setInterval(() => {
+          try { res.write(`: heartbeat\n\n`); } catch { closeSseClient(client); }
         }, 30_000);
-        req.on("close", () => { sseClients.delete(res); clearInterval(heartbeat); });
+        req.on("close", () => closeSseClient(client));
         return;
       }
 

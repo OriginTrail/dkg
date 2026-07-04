@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import {
   DASHBOARD_SESSION_COOKIE,
@@ -31,7 +31,9 @@ function cookieFrom(res: Response): string {
 async function startServer(options: {
   validTokens?: Set<string>;
   loopbackToken?: string;
+  refreshValidTokens?: () => void;
   resolveLoopbackToken?: () => string | undefined;
+  onSessionRevoked?: (sessionId: string) => void;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
@@ -48,8 +50,10 @@ async function startServer(options: {
       authEnabled: true,
       validTokens,
       loopbackToken: options.loopbackToken ?? VALID_TOKEN,
+      refreshValidTokens: options.refreshValidTokens,
       resolveLoopbackToken: options.resolveLoopbackToken,
       resolvePrincipal,
+      onSessionRevoked: options.onSessionRevoked,
     })) {
       return;
     }
@@ -131,21 +135,24 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({ authenticated: true, source: 'loopback' });
   });
 
-  it('selects the current loopback bootstrap token after token rotation', async () => {
-    const validTokens = new Set([ROTATED_TOKEN]);
-    let resolveCalls = 0;
+  it('refreshes valid tokens before selecting the loopback bootstrap token', async () => {
+    const validTokens = new Set([VALID_TOKEN]);
+    let currentLoopbackToken = VALID_TOKEN;
+    const refreshValidTokens = vi.fn(() => {
+      validTokens.delete(VALID_TOKEN);
+      validTokens.add(ROTATED_TOKEN);
+      currentLoopbackToken = ROTATED_TOKEN;
+    });
     const started = await startServer({
       validTokens,
-      resolveLoopbackToken: () => {
-        resolveCalls += 1;
-        return resolveCalls === 1 ? VALID_TOKEN : ROTATED_TOKEN;
-      },
+      refreshValidTokens,
+      resolveLoopbackToken: () => currentLoopbackToken,
     });
     server = started.server;
 
     const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     expect(bootstrap.status).toBe(200);
-    expect(resolveCalls).toBeGreaterThanOrEqual(2);
+    expect(refreshValidTokens).toHaveBeenCalledTimes(1);
 
     const res = await fetch(`${started.baseUrl}/api/protected`, {
       headers: { Cookie: cookieFrom(bootstrap) },
@@ -365,6 +372,24 @@ describe('dashboard browser sessions', () => {
     expect(res.status).toBe(200);
   });
 
+  it('allows unsafe session-authenticated requests from a loopback dev-server origin', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: 'http://localhost:5173',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
   it('rejects unsafe session-authenticated requests with valid CSRF but hostile Origin', async () => {
     const started = await startServer();
     server = started.server;
@@ -433,5 +458,21 @@ describe('dashboard browser sessions', () => {
 
     const res = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(401);
+  });
+
+  it('notifies when logout revokes a dashboard session', async () => {
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({ onSessionRevoked });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+
+    const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    expect(logout.status).toBe(200);
+    expect(onSessionRevoked).toHaveBeenCalledTimes(1);
+    expect(onSessionRevoked).toHaveBeenCalledWith(decodeURIComponent(cookie.split('=')[1]!));
   });
 });
