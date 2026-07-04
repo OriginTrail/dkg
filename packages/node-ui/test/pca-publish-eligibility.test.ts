@@ -29,6 +29,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 });
 
 const { PublishEligibilityChip, PublishEligibilityChipView } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
+const { usePublishEligibility } = await import('../src/ui/hooks/usePublishEligibility.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
 
@@ -614,5 +615,60 @@ describe('PublishEligibilityChipView (pure view)', () => {
     expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
     expect(mocks.fetchPca).not.toHaveBeenCalled();
     await unmount();
+  });
+});
+
+// #1382 — anyGasFunded is the load-bearing input to the owner-CG gate exception. Test it
+// at the HOOK boundary from REAL mocked wallet/PCA responses (not stubbed at the widget),
+// so a regression that drops the `|| balanceUnknown` fail-open would be caught here.
+describe('usePublishEligibility — anyGasFunded (hook boundary)', () => {
+  // Captured hook return; `any` because the harness only reads loading/anyGasFunded/verdict.
+  let latestElig: any = null;
+  function EligHarness() {
+    latestElig = usePublishEligibility('cg', 0);
+    return null;
+  }
+  async function renderElig() {
+    latestElig = null;
+    const handle = await render(React.createElement(EligHarness));
+    for (let i = 0; i < 80 && (latestElig == null || latestElig.loading); i++) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    return handle;
+  }
+  // Every signing wallet approved on a healthy PCA (so coverage isn't the fall-through cause).
+  const approvedHealthy = (key?: string) =>
+    (key ? { ...makePcaSnapshot(), probedKey: { key, registered: true } } : makePcaSnapshot());
+
+  it('all approved wallets confirmed out of gas → anyGasFunded false (owner DANGER stays a gate)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0], balances: [{ address: W0, eth: '0', trac: '100', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => approvedHealthy(key));
+    const h = await renderElig();
+    expect(latestElig!.anyGasFunded).toBe(false);
+    // Covered but out of gas → the DANGER verdict the gate keys on.
+    expect(latestElig!.verdict).toBe('fallthrough-no-funds');
+    await h.unmount();
+  });
+
+  it('at least one gas-funded wallet → anyGasFunded true', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0], balances: [{ address: W0, eth: '0.1', trac: '100', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => approvedHealthy(key));
+    const h = await renderElig();
+    expect(latestElig!.anyGasFunded).toBe(true);
+    await h.unmount();
+  });
+
+  it('unreadable gas (missing balance entry) → anyGasFunded true (fail-open, mirrors GREEN)', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0], balances: [], chainId: '84532', rpcUrl: null, // no entry for W0 → balanceUnknown
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) => approvedHealthy(key));
+    const h = await renderElig();
+    expect(latestElig!.anyGasFunded).toBe(true);
+    await h.unmount();
   });
 });
