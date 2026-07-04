@@ -36,12 +36,12 @@ interface ProbeRow {
    */
   covers: boolean;
   /**
-   * #1356 — this probe was inconclusive because the chain adapter can't answer PCA
-   * queries on this chain (a capability gap — retrying is futile), NOT a transient
-   * RPC failure. Lets the all-inconclusive message say "not supported here" instead
-   * of "the lookup failed. Retry.". Undefined on a transient/failed probe.
+   * #1356 — true iff this probe was inconclusive because the chain adapter can't answer
+   * PCA queries on this chain (a capability gap — retrying is futile). False for a
+   * registered/covering/transient-failure row. Lets the all-inconclusive message say
+   * "not supported here" instead of "the lookup failed. Retry.".
    */
-  adapterUnsupported?: boolean;
+  adapterUnsupported: boolean;
 }
 
 /**
@@ -116,7 +116,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                 adapterUnsupported: c.outcome === 'inconclusive' ? c.adapterUnsupported : false,
               };
             })
-            .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false })),
+            .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false, adapterUnsupported: false })),
         ),
       );
       // L4: the per-wallet .catch swallows failures, so every-row-null means the

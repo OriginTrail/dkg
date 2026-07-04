@@ -113,7 +113,8 @@ describe('classifyCoverage (discriminated union — facets ONLY on uncovered)', 
         probedKey: { key: '0x', registered: true },
       }),
     );
-    expect(c).toEqual({ outcome: 'inconclusive', registered: null });
+    // #1356 — a fail-softed budget read is inconclusive but NOT a capability gap.
+    expect(c).toEqual({ outcome: 'inconclusive', registered: null, adapterUnsupported: false });
   });
   it('registered + expired → uncovered, dead:true (the reviewer’s example facet)', () => {
     const c = classifyCoverage(makePcaSnapshot({ expiresAtTimestamp: PAST, probedKey: { key: '0x', registered: true } }));

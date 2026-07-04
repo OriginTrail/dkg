@@ -167,7 +167,7 @@ const SCENARIOS: Scenario[] = [
       extendedRequested: true,
     },
     probe: { key: W0, registered: true },
-    expected: { outcome: 'inconclusive', registered: null },
+    expected: { outcome: 'inconclusive', registered: null, adapterUnsupported: false },
     overview: { registered: null, approvedCount: 0, inconclusive: true, covered: false, bestBps: null },
     s5Verdict: 'unknown',
     s5Wait: 'PCA status unknown',

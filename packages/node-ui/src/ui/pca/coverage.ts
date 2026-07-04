@@ -35,17 +35,18 @@ export function normalizeProbeRegistered(probedKey: PcaProbedKey | undefined): b
  * `outcome`, so each surface switches on ONE field and TS enforces which facets are
  * meaningful (a caller can't read `dead`/`hasBudget` on a probe that never resolved):
  *  - `inconclusive` — the probe couldn't be read → neutral, never DANGER (#9).
- *                     `adapterUnsupported` (#1356) distinguishes a CAPABILITY GAP
- *                     (the chain adapter can't answer PCA queries here — retrying is
- *                     futile) from a transient RPC failure (retry). Set ONLY on the
- *                     adapter-gap path; a transient/fail-soft leaves it undefined.
+ *                     `adapterUnsupported` (#1356) is ALWAYS set (true iff the chain
+ *                     adapter can't answer PCA queries here — a CAPABILITY GAP where
+ *                     retrying is futile; false for a transient RPC failure / fail-soft
+ *                     where retry may resolve it). Required, not optional, so callers
+ *                     never disambiguate true/false/undefined truthiness.
  *  - `unregistered` — confirmed NOT an approved publishing wallet here.
  *  - `covers`       — registered HERE AND the account is spendable (not dead, has budget).
  *  - `uncovered`    — registered HERE but the account can't cover; `dead`/`hasBudget`
  *                     are the reason facets, carried ONLY on this variant.
  */
 export type PcaCoverageResult =
-  | { outcome: 'inconclusive'; registered: null; adapterUnsupported?: boolean }
+  | { outcome: 'inconclusive'; registered: null; adapterUnsupported: boolean }
   | { outcome: 'unregistered'; registered: false }
   | { outcome: 'covers'; registered: true }
   | { outcome: 'uncovered'; registered: true; dead: boolean; hasBudget: boolean };
@@ -75,7 +76,9 @@ export function classifyCoverage(snap: PcaSnapshot, nowSec?: number): PcaCoverag
   if (registered === false) return { outcome: 'unregistered', registered: false };
   const dead = isPcaDead(snap, nowSec);
   const budget = pcaBudgetState(snap);
-  if (budget === null) return { outcome: 'inconclusive', registered: null };
+  // A fail-softed/unknown extended budget read is inconclusive but NOT a capability gap
+  // (the wallet is registered here; retrying the read may resolve it) → adapterUnsupported false.
+  if (budget === null) return { outcome: 'inconclusive', registered: null, adapterUnsupported: false };
   const hasBudget = budget;
   if (!dead && hasBudget) return { outcome: 'covers', registered: true };
   return { outcome: 'uncovered', registered: true, dead, hasBudget };
