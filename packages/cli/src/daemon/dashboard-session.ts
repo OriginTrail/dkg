@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractBearerToken, verifyToken } from "../auth.js";
-import type { RequestAuthPrincipal } from "../auth.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "./http-utils.js";
 import {
   clearDashboardSessionCookie,
@@ -39,7 +38,6 @@ export interface DashboardSessionHandlerOptions {
   loopbackToken?: string;
   refreshValidTokens?: () => void;
   resolveLoopbackToken?: () => string | undefined;
-  resolvePrincipal: (token: string) => RequestAuthPrincipal;
   corsOrigin?: string | null;
   onSessionRevoked?: (sessionId: string) => void;
 }
@@ -93,7 +91,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 503, { error: "No valid dashboard bootstrap token is available" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(loopbackToken, "loopback", options.resolvePrincipal(loopbackToken));
+    const created = store.create(loopbackToken, "loopback");
     setDashboardSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
@@ -120,7 +118,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 401, { error: "Invalid dashboard session token" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(token!, "exchange", options.resolvePrincipal(token!));
+    const created = store.create(token!, "exchange");
     setDashboardSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,

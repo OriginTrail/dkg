@@ -2872,10 +2872,6 @@ export async function runDaemonInner(
     log("API authentication disabled (auth.enabled = false)");
   }
   const dashboardSessions = new DashboardSessionStore();
-  const dashboardSessionAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
-    verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
-  });
   const resolveDashboardPrincipal = (token: string) => {
     const agentAddress = agent.resolveAgentAddress(token);
     return {
@@ -2883,6 +2879,11 @@ export async function runDaemonInner(
       agentAddress,
     };
   };
+  const dashboardSessionAuthSource = createDashboardSessionAuthSource({
+    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    resolvePrincipal: resolveDashboardPrincipal,
+    verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
+  });
   const resolveDashboardLoopbackToken = () =>
     Array.from(validTokens).find((token) => !agent.resolveAgentByToken(token))
     ?? (validTokens.values().next().value as string | undefined);
@@ -3067,7 +3068,6 @@ export async function runDaemonInner(
             validTokens,
             refreshValidTokens: () => reconcileValidTokens(validTokens),
             resolveLoopbackToken: resolveDashboardLoopbackToken,
-            resolvePrincipal: resolveDashboardPrincipal,
             corsOrigin: reqCorsOrigin,
             onSessionRevoked: closeDashboardSessionSseClients,
           },

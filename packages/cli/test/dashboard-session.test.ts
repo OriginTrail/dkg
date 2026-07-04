@@ -12,7 +12,7 @@ import {
 } from '../src/daemon/dashboard-session.js';
 import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
-import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
+import { getRequestAuthContext, httpAuthGuard, type RequestAuthPrincipal } from '../src/auth.js';
 
 const VALID_TOKEN = 'dashboard-backed-token';
 const ROTATED_TOKEN = 'dashboard-rotated-token';
@@ -55,13 +55,14 @@ async function startServer(options: {
   loopbackToken?: string;
   refreshValidTokens?: () => void;
   resolveLoopbackToken?: () => string | undefined;
+  resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
-  const resolvePrincipal = (token: string) => token === AGENT_TOKEN
-    ? { kind: 'agent' as const, agentAddress: TOKEN_AGENT_ADDRESS }
-    : { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
+  const resolvePrincipal = options.resolvePrincipal ?? ((token: string): RequestAuthPrincipal => token === AGENT_TOKEN
+    ? { kind: 'agent', agentAddress: TOKEN_AGENT_ADDRESS }
+    : { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS });
   const agent = {
     resolveAgentByToken: (token: string | undefined) => token === AGENT_TOKEN ? TOKEN_AGENT_ADDRESS : undefined,
     resolveAgentAddress: (token: string | undefined) => token === AGENT_TOKEN ? TOKEN_AGENT_ADDRESS : DEFAULT_AGENT_ADDRESS,
@@ -76,6 +77,7 @@ async function startServer(options: {
   };
   const dashboardAuthSource = createDashboardSessionAuthSource({
     authenticate: (request) => sessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    resolvePrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -86,7 +88,6 @@ async function startServer(options: {
       loopbackToken: options.loopbackToken ?? VALID_TOKEN,
       refreshValidTokens: options.refreshValidTokens,
       resolveLoopbackToken: options.resolveLoopbackToken,
-      resolvePrincipal,
       onSessionRevoked: options.onSessionRevoked,
     })) {
       return;
@@ -391,7 +392,7 @@ describe('dashboard browser sessions', () => {
     expect(String(headers['Set-Cookie'])).not.toContain('Secure');
   });
 
-  it('stores a deterministic principal when exchanging an agent-scoped token', async () => {
+  it('resolves a deterministic principal when exchanging an agent-scoped token', async () => {
     const started = await startServer();
     server = started.server;
 
@@ -413,6 +414,37 @@ describe('dashboard browser sessions', () => {
         internalCredentialToken: AGENT_TOKEN,
         principal: { kind: 'agent', agentAddress: TOKEN_AGENT_ADDRESS },
         dashboardSession: { source: 'exchange' },
+      },
+    });
+  });
+
+  it('resolves the dashboard principal from the backing token for each protected request', async () => {
+    let agentAddress = TOKEN_AGENT_ADDRESS;
+    const started = await startServer({
+      resolvePrincipal: (token) => token === AGENT_TOKEN
+        ? { kind: 'agent', agentAddress }
+        : { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: AGENT_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    const cookie = cookieFrom(exchange);
+    agentAddress = 'did:dkg:agent:rotated';
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      requestAuth: {
+        source: 'dashboard-session',
+        internalCredentialToken: AGENT_TOKEN,
+        principal: { kind: 'agent', agentAddress: 'did:dkg:agent:rotated' },
       },
     });
   });
@@ -516,8 +548,7 @@ describe('dashboard browser sessions', () => {
   it('rejects and prunes expired dashboard session cookies', () => {
     const store = new DashboardSessionStore();
     const issuedAt = 1_000;
-    const principal = { kind: 'node-admin' as const, agentAddress: DEFAULT_AGENT_ADDRESS };
-    const created = store.create(VALID_TOKEN, 'loopback', principal, issuedAt);
+    const created = store.create(VALID_TOKEN, 'loopback', issuedAt);
     const req = {
       headers: {
         cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
@@ -527,7 +558,6 @@ describe('dashboard browser sessions', () => {
     expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt - 1)).toMatchObject({
       sessionId: created.sessionId,
       compatToken: VALID_TOKEN,
-      principal,
     });
     expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt + 1)).toBeNull();
     expect(store.authenticateSessionId(getDashboardSessionCookie(req), created.record.expiresAt + 2)).toBeNull();

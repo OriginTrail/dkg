@@ -1,11 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { RequestAuthPrincipal } from "../auth.js";
 
 export const DASHBOARD_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 export interface DashboardSessionRecord {
   compatToken: string;
-  principal: RequestAuthPrincipal;
   csrfToken: string;
   source: "loopback" | "exchange";
   issuedAt: number;
@@ -16,7 +14,6 @@ export interface DashboardSessionRecord {
 export interface AuthenticatedDashboardSession {
   sessionId: string;
   compatToken: string;
-  principal: RequestAuthPrincipal;
   csrfToken: string;
   source: DashboardSessionRecord["source"];
   expiresAt: number;
@@ -28,7 +25,6 @@ export class DashboardSessionStore {
   create(
     compatToken: string,
     source: DashboardSessionRecord["source"],
-    principal: RequestAuthPrincipal,
     now = Date.now(),
   ): {
     sessionId: string;
@@ -38,7 +34,6 @@ export class DashboardSessionStore {
     const sessionId = randomBytes(32).toString("base64url");
     const record: DashboardSessionRecord = {
       compatToken,
-      principal,
       csrfToken: randomBytes(32).toString("base64url"),
       source,
       issuedAt: now,
@@ -58,7 +53,6 @@ export class DashboardSessionStore {
     return {
       sessionId,
       compatToken: record.compatToken,
-      principal: record.principal,
       csrfToken: record.csrfToken,
       source: record.source,
       expiresAt: record.expiresAt,

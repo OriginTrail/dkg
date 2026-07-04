@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { verifyToken } from "../auth.js";
-import type { RequestAuthDecision, RequestAuthSource } from "../auth.js";
+import type { RequestAuthDecision, RequestAuthPrincipal, RequestAuthSource } from "../auth.js";
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import { hasTrustedDashboardOrigin, isUnsafeHttpMethod } from "./dashboard-session-policy.js";
 
@@ -53,6 +53,7 @@ export function authorizeDashboardSessionRequest(
 
 export interface DashboardSessionAuthSourceOptions {
   authenticate: (req: IncomingMessage) => AuthenticatedDashboardSession | null;
+  resolvePrincipal: (token: string) => RequestAuthPrincipal;
   verifyCsrf: (req: IncomingMessage, session: AuthenticatedDashboardSession) => boolean;
 }
 
@@ -75,6 +76,7 @@ export function createDashboardSessionAuthSource(
           error: authorization.error,
         };
       }
+      const principal = options.resolvePrincipal(session.compatToken);
 
       return {
         ok: true,
@@ -82,7 +84,7 @@ export function createDashboardSessionAuthSource(
         context: {
           source: "dashboard-session",
           internalCredentialToken: session.compatToken,
-          principal: session.principal,
+          principal,
           csrf: {
             required: authorization.csrfRequired,
             validated: authorization.csrfValidated,
