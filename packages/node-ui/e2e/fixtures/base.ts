@@ -1,4 +1,7 @@
 import { test as base, expect } from '@playwright/test';
+import type { Page } from '@playwright/test';
+import { readDevnetNode } from '../helpers/devnet.js';
+import { UI_NODE } from '../helpers/real-node.js';
 import { AppShellPage } from '../pages/app-shell.po.js';
 import { HeaderPage } from '../pages/header.po.js';
 import { LeftPanelPage } from '../pages/left-panel.po.js';
@@ -17,6 +20,13 @@ import { FilePreviewModal } from '../pages/modals/file-preview.po.js';
 import { PublishingConvictionPage } from '../pages/publishing-conviction.po.js';
 
 type Fixtures = {
+  /**
+   * Auto fixture (no spec references it directly). Opens the dashboard through
+   * the explicit token-exchange flow before app navigation so specs drive the
+   * same cookie session path operators use, without reintroducing a browser
+   * bearer token or tokenless loopback bootstrap.
+   */
+  _dashboardSession: void;
   /**
    * Auto fixture (no spec references it directly). Fails ANY test whose page
    * silently fell back to demo/mock data. See the implementation note below.
@@ -40,10 +50,44 @@ type Fixtures = {
   conviction: PublishingConvictionPage;
 };
 
+async function ensureDashboardSession(page: Page): Promise<void> {
+  const status = await page.request.get('/api/dashboard/session/status', {
+    failOnStatusCode: false,
+  });
+  if (status.ok()) {
+    const body = await status.json().catch(() => null) as { authenticated?: boolean; authDisabled?: boolean } | null;
+    if (body?.authenticated === true || body?.authDisabled === true) return;
+  }
+
+  const node = readDevnetNode(UI_NODE);
+  if (!node?.authToken) {
+    throw new Error(`Devnet node${UI_NODE} auth token is unavailable; cannot open a dashboard session for e2e`);
+  }
+  const exchange = await page.request.post('/api/dashboard/session/exchange', {
+    data: { token: node.authToken },
+    failOnStatusCode: false,
+  });
+  if (!exchange.ok()) {
+    const body = await exchange.text().catch(() => '');
+    throw new Error(
+      `Failed to exchange devnet node${UI_NODE} token for dashboard session: ` +
+      `${exchange.status()} ${body.slice(0, 300)}`,
+    );
+  }
+}
+
 export const test = base.extend<Fixtures>({
   // No mocks: every test runs against a real devnet node (see playwright.config.ts
   // `webServer` → bootstrap-devnet.ts). The page object fixtures below simply
   // wrap the real UI so specs read as user journeys.
+
+  _dashboardSession: [
+    async ({ page }, use) => {
+      await ensureDashboardSession(page);
+      await use();
+    },
+    { auto: true },
+  ],
 
   // HARD GUARD against silent false positives. The product wraps several core
   // endpoints in `api-wrapper.detectMockMode`, which swaps in fabricated demo

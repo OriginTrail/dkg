@@ -66,15 +66,9 @@ describe('useNodeEvents dashboard sessions', () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
       if (url === '/api/dashboard/session/status') {
-        return new Response(JSON.stringify({ authenticated: false }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/dashboard/session/loopback') {
         return new Response(JSON.stringify({
           authenticated: true,
-          source: 'loopback',
+          source: 'exchange',
           csrfToken: 'csrf-refreshed',
           expiresAt: Date.now() + 60_000,
         }), {
@@ -124,7 +118,6 @@ describe('useNodeEvents dashboard sessions', () => {
 
     expect(fetchMock.mock.calls.map(([input, init]) => `${init?.method ?? 'GET'} ${input}`)).toEqual([
       'GET /api/dashboard/session/status',
-      'POST /api/dashboard/session/loopback',
     ]);
     expect(MockEventSource.instances[0].closed).toBe(true);
     expect(MockEventSource.instances).toHaveLength(2);

@@ -2884,10 +2884,6 @@ export async function runDaemonInner(
     resolvePrincipal: resolveDashboardPrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
-  const resolveDashboardLoopbackToken = () =>
-    Array.from(validTokens).find((token) => !agent.resolveAgentByToken(token))
-    ?? (validTokens.values().next().value as string | undefined);
-
   // Trusted server-side port binding used downstream (SSRF defence in
   // manifestSelfClient; passed to handleRequest + route modules).
   const apiPortRef = { value: 0 };
@@ -3067,7 +3063,6 @@ export async function runDaemonInner(
             authEnabled,
             validTokens,
             refreshValidTokens: () => reconcileValidTokens(validTokens),
-            resolveLoopbackToken: resolveDashboardLoopbackToken,
             corsOrigin: reqCorsOrigin,
             onSessionRevoked: closeDashboardSessionSseClients,
           },

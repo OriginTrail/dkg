@@ -35,9 +35,7 @@ export {
 export interface DashboardSessionHandlerOptions {
   authEnabled: boolean;
   validTokens: Set<string>;
-  loopbackToken?: string;
   refreshValidTokens?: () => void;
-  resolveLoopbackToken?: () => string | undefined;
   corsOrigin?: string | null;
   onSessionRevoked?: (sessionId: string) => void;
 }
@@ -86,12 +84,13 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 403, { error: "Loopback dashboard session is only available from localhost" }, options.corsOrigin);
       return true;
     }
-    const loopbackToken = resolveCurrentLoopbackToken(options);
-    if (!loopbackToken) {
-      jsonResponse(res, 503, { error: "No valid dashboard bootstrap token is available" }, options.corsOrigin);
+    options.refreshValidTokens?.();
+    const token = extractBearerToken(req.headers.authorization);
+    if (!verifyToken(token, options.validTokens)) {
+      jsonResponse(res, 401, { error: "Valid API token required for loopback dashboard session" }, options.corsOrigin);
       return true;
     }
-    const created = store.create(loopbackToken, "loopback");
+    const created = store.create(token!, "loopback");
     setDashboardSessionCookie(req, res, created.sessionId);
     jsonResponse(res, 200, sessionResponse({
       csrfToken: created.record.csrfToken,
@@ -159,10 +158,4 @@ function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken
     csrfToken: session.csrfToken,
     expiresAt: session.expiresAt,
   };
-}
-
-function resolveCurrentLoopbackToken(options: DashboardSessionHandlerOptions): string | undefined {
-  options.refreshValidTokens?.();
-  const token = options.resolveLoopbackToken?.() ?? options.loopbackToken;
-  return token && options.validTokens.has(token) ? token : undefined;
 }

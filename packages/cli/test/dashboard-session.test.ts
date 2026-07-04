@@ -40,7 +40,7 @@ describe('dashboard session trust policy helpers', () => {
 function loopbackBootstrapInit(baseUrl: string): RequestInit {
   return {
     method: 'POST',
-    headers: { Origin: baseUrl },
+    headers: { Origin: baseUrl, Authorization: `Bearer ${VALID_TOKEN}` },
   };
 }
 
@@ -52,9 +52,7 @@ function cookieFrom(res: Response): string {
 
 async function startServer(options: {
   validTokens?: Set<string>;
-  loopbackToken?: string;
   refreshValidTokens?: () => void;
-  resolveLoopbackToken?: () => string | undefined;
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
@@ -85,9 +83,7 @@ async function startServer(options: {
     if (await handleDashboardSessionRequest(req, res, url, sessions, {
       authEnabled: true,
       validTokens,
-      loopbackToken: options.loopbackToken ?? VALID_TOKEN,
       refreshValidTokens: options.refreshValidTokens,
-      resolveLoopbackToken: options.resolveLoopbackToken,
       onSessionRevoked: options.onSessionRevoked,
     })) {
       return;
@@ -201,22 +197,22 @@ describe('dashboard browser sessions', () => {
     await expect(res.json()).resolves.toMatchObject({ authenticated: true, source: 'loopback' });
   });
 
-  it('refreshes valid tokens before selecting the loopback bootstrap token', async () => {
+  it('refreshes valid tokens before authorizing loopback bootstrap tokens', async () => {
     const validTokens = new Set([VALID_TOKEN]);
-    let currentLoopbackToken = VALID_TOKEN;
     const refreshValidTokens = vi.fn(() => {
       validTokens.delete(VALID_TOKEN);
       validTokens.add(ROTATED_TOKEN);
-      currentLoopbackToken = ROTATED_TOKEN;
     });
     const started = await startServer({
       validTokens,
       refreshValidTokens,
-      resolveLoopbackToken: () => currentLoopbackToken,
     });
     server = started.server;
 
-    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, {
+      method: 'POST',
+      headers: { Origin: started.baseUrl, Authorization: `Bearer ${ROTATED_TOKEN}` },
+    });
     expect(bootstrap.status).toBe(200);
     expect(refreshValidTokens).toHaveBeenCalledTimes(1);
 
@@ -230,6 +226,21 @@ describe('dashboard browser sessions', () => {
         internalCredentialToken: ROTATED_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
       },
+    });
+  });
+
+  it('rejects tokenless loopback bootstrap even with forgeable local browser headers', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, {
+      method: 'POST',
+      headers: { Origin: started.baseUrl },
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Valid API token required for loopback dashboard session',
     });
   });
 

@@ -66,15 +66,9 @@ describe('dashboard session client', () => {
         });
       }
       if (url === '/api/dashboard/session/status') {
-        return new Response(JSON.stringify({ authenticated: false }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      if (url === '/api/dashboard/session/loopback') {
         return new Response(JSON.stringify({
           authenticated: true,
-          source: 'loopback',
+          source: 'exchange',
           csrfToken: 'csrf-new',
           expiresAt: Date.now() + 60_000,
         }), {
@@ -92,15 +86,14 @@ describe('dashboard session client', () => {
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       'POST /api/protected',
       'GET /api/dashboard/session/status',
-      'POST /api/dashboard/session/loopback',
       'POST /api/protected',
     ]);
     expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-old');
-    expect(headerValue(calls[3]?.headers, 'X-DKG-CSRF')).toBe('csrf-new');
+    expect(headerValue(calls[2]?.headers, 'X-DKG-CSRF')).toBe('csrf-new');
   });
 
   it('refreshes stale CSRF and retries once after an unsafe protected API 403', async () => {
-    const calls: Array<{ url: string; method: string; headers?: HeadersInit }> = [];
+    const calls: Array<{ url: string; method: string; headers?: HeadersInit; body?: BodyInit | null }> = [];
     let protectedCalls = 0;
     useAuthenticatedDashboardSession({
       source: 'loopback',
@@ -110,7 +103,7 @@ describe('dashboard session client', () => {
 
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
-      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers });
+      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers, body: init?.body });
       if (url === '/api/protected') {
         protectedCalls += 1;
         if (protectedCalls === 1) {
@@ -138,7 +131,15 @@ describe('dashboard session client', () => {
       return new Response('{}', { status: 404 });
     });
 
-    const res = await apiFetch('/api/protected', { method: 'POST' });
+    const body = JSON.stringify({ contextGraphId: 'cg-1', name: 'memory' });
+    const res = await apiFetch('/api/protected', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-DKG-Client': 'node-ui',
+      },
+      body,
+    });
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ ok: true });
@@ -149,6 +150,10 @@ describe('dashboard session client', () => {
     ]);
     expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-tab-stale');
     expect(headerValue(calls[2]?.headers, 'X-DKG-CSRF')).toBe('csrf-cookie-current');
+    expect(headerValue(calls[2]?.headers, 'Content-Type')).toBe('application/json');
+    expect(headerValue(calls[2]?.headers, 'X-DKG-Client')).toBe('node-ui');
+    expect(calls[0]?.body).toBe(body);
+    expect(calls[2]?.body).toBe(body);
   });
 
   it('does not refresh or retry generic unsafe 403 responses', async () => {

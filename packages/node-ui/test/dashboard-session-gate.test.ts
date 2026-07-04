@@ -89,7 +89,7 @@ describe('DashboardSessionGate', () => {
     useAuthenticatedDashboardSession();
   });
 
-  it('requires operator token exchange when loopback bootstrap is rejected before protected API calls run', async () => {
+  it('requires operator token exchange before protected API calls run', async () => {
     await act(async () => {
       root!.render(React.createElement(DashboardSessionGate, null, React.createElement(ProtectedProbe)));
     });
@@ -99,7 +99,6 @@ describe('DashboardSessionGate', () => {
     expect(container.querySelector('[data-testid="protected-probe"]')).toBeNull();
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
       'GET /api/dashboard/session/status',
-      'POST /api/dashboard/session/loopback',
     ]);
 
     const input = container.querySelector('input[type="password"]') as HTMLInputElement | null;

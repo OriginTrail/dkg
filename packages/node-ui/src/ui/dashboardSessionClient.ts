@@ -34,14 +34,6 @@ async function requestSessionStatus(): Promise<DashboardSessionStatus | null> {
   }).then(async (res) => res.ok ? parseDashboardSessionStatus(await readJson<unknown>(res)) : null).catch(() => null);
 }
 
-async function requestLoopbackSession(): Promise<DashboardSessionStatus | null> {
-  return fetch('/api/dashboard/session/loopback', {
-    method: 'POST',
-    cache: 'no-store',
-    credentials: 'same-origin',
-  }).then(async (res) => res.ok ? parseDashboardSessionStatus(await readJson<unknown>(res)) : null).catch(() => null);
-}
-
 export async function ensureDashboardSession(): Promise<DashboardSessionStatus> {
   const dashboardSession = getDashboardSession();
   if (typeof window === 'undefined') return dashboardSession;
@@ -56,11 +48,6 @@ export async function ensureDashboardSession(): Promise<DashboardSessionStatus> 
     const status = await requestSessionStatus();
     if (isDashboardSessionReady(status ?? undefined)) {
       return setDashboardSession(status!);
-    }
-
-    const loopback = await requestLoopbackSession();
-    if (isDashboardSessionReady(loopback ?? undefined)) {
-      return setDashboardSession(loopback!);
     }
 
     return setDashboardSession({ state: 'unauthenticated', authenticated: false });
