@@ -58,11 +58,21 @@ function appendSetCookie(res: ServerResponse, value: string): void {
 }
 
 function isHttpsRequest(req: IncomingMessage): boolean {
+  if (Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted)) return true;
+  if (!isTrustedForwardedHeaderSource(req)) return false;
+
   const forwardedProto = req.headers["x-forwarded-proto"];
   const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
   return firstForwardedValue(proto) === "https" ||
-    forwardedHeaderHasHttpsProto(req.headers.forwarded) ||
-    Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted);
+    forwardedHeaderHasHttpsProto(req.headers.forwarded);
+}
+
+function isTrustedForwardedHeaderSource(req: IncomingMessage): boolean {
+  const addr = req.socket.remoteAddress ?? "";
+  return addr === "::1" ||
+    addr === "127.0.0.1" ||
+    addr === "::ffff:127.0.0.1" ||
+    addr.startsWith("127.");
 }
 
 function firstForwardedValue(value: string | string[] | undefined): string | undefined {

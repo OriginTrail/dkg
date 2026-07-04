@@ -10,6 +10,7 @@ import {
   isLoopbackAddress,
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
+import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
 import { getRequestAuthContext, httpAuthGuard } from '../src/auth.js';
 
@@ -370,6 +371,26 @@ describe('dashboard browser sessions', () => {
     expect(setCookie).toContain('Secure');
   });
 
+  it('ignores spoofed forwarding protocol headers from non-loopback peers when setting cookies', () => {
+    const req = {
+      headers: {
+        'x-forwarded-proto': 'https',
+        forwarded: 'for=203.0.113.20;proto=https;host=node.example',
+      },
+      socket: { remoteAddress: '203.0.113.20' },
+    } as IncomingMessage;
+    const headers: Record<string, string | string[]> = {};
+    const res = {
+      getHeader: (name: string) => headers[name],
+      setHeader: (name: string, value: string | string[]) => { headers[name] = value; },
+    } as ServerResponse;
+
+    setDashboardSessionCookie(req, res, 'spoofed-forwarded-session');
+
+    expect(headers['Set-Cookie']).toContain('dkg_ui_session=');
+    expect(String(headers['Set-Cookie'])).not.toContain('Secure');
+  });
+
   it('stores a deterministic principal when exchanging an agent-scoped token', async () => {
     const started = await startServer();
     server = started.server;
@@ -433,6 +454,23 @@ describe('dashboard browser sessions', () => {
     expect(csrf.status).toBe(401);
     await expect(csrf.json()).resolves.toMatchObject({
       error: 'Dashboard session required',
+    });
+  });
+
+  it('rejects protected dashboard-cookie requests after the backing token is invalidated', async () => {
+    const validTokens = new Set([VALID_TOKEN, AGENT_TOKEN]);
+    const started = await startServer({ validTokens });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    validTokens.delete(VALID_TOKEN);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: cookie },
+    });
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({
+      error: expect.stringContaining('Unauthorized'),
     });
   });
 
