@@ -44,9 +44,9 @@ export type RequestAuthContext =
       source: 'dashboard-session';
       internalCredentialToken: string;
       dashboardSession: {
-        sessionId?: string;
-        source?: 'loopback' | 'exchange';
-        expiresAt?: number;
+        sessionId: string;
+        source: 'loopback' | 'exchange';
+        expiresAt: number;
       };
     });
 

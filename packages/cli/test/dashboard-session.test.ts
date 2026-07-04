@@ -538,18 +538,20 @@ describe('dashboard browser sessions', () => {
     server = started.server;
     const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
     const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
 
     const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
       method: 'POST',
-      headers: { Cookie: cookie },
+      headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken },
     });
     expect(logout.status).toBe(200);
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0');
 
     const res = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
     expect(res.status).toBe(401);
   });
 
-  it('notifies when logout revokes a dashboard session', async () => {
+  it('rejects logout without CSRF and leaves the live session usable', async () => {
     const onSessionRevoked = vi.fn();
     const started = await startServer({ onSessionRevoked });
     server = started.server;
@@ -559,6 +561,54 @@ describe('dashboard browser sessions', () => {
     const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
       method: 'POST',
       headers: { Cookie: cookie },
+    });
+    expect(logout.status).toBe(403);
+    await expect(logout.json()).resolves.toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+    });
+    expect(onSessionRevoked).not.toHaveBeenCalled();
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects logout with valid CSRF but hostile Origin', async () => {
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({ onSessionRevoked });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: 'https://attacker.example',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(logout.status).toBe(403);
+    await expect(logout.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
+    expect(onSessionRevoked).not.toHaveBeenCalled();
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
+    expect(res.status).toBe(200);
+  });
+
+  it('notifies when logout revokes a dashboard session', async () => {
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({ onSessionRevoked });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const logout = await fetch(`${started.baseUrl}/api/dashboard/session/logout`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken },
     });
     expect(logout.status).toBe(200);
     expect(onSessionRevoked).toHaveBeenCalledTimes(1);

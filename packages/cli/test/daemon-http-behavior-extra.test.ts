@@ -373,12 +373,14 @@ describe('CLI-2 — CORS policy for /api/*', () => {
       headers: {
         Origin: `http://127.0.0.1:${d.apiPort}`,
         'Access-Control-Request-Method': 'POST',
-        'Access-Control-Request-Headers': 'Content-Type, Authorization',
+        'Access-Control-Request-Headers': 'Content-Type, X-DKG-CSRF',
       },
     });
     expect([200, 204]).toContain(res.status);
     const acao = res.headers.get('access-control-allow-origin');
     expect(acao === `http://127.0.0.1:${d.apiPort}` || acao === '*').toBe(true);
+    const allowedHeaders = res.headers.get('access-control-allow-headers') ?? '';
+    expect(allowedHeaders.toLowerCase()).toContain('x-dkg-csrf');
   });
 });
 

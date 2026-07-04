@@ -3156,7 +3156,7 @@ export async function runDaemonInner(
           res,
           dashboardSessionId: dashboardSession?.sessionId,
         };
-        if (dashboardSession?.expiresAt) {
+        if (dashboardSession) {
           const delayMs = Math.max(0, dashboardSession.expiresAt - Date.now());
           client.expiryTimer = setTimeout(() => closeSseClient(client), delayMs);
         }
