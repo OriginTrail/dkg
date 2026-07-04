@@ -856,9 +856,9 @@ function staticSecurityHeaders(isHtml: boolean): Record<string, string> {
     headers['Content-Security-Policy'] = [
       "default-src 'self'",
       "script-src 'self'",
-      "style-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "img-src 'self' data: blob:",
-      "font-src 'self'",
+      "font-src 'self' https://fonts.gstatic.com",
       "connect-src 'self' http: https: ws: wss:",
       "frame-src 'self' blob:",
       "object-src 'none'",

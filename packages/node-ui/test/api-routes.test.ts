@@ -557,6 +557,8 @@ describe('serveStatic path traversal prevention', () => {
     expect(body).not.toContain('sentinel-secret-token');
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(res.headers.get('content-security-policy')).toContain("script-src 'self'");
+    expect(res.headers.get('content-security-policy')).toContain("style-src 'self' 'unsafe-inline' https://fonts.googleapis.com");
+    expect(res.headers.get('content-security-policy')).toContain("font-src 'self' https://fonts.gstatic.com");
     expect(res.headers.get('content-security-policy')).toContain("frame-src 'self' blob:");
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   });
