@@ -556,6 +556,22 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('rejects unsafe session-authenticated requests with an incorrect CSRF token', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-DKG-CSRF': 'wrong-token' },
+    });
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+    });
+  });
+
   it('allows unsafe session-authenticated requests with CSRF', async () => {
     const started = await startServer();
     server = started.server;
