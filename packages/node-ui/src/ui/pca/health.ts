@@ -2,10 +2,10 @@
 // HealthChip.tsx so domain code (coverage.ts, the hooks) doesn't import a React
 // component file (layer inversion). HealthChip.tsx re-imports these for its pill.
 //
-// #1349 — the `insolvent` derivation reuses the shared `hasPcaBudget` snapshot
+// #1349 — the `insolvent` derivation reuses the shared 3-state `pcaBudgetState` snapshot
 // predicate so this pill and S5 eligibility agree on "has budget". Both it and the
 // liveness `isPcaExpired` live in the acyclic leaf `pca-primitives.ts`.
-import { hasPcaBudget, isPcaExpired } from './pca-primitives.js';
+import { pcaBudgetState, isPcaExpired } from './pca-primitives.js';
 import type { PcaSnapshot } from '../api.js';
 
 /**
@@ -36,8 +36,8 @@ export const PCA_EXPIRING_SOON_SECONDS = 7 * 24 * 60 * 60;
  * (GAP-4/5 extended snapshot) is DEFINITIVELY known AND every budget source is
  * empty. When `remainingAllowance` is absent — a coarse P0 snapshot, or the daemon
  * fail-softed the extended read — insolvency is NOT asserted (invariant #9: never
- * claim a depleted buffer we can't prove). The budget check reuses coverage's
- * `hasPcaBudget` so this pill and S5 eligibility agree on "has budget".
+ * claim a depleted buffer we can't prove). The budget check reuses the shared
+ * `pcaBudgetState` so this pill and S5 eligibility agree on "has budget".
  */
 export function healthForSnapshot(
   snapshot: Pick<
@@ -56,10 +56,13 @@ export function healthForSnapshot(
   const hasExpiry = typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0;
   if (isPcaExpired(snapshot, nowSec)) return 'expired';
   if (fullySwept) return 'swept';
-  // Insolvent only on a definitive extended read (remainingAllowance present) with no
-  // spendable budget left. The `!== undefined` guard is the #9 honesty gate; when it
-  // holds, `hasPcaBudget` returns a definite true/false (never the unknown `null`).
-  if (snapshot.remainingAllowance !== undefined && !hasPcaBudget(snapshot)) return 'insolvent';
+  // Insolvent ONLY when a DEFINITIVE (extended) read shows an empty budget. `pcaBudgetState`
+  // is 3-state — `false` = known-empty, `null` = unknown (fail-softed → NOT insolvent, #9),
+  // `true` = solvent — so `=== false` makes the known-empty check explicit. The
+  // `remainingAllowance !== undefined` guard STAYS: `pcaBudgetState` also maps the COARSE
+  // `baseEpochAllowance === 0` (a non-extended snapshot) to `false`, which #1349's #9 rule
+  // defers as unprovable; the guard (which that coarse case fails) keeps that deferral.
+  if (snapshot.remainingAllowance !== undefined && pcaBudgetState(snapshot) === false) return 'insolvent';
   if (typeof agentCount === 'number' && agentCount >= PCA_CAP_NEAR_THRESHOLD) return 'cap-near';
   if (hasExpiry && expiresAtTimestamp - nowSec <= PCA_EXPIRING_SOON_SECONDS) return 'expiring';
   return 'healthy';
