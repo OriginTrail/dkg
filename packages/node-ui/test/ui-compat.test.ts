@@ -415,6 +415,24 @@ describe('fileUrl hash handling', () => {
   });
 });
 
+describe('DaemonPath transport boundary', () => {
+  const api = readFile('api.ts');
+  const filePreviewModal = readRawFile('components/Modals/FilePreviewModal.tsx');
+
+  it('keeps direct daemon fetches behind typed path builders', () => {
+    expect(api).not.toMatch(/apiFetch\(['"`]\/api/);
+    expect(api).not.toMatch(/fetchWithTimeout\(['"`]\/api/);
+    expect(api).toContain("fetchWithTimeout(apiDaemonPath('/api/connect')");
+    expect(api).toContain("apiFetch(apiDaemonPath('/api/openclaw-channel/send')");
+    expect(api).toContain("apiFetch(apiDaemonPath('/api/hermes-channel/send')");
+  });
+
+  it('keeps file-preview blob helpers on DaemonPath values', () => {
+    expect(filePreviewModal).toContain('authenticatedBlobUrl(url: DaemonPath)');
+    expect(filePreviewModal).toContain('handleDownload = async (downloadUrl: DaemonPath');
+  });
+});
+
 describe('listAssertions query path', () => {
   const api = readFile('api.ts');
 

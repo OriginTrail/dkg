@@ -207,7 +207,7 @@ export const updateTelemetrySettings = (enabled: boolean) =>
   put<{ ok: boolean; enabled: boolean }>('/api/settings/telemetry', { enabled });
 export const fetchConnections = () => get<any>('/api/connections');
 export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =>
-  fetchWithTimeout(`${BASE}/api/connect`, {
+  fetchWithTimeout(apiDaemonPath('/api/connect'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ multiaddr }),
@@ -224,7 +224,7 @@ export const connectToPeerWithTimeout = (multiaddr: string, timeoutMs = 10000) =
 // from relay/IP rotation. Daemon side: `POST /api/connect { peerId }` →
 // `agent.connectToPeerId` → `peerRouting.findPeer` → `libp2p.dial`.
 export const connectToPeerIdWithTimeout = (peerId: string, timeoutMs = 20000) =>
-  fetchWithTimeout(`${BASE}/api/connect`, {
+  fetchWithTimeout(apiDaemonPath('/api/connect'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ peerId }),
@@ -2395,7 +2395,7 @@ export async function sendOpenClawLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const res = await apiFetch('/api/openclaw-channel/send', {
+  const res = await apiFetch(apiDaemonPath('/api/openclaw-channel/send'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
@@ -2476,7 +2476,7 @@ export async function streamOpenClawLocalChat(
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await apiFetch('/api/openclaw-channel/stream', {
+  const res = await apiFetch(apiDaemonPath('/api/openclaw-channel/stream'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -2572,7 +2572,7 @@ export async function sendHermesLocalChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const res = await apiFetch('/api/hermes-channel/send', {
+  const res = await apiFetch(apiDaemonPath('/api/hermes-channel/send'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildLocalAgentChatBody(text, opts)),
@@ -2591,7 +2591,7 @@ export async function streamHermesLocalChat(
     onEvent?: (event: OpenClawStreamEvent) => void;
   } = {},
 ): Promise<LocalAgentChatResponse> {
-  const res = await apiFetch('/api/hermes-channel/stream', {
+  const res = await apiFetch(apiDaemonPath('/api/hermes-channel/stream'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
