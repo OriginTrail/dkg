@@ -22,8 +22,8 @@
  *   6. Corrupt / unreadable state file → treated as null persisted marker.
  *   7. Idempotent across repeated calls with the same input.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, statSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chainResetWipe, detectBackendSwitch, detectNetworkSwitch } from '../src/daemon/chain-reset-wipe.js';
@@ -69,6 +69,9 @@ describe('chainResetWipe — opt-in protocol', () => {
     expect(result.wiped).toBe(false);
     expect(result.prevMarker).toBeNull();
     expect(result.removedFiles).toEqual([]);
+    // New #679 result fields are inert on the no-op path.
+    expect(result.skipped).toBe(false);
+    expect(result.backedUpFiles).toEqual([]);
     // No state file is created when the protocol isn't active.
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(false);
     // All files preserved.
@@ -90,18 +93,27 @@ describe('chainResetWipe — first boot with marker present', () => {
 
     expect(result.wiped).toBe(true);
     expect(result.prevMarker).toBeNull();
+    // Under the default backupStore=true, store.nq is RENAMED (→ backedUpFiles),
+    // not hard-deleted; the regenerable files are still removed outright.
     expect(result.removedFiles).toEqual(
       expect.arrayContaining([
-        'store.nq',
         'store.nq.tmp',
+        // Label is platform-independent after the #679 walLabel fix
+        // (`replace(/^[/\\]+/, '')`) — no leading `/` on Linux nor `\` on Windows.
         'random-sampling.wal',
         'publish-journal.0',
         'publish-journal.1',
         'publish-journal.staging',
       ]),
     );
+    expect(result.removedFiles).not.toContain('store.nq');
+    expect(result.backedUpFiles).toHaveLength(1);
+    expect(result.backedUpFiles[0]).toMatch(/^store\.nq\.pre-wipe-/);
 
+    // Existence-based checks for the store files.
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(existsSync(join(dataDir, 'store.nq.tmp'))).toBe(false);
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
     expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);
     expect(existsSync(join(dataDir, STATE_FILE))).toBe(true);
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
@@ -132,6 +144,9 @@ describe('chainResetWipe — same marker (steady state)', () => {
     expect(result.wiped).toBe(false);
     expect(result.prevMarker).toBe(NEW_MARKER);
     expect(result.removedFiles).toEqual([]);
+    // New #679 result fields are inert on the equal-marker no-op path too.
+    expect(result.skipped).toBe(false);
+    expect(result.backedUpFiles).toEqual([]);
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(true);
   });
@@ -194,8 +209,12 @@ describe('chainResetWipe — marker changed (chain reset)', () => {
     const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
     expect(result.wiped).toBe(true);
-    expect(result.removedFiles).toEqual(['store.nq']);
+    // store.nq is backed up (renamed), not in removedFiles; nothing else existed.
+    expect(result.removedFiles).toEqual([]);
+    expect(result.backedUpFiles).toHaveLength(1);
+    expect(result.backedUpFiles[0]).toMatch(/^store\.nq\.pre-wipe-/);
     expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(existsSync(join(dataDir, result.backedUpFiles[0]))).toBe(true);
   });
 
   it('is idempotent: a second call with the same input is a no-op', async () => {
@@ -230,6 +249,381 @@ describe('chainResetWipe — corrupt state file', () => {
     // State file gets rewritten with the current marker.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(NEW_MARKER);
+  });
+});
+
+// =====================================================================
+// #679 — dev-loop opt-out + store.nq backup / rotation
+// =====================================================================
+//
+// Two operator-facing additions guarded here:
+//   - DKG_SKIP_CHAIN_RESET_WIPE=1 (the `skip` option): a monorepo developer
+//     can hop between marker-pinned worktrees without losing their local
+//     store. The wipe is bypassed AND the marker is deliberately NOT persisted,
+//     so the wipe re-triggers the moment the flag is unset. The operator
+//     guarantee is unchanged — skip unset still wipes by default.
+//   - store.nq is RENAMED to store.nq.pre-wipe-<marker>-<ts> instead of being
+//     hard-deleted, so a wrongly-triggered wipe is recoverable; old backups
+//     rotate down to maxStoreBackups (default 3). backupStore:false restores
+//     the hard-delete. A rename failure is a wipe failure: the marker is not
+//     persisted and the wipe retries on the next boot.
+
+function readPersistedMarker(dir: string): string | null {
+  return JSON.parse(readFileSync(join(dir, STATE_FILE), 'utf8')).chainResetMarker;
+}
+
+describe('chainResetWipe — operator-mode invariant (#679)', () => {
+  it('skip unset (operator default) still wipes and persists the marker on a marker change', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    seedAllFiles(dataDir);
+
+    // skip:false is the effective value when DKG_SKIP_CHAIN_RESET_WIPE is unset
+    // (skip:undefined behaves identically — the opt-out must never weaken the
+    // operator guarantee).
+    const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
+
+    expect(result.wiped).toBe(true);
+    expect(result.skipped).toBe(false);
+    expect(result.prevMarker).toBe(OLD_MARKER);
+
+    // Chain-state gone (store.nq via backup, the rest hard-deleted)...
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
+    expect(existsSync(join(dataDir, 'publish-journal.0'))).toBe(false);
+    expect(result.backedUpFiles).toHaveLength(1);
+    // The backup holds the original store.nq bytes (seedAllFiles wrote this) —
+    // a wrongly-triggered wipe is recoverable by renaming the file back.
+    expect(readFileSync(join(dataDir, result.backedUpFiles[0]), 'utf8')).toBe('<s> <p> <o> .');
+    // ...operator identity preserved...
+    expect(existsSync(join(dataDir, 'wallets.json'))).toBe(true);
+    // ...and the marker advanced, so next boot is steady-state.
+    expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
+  });
+});
+
+describe('chainResetWipe — dev-loop opt-out (skip, #679)', () => {
+  it('skip=true bypasses the wipe, preserves local chain-state, and does NOT persist the marker', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    seedAllFiles(dataDir);
+    const logs: string[] = [];
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      skip: true,
+      log: (m) => logs.push(m),
+    });
+
+    expect(result.wiped).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.prevMarker).toBe(OLD_MARKER);
+    expect(result.removedFiles).toEqual([]);
+    expect(result.backedUpFiles).toEqual([]);
+
+    // Every chain-state file survives untouched.
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+    expect(existsSync(join(dataDir, 'store.nq.tmp'))).toBe(true);
+    expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(true);
+    expect(existsSync(join(dataDir, 'publish-journal.0'))).toBe(true);
+
+    // Marker deliberately NOT advanced, so unsetting the flag re-triggers.
+    expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
+    expect(logs.some((l) => l.includes('skipped'))).toBe(true);
+  });
+
+  it('skip short-circuits the backup — no rename, store.nq is byte-for-byte untouched', async () => {
+    writeFileSync(join(dataDir, 'store.nq'), 'ORIGINAL');
+
+    const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: true });
+
+    expect(result.skipped).toBe(true);
+    expect(result.backedUpFiles).toEqual([]);
+    expect(readFileSync(join(dataDir, 'store.nq'), 'utf8')).toBe('ORIGINAL');
+    // No pre-wipe sibling was written.
+    expect(readdirSync(dataDir).some((f) => f.startsWith('store.nq.pre-wipe-'))).toBe(false);
+  });
+
+  it('unsetting skip after a skipped boot re-triggers the wipe (marker was never persisted)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
+
+    // Boot 1: developer has the opt-out set → store preserved, marker untouched.
+    const skipped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: true });
+    expect(skipped.skipped).toBe(true);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+    expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
+
+    // Boot 2: flag unset → the wipe finally runs because the marker never advanced.
+    const wiped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
+    expect(wiped.wiped).toBe(true);
+    expect(wiped.skipped).toBe(false);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
+  });
+
+  it('skip=true does not attempt the external SPARQL wipe (fetch is never called)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
+
+    let fetchCalls = 0;
+    const fn: typeof globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(null, { status: 200 });
+    }) as typeof globalThis.fetch;
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      skip: true,
+      // An external backend is configured; skip must short-circuit BEFORE the
+      // external wipe just as it does before the local file wipe.
+      storeConfig: {
+        backend: 'blazegraph',
+        options: { url: 'http://blaze.test/sparql', managedByDkg: true },
+      },
+      fetch: fn,
+    });
+
+    expect(result.skipped).toBe(true);
+    expect(result.wiped).toBe(false);
+    expect(fetchCalls).toBe(0); // no external SPARQL request issued
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(true); // local store preserved too
+  });
+
+  it('skip is irrelevant when the marker already matches (equal no-op is unchanged)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: NEW_MARKER, savedAt: Date.now() }),
+    );
+    seedAllFiles(dataDir);
+
+    const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: true });
+
+    // The equal-marker short-circuit returns BEFORE the skip branch, so a match
+    // reports skipped:false (not a bypass — there was simply nothing to bypass).
+    expect(result.wiped).toBe(false);
+    expect(result.skipped).toBe(false);
+    expect(result.backedUpFiles).toEqual([]);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+  });
+});
+
+describe('chainResetWipe — store.nq backup + rotation (#679)', () => {
+  it('renames store.nq to store.nq.pre-wipe-<marker>-<ts> and keeps it recoverable (default)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), 'PRECIOUS_TRIPLES');
+
+    const logs: string[] = [];
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      log: (m) => logs.push(m),
+    });
+
+    expect(result.wiped).toBe(true);
+    expect(result.removedFiles).not.toContain('store.nq');
+    expect(result.backedUpFiles).toHaveLength(1);
+    const backup = result.backedUpFiles[0];
+    // <marker> is sanitized ([^A-Za-z0-9._-] → _); NEW_MARKER is already clean.
+    expect(backup).toMatch(/^store\.nq\.pre-wipe-v10-rs-staking-consolidation-2026-04-30-\d+$/);
+
+    // Original gone; the backup holds the original bytes (recoverable by rename-back).
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(readFileSync(join(dataDir, backup), 'utf8')).toBe('PRECIOUS_TRIPLES');
+    // A clean backup is not a failure — the marker advances.
+    expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
+    expect(logs.some((l) => l.includes('backed up: store.nq'))).toBe(true);
+  });
+
+  it('backupStore=false hard-deletes store.nq (no backup file)', async () => {
+    writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      backupStore: false,
+    });
+
+    expect(result.wiped).toBe(true);
+    expect(result.removedFiles).toContain('store.nq');
+    expect(result.backedUpFiles).toEqual([]);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(readdirSync(dataDir).some((f) => f.startsWith('store.nq.pre-wipe-'))).toBe(false);
+  });
+
+  it('rotates store.nq backups down to maxStoreBackups, keeping the newest', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    // Three older backups with distinct embedded timestamps (rotation sorts on
+    // the trailing -<digits>). Real Date.now() for the new backup is ≫ these.
+    writeFileSync(join(dataDir, 'store.nq.pre-wipe-old-100'), 'b100');
+    writeFileSync(join(dataDir, 'store.nq.pre-wipe-old-200'), 'b200');
+    writeFileSync(join(dataDir, 'store.nq.pre-wipe-old-300'), 'b300');
+    writeFileSync(join(dataDir, 'store.nq'), 'newest');
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      maxStoreBackups: 2,
+    });
+
+    expect(result.wiped).toBe(true);
+    const backups = readdirSync(dataDir).filter((f) => f.startsWith('store.nq.pre-wipe-'));
+    // 3 pre-seeded + 1 new = 4 → rotated down to the newest 2.
+    expect(backups).toHaveLength(2);
+    expect(backups).toContain(result.backedUpFiles[0]); // just-created (Date.now() ≫ seeds) survives
+    expect(backups).toContain('store.nq.pre-wipe-old-300'); // 2nd-newest kept
+    expect(backups).not.toContain('store.nq.pre-wipe-old-200'); // rotated out
+    expect(backups).not.toContain('store.nq.pre-wipe-old-100'); // oldest rotated out
+  });
+
+  it('records a store.nq rename failure and does NOT persist the marker (retries next boot)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), 'PRECIOUS');
+
+    // Pin Date.now so the backup target name is deterministic, then pre-create
+    // that exact path as a NON-EMPTY DIRECTORY. renameSync(file → existing dir)
+    // throws on every platform (EISDIR / EPERM) — a deterministic, cross-platform
+    // rename failure that (unlike chmod) also reproduces on Windows.
+    const FIXED = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(FIXED);
+    try {
+      const blockingDir = join(
+        dataDir,
+        `store.nq.pre-wipe-v10-rs-staking-consolidation-2026-04-30-${FIXED}`,
+      );
+      mkdirSync(blockingDir, { recursive: true });
+      writeFileSync(join(blockingDir, 'occupied'), 'x');
+
+      const logs: string[] = [];
+      const result = await chainResetWipe({
+        dataDir,
+        currentMarker: NEW_MARKER,
+        log: (m) => logs.push(m),
+      });
+
+      // The wipe ran, but the store.nq backup step failed.
+      expect(result.wiped).toBe(true);
+      expect(result.backedUpFiles).toEqual([]);
+      expect(result.failedFiles.some((f) => f.file === 'store.nq')).toBe(true);
+      // Rename failed → the original store.nq is still there (recoverable).
+      expect(readFileSync(join(dataDir, 'store.nq'), 'utf8')).toBe('PRECIOUS');
+      // Marker NOT persisted — the wipe must retry on the next boot.
+      expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
+      expect(logs.some((l) => l.includes('marker was not persisted'))).toBe(true);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('sanitizes a filesystem-unsafe marker so the backup rename succeeds (no boot-loop)', async () => {
+    // A marker with `/`, space and `:` — unsanitized, the `/` would make
+    // renameSync target a nested path → throw → store.nq lands in failedFiles →
+    // the marker never persists → the node re-wipes on EVERY boot. The sanitize
+    // guard (`[^A-Za-z0-9._-]` → `_`) must keep the backup name flat.
+    const DIRTY = 'v10/reset 2026:step';
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    writeFileSync(join(dataDir, 'store.nq'), 'DIRTY_MARKER_BYTES');
+
+    const result = await chainResetWipe({ dataDir, currentMarker: DIRTY });
+
+    expect(result.wiped).toBe(true);
+    expect(result.failedFiles).toEqual([]); // rename did NOT hit a nested-path failure
+    expect(result.backedUpFiles).toHaveLength(1);
+    // Every non-[A-Za-z0-9._-] char collapsed to `_` (flat filename, no `/`).
+    expect(result.backedUpFiles[0]).toMatch(/^store\.nq\.pre-wipe-v10_reset_2026_step-\d+$/);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(readFileSync(join(dataDir, result.backedUpFiles[0]), 'utf8')).toBe('DIRTY_MARKER_BYTES');
+    // The RAW (unsanitized) marker is persisted — only the FILENAME is sanitized,
+    // so steady state is reached and the boot-loop is avoided.
+    expect(readPersistedMarker(dataDir)).toBe(DIRTY);
+  });
+
+  it('rotation eviction failure is swallowed — wipe still succeeds and the marker persists', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    // Newest OTHER backup (kept); oldest OTHER is an un-removable NON-EMPTY
+    // DIRECTORY so the eviction `rmSync(..., { force: true })` (no recursive)
+    // throws — best-effort rotation must swallow it, not fail the boot.
+    writeFileSync(join(dataDir, 'store.nq.pre-wipe-old-200'), 'keeper');
+    mkdirSync(join(dataDir, 'store.nq.pre-wipe-old-100'), { recursive: true });
+    writeFileSync(join(dataDir, 'store.nq.pre-wipe-old-100', 'occupied'), 'x');
+    writeFileSync(join(dataDir, 'store.nq'), 'fresh');
+
+    const logs: string[] = [];
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      maxStoreBackups: 2,
+      log: (m) => logs.push(m),
+    });
+
+    expect(result.wiped).toBe(true);
+    // A swallowed rotation error is NOT a wipe failure — failedFiles stays empty...
+    expect(result.failedFiles).toEqual([]);
+    // ...and the marker still advances (no retry-forever).
+    expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
+    // The rotation was attempted and its failure logged as a swallowed WARN.
+    expect(logs.some((l) => l.includes('failed to rotate out old store backup'))).toBe(true);
+    // Fresh backup + the newest kept OTHER both survive; the un-removable old one
+    // simply remains (best-effort eviction gave up on it).
+    expect(result.backedUpFiles).toHaveLength(1);
+    expect(existsSync(join(dataDir, result.backedUpFiles[0]))).toBe(true);
+    expect(existsSync(join(dataDir, 'store.nq.pre-wipe-old-200'))).toBe(true);
+    expect(existsSync(join(dataDir, 'store.nq.pre-wipe-old-100'))).toBe(true);
+  });
+
+  it('keeps the FRESH backup over an old one with a larger embedded ts (clock-skew guard)', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    // Planted OLD backup with a 14-digit embedded ts — larger than any real
+    // 13-digit Date.now(). Under pure ts-ranking this would outrank and evict the
+    // fresh snapshot; the keepName exemption must protect the fresh one instead.
+    const planted = 'store.nq.pre-wipe-oldmarker-99999999999999';
+    writeFileSync(join(dataDir, planted), 'stale');
+    writeFileSync(join(dataDir, 'store.nq'), 'fresh');
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      maxStoreBackups: 1,
+    });
+
+    expect(result.wiped).toBe(true);
+    expect(result.backedUpFiles).toHaveLength(1);
+    const fresh = result.backedUpFiles[0];
+    // Fresh recovery snapshot survives despite its smaller embedded ts...
+    expect(existsSync(join(dataDir, fresh))).toBe(true);
+    // ...and the planted larger-ts backup is the one evicted (maxStoreBackups:1,
+    // keepOthers=0). Without the exemption this assertion would invert.
+    expect(existsSync(join(dataDir, planted))).toBe(false);
   });
 });
 

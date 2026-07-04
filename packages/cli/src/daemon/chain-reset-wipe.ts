@@ -10,7 +10,7 @@
  * sampling WAL because those files reference chain entities (KC ids,
  * merkle roots, challenge periods) that no longer exist after the chain
  * is redeployed. Without this auto-wipe, every operator has to do it by
- * hand — see docs/TESTNET_RESET.md Phase C for the manual drill.
+ * hand — see docs/archive/internal/TESTNET_RESET.md Phase C for the manual drill.
  *
  * With this hook, the maintainer simply bumps
  * `network/testnet.json#chainResetMarker` to a fresh value as part of the
@@ -39,9 +39,18 @@
  *   installs hit this branch too but have nothing to wipe → no harm.
  * - Persisted == current → no wipe, idempotent.
  * - Persisted != current → wipe + save new marker.
+ * - `DKG_SKIP_CHAIN_RESET_WIPE=1` (dev-loop opt-out) → bypass the wipe
+ *   entirely and DON'T persist the marker, so unsetting it re-triggers the
+ *   wipe next boot. The operator guarantee is untouched: a real operator
+ *   node with the env var unset still wipes by default on a marker change.
+ * - By default `store.nq` is RENAMED to `store.nq.pre-wipe-<marker>-<ts>`
+ *   rather than deleted (rotation keeps the newest `maxStoreBackups`, default
+ *   3), so a wrongly-triggered wipe is recoverable by moving the file back.
+ *   `backupStore: false` restores the hard-delete behaviour.
  *
- * Files wiped: `store.nq`, `store.nq.tmp`, `random-sampling.wal`,
- *              `publish-journal.*` (all variants from publisher-runner).
+ * Files wiped: `store.nq` (backed up by default, see above), `store.nq.tmp`,
+ *              `random-sampling.wal`, `publish-journal.*` (all variants from
+ *              publisher-runner).
  *
  * Files preserved: `wallets.json` (operator identity), `auth.token`,
  *              `config.json`, `node-ui.db` (dashboard state),
@@ -51,7 +60,15 @@
  * constant across resets, and `ensureProfile` re-derives the on-chain
  * identityId on the new chain cleanly.
  */
-import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  rmSync,
+  renameSync,
+  statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint } from '@origintrail-official/dkg-storage';
 
@@ -122,10 +139,23 @@ const SPARQL_SCOPED_DELETE =
 export interface ChainResetWipeResult {
   /** True when a wipe was performed. */
   wiped: boolean;
+  /**
+   * True when a wipe WOULD have run (marker mismatch) but was bypassed
+   * because `skip` was set (`DKG_SKIP_CHAIN_RESET_WIPE=1`). Mutually
+   * exclusive with `wiped`. The marker is deliberately NOT persisted on a
+   * skip, so the wipe re-triggers once the env var is unset.
+   */
+  skipped: boolean;
   /** The marker we had persisted before this boot, or null on first boot / no persisted state. */
   prevMarker: string | null;
   /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
   removedFiles: string[];
+  /**
+   * `store.nq` backup filenames created instead of deleting it (relative to
+   * dataDir, `store.nq.pre-wipe-<marker>-<ts>`). Empty unless a wipe ran with
+   * `backupStore` enabled and a `store.nq` was present.
+   */
+  backedUpFiles: string[];
   /**
    * Files we attempted to wipe but could not remove. When non-empty, the
    * marker is intentionally not persisted so the wipe retries on next boot.
@@ -164,6 +194,34 @@ export interface ChainResetWipeOptions {
    * so parallel test cases don't race.
    */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Dev-loop opt-out. Sourced from `process.env.DKG_SKIP_CHAIN_RESET_WIPE === '1'`
+   * in production (tests pass it explicitly). When `true` and a wipe WOULD run
+   * (marker mismatch, including first-boot-with-marker), the wipe is bypassed
+   * entirely AND the marker is NOT persisted — so unsetting the env var later
+   * re-triggers the wipe on the next boot. This keeps the operator guarantee
+   * intact (a real operator node with the flag unset still wipes by default)
+   * while letting monorepo developers switch between marker-pinned worktrees
+   * without losing their local `store.nq`. Mirrors the `acceptStoreReset` /
+   * `acceptNetworkSwitch` env-opt-out pattern used by the sibling detectors.
+   */
+  skip?: boolean;
+  /**
+   * When a wipe runs, back up `store.nq` by renaming it to
+   * `store.nq.pre-wipe-<marker>-<ts>` instead of deleting it, so a
+   * wrongly-triggered wipe (typically a dev branch switch) is recoverable by
+   * moving the file back. Defaults to `true` when undefined. Set `false` to
+   * restore the historical hard-delete behaviour. Only `store.nq` is backed
+   * up; `store.nq.tmp`, the RS WAL and publish journals are regenerable and
+   * always hard-deleted.
+   */
+  backupStore?: boolean;
+  /**
+   * Rotation cap for `store.nq.pre-wipe-*` backups. After a new backup is
+   * created, the oldest backups beyond this count are removed (best-effort;
+   * rotation failures are non-fatal and never block boot). Defaults to `3`.
+   */
+  maxStoreBackups?: number;
   /** Optional logger. Defaults to no-op so the function is silent in tests by default. */
   log?: (msg: string) => void;
 }
@@ -287,12 +345,80 @@ async function performExternalWipe(
   }
 }
 
+const STORE_BACKUP_PREFIX = 'store.nq.pre-wipe-';
+
+/**
+ * Rotate `store.nq.pre-wipe-*` backups down to the newest `maxStoreBackups`.
+ * Best-effort: any failure (listing, stat, unlink) is logged as a WARN and
+ * swallowed — rotation must never fail a wipe or a boot.
+ *
+ * `keepName` is the backup created THIS run: it is ALWAYS retained and never a
+ * rotation candidate, so a non-monotonic wall clock (NTP step-back, VM
+ * snapshot/restore, or a planted large-timestamp filename) can never evict the
+ * fresh recovery snapshot the wipe just made — that would silently defeat the
+ * recoverability this backup exists for. It occupies one of the `maxStoreBackups`
+ * slots, so we retain the newest `maxStoreBackups - 1` of the OTHER backups.
+ * Those are ranked by filesystem mtime (robust to clock steps) with the embedded
+ * trailing `-<Date.now()>` as a stable tiebreak.
+ */
+function rotateStoreBackups(
+  dataDir: string,
+  maxStoreBackups: number,
+  keepName: string,
+  log: (msg: string) => void,
+): void {
+  try {
+    // The just-created backup always survives and takes one slot.
+    const keepOthers = Math.max(0, maxStoreBackups - 1);
+    const others = readdirSync(dataDir)
+      .filter((f) => f.startsWith(STORE_BACKUP_PREFIX) && f !== keepName)
+      .map((f) => {
+        // Embedded timestamp is the trailing `-<Date.now()>`; Date.now() has no
+        // hyphens so the last `-digits` group is unambiguous even when the marker
+        // itself contains dates (e.g. `…-2026-05-25-1716…`). Falls back to mtime
+        // only when the timestamp can't be parsed. (These are all OLD backups —
+        // the fresh one is exempted above — so relative order among them only
+        // decides which stale recovery copy to drop, never the fresh snapshot.)
+        const tsMatch = f.match(/-(\d+)$/);
+        let ts: number;
+        if (tsMatch) {
+          ts = Number(tsMatch[1]);
+        } else {
+          try {
+            ts = statSync(join(dataDir, f)).mtimeMs;
+          } catch {
+            ts = 0;
+          }
+        }
+        return { file: f, ts };
+      })
+      .sort((a, b) => b.ts - a.ts); // newest first
+
+    for (const stale of others.slice(keepOthers)) {
+      try {
+        rmSync(join(dataDir, stale.file), { force: true });
+        log(`  rotated out old store backup: ${stale.file}`);
+      } catch (err) {
+        log(`  WARN: failed to rotate out old store backup ${stale.file}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    log(`  WARN: failed to rotate store backups: ${(err as Error).message}`);
+  }
+}
+
 function performWipe(
   dataDir: string,
   walPath: string | undefined,
   log: (msg: string) => void,
-): { removedFiles: string[]; failedFiles: Array<{ file: string; error: string }> } {
+  backup: { currentMarker: string; backupStore: boolean; maxStoreBackups: number },
+): {
+  removedFiles: string[];
+  backedUpFiles: string[];
+  failedFiles: Array<{ file: string; error: string }>;
+} {
   const removedFiles: string[] = [];
+  const backedUpFiles: string[] = [];
   const failedFiles: Array<{ file: string; error: string }> = [];
 
   // wipeAbs: wipe an absolute path, log under a display label. We log the
@@ -312,7 +438,28 @@ function performWipe(
     }
   };
 
-  wipeAbs(join(dataDir, 'store.nq'), 'store.nq');
+  // store.nq: back it up (rename, O(1) same-fs) instead of deleting so a
+  // wrongly-triggered wipe is recoverable, then rotate old backups. A rename
+  // failure is treated exactly like a wipe failure (pushed to failedFiles) so
+  // the marker isn't persisted and the wipe retries next boot. `backupStore:
+  // false` restores the hard-delete path.
+  const storeAbs = join(dataDir, 'store.nq');
+  if (backup.backupStore && existsSync(storeAbs)) {
+    const sanitizedMarker = String(backup.currentMarker).replace(/[^A-Za-z0-9._-]/g, '_');
+    const backupName = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${Date.now()}`;
+    try {
+      renameSync(storeAbs, join(dataDir, backupName));
+      backedUpFiles.push(backupName);
+      log(`  backed up: store.nq → ${backupName}`);
+      rotateStoreBackups(dataDir, backup.maxStoreBackups, backupName, log);
+    } catch (err) {
+      const message = (err as Error).message;
+      failedFiles.push({ file: 'store.nq', error: message });
+      log(`  WARN: failed to back up store.nq → ${backupName}: ${message}`);
+    }
+  } else {
+    wipeAbs(storeAbs, 'store.nq');
+  }
   wipeAbs(join(dataDir, 'store.nq.tmp'), 'store.nq.tmp');
 
   // Random sampling WAL: wipe the resolved runtime path (which the
@@ -323,7 +470,7 @@ function performWipe(
     ? walPath
     : join(dataDir, 'random-sampling.wal');
   const walLabel = walAbs.startsWith(dataDir)
-    ? walAbs.slice(dataDir.length).replace(/^\/+/, '')
+    ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
 
@@ -347,7 +494,7 @@ function performWipe(
   }
 
   for (const f of removedFiles) log(`  removed: ${f}`);
-  return { removedFiles, failedFiles };
+  return { removedFiles, backedUpFiles, failedFiles };
 }
 
 export async function chainResetWipe(
@@ -360,14 +507,29 @@ export async function chainResetWipe(
   // touched so we don't accidentally turn on the protocol later just
   // because some leftover state file made the comparison non-trivial.
   if (opts.currentMarker === undefined) {
-    return { wiped: false, prevMarker: null, removedFiles: [], failedFiles: [] };
+    return { wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   const prev = loadState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
-    return { wiped: false, prevMarker, removedFiles: [], failedFiles: [] };
+    return { wiped: false, skipped: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+  }
+
+  // Dev-loop opt-out. A wipe WOULD run here (marker mismatch, including
+  // first-boot-with-marker), but `DKG_SKIP_CHAIN_RESET_WIPE=1` bypasses it
+  // entirely and — crucially — does NOT persist the marker, so unsetting the
+  // env var re-triggers the wipe on the next boot. This keeps the operator
+  // guarantee intact while letting developers hop between marker-pinned
+  // worktrees without losing their local store. No file wipe, no external
+  // SPARQL wipe, no marker write.
+  if (opts.skip === true) {
+    log(
+      `Chain reset wipe skipped (DKG_SKIP_CHAIN_RESET_WIPE=1): marker ${prevMarker ?? '<none>'} → ${opts.currentMarker}. ` +
+      `Local chain-state preserved; unset the env var to wipe.`,
+    );
+    return { wiped: false, skipped: true, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Mismatch (including "first boot with marker present"): wipe.
@@ -389,10 +551,20 @@ export async function chainResetWipe(
   // persist the marker after every targeted file was removed cleanly; a
   // partial wipe must retry on next boot instead of being masked forever.
   let removedFiles: string[] = [];
+  let backedUpFiles: string[] = [];
   let failedFiles: Array<{ file: string; error: string }> = [];
   let markerPersisted = false;
   try {
-    ({ removedFiles, failedFiles } = performWipe(opts.dataDir, opts.randomSamplingWalPath, log));
+    ({ removedFiles, backedUpFiles, failedFiles } = performWipe(
+      opts.dataDir,
+      opts.randomSamplingWalPath,
+      log,
+      {
+        currentMarker: opts.currentMarker,
+        backupStore: opts.backupStore !== false,
+        maxStoreBackups: opts.maxStoreBackups ?? 3,
+      },
+    ));
   } catch (err) {
     const message = (err as Error).message;
     failedFiles.push({ file: '<chain-state-wipe>', error: message });
@@ -445,7 +617,7 @@ export async function chainResetWipe(
     log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
   }
 
-  return { wiped: true, prevMarker, removedFiles, failedFiles };
+  return { wiped: true, skipped: false, prevMarker, removedFiles, backedUpFiles, failedFiles };
 }
 
 // =====================================================================

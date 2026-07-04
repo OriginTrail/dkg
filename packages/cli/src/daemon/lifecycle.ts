@@ -1012,7 +1012,7 @@ export async function runDaemonInner(
   // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
   // detects the change and wipes the now-orphaned chain state.
   // Operator's keystore + dashboard DB + uploaded files are preserved.
-  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  // See docs/archive/internal/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
   // Detect backend switch first. If the operator hand-edited
   // store.backend between boots, refuse to start unless they opt in
   // via DKG_ACCEPT_STORE_RESET=1. The new backend is fresh — any data
@@ -1159,6 +1159,10 @@ export async function runDaemonInner(
   const wipeResult = await chainResetWipe({
     dataDir: dkgDir(),
     currentMarker: network?.chainResetMarker,
+    // Dev-loop opt-out: when set, bypass the wipe entirely and don't persist
+    // the marker (unsetting it re-triggers the wipe). Operator nodes leave it
+    // unset and keep wiping by default on a marker change. See issue #679.
+    skip: process.env.DKG_SKIP_CHAIN_RESET_WIPE === '1',
     // Honour operator's `randomSampling.walPath` override; the prover
     // writes its WAL there, so a fresh chain reset must wipe that file
     // (not the default ~/.dkg/random-sampling.wal which would be empty).
@@ -1172,7 +1176,8 @@ export async function runDaemonInner(
   });
   if (wipeResult.wiped) {
     log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed ` +
+      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
+      `${wipeResult.backedUpFiles.length} backed up ` +
       `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
     );
     // A DKG-managed external wipe uses DROP ALL, which also removes the
