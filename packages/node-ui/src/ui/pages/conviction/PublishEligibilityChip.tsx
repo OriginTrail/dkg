@@ -1,51 +1,68 @@
 import React from 'react';
 import { usePcaStore } from '../../stores/pca.js';
-import { usePublishEligibility, type PublishEligibility } from '../../hooks/usePublishEligibility.js';
+import { usePublishEligibility } from '../../hooks/usePublishEligibility.js';
 import { EligibilityVerdictBanner } from '../../components/Pca/index.js';
+import type { PcaVerdict } from '../../components/Pca/EligibilityVerdictBanner.js';
 
 /**
- * S5 — the condensed PCA eligibility chip on the SWM→VM publish CTA. The chip is
- * the load-bearing fall-through guard at the moment of spend; it carries its own
- * aria-live (via EligibilityVerdictBanner: amber AND danger = role=alert/assertive).
- * Rendered only when the node tracks ≥1 PCA — a node not using conviction gets no
- * chip noise.
- *
- * `id` lets the publish button reference the verdict via aria-describedby so a
- * screen-reader user activating Publish hears the direct-cost/fail state.
- *
- * `elig` (#1382) lets a parent that ALSO needs the verdict — e.g. LayerActionsWidget,
- * which gates the publish button on it — compute it ONCE and pass it in, so the chip
- * and the button share a single 30s poll and never disagree. When absent the chip runs
- * its own hook (standalone use preserved).
+ * S5 — the PRESENTATION of the eligibility chip: a PURE view over an already-resolved
+ * verdict (no hook, no fetch). Both the standalone `PublishEligibilityChip` container
+ * and LayerActionsWidget (which resolves the verdict ONCE for its CTA gate and the chip
+ * together) render this, so the chip and the button can never disagree and there's no
+ * duplicate poll. It carries its own aria-live (via EligibilityVerdictBanner: amber AND
+ * danger = role=alert/assertive). `id` lets the publish button reference the verdict via
+ * aria-describedby so a screen-reader user activating Publish hears the direct-cost/fail state.
  */
-export function PublishEligibilityChip({
-  contextGraphId,
+export function PublishEligibilityChipView({
+  verdict,
+  accountId,
+  discountBps,
+  accountUntracked,
+  ownerPublish,
   id,
-  elig,
 }: {
-  contextGraphId: string;
+  verdict: PcaVerdict;
+  accountId?: string;
+  discountBps?: number;
+  accountUntracked?: boolean;
+  ownerPublish?: boolean;
   id?: string;
-  elig?: PublishEligibility;
 }) {
+  return (
+    <div className="v10-pca-publish-chip" id={id} data-testid="pca-publish-eligibility">
+      <EligibilityVerdictBanner
+        variant="chip"
+        verdict={verdict}
+        accountId={accountId}
+        discountBps={discountBps}
+        accountUntracked={accountUntracked}
+        ownerPublish={ownerPublish}
+      />
+    </div>
+  );
+}
+
+/**
+ * Standalone container: resolves the verdict via its own 30s poll and renders the view.
+ * Rendered only when the node tracks ≥1 PCA — a node not using conviction gets no chip
+ * noise. (LayerActionsWidget bypasses this container and drives the view from its own
+ * shared read; see that widget for the single-poll path.)
+ */
+export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId: string; id?: string }) {
   const trackedIds = usePcaStore((s) => s.trackedIds);
-  // When the parent supplies `elig`, skip this hook's fetch (enabled:false) to avoid a
-  // duplicate poll; the hook must still be called unconditionally (rules of hooks).
-  const own = usePublishEligibility(contextGraphId, 30_000, { enabled: elig === undefined });
-  const e = elig ?? own;
+  const elig = usePublishEligibility(contextGraphId, 30_000);
 
   // No tracked PCA → no expectation of a discount → no chip.
   if (trackedIds.length === 0) return null;
 
   return (
-    <div className="v10-pca-publish-chip" id={id} data-testid="pca-publish-eligibility">
-      <EligibilityVerdictBanner
-        variant="chip"
-        verdict={e.verdict}
-        accountId={e.accountId}
-        discountBps={e.discountBps}
-        accountUntracked={e.accountUntracked}
-        ownerPublish={e.ownerPublish}
-      />
-    </div>
+    <PublishEligibilityChipView
+      verdict={elig.verdict}
+      accountId={elig.accountId}
+      discountBps={elig.discountBps}
+      accountUntracked={elig.accountUntracked}
+      ownerPublish={elig.ownerPublish}
+      id={id}
+    />
   );
 }

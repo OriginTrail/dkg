@@ -15,9 +15,11 @@ const apiMocks = vi.hoisted(() => ({
   partialPublishWarning: vi.fn((d?: string) => (d ? `binding incomplete — ${d}` : 'binding incomplete')),
 }));
 
-// #1382 — LayerActionsWidget now reads the S5 verdict directly to hard-gate the VM
-// publish CTA. Mock the hook so tests drive the verdict deterministically.
+// #1382 — LayerActionsWidget reads the S5 verdict directly (single shared read) to gate
+// the VM publish CTA AND drive the chip. Mock the hook so tests drive the verdict
+// deterministically, and spy the PURE chip VIEW to capture the props it receives.
 const eligMock = vi.hoisted(() => ({ usePublishEligibility: vi.fn() }));
+const chipViewMock = vi.hoisted(() => ({ PublishEligibilityChipView: vi.fn((_props: any) => null) }));
 
 vi.mock('../src/ui/api.js', async (orig) => ({
   ...(await orig<typeof import('../src/ui/api.js')>()),
@@ -30,13 +32,14 @@ vi.mock('../src/ui/hooks/usePublishEligibility.js', () => ({
   usePublishEligibility: eligMock.usePublishEligibility,
 }));
 
-// The S5 PREDICTIVE chip is a separate surface (+ would pull in the PCA fetchers) — no-op
-// it so this test isolates the CONFIRMED badge render path.
+// Spy the pure chip view (no fetch) so we can assert the widget passes it the exact
+// verdict from its single read, and isolate the CONFIRMED-badge render path.
 vi.mock('../src/ui/pages/conviction/PublishEligibilityChip.js', () => ({
-  PublishEligibilityChip: () => null,
+  PublishEligibilityChipView: chipViewMock.PublishEligibilityChipView,
 }));
 
 const { LayerActionsWidget } = await import('../src/ui/views/project/components/layer-widgets.js');
+const { usePcaStore } = await import('../src/ui/stores/pca.js');
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -57,9 +60,11 @@ beforeEach(() => {
   document.body.innerHTML = '';
   vi.clearAllMocks();
   apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }]);
+  // Track a PCA so the chip guard (trackedIds.length > 0) is satisfied by default.
+  usePcaStore.setState({ trackedIds: ['7'], createPending: null });
   // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
   // publish freely. Gate tests override per-verdict.
-  eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false } as any);
+  eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false, anyGasFunded: false } as any);
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -101,8 +106,8 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
 describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   const publishBtn = (c: HTMLElement) =>
     c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
-  const setVerdict = (verdict: unknown, ownerPublish = false) =>
-    eligMock.usePublishEligibility.mockReturnValue({ verdict, ownerPublish } as any);
+  const setVerdict = (verdict: unknown, ownerPublish = false, anyGasFunded = false) =>
+    eligMock.usePublishEligibility.mockReturnValue({ verdict, ownerPublish, anyGasFunded } as any);
 
   it('GATES the VM publish CTA on a DANGER (fallthrough-no-funds) verdict via aria-disabled + tooltip', async () => {
     setVerdict('fallthrough-no-funds');
@@ -134,10 +139,10 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  // #1382 owner-CG bug: on an owner publish the registration escrow can still cover the
-  // cost, so fallthrough-no-funds is NOT definitive — the button must stay ENABLED.
-  it('does NOT gate on fallthrough-no-funds when ownerPublish is true (escrow may cover)', async () => {
-    setVerdict('fallthrough-no-funds', true);
+  // #1382 owner-CG exception: the registration escrow covers the TRAC fee, so an owner
+  // publish with a gas-funded wallet stays ENABLED even on fallthrough-no-funds.
+  it('does NOT gate on fallthrough-no-funds when ownerPublish AND a wallet has gas (escrow may cover)', async () => {
+    setVerdict('fallthrough-no-funds', true, true);
     const { container, unmount } = await render(
       React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
     );
@@ -145,6 +150,20 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     expect(btn.getAttribute('aria-disabled')).toBeNull();
     expect(btn.disabled).toBe(false);
     expect(btn.getAttribute('title')).toBeNull();
+    await unmount();
+  });
+
+  // #1382 review MUST-FIX: escrow covers TRAC, NOT gas — so an owner publish with EVERY
+  // wallet out of gas still fails on-chain and MUST stay gated (the owner exception must
+  // not bypass a confirmed no-gas failure).
+  it('STILL gates an owner publish when no wallet has gas (escrow does not cover gas)', async () => {
+    setVerdict('fallthrough-no-funds', true, false);
+    const { container, unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    const btn = publishBtn(container);
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.getAttribute('title')).toContain('Publish will fail');
     await unmount();
   });
 
@@ -175,6 +194,42 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
     expect(btn.getAttribute('aria-disabled')).toBeNull();
     expect(btn.disabled).toBe(false);
     expect(btn.getAttribute('title')).toBeNull();
+    await unmount();
+  });
+
+  // Shared-eligibility contract (#1382): the widget resolves the verdict ONCE and drives
+  // the pure chip view with it — button and chip can't disagree, and there's one poll.
+  it('drives the pure chip view with the exact verdict from its single swm read (enabled)', async () => {
+    setVerdict('eligible');
+    const { unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    // Single shared read: the hook is called for the swm widget with enabled:true.
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000, { enabled: true });
+    // The pure view received the exact verdict from that read.
+    expect(chipViewMock.PublishEligibilityChipView).toHaveBeenCalled();
+    const props = chipViewMock.PublishEligibilityChipView.mock.calls.at(-1)![0];
+    expect(props.verdict).toBe('eligible');
+    await unmount();
+  });
+
+  it('skips the eligibility probe on the promote (wm) widget and renders no chip', async () => {
+    setVerdict('eligible');
+    const { unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'wm', count: 1, contextGraphId: 'cg' }),
+    );
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000, { enabled: false });
+    expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('renders no chip when the node tracks no PCA (guard preserved)', async () => {
+    usePcaStore.setState({ trackedIds: [] });
+    setVerdict('eligible');
+    const { unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
     await unmount();
   });
 });

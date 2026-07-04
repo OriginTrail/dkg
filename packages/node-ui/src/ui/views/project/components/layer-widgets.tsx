@@ -5,8 +5,9 @@ import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
-import { PublishEligibilityChip } from '../../../pages/conviction/PublishEligibilityChip.js';
+import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { usePublishEligibility } from '../../../hooks/usePublishEligibility.js';
+import { usePcaStore } from '../../../stores/pca.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
 
 // ─── Generative Widget Components ─────────────────────────────
@@ -124,15 +125,18 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   // the O(wallets×PCAs) probe on the promote (wm) widget, which shows neither. Polls the
   // chip's 30s cadence so the gate self-corrects once a wallet is funded; the hook also
   // no-ops when no PCA is tracked.
+  const trackedIds = usePcaStore((s) => s.trackedIds);
   const elig = usePublishEligibility(contextGraphId, 30_000, { enabled: !isWm });
-  const { verdict, ownerPublish } = elig;
-  // Hard-gate the SWM→VM publish CTA on the DANGER verdict — EXCEPT on an owner CG, where
-  // the registration escrow can still cover the publish (the banner hedges "will FAIL …
-  // UNLESS this graph's registration escrow already covers it"), so a hard block there
-  // would both contradict that copy and violate #9. Gate ONLY `fallthrough-no-funds` &&
-  // !ownerPublish; 'eligible'/'fallthrough' (has TRAC) and 'unknown' (inconclusive → fail
-  // OPEN) stay enabled — never block on what we can't confirm.
-  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds' && !ownerPublish;
+  const { verdict, ownerPublish, anyGasFunded } = elig;
+  // Hard-gate the SWM→VM publish CTA on the DANGER verdict — with a NARROW owner-CG
+  // exception: the registration escrow can cover the TRAC fee (the banner hedges "will
+  // FAIL … UNLESS this graph's registration escrow already covers it"), so an owner
+  // publish is only truly blocked when NO wallet can fund the gas. Escrow covers TRAC,
+  // NOT native gas — so the all-out-of-gas fall-through (`fallthrough-no-funds` with
+  // anyGasFunded=false) still fails on-chain even for an owner and MUST stay gated.
+  // Gate `fallthrough-no-funds` unless (ownerPublish && anyGasFunded); 'eligible'/
+  // 'fallthrough' (has TRAC) and 'unknown' (inconclusive → fail OPEN) stay enabled.
+  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds' && !(ownerPublish && anyGasFunded);
   // Cause-agnostic reason: `fallthrough-no-funds` also fires when covered wallets are out
   // of GAS (TRAC covered), so name the failure without pinning it to one remedy.
   const gateReason = 'Publish will fail — no signing wallet can fund it (coverage or gas).';
@@ -247,9 +251,10 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
           predictive chip below. */}
       {!isWm && <DiscountAppliedBadge convictionCostCovered={costCovered} />}
-      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). Shares this
-          widget's single eligibility read so the chip and the button never disagree. */}
-      {!isWm && <PublishEligibilityChip contextGraphId={contextGraphId} id={verdictId} elig={elig} />}
+      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). Renders the
+          PURE view off this widget's single eligibility read so the chip and the button
+          never disagree; the `trackedIds` guard preserves "no tracked PCA → no chip". */}
+      {!isWm && trackedIds.length > 0 && <PublishEligibilityChipView {...elig} id={verdictId} />}
       {/* SR-only cause for the policy gate — referenced by aria-describedby so the
           announced reason matches the visual state (see gateReason). */}
       {publishBlocked && <span id={gateReasonId} className="v10-sr-only">{gateReason}</span>}

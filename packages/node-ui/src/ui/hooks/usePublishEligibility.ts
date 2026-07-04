@@ -58,6 +58,13 @@ export interface PublishEligibility {
   accountUntracked?: boolean;
   /** #4 — true only when this node owns the target CG (curator). */
   ownerPublish: boolean;
+  /**
+   * #1382 — at least one signing wallet has GAS (or unreadable gas → fail open). The
+   * registration escrow (owner CG) covers the TRAC fee but NOT native gas, so an
+   * owner-CG exception to the DANGER gate is only safe when this is true — otherwise
+   * the all-out-of-gas fall-through publishes to a certain on-chain failure.
+   */
+  anyGasFunded: boolean;
   /** Failed-condition phrases for the amber/danger message. */
   reasons: string[];
   /** Per-condition AND across all signing wallets (the popover breakdown). */
@@ -227,6 +234,7 @@ export function usePublishEligibility(
         verdict: 'unknown',
         loading,
         ownerPublish,
+        anyGasFunded: false,
         reasons: [],
         conditions: { approved: false, gasFunded: false, notExpired: false, solvent: false },
         wallets,
@@ -302,6 +310,9 @@ export function usePublishEligibility(
       discountBps: best?.discountBps,
       accountUntracked: best?.coverUntracked,
       ownerPublish,
+      // Mirror line 251's fail-open gas check: unreadable gas (balanceUnknown) counts as
+      // "has gas" so an owner exception doesn't hard-block on data we couldn't read (#9).
+      anyGasFunded: wallets.some((w) => w.gasFunded || w.balanceUnknown),
       reasons,
       conditions,
       wallets,

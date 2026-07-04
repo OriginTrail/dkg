@@ -28,7 +28,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
   };
 });
 
-const { PublishEligibilityChip } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
+const { PublishEligibilityChip, PublishEligibilityChipView } = await import('../src/ui/pages/conviction/PublishEligibilityChip.js');
 const { usePcaStore } = await import('../src/ui/stores/pca.js');
 const { makePcaSnapshot } = await import('../src/ui/mocks/pca.js');
 
@@ -585,6 +585,34 @@ describe('PublishEligibilityChip (S5)', () => {
     await waitForText(container, 'No PCA discount'); // amber fall-through, NOT eligible
     expect(container.querySelector('[data-verdict="eligible"]')).toBeNull();
     expect(container.querySelector('[data-verdict="fallthrough"]')).toBeTruthy();
+    await unmount();
+  });
+});
+
+// #1382 — the pure presentation view: renders a SUPPLIED verdict with no hook / no fetch,
+// so LayerActionsWidget can drive it from its single shared read.
+describe('PublishEligibilityChipView (pure view)', () => {
+  it('renders a supplied GREEN verdict (PCA + discount) without any fetch', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PublishEligibilityChipView, { verdict: 'eligible', accountId: '7', discountBps: 3000, id: 'v1' }),
+    );
+    const wrap = container.querySelector('[data-testid="pca-publish-eligibility"]')!;
+    expect(wrap).toBeTruthy();
+    expect(wrap.getAttribute('id')).toBe('v1');
+    expect(container.querySelector('[data-verdict="eligible"]')).toBeTruthy();
+    expect(container.textContent).toContain('PCA #7');
+    // Pure: it resolves nothing itself.
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  it('reflects a supplied DANGER verdict with no fetch', async () => {
+    const { container, unmount } = await render(
+      React.createElement(PublishEligibilityChipView, { verdict: 'fallthrough-no-funds' }),
+    );
+    expect(container.querySelector('[data-verdict="fallthrough-no-funds"]')).toBeTruthy();
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
     await unmount();
   });
 });
