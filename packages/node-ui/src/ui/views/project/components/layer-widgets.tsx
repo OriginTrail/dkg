@@ -119,17 +119,28 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   // B8 — the CONFIRMED post-publish discount from the VM publish response's sample.
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const isWm = layer === 'wm';
-  // S5/#1382 — hard-gate the SWM→VM publish CTA on a DANGER verdict: 'fallthrough-no-funds'
-  // means NO signing wallet can fund the publish, so it would fail on-chain. Polls at the
-  // chip's 30s cadence so the gate self-corrects once a wallet is funded. Gate ONLY this
-  // terminal case — 'eligible'/'fallthrough' (has TRAC) stay enabled, and 'unknown' (probe
-  // inconclusive) fails OPEN (never block on what we can't confirm, #9). The hook no-ops
-  // when no PCA is tracked, so non-conviction nodes never probe or gate.
-  const { verdict } = usePublishEligibility(contextGraphId, 30_000);
-  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds';
-  // S5 — the PCA eligibility verdict the publish button is aria-describedby'd to,
-  // so a screen-reader user activating Publish hears the direct-cost/fail state.
+  // S5/#1382 — ONE eligibility read, shared by the CTA gate AND the chip below (passed
+  // via `elig`, so button and chip poll once and can't disagree). `enabled:!isWm` skips
+  // the O(wallets×PCAs) probe on the promote (wm) widget, which shows neither. Polls the
+  // chip's 30s cadence so the gate self-corrects once a wallet is funded; the hook also
+  // no-ops when no PCA is tracked.
+  const elig = usePublishEligibility(contextGraphId, 30_000, { enabled: !isWm });
+  const { verdict, ownerPublish } = elig;
+  // Hard-gate the SWM→VM publish CTA on the DANGER verdict — EXCEPT on an owner CG, where
+  // the registration escrow can still cover the publish (the banner hedges "will FAIL …
+  // UNLESS this graph's registration escrow already covers it"), so a hard block there
+  // would both contradict that copy and violate #9. Gate ONLY `fallthrough-no-funds` &&
+  // !ownerPublish; 'eligible'/'fallthrough' (has TRAC) and 'unknown' (inconclusive → fail
+  // OPEN) stay enabled — never block on what we can't confirm.
+  const publishBlocked = !isWm && verdict === 'fallthrough-no-funds' && !ownerPublish;
+  // Cause-agnostic reason: `fallthrough-no-funds` also fires when covered wallets are out
+  // of GAS (TRAC covered), so name the failure without pinning it to one remedy.
+  const gateReason = 'Publish will fail — no signing wallet can fund it (coverage or gas).';
+  // S5 — the publish button is aria-describedby'd to the verdict chip; when gated it ALSO
+  // points at a visually-hidden node carrying `gateReason`, so the SR announcement matches
+  // the visual state (the `title` alone is suppressed for SR by aria-describedby).
   const verdictId = useId();
+  const gateReasonId = useId();
   // Mirror the outcome up to the strip; it persists past this widget's unmount.
   useEffect(() => {
     if (result) onResult?.({ ok: true, text: result });
@@ -138,6 +149,9 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
   }, [result, error]);
 
   const handleAction = useCallback(async () => {
+    // The policy gate is aria-disabled (keeps the button focusable + announceable), not
+    // natively disabled, so the click still fires — block the action here.
+    if (publishBlocked) return;
     setBusy(true);
     setError(null);
     setResult(null);
@@ -215,7 +229,7 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
     } finally {
       setBusy(false);
     }
-  }, [isWm, contextGraphId, onComplete]);
+  }, [isWm, contextGraphId, onComplete, publishBlocked]);
 
   if (count === 0) return null;
   const color = isWm ? '#f59e0b' : '#22c55e';
@@ -233,8 +247,12 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
           predictive chip below. */}
       {!isWm && <DiscountAppliedBadge convictionCostCovered={costCovered} />}
-      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). */}
-      {!isWm && <PublishEligibilityChip contextGraphId={contextGraphId} id={verdictId} />}
+      {/* S5 — PCA fall-through guard at the moment of spend (VM publish only). Shares this
+          widget's single eligibility read so the chip and the button never disagree. */}
+      {!isWm && <PublishEligibilityChip contextGraphId={contextGraphId} id={verdictId} elig={elig} />}
+      {/* SR-only cause for the policy gate — referenced by aria-describedby so the
+          announced reason matches the visual state (see gateReason). */}
+      {publishBlocked && <span id={gateReasonId} className="v10-sr-only">{gateReason}</span>}
       <div className="v10-decision-actions">
         <button
           data-testid={isWm ? 'widget-promote-all-btn' : 'widget-publish-vm-btn'}
@@ -242,9 +260,13 @@ export function LayerActionsWidget({ layer, count, contextGraphId, onComplete, o
           style={isWm
             ? { borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }
             : { opacity: busy || publishBlocked ? 0.5 : 1 }}
-          disabled={busy || publishBlocked}
-          title={publishBlocked ? 'Publish will fail — no wallet can cover the cost.' : undefined}
-          aria-describedby={!isWm ? verdictId : undefined}
+          // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate
+          // uses aria-disabled so SR/keyboard users keep focus + hear the reason (handleAction
+          // no-ops when blocked).
+          disabled={busy}
+          aria-disabled={publishBlocked || undefined}
+          title={publishBlocked ? gateReason : undefined}
+          aria-describedby={!isWm ? (publishBlocked ? `${verdictId} ${gateReasonId}` : verdictId) : undefined}
           onClick={handleAction}
         >
           {busy ? '...' : (isWm ? '✓ Promote All → Shared' : '◉ Publish to Verifiable Memory')}

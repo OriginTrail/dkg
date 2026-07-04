@@ -1,6 +1,6 @@
 import React from 'react';
 import { usePcaStore } from '../../stores/pca.js';
-import { usePublishEligibility } from '../../hooks/usePublishEligibility.js';
+import { usePublishEligibility, type PublishEligibility } from '../../hooks/usePublishEligibility.js';
 import { EligibilityVerdictBanner } from '../../components/Pca/index.js';
 
 /**
@@ -12,10 +12,26 @@ import { EligibilityVerdictBanner } from '../../components/Pca/index.js';
  *
  * `id` lets the publish button reference the verdict via aria-describedby so a
  * screen-reader user activating Publish hears the direct-cost/fail state.
+ *
+ * `elig` (#1382) lets a parent that ALSO needs the verdict — e.g. LayerActionsWidget,
+ * which gates the publish button on it — compute it ONCE and pass it in, so the chip
+ * and the button share a single 30s poll and never disagree. When absent the chip runs
+ * its own hook (standalone use preserved).
  */
-export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId: string; id?: string }) {
+export function PublishEligibilityChip({
+  contextGraphId,
+  id,
+  elig,
+}: {
+  contextGraphId: string;
+  id?: string;
+  elig?: PublishEligibility;
+}) {
   const trackedIds = usePcaStore((s) => s.trackedIds);
-  const elig = usePublishEligibility(contextGraphId, 30_000);
+  // When the parent supplies `elig`, skip this hook's fetch (enabled:false) to avoid a
+  // duplicate poll; the hook must still be called unconditionally (rules of hooks).
+  const own = usePublishEligibility(contextGraphId, 30_000, { enabled: elig === undefined });
+  const e = elig ?? own;
 
   // No tracked PCA → no expectation of a discount → no chip.
   if (trackedIds.length === 0) return null;
@@ -24,11 +40,11 @@ export function PublishEligibilityChip({ contextGraphId, id }: { contextGraphId:
     <div className="v10-pca-publish-chip" id={id} data-testid="pca-publish-eligibility">
       <EligibilityVerdictBanner
         variant="chip"
-        verdict={elig.verdict}
-        accountId={elig.accountId}
-        discountBps={elig.discountBps}
-        accountUntracked={elig.accountUntracked}
-        ownerPublish={elig.ownerPublish}
+        verdict={e.verdict}
+        accountId={e.accountId}
+        discountBps={e.discountBps}
+        accountUntracked={e.accountUntracked}
+        ownerPublish={e.ownerPublish}
       />
     </div>
   );

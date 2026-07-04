@@ -59,7 +59,7 @@ beforeEach(() => {
   apiMocks.listAssertions.mockResolvedValue([{ name: 'a', graphUri: 'g' }]);
   // Default: an inconclusive verdict never gates (fail-open) — so the B8 badge tests
   // publish freely. Gate tests override per-verdict.
-  eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown' } as any);
+  eligMock.usePublishEligibility.mockReturnValue({ verdict: 'unknown', ownerPublish: false } as any);
 });
 afterEach(() => { document.body.innerHTML = ''; });
 
@@ -101,28 +101,65 @@ describe('LayerActionsWidget — B8 confirmed discount badge (#1365 r3)', () => 
 describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   const publishBtn = (c: HTMLElement) =>
     c.querySelector('[data-testid="widget-publish-vm-btn"]') as HTMLButtonElement;
+  const setVerdict = (verdict: unknown, ownerPublish = false) =>
+    eligMock.usePublishEligibility.mockReturnValue({ verdict, ownerPublish } as any);
 
-  it('DISABLES the VM publish CTA on a DANGER (fallthrough-no-funds) verdict, with a tooltip', async () => {
-    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'fallthrough-no-funds' } as any);
+  it('GATES the VM publish CTA on a DANGER (fallthrough-no-funds) verdict via aria-disabled + tooltip', async () => {
+    setVerdict('fallthrough-no-funds');
     const { container, unmount } = await render(
       React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
     );
     const btn = publishBtn(container);
-    expect(btn.disabled).toBe(true);
+    // Policy gate uses aria-disabled (SR/keyboard reachable), NOT native disabled.
+    expect(btn.getAttribute('aria-disabled')).toBe('true');
+    expect(btn.disabled).toBe(false);
     expect(btn.getAttribute('title')).toContain('Publish will fail');
+    // The reason is AT-reachable: aria-describedby points at a node carrying the cause.
+    const describedby = btn.getAttribute('aria-describedby') ?? '';
+    const reasonId = describedby.split(' ').pop()!;
+    // useId() ids contain colons → use an attribute selector, not `#id` (invalid CSS).
+    expect(container.querySelector(`[id="${reasonId}"]`)?.textContent).toContain('coverage or gas');
     await unmount();
   });
 
-  // CTA POLICY: gate ONLY the terminal no-funds case. 'eligible'/'fallthrough' (has
-  // TRAC → pays direct) stay enabled; 'unknown' (probe inconclusive) fails OPEN (#9).
-  it.each(['eligible', 'fallthrough', 'unknown'])(
+  it('a gated click is a NO-OP (never starts the publish)', async () => {
+    setVerdict('fallthrough-no-funds');
+    const { container, unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    expect(apiMocks.listAssertions).not.toHaveBeenCalled();
+    expect(apiMocks.publishAssertionsToVm).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  // #1382 owner-CG bug: on an owner publish the registration escrow can still cover the
+  // cost, so fallthrough-no-funds is NOT definitive — the button must stay ENABLED.
+  it('does NOT gate on fallthrough-no-funds when ownerPublish is true (escrow may cover)', async () => {
+    setVerdict('fallthrough-no-funds', true);
+    const { container, unmount } = await render(
+      React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
+    );
+    const btn = publishBtn(container);
+    expect(btn.getAttribute('aria-disabled')).toBeNull();
+    expect(btn.disabled).toBe(false);
+    expect(btn.getAttribute('title')).toBeNull();
+    await unmount();
+  });
+
+  // CTA POLICY: gate ONLY the terminal no-funds case. 'eligible'/'fallthrough' (has TRAC
+  // → pays direct) stay enabled; 'unknown' (inconclusive) and a still-loading/undefined
+  // verdict fail OPEN (#9 — never block on what we can't confirm).
+  it.each(['eligible', 'fallthrough', 'unknown', undefined])(
     'keeps the VM publish CTA ENABLED on a %s verdict',
     async (verdict) => {
-      eligMock.usePublishEligibility.mockReturnValue({ verdict } as any);
+      setVerdict(verdict);
       const { container, unmount } = await render(
         React.createElement(LayerActionsWidget, { layer: 'swm', count: 1, contextGraphId: 'cg' }),
       );
       const btn = publishBtn(container);
+      expect(btn.getAttribute('aria-disabled')).toBeNull();
       expect(btn.disabled).toBe(false);
       expect(btn.getAttribute('title')).toBeNull();
       await unmount();
@@ -130,11 +167,12 @@ describe('LayerActionsWidget — S5 publish CTA gate (#1382)', () => {
   );
 
   it('never gates the PROMOTE (wm) CTA, even on a DANGER verdict', async () => {
-    eligMock.usePublishEligibility.mockReturnValue({ verdict: 'fallthrough-no-funds' } as any);
+    setVerdict('fallthrough-no-funds');
     const { container, unmount } = await render(
       React.createElement(LayerActionsWidget, { layer: 'wm', count: 1, contextGraphId: 'cg' }),
     );
     const btn = container.querySelector('[data-testid="widget-promote-all-btn"]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-disabled')).toBeNull();
     expect(btn.disabled).toBe(false);
     expect(btn.getAttribute('title')).toBeNull();
     await unmount();

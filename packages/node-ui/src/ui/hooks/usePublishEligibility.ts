@@ -77,13 +77,20 @@ export interface PublishEligibility {
  * The escrow caveat is owner-scoped (#4): `ownerPublish` is true only when this
  * node curates the target CG. Everything is a PREDICTION (#9) — no B8 confirmation.
  */
-export function usePublishEligibility(contextGraphId: string, intervalMs = 0): PublishEligibility {
+export function usePublishEligibility(
+  contextGraphId: string,
+  intervalMs = 0,
+  opts: { enabled?: boolean } = {},
+): PublishEligibility {
+  const enabled = opts.enabled ?? true;
   const trackedIds = usePcaStore((s) => s.trackedIds);
   const idsKey = trackedIds.join(',');
 
   const { data, loading } = useFetch(
     async () => {
-      if (trackedIds.length === 0) {
+      // `enabled:false` (e.g. a caller that shares another surface's read, or a widget
+      // that never displays the verdict) short-circuits the O(wallets×PCAs) probe.
+      if (!enabled || trackedIds.length === 0) {
         return { wallets: [] as WalletDetail[], ownerPublish: false, resolved: false };
       }
       const wb = await fetchWalletsBalances().catch(() => null);
@@ -206,7 +213,7 @@ export function usePublishEligibility(contextGraphId: string, intervalMs = 0): P
       );
       return { wallets: details, ownerPublish, resolved: wallets.length > 0 };
     },
-    [idsKey, contextGraphId],
+    [idsKey, contextGraphId, enabled],
     intervalMs,
   );
 
