@@ -167,6 +167,29 @@ describe('chainResetWipe — dev-loop opt-out (skip, #679)', () => {
     expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
   });
 
+  it('first-boot skip (no state file) leaves the marker unpersisted and re-triggers on unset', async () => {
+    // #679 core guarantee for the FIRST-BOOT-with-marker case (prevMarker null):
+    // skip must not create a state file, so unsetting the flag still wipes.
+    // Guards a regression that only skipped persistence when prevMarker != null.
+    writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
+    expect(existsSync(join(dataDir, STATE_FILE))).toBe(false); // no prior state
+
+    // Boot 1: opt-out set, first boot (no persisted marker) → store preserved and
+    // — crucially — NO state file written.
+    const skipped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: true });
+    expect(skipped.skipped).toBe(true);
+    expect(skipped.wiped).toBe(false);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(true);
+    expect(existsSync(join(dataDir, STATE_FILE))).toBe(false); // marker NOT persisted
+    expect(readPersistedMarker(dataDir)).toBeNull();
+
+    // Boot 2: flag unset → the wipe finally runs, because the marker never advanced.
+    const wiped = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER, skip: false });
+    expect(wiped.wiped).toBe(true);
+    expect(existsSync(join(dataDir, 'store.nq'))).toBe(false);
+    expect(readPersistedMarker(dataDir)).toBe(NEW_MARKER);
+  });
+
   it('skip=true does not attempt the external SPARQL wipe (fetch is never called)', async () => {
     writeFileSync(
       join(dataDir, STATE_FILE),
