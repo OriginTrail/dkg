@@ -678,6 +678,7 @@ describe('dashboard browser sessions', () => {
       headers: {
         Cookie: cookie,
         Origin: dashboardOrigin,
+        'Sec-Fetch-Site': 'cross-site',
         'X-DKG-CSRF': body.csrfToken,
       },
     });
@@ -688,6 +689,7 @@ describe('dashboard browser sessions', () => {
       headers: {
         Cookie: cookie,
         Origin: 'https://attacker.example',
+        'Sec-Fetch-Site': 'cross-site',
         'X-DKG-CSRF': body.csrfToken,
       },
     });

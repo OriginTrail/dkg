@@ -3,7 +3,7 @@
 import React, { act, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DashboardSessionGate } from '../src/ui/App.js';
+import { DashboardSessionGate } from '../src/ui/components/DashboardSessionGate.js';
 import { apiFetch } from '../src/ui/dashboardSessionClient.js';
 import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 

@@ -30,11 +30,14 @@ export function isUnsafeHttpMethod(method: string | undefined): boolean {
 }
 
 export function hasTrustedDashboardOrigin(req: IncomingMessage, corsOrigin?: string | null): boolean {
+  const allowedCorsOrigin = parseOrigin(corsOrigin ?? undefined);
   const fetchSite = firstHeaderValue(req.headers["sec-fetch-site"])?.toLowerCase();
-  if (fetchSite === "cross-site") return false;
+  const originHeader = firstHeaderValue(req.headers.origin);
+  if (fetchSite === "cross-site" && (!originHeader || parseOrigin(originHeader) !== allowedCorsOrigin)) {
+    return false;
+  }
 
   const allowed = trustedDashboardOrigins(req, corsOrigin);
-  const originHeader = firstHeaderValue(req.headers.origin);
   if (originHeader && !isTrustedDashboardHeaderOrigin(req, originHeader, allowed)) return false;
 
   const refererHeader = firstHeaderValue(req.headers.referer);
