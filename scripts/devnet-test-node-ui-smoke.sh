@@ -18,6 +18,7 @@ PASS=0
 FAIL=0
 COOKIE_JAR="/tmp/rc12-ui-cookies.txt"
 HEADER_FILE="/tmp/rc12-ui-headers.txt"
+AUTH_TOKEN_FILE="$REPO_ROOT/.devnet/node${UI_NODE_ID}/auth.token"
 
 ok()   { PASS=$((PASS+1)); echo "  PASS: $*"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL: $*"; }
@@ -103,7 +104,15 @@ if [ "$ready" = true ]; then
     fail "protected API without session returned HTTP $protected_code"
   fi
 
-  bootstrap_code=$(curl -s -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -D "$HEADER_FILE" -H "Origin: http://localhost:$UI_PORT" -o /tmp/rc12-ui-session-after.json -w "%{http_code}" "http://localhost:$UI_PORT/api/dashboard/session/loopback" 2>/dev/null || echo "000")
+  AUTH_TOKEN=""
+  if [ -f "$AUTH_TOKEN_FILE" ]; then
+    AUTH_TOKEN="$(grep -v '^[[:space:]]*#' "$AUTH_TOKEN_FILE" | tr -d '\r' | awk 'NF { print; exit }')"
+  fi
+  if [ -z "$AUTH_TOKEN" ]; then
+    fail "devnet node $UI_NODE_ID auth token missing at $AUTH_TOKEN_FILE"
+  fi
+
+  bootstrap_code=$(curl -s -X POST -b "$COOKIE_JAR" -c "$COOKIE_JAR" -D "$HEADER_FILE" -H "Origin: http://localhost:$UI_PORT" -H "Authorization: Bearer $AUTH_TOKEN" -o /tmp/rc12-ui-session-after.json -w "%{http_code}" "http://localhost:$UI_PORT/api/dashboard/session/loopback" 2>/dev/null || echo "000")
   if [ "$bootstrap_code" = "200" ] && grep -qi "httponly" "$HEADER_FILE" && grep -qi "samesite=strict" "$HEADER_FILE"; then
     ok "loopback dashboard session bootstrap sets HttpOnly SameSite cookie"
   else

@@ -55,6 +55,7 @@ async function startServer(options: {
   refreshValidTokens?: () => void;
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
+  corsOrigin?: string | null;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
@@ -85,10 +86,11 @@ async function startServer(options: {
       validTokens,
       refreshValidTokens: options.refreshValidTokens,
       onSessionRevoked: options.onSessionRevoked,
+      corsOrigin: options.corsOrigin,
     })) {
       return;
     }
-    if (!(await httpAuthGuard(req, res, true, validTokens, null, {
+    if (!(await httpAuthGuard(req, res, true, validTokens, options.corsOrigin ?? null, {
       resolvePrincipal,
       authSources: [dashboardAuthSource],
     }))) {
@@ -661,6 +663,38 @@ describe('dashboard browser sessions', () => {
       },
     });
     expect(res.status).toBe(200);
+  });
+
+  it('allows unsafe session-authenticated requests from the configured dashboard CORS origin only', async () => {
+    const dashboardOrigin = 'https://dashboard.example';
+    const started = await startServer({ corsOrigin: dashboardOrigin });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string };
+
+    const allowed = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: dashboardOrigin,
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(allowed.status).toBe(200);
+
+    const rejected = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: {
+        Cookie: cookie,
+        Origin: 'https://attacker.example',
+        'X-DKG-CSRF': body.csrfToken,
+      },
+    });
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
   });
 
   it('rejects unsafe session-authenticated requests with valid CSRF but hostile Origin', async () => {
