@@ -1,7 +1,7 @@
 import { type IncomingMessage, type ServerResponse } from 'node:http';
 import { join, resolve, relative, sep, isAbsolute } from 'node:path';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat, realpath } from 'node:fs/promises';
+import { stat, realpath } from 'node:fs/promises';
 import { PayloadTooLargeError, type RelayStats } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from './db.js';
 import { type ChatMemoryManager } from './chat-memory.js';
@@ -80,11 +80,28 @@ export interface TelemetrySettingsCallbacks {
   setTelemetryEnabled: (enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
 }
 
+export interface HandleNodeUIRequestOptions {
+  metricsCollector?: MetricsCollector;
+  memoryManager?: ChatMemoryManager;
+  llmSettings?: LlmSettingsCallbacks;
+  telemetrySettings?: TelemetrySettingsCallbacks;
+  corsOrigin?: string | null;
+  relayStatsProvider?: RelayStatsProvider;
+}
+
 /**
  * Handles all /api/metrics, /api/operations, /api/node-log, /api/query-history,
  * /api/saved-queries, and /ui routes. Returns true if the request was handled.
  */
-export async function handleNodeUIRequest(
+export function handleNodeUIRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  options?: HandleNodeUIRequestOptions,
+): Promise<boolean>;
+export function handleNodeUIRequest(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
@@ -92,13 +109,92 @@ export async function handleNodeUIRequest(
   staticDir: string,
   _legacyRemovedArg?: unknown,
   metricsCollector?: MetricsCollector,
-  authToken?: string,
+  _authTokenRemoved?: string,
   memoryManager?: ChatMemoryManager,
   llmSettings?: LlmSettingsCallbacks,
   telemetrySettings?: TelemetrySettingsCallbacks,
   corsOrigin?: string | null,
   relayStatsProvider?: RelayStatsProvider,
+): Promise<boolean>;
+export async function handleNodeUIRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  optionsOrLegacyRemovedArg: HandleNodeUIRequestOptions | unknown = {},
+  legacyMetricsCollector?: MetricsCollector,
+  _authTokenRemoved?: string,
+  legacyMemoryManager?: ChatMemoryManager,
+  legacyLlmSettings?: LlmSettingsCallbacks,
+  legacyTelemetrySettings?: TelemetrySettingsCallbacks,
+  legacyCorsOrigin?: string | null,
+  legacyRelayStatsProvider?: RelayStatsProvider,
 ): Promise<boolean> {
+  return handleNodeUIRequestCore(
+    req,
+    res,
+    url,
+    db,
+    staticDir,
+    normalizeHandleNodeUIRequestOptions(
+      optionsOrLegacyRemovedArg,
+      legacyMetricsCollector,
+      _authTokenRemoved,
+      legacyMemoryManager,
+      legacyLlmSettings,
+      legacyTelemetrySettings,
+      legacyCorsOrigin,
+      legacyRelayStatsProvider,
+    ),
+  );
+}
+
+function normalizeHandleNodeUIRequestOptions(
+  optionsOrLegacyRemovedArg: HandleNodeUIRequestOptions | unknown,
+  legacyMetricsCollector?: MetricsCollector,
+  _authTokenRemoved?: string,
+  legacyMemoryManager?: ChatMemoryManager,
+  legacyLlmSettings?: LlmSettingsCallbacks,
+  legacyTelemetrySettings?: TelemetrySettingsCallbacks,
+  legacyCorsOrigin?: string | null,
+  legacyRelayStatsProvider?: RelayStatsProvider,
+): HandleNodeUIRequestOptions {
+  const hasLegacyTail = legacyMetricsCollector !== undefined ||
+    _authTokenRemoved !== undefined ||
+    legacyMemoryManager !== undefined ||
+    legacyLlmSettings !== undefined ||
+    legacyTelemetrySettings !== undefined ||
+    legacyCorsOrigin !== undefined ||
+    legacyRelayStatsProvider !== undefined;
+  return hasLegacyTail
+    ? {
+        metricsCollector: legacyMetricsCollector,
+        memoryManager: legacyMemoryManager,
+        llmSettings: legacyLlmSettings,
+        telemetrySettings: legacyTelemetrySettings,
+        corsOrigin: legacyCorsOrigin,
+        relayStatsProvider: legacyRelayStatsProvider,
+      }
+    : (isHandleNodeUIRequestOptions(optionsOrLegacyRemovedArg) ? optionsOrLegacyRemovedArg : {});
+}
+
+async function handleNodeUIRequestCore(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  db: DashboardDB,
+  staticDir: string,
+  options: HandleNodeUIRequestOptions = {},
+): Promise<boolean> {
+  const {
+    metricsCollector,
+    memoryManager,
+    llmSettings,
+    telemetrySettings,
+    corsOrigin,
+    relayStatsProvider,
+  } = options;
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
 
@@ -667,13 +763,17 @@ export async function handleNodeUIRequest(
   // --- Static UI files ---
 
   if (path === '/ui' || path.startsWith('/ui/')) {
-    return serveStatic(res, staticDir, path, authToken);
+    return serveStatic(res, staticDir, path);
   }
 
   return false;
 }
 
-async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string, authToken?: string): Promise<true> {
+function isHandleNodeUIRequestOptions(value: unknown): value is HandleNodeUIRequestOptions {
+  return Boolean(value) && typeof value === 'object';
+}
+
+async function serveStatic(res: ServerResponse, staticDir: string, urlPath: string): Promise<true> {
   let filePath = urlPath === '/ui' || urlPath === '/ui/'
     ? join(staticDir, 'index.html')
     : join(staticDir, urlPath.slice('/ui/'.length));
@@ -720,42 +820,53 @@ async function serveStatic(res: ServerResponse, staticDir: string, urlPath: stri
   const isHtml = mimeExt === '.html';
 
   try {
-    if (isHtml && authToken) {
-      const html = await readFile(filePath, 'utf-8');
-      const injection = `<script>window.__DKG_TOKEN__=${JSON.stringify(authToken)}</script>`;
-      const injected = html.replace('</head>', `${injection}</head>`);
-      const buf = Buffer.from(injected, 'utf-8');
-      res.writeHead(200, {
-        'Content-Type': 'text/html',
-        'Content-Length': buf.byteLength,
-        'Cache-Control': 'no-cache',
-      });
-      res.end(buf);
-    } else {
-      const s = await stat(filePath);
-      const contentType = MIME[mimeExt] ?? 'application/octet-stream';
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Content-Length': s.size,
-        'Cache-Control': isHtml ? 'no-cache' : 'public, max-age=31536000, immutable',
-      });
-      const stream = createReadStream(filePath);
-      stream.on('error', (err) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Stream read error' }));
-        } else {
-          res.destroy(err);
-        }
-      });
-      stream.pipe(res);
-    }
+    const s = await stat(filePath);
+    const contentType = MIME[mimeExt] ?? 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': s.size,
+      'Cache-Control': isHtml ? 'no-store' : 'public, max-age=31536000, immutable',
+      ...staticSecurityHeaders(isHtml),
+    });
+    const stream = createReadStream(filePath);
+    stream.on('error', (err) => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Stream read error' }));
+      } else {
+        res.destroy(err);
+      }
+    });
+    stream.pipe(res);
   } catch {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(503, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
     res.end('<!DOCTYPE html><html><body><h1>Node UI not built</h1><p>Run <code>pnpm build:ui</code> in @origintrail-official/dkg-node-ui</p></body></html>');
   }
 
   return true;
+}
+
+function staticSecurityHeaders(isHtml: boolean): Record<string, string> {
+  const headers: Record<string, string> = {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  };
+  if (isHtml) {
+    headers['Content-Security-Policy'] = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "img-src 'self' data: blob:",
+      "font-src 'self' https://fonts.gstatic.com",
+      "connect-src 'self' http: https: ws: wss:",
+      "frame-src 'self' blob:",
+      "object-src 'none'",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+    ].join('; ');
+  }
+  return headers;
 }
 
 function json(res: ServerResponse, status: number, data: unknown): true {
@@ -763,7 +874,11 @@ function json(res: ServerResponse, status: number, data: unknown): true {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (origin) {
     headers['Access-Control-Allow-Origin'] = origin;
-    if (origin !== '*') headers['Vary'] = 'Origin';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-DKG-CSRF';
+    if (origin !== '*') {
+      headers['Access-Control-Allow-Credentials'] = 'true';
+      headers['Vary'] = 'Origin';
+    }
   }
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));

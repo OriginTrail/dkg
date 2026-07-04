@@ -12,15 +12,15 @@
  * Both are loaded at build time via Vite's import.meta.glob so the
  * UI bundle has them inline; no runtime fetch needed.
  */
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 
 // Local POST helper. The api.ts module's `post` is private; re-using
-// `authHeaders` lets us send authenticated JSON to the daemon without
+// `apiFetch` lets us send session-authenticated JSON to the daemon without
 // widening the api.ts surface.
 async function post<T = unknown>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(path, {
+  const res = await apiFetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
   if (!res.ok) {

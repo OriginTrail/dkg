@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures/base.js';
 import { sel } from '../helpers/selectors.js';
+import { fetchApiInPage } from '../helpers/page-api.js';
 
 test.describe('Header', () => {
   test.beforeEach(async ({ shell, page }) => {
@@ -68,22 +69,15 @@ test.describe('Header', () => {
   });
 
   test('clicking notification bell opens the dropdown and renders the feed the API reports', async ({ header, page }) => {
-    // Ground-truth the scoped feed the node serves to THIS caller (same bearer
-    // the UI uses) and assert the pane agrees. This catches the real bug class
+    // Ground-truth the scoped feed the node serves to THIS caller (same dashboard
+    // session the UI uses) and assert the pane agrees. This catches the real bug class
     // — "the API has notifications but the pane renders none" — without the old
     // flaky `> 0` assumption, which silently passed on mock data or lucky
     // timing: the feed loads async AND gates on caller-identity resolution, so
     // counting items the instant the pane opens is a race (it was passing only
     // because the feed sometimes won that race).
-    const apiCount = await page.evaluate(async () => {
-      const token = (window as { __DKG_TOKEN__?: string }).__DKG_TOKEN__;
-      const r = await fetch('/api/notifications', {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!r.ok) return -1;
-      const j = await r.json();
-      return Array.isArray(j.notifications) ? j.notifications.length : -1;
-    });
+    const feed = await fetchApiInPage<{ notifications?: unknown[] }>(page, '/api/notifications');
+    const apiCount = Array.isArray(feed.json?.notifications) ? feed.json.notifications.length : -1;
     expect(apiCount, '/api/notifications must return a notifications array').toBeGreaterThanOrEqual(0);
 
     await header.openNotifications();

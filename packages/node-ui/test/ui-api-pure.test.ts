@@ -1,8 +1,8 @@
 import { createServer, type Server } from 'node:http';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import {
   fileUrl,
-  authHeaders,
+  withDashboardSessionCredentials,
   fetchStatus,
   fetchAgents,
   fetchMetrics,
@@ -13,6 +13,8 @@ import {
   fetchErrorHotspots,
   fetchNodeLog,
   fetchConnections,
+  connectToPeerWithTimeout,
+  connectToPeerIdWithTimeout,
   fetchRetentionSettings,
   fetchTelemetrySettings,
   markNotificationsRead,
@@ -45,6 +47,7 @@ import {
   partialPublishWarning,
   knowledgeAssetFinalize,
 } from '../src/ui/api.js';
+import { useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 let server: Server;
 let baseUrl: string;
@@ -60,6 +63,16 @@ type ResponseOverride = {
   body: unknown;
 };
 let responseOverrides: ResponseOverride[] = [];
+
+function headerValue(headers: HeadersInit | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  if (headers instanceof Headers) return headers.get(name) ?? undefined;
+  if (Array.isArray(headers)) {
+    const found = headers.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    return found?.[1];
+  }
+  return (headers as Record<string, string>)[name];
+}
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -173,6 +186,7 @@ describe('UI API tests', () => {
     requestLog.length = 0;
     queryBindings = [];
     responseOverrides = [];
+    useAuthenticatedDashboardSession({ expiresAt: Date.now() + 60_000 });
   });
 
   describe('fileUrl', () => {
@@ -205,10 +219,77 @@ describe('UI API tests', () => {
     });
   });
 
-  describe('authHeaders', () => {
-    it('returns empty object when window is undefined', () => {
-      const headers = authHeaders();
-      expect(headers).toEqual({});
+  describe('withDashboardSessionCredentials', () => {
+    it('attaches dashboard CSRF credentials when a session is active', () => {
+      const init = withDashboardSessionCredentials();
+      expect(init.credentials).toBe('same-origin');
+      expect(init.headers).toEqual({ 'X-DKG-CSRF': 'csrf-test' });
+    });
+  });
+
+  describe('/api/connect session transport', () => {
+    it('connectToPeerWithTimeout sends a CSRF-backed dashboard session request', async () => {
+      const previousFetch = globalThis.fetch;
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ connected: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      useAuthenticatedDashboardSession({
+        csrfToken: 'csrf-connect',
+        expiresAt: Date.now() + 60_000,
+      });
+
+      try {
+        await expect(connectToPeerWithTimeout('/ip4/127.0.0.1/tcp/1234', 5000)).resolves.toEqual({
+          connected: true,
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchMock.mock.calls[0]!;
+        expect(url).toBe('/api/connect');
+        expect(init).toMatchObject({
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+        expect(headerValue(init?.headers, 'Content-Type')).toBe('application/json');
+        expect(headerValue(init?.headers, 'X-DKG-CSRF')).toBe('csrf-connect');
+        expect(init?.body).toBe(JSON.stringify({ multiaddr: '/ip4/127.0.0.1/tcp/1234' }));
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
+    });
+
+    it('connectToPeerIdWithTimeout sends a CSRF-backed dashboard session request', async () => {
+      const previousFetch = globalThis.fetch;
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ connected: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+      useAuthenticatedDashboardSession({
+        csrfToken: 'csrf-connect-peer',
+        expiresAt: Date.now() + 60_000,
+      });
+
+      try {
+        await expect(connectToPeerIdWithTimeout('12D3KooWPeer', 5000)).resolves.toEqual({
+          connected: true,
+        });
+
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        const [url, init] = fetchMock.mock.calls[0]!;
+        expect(url).toBe('/api/connect');
+        expect(init).toMatchObject({
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+        expect(headerValue(init?.headers, 'Content-Type')).toBe('application/json');
+        expect(headerValue(init?.headers, 'X-DKG-CSRF')).toBe('csrf-connect-peer');
+        expect(init?.body).toBe(JSON.stringify({ peerId: '12D3KooWPeer' }));
+      } finally {
+        globalThis.fetch = previousFetch;
+      }
     });
   });
 

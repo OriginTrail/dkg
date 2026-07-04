@@ -105,7 +105,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -1127,9 +1127,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "POST" && signJoinMatch) {
     const contextGraphId = decodeURIComponent(signJoinMatch[1]);
     try {
-      const callerAddress = agent.resolveAgentAddress(
-        extractBearerToken(req.headers.authorization),
-      );
+      const callerAddress = requestAgentAddress;
       // Body is intentionally ignored — sign-only. Drain it so a JSON body
       // sent by older clients doesn't sit on the socket.
       try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }

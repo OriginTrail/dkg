@@ -141,7 +141,15 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens } from '../auth.js';
+import {
+  DashboardSessionStore,
+  createDashboardSessionAuthSource,
+  getDashboardSessionCookie,
+  handleDashboardSessionRequest,
+  verifyDashboardCsrf,
+} from './dashboard-session.js';
+import { createSseHub } from './sse-hub.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -2544,15 +2552,16 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  const sseClients = new Set<ServerResponse>();
-  function sseBroadcast(event: string, payload: Record<string, unknown>) {
-    const data = JSON.stringify(payload);
-    const msg = `event: ${event}\ndata: ${data}\n\n`;
-    for (const client of sseClients) {
-      try { client.write(msg); } catch { sseClients.delete(client); }
-    }
-  }
+  const authEnabled = config.auth?.enabled !== false;
+  const validTokens = await loadTokens(config.auth);
+  const sseHub = createSseHub({
+    isDashboardSessionTokenValid: (token) => {
+      reconcileValidTokens(validTokens);
+      return validTokens.has(token);
+    },
+  });
+  const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
+  const sseBroadcast = (event: string, payload: Record<string, unknown>) => sseHub.broadcast(event, payload);
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
     if (!event.contextGraphId) return;
     sseBroadcast("memory_graph_changed", {
@@ -2849,8 +2858,6 @@ export async function runDaemonInner(
 
   // --- Authentication ---
 
-  const authEnabled = config.auth?.enabled !== false;
-  const validTokens = await loadTokens(config.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0
@@ -2869,7 +2876,19 @@ export async function runDaemonInner(
   } else {
     log("API authentication disabled (auth.enabled = false)");
   }
-
+  const dashboardSessions = new DashboardSessionStore();
+  const resolveDashboardPrincipal = (token: string) => {
+    const agentAddress = agent.resolveAgentAddress(token);
+    return {
+      kind: agent.resolveAgentByToken(token) ? "agent" as const : "node-admin" as const,
+      agentAddress,
+    };
+  };
+  const dashboardSessionAuthSource = createDashboardSessionAuthSource({
+    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    resolvePrincipal: resolveDashboardPrincipal,
+    verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
+  });
   // Trusted server-side port binding used downstream (SSRF defence in
   // manifestSelfClient; passed to handleRequest + route modules).
   const apiPortRef = { value: 0 };
@@ -3029,14 +3048,28 @@ export async function runDaemonInner(
           return;
         }
         res.writeHead(204, {
-          ...(reqCorsOrigin
-            ? { "Access-Control-Allow-Origin": reqCorsOrigin }
-            : {}),
+          ...corsHeaders(reqCorsOrigin),
           "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
         });
         res.end();
         return;
+      }
+
+      if (reqUrl.pathname.startsWith("/api/dashboard/session")) {
+        const handledSession = await handleDashboardSessionRequest(
+          req,
+          res,
+          reqUrl,
+          dashboardSessions,
+          {
+            authEnabled,
+            validTokens,
+            refreshValidTokens: () => reconcileValidTokens(validTokens),
+            corsOrigin: reqCorsOrigin,
+            onSessionRevoked: closeDashboardSessionSseClients,
+          },
+        );
+        if (handledSession) return;
       }
 
       // Auth guard — rejects with 401 if token is invalid/missing
@@ -3046,6 +3079,10 @@ export async function runDaemonInner(
         authEnabled,
         validTokens,
         resolveCorsOrigin(req, corsAllowed),
+        {
+          resolvePrincipal: resolveDashboardPrincipal,
+          authSources: [dashboardSessionAuthSource],
+        },
       );
       if (!authAllowed) return;
 
@@ -3076,6 +3113,13 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
+        const requestAuth = getRequestAuthContext(req);
+        const dashboardSession = requestAuth?.source === "dashboard-session"
+          ? {
+              ...requestAuth.dashboardSession,
+              compatToken: requestAuth.internalCredentialToken,
+            }
+          : undefined;
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3083,11 +3127,8 @@ export async function runDaemonInner(
           ...corsHeaders(resolveCorsOrigin(req, corsAllowed)),
         });
         res.write(`event: connected\ndata: {}\n\n`);
-        sseClients.add(res);
-        const heartbeat = setInterval(() => {
-          try { res.write(`: heartbeat\n\n`); } catch { /* closed */ }
-        }, 30_000);
-        req.on("close", () => { sseClients.delete(res); clearInterval(heartbeat); });
+        const subscription = sseHub.add(res, dashboardSession);
+        req.on("close", () => subscription.close());
         return;
       }
 
@@ -3138,7 +3179,6 @@ export async function runDaemonInner(
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
       // Only inject the relay-stats provider when this node is actually
       // running a relay server. Without this gate, edge nodes always
       // hit the `relayStatsProvider != null` branch in `api.ts` and
@@ -3154,7 +3194,14 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, {
+        metricsCollector,
+        memoryManager,
+        llmSettings,
+        telemetrySettings,
+        corsOrigin: resolveCorsOrigin(req, corsAllowed),
+        relayStatsProvider,
+      });
       if (handled) return;
 
       await handleRequest(

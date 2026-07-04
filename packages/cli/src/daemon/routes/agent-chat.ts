@@ -106,7 +106,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -605,8 +605,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
 
   // GET /api/agent/identity — current agent identity for the requesting token
   if (req.method === "GET" && path === "/api/agent/identity") {
-    const token = extractBearerToken(req.headers.authorization);
-    const agentAddress = agent.resolveAgentAddress(token);
+    const agentAddress = requestAgentAddress;
     const localAgents = agent.listLocalAgents();
     const current = localAgents.find((a) => a.agentAddress === agentAddress);
     return jsonResponse(res, 200, {

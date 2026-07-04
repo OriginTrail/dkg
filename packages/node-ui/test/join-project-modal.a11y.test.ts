@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { setDashboardSessionForTesting } from '../src/ui/dashboardSessionTestSupport.js';
 
 // Mock the api surface JoinProjectModal pulls in so the modal renders
 // without a live daemon. Most calls are happy-path stubs; the test
@@ -58,6 +59,7 @@ describe('JoinProjectModal — BUG-017 a11y dismiss wiring', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
+    setDashboardSessionForTesting({ state: 'auth-disabled', authenticated: true, authDisabled: true });
     (globalThis as any).EventSource = class {
       constructor(_url: string) {}
       addEventListener() {}
@@ -83,6 +85,7 @@ describe('JoinProjectModal — BUG-017 a11y dismiss wiring', () => {
       act(() => { root.unmount(); });
       container.remove();
     }
+    setDashboardSessionForTesting({ state: 'unauthenticated', authenticated: false });
   });
 
   it('renders nothing when open=false (modal is unmounted, no aria-hidden ghost on the page)', async () => {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } from '../../api.js';
+import { apiFetch, fetchExtractionStatus, fileUrl, type DaemonPath, type ExtractionStatus } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 
 interface FilePreviewModalProps {
@@ -34,8 +34,8 @@ function previewKind(ct: string): 'pdf' | 'image' | 'text' | 'binary' {
   return 'binary';
 }
 
-async function authenticatedBlobUrl(url: string): Promise<string> {
-  const res = await fetch(url, { headers: authHeaders() });
+async function authenticatedBlobUrl(url: DaemonPath): Promise<string> {
+  const res = await apiFetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -62,7 +62,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
         const kind = previewKind(s.detectedContentType);
         const url = fileUrl(s.fileHash, s.detectedContentType);
         if (kind === 'text') {
-          const res = await fetch(url, { headers: authHeaders() });
+          const res = await apiFetch(url);
           if (res.ok) setTextContent(await res.text());
         } else if (kind === 'pdf' || kind === 'image') {
           const blob = await authenticatedBlobUrl(url);
@@ -91,7 +91,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
   const kind = status ? previewKind(status.detectedContentType) : null;
   const rawUrl = status ? fileUrl(status.fileHash, status.detectedContentType) : null;
 
-  const handleDownload = async (downloadUrl: string, filename: string) => {
+  const handleDownload = async (downloadUrl: DaemonPath, filename: string) => {
     try {
       const blob = await authenticatedBlobUrl(downloadUrl);
       const a = document.createElement('a');

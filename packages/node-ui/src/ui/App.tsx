@@ -14,6 +14,7 @@ import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
+import { DashboardSessionGate } from './components/DashboardSessionGate.js';
 import { MockModeBanner } from './components/MockModeBanner.js';
 
 function useLiveStatus() {
@@ -246,9 +247,11 @@ export function App() {
   return (
     <Routes>
       <Route path="/network" element={
-        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-          <NetworkDebugPage />
-        </React.Suspense>
+        <DashboardSessionGate>
+          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+            <NetworkDebugPage />
+          </React.Suspense>
+        </DashboardSessionGate>
       } />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
@@ -258,7 +261,7 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
-      <Route path="*" element={<AppShell />} />
+      <Route path="*" element={<DashboardSessionGate><AppShell /></DashboardSessionGate>} />
     </Routes>
   );
 }

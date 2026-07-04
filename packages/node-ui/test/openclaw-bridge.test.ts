@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readDaemonSources } from './helpers/read-cli-daemon';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 const UI_DIR = resolve(__dirname, '..', 'src', 'ui');
 const CLI_DIR = resolve(__dirname, '..', '..', 'cli', 'src');
@@ -411,16 +412,21 @@ describe('OpenClaw bridge behavioral tests', () => {
   const chatOpenClawEnd = daemonSrc.indexOf('// -----------------------------------------------------------------------', chatOpenClawStart);
   const chatOclawBlock = daemonSrc.slice(chatOpenClawStart, chatOpenClawEnd === -1 ? undefined : chatOpenClawEnd);
 
-  beforeEach(() => {
-    (globalThis as any).window = { __DKG_TOKEN__: undefined };
+  beforeEach(async () => {
+    (globalThis as any).window = {};
     (globalThis as any).localStorage = {
       getItem: () => null,
       setItem: () => {},
       removeItem: () => {},
     };
+    useAuthenticatedDashboardSession({
+      csrfToken: 'csrf-openclaw-test',
+      expiresAt: Date.now() + 60_000,
+    });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    resetDashboardSession();
     delete (globalThis as any).window;
     delete (globalThis as any).localStorage;
   });

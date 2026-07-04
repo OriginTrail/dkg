@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,7 +8,10 @@ import {
   verifyToken,
   extractBearerToken,
   httpAuthGuard,
+  getRequestAuthContext,
   loadTokens,
+  resolveRequestAuthDecision,
+  type RequestAuthSource,
 } from '../src/auth.js';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +62,169 @@ describe('verifyToken', () => {
 
   it('returns false for empty string', () => {
     expect(verifyToken('', tokens)).toBe(false);
+  });
+});
+
+describe('resolveRequestAuthDecision', () => {
+  const VALID_TOKEN = 'decision-token';
+  const validTokens = new Set([VALID_TOKEN]);
+  const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:decision' };
+
+  function request(
+    url: string,
+    options: { method?: string; headers?: IncomingMessage['headers'] } = {},
+  ): IncomingMessage {
+    return {
+      url,
+      method: options.method ?? 'GET',
+      headers: {
+        host: '127.0.0.1:8900',
+        ...(options.headers ?? {}),
+      },
+    } as IncomingMessage;
+  }
+
+  it('returns an authorization-header context for a valid bearer credential', () => {
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
+      validTokens,
+      { resolvePrincipal: () => principal },
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+      context: {
+        source: 'authorization-header',
+        token: VALID_TOKEN,
+        principal,
+        csrf: { required: false, validated: false },
+      },
+    });
+  });
+
+  it('accepts a valid bearer credential without inventing an unresolved principal context', () => {
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { authorization: `Bearer ${VALID_TOKEN}` } }),
+      validTokens,
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+    });
+    expect(decision?.ok === true ? decision.context : undefined).toBeUndefined();
+  });
+
+  it('returns an events-query context with a resolved principal for a valid SSE credential', () => {
+    const decision = resolveRequestAuthDecision(
+      request(`/api/events?token=${VALID_TOKEN}`),
+      validTokens,
+      { resolvePrincipal: () => principal },
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+      context: {
+        source: 'events-query',
+        token: VALID_TOKEN,
+        principal,
+        csrf: { required: false, validated: false },
+      },
+    });
+  });
+
+  it('does not fall back to dashboard-cookie auth after an invalid explicit bearer attempt', () => {
+    const authSource = {
+      resolve: vi.fn(() => ({
+        ok: true as const,
+        credentialToken: VALID_TOKEN,
+        context: {
+          source: 'dashboard-session' as const,
+          internalCredentialToken: VALID_TOKEN,
+          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+          csrf: { required: false, validated: false },
+        },
+      })),
+    };
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', {
+        headers: {
+          authorization: 'Bearer wrong-token',
+          cookie: 'dkg_ui_session=present',
+        },
+      }),
+      validTokens,
+      {
+        authSources: [authSource],
+      },
+    );
+
+    expect(decision).toBeNull();
+    expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to dashboard-cookie auth after an invalid explicit SSE query token', () => {
+    const authSource = {
+      resolve: vi.fn(() => ({
+        ok: true as const,
+        credentialToken: VALID_TOKEN,
+        context: {
+          source: 'dashboard-session' as const,
+          internalCredentialToken: VALID_TOKEN,
+          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+          csrf: { required: false, validated: false },
+        },
+      })),
+    };
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/events?token=wrong-token', {
+        headers: {
+          cookie: 'dkg_ui_session=present',
+        },
+      }),
+      validTokens,
+      {
+        authSources: [authSource],
+      },
+    );
+
+    expect(decision).toBeNull();
+    expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back to dashboard-cookie auth after an empty explicit authorization header', () => {
+    const authSource = {
+      resolve: vi.fn(() => ({
+        ok: true as const,
+        credentialToken: VALID_TOKEN,
+        context: {
+          source: 'dashboard-session' as const,
+          internalCredentialToken: VALID_TOKEN,
+          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+          csrf: { required: false, validated: false },
+        },
+      })),
+    };
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', {
+        headers: {
+          authorization: 'Bearer ',
+          cookie: 'dkg_ui_session=present',
+        },
+      }),
+      validTokens,
+      {
+        authSources: [authSource],
+      },
+    );
+
+    expect(decision).toBeNull();
+    expect(authSource.resolve).not.toHaveBeenCalled();
   });
 });
 
@@ -118,14 +284,22 @@ describe('loadTokens', () => {
 describe('httpAuthGuard', () => {
   const VALID_TOKEN = 'test-secret-token';
   const validTokens = new Set([VALID_TOKEN]);
+  const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:http-guard' };
   let server: Server;
   let baseUrl: string;
+  let corsOrigin: string | null;
+  let authSources: RequestAuthSource[] | undefined;
 
   beforeEach(async () => {
+    corsOrigin = null;
+    authSources = undefined;
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (!(await httpAuthGuard(req, res, true, validTokens))) return;
+      if (!(await httpAuthGuard(req, res, true, validTokens, corsOrigin, {
+        resolvePrincipal: () => principal,
+        authSources,
+      }))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      res.end(JSON.stringify({ ok: true, requestAuth: getRequestAuthContext(req) ?? null }));
     });
 
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -232,6 +406,47 @@ describe('httpAuthGuard', () => {
     expect(body.error).toContain('Unauthorized');
   });
 
+  it('adds credentialed configured CORS headers to missing-token auth failures', async () => {
+    corsOrigin = 'https://dashboard.example';
+
+    const res = await fetch(`${baseUrl}/api/query`, {
+      method: 'POST',
+      headers: { Origin: corsOrigin },
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('access-control-allow-origin')).toBe(corsOrigin);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('adds credentialed configured CORS headers to auth-source 403 failures', async () => {
+    corsOrigin = 'https://dashboard.example';
+    authSources = [{
+      resolve: () => ({
+        ok: false,
+        status: 403,
+        error: 'Invalid or missing dashboard CSRF token',
+        code: 'DASHBOARD_CSRF_INVALID',
+      }),
+    }];
+
+    const res = await fetch(`${baseUrl}/api/query`, {
+      method: 'POST',
+      headers: { Origin: corsOrigin },
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body).toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+      code: 'DASHBOARD_CSRF_INVALID',
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBe(corsOrigin);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
   it('rejects Hermes provider persistence without token', async () => {
     const res = await fetch(`${baseUrl}/api/hermes-channel/persist-turn`, { method: 'POST' });
     expect(res.status).toBe(401);
@@ -253,6 +468,24 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+    expect(body.requestAuth).toMatchObject({
+      source: 'authorization-header',
+      token: VALID_TOKEN,
+      principal,
+      csrf: { required: false, validated: false },
+    });
+  });
+
+  it('resolves the same principal shape for valid SSE query-token auth', async () => {
+    const res = await fetch(`${baseUrl}/api/events?token=${encodeURIComponent(VALID_TOKEN)}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requestAuth).toMatchObject({
+      source: 'events-query',
+      token: VALID_TOKEN,
+      principal,
+      csrf: { required: false, validated: false },
+    });
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  authHeaders, removeParticipant, listParticipants,
+  apiFetch, removeParticipant, listParticipants,
   fetchAgents, listJoinRequests, approveJoinRequest, rejectJoinRequest,
   type PendingJoinRequest,
 } from '../../api.js';
@@ -133,7 +133,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
   useEffect(() => {
     if (!open) return;
-    fetch('/api/status', { headers: authHeaders() })
+    apiFetch('/api/status')
       .then(r => r.json())
       .then((data: any) => {
         if (typeof data?.peerId === 'string' && data.peerId.length > 0) {

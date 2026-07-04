@@ -4,10 +4,12 @@ import { describe, expect, it, afterEach, vi } from 'vitest';
 
 import { numericChainId, chainIdHex } from '../src/ui/web3/chainId.js';
 import { synthesizeChain, publicClientFor, _resetClientCacheForTesting } from '../src/ui/web3/clients.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   _resetClientCacheForTesting();
+  resetDashboardSession();
 });
 
 describe('chainId helpers', () => {
@@ -66,11 +68,14 @@ describe('publicClientFor', () => {
 
   it('can read through a same-origin relative PCA RPC URL in the browser', async () => {
     const seenUrls: string[] = [];
-    const seenHeaders: Array<HeadersInit | undefined> = [];
-    (window as any).__DKG_TOKEN__ = 'tok-123';
+    const seenInits: Array<RequestInit | undefined> = [];
+    useAuthenticatedDashboardSession({
+      csrfToken: 'csrf-123',
+      expiresAt: Date.now() + 60_000,
+    });
     vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
       seenUrls.push(typeof input === 'string' ? input : input.toString());
-      seenHeaders.push(init?.headers);
+      seenInits.push(init);
       const body = JSON.parse(String(init?.body ?? '{}')) as { id?: unknown } | Array<{ id?: unknown }>;
       const responseBody = Array.isArray(body)
         ? body.map((call) => ({ jsonrpc: '2.0', id: call.id, result: '0x14a34' }))
@@ -84,12 +89,56 @@ describe('publicClientFor', () => {
     const client = publicClientFor('base:84532', ['/api/pca/rpc']);
     await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
     expect(seenUrls).toEqual(['/api/pca/rpc']);
-    expect(headerValue(seenHeaders[0], 'Authorization')).toBe('Bearer tok-123');
+    expect(seenInits[0]?.credentials).toBe('same-origin');
+    expect(headerValue(seenInits[0]?.headers, 'Authorization')).toBeUndefined();
+    expect(headerValue(seenInits[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-123');
   });
 
-  it('does not send the node bearer token to external RPC URLs', async () => {
+  it('uses the current CSRF token for each same-origin RPC request on a cached client', async () => {
     const seenHeaders: Array<HeadersInit | undefined> = [];
-    (window as any).__DKG_TOKEN__ = 'tok-123';
+    useAuthenticatedDashboardSession({
+      csrfToken: 'csrf-old',
+      expiresAt: Date.now() + 60_000,
+    });
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/dashboard/session/status') {
+        return new Response(JSON.stringify({
+          authenticated: true,
+          source: 'exchange',
+          csrfToken: 'csrf-new',
+          expiresAt: Date.now() + 60_000,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      seenHeaders.push(init?.headers);
+      const body = JSON.parse(String(init?.body ?? '{}')) as { id?: unknown } | Array<{ id?: unknown }>;
+      const responseBody = Array.isArray(body)
+        ? body.map((call) => ({ jsonrpc: '2.0', id: call.id, result: '0x14a34' }))
+        : { jsonrpc: '2.0', id: body.id, result: '0x14a34' };
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const client = publicClientFor('base:84532', ['/api/pca/rpc']);
+    await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
+    expect(headerValue(seenHeaders[0], 'X-DKG-CSRF')).toBe('csrf-old');
+
+    useAuthenticatedDashboardSession({
+      csrfToken: 'csrf-old',
+      expiresAt: Date.now() - 1,
+    });
+    expect(publicClientFor('base:84532', ['/api/pca/rpc'])).toBe(client);
+    await expect(client.request({ method: 'eth_chainId' })).resolves.toBe('0x14a34');
+    expect(headerValue(seenHeaders[1], 'X-DKG-CSRF')).toBe('csrf-new');
+  });
+
+  it('does not send dashboard credentials to external RPC URLs', async () => {
+    const seenHeaders: Array<HeadersInit | undefined> = [];
     vi.stubGlobal('fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
       seenHeaders.push(init?.headers);
       const body = JSON.parse(String(init?.body ?? '{}')) as { id?: unknown } | Array<{ id?: unknown }>;

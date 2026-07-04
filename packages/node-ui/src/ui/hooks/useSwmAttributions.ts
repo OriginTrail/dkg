@@ -26,7 +26,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 
 export interface AgentAttribution {
   /** Canonical agent identifier. Peer-id for libp2p (`12D3…`), `did:dkg:agent:`
@@ -259,9 +259,9 @@ export function useSwmAttributions(contextGraphId: string | undefined): SwmAttri
           }, ATTRIBUTION_QUERY_TIMEOUT_MS);
         });
         const request = (async () => {
-          const res = await fetch('/api/query', {
+          const res = await apiFetch('/api/query', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
             body: JSON.stringify({
               // Do NOT send contextGraphId here. The query already scopes to the

@@ -6,7 +6,7 @@
 //     ("approved publishing wallet", never "agent").
 //  2. The `fetchPca`/`createPca`/`pca*` helpers are exercised against a mocked
 //     `globalThis.fetch` (the same transport-boundary mock the rest of the
-//     api.ts tests use), asserting URL/method/auth/body shaping and that
+//     api.ts tests use), asserting URL/method/session/body shaping and that
 //     failures surface as `HttpError` (incl. the DELETE path via `delJson`).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +26,7 @@ import {
   pcaSettle,
   registerContextGraph,
 } from '../src/ui/api.js';
+import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 describe('describePcaError', () => {
   it('returns null for non-HttpError throwables (falls back to err.message)', () => {
@@ -182,12 +183,15 @@ describe('PCA api helpers (transport shaping)', () => {
     originalFetch = globalThis.fetch;
     fetchMock = vi.fn();
     globalThis.fetch = fetchMock as any;
-    (window as any).__DKG_TOKEN__ = 'tok-123';
+    useAuthenticatedDashboardSession({
+      csrfToken: 'csrf-123',
+      expiresAt: Date.now() + 60_000,
+    });
   });
 
   afterEach(() => {
     if (originalFetch) globalThis.fetch = originalFetch;
-    delete (window as any).__DKG_TOKEN__;
+    resetDashboardSession();
   });
 
   function ok(body: unknown) {
@@ -197,14 +201,15 @@ describe('PCA api helpers (transport shaping)', () => {
     return { ok: false, status, json: async () => body } as any;
   }
 
-  it('fetchPca GETs the snapshot with the bearer token and no key by default', async () => {
+  it('fetchPca GETs the snapshot with session credentials and no key by default', async () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '1', owner: '0xowner' }));
     const snap = await fetchPca('1');
     expect(snap.accountId).toBe('1');
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('/api/pca/1');
     expect(init?.method ?? 'GET').toBe('GET');
-    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer tok-123');
+    expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(init?.credentials).toBe('same-origin');
   });
 
   it('fetchPca appends ?key= when probing a wallet', async () => {
@@ -269,7 +274,7 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(isPcaFeatureUnavailable(capErr)).toBe(true); // capability gate
   });
 
-  it('createPca POSTs { tokens, primaryNode } as JSON with auth', async () => {
+  it('createPca POSTs { tokens, primaryNode } as JSON with session CSRF', async () => {
     fetchMock.mockResolvedValueOnce(ok({ accountId: '5', committedTokens: '100000.0' }));
     const res = await createPca({ tokens: '100000', primaryNode: '42' });
     expect(res.accountId).toBe('5');
@@ -277,7 +282,8 @@ describe('PCA api helpers (transport shaping)', () => {
     expect(url).toBe('/api/pca');
     expect(init.method).toBe('POST');
     expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
-    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok-123');
+    expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect((init.headers as Record<string, string>)['X-DKG-CSRF']).toBe('csrf-123');
     expect(JSON.parse(init.body as string)).toEqual({ tokens: '100000', primaryNode: '42' });
   });
 

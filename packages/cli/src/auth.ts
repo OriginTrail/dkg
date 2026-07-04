@@ -12,6 +12,54 @@ import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dkgDir } from './config.js';
+import { corsHeaders } from './http-cors.js';
+
+export type RequestAuthPrincipal = {
+  kind: 'agent' | 'node-admin';
+  agentAddress: string;
+};
+
+export interface HttpAuthGuardOptions {
+  resolvePrincipal?: (token: string) => RequestAuthPrincipal;
+  authSources?: RequestAuthSource[];
+}
+
+interface RequestAuthBaseContext {
+  principal: RequestAuthPrincipal;
+  csrf: {
+    required: boolean;
+    validated: boolean;
+  };
+}
+
+export type RequestAuthContext =
+  | (RequestAuthBaseContext & {
+      source: 'authorization-header';
+      token: string;
+    })
+  | (RequestAuthBaseContext & {
+      source: 'events-query';
+      token: string;
+    })
+  | (RequestAuthBaseContext & {
+      source: 'dashboard-session';
+      internalCredentialToken: string;
+      dashboardSession: {
+        sessionId: string;
+        source: 'loopback' | 'exchange';
+        expiresAt: number;
+      };
+    });
+
+const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
+
+export function setRequestAuthContext(req: IncomingMessage, context: RequestAuthContext): void {
+  (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT] = context;
+}
+
+export function getRequestAuthContext(req: IncomingMessage): RequestAuthContext | undefined {
+  return (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT];
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -275,9 +323,13 @@ function reconcileFileTokens(validTokens: Set<string>): void {
  * Performs an mtime-gated hot-reload of the on-disk `auth.token` file
  * on every call — see `reconcileFileTokens` above for the rationale.
  */
+export function reconcileValidTokens(validTokens: Set<string>): void {
+  reconcileFileTokens(validTokens);
+}
+
 export function verifyToken(token: string | undefined, validTokens: Set<string>): boolean {
   if (!token) return false;
-  reconcileFileTokens(validTokens);
+  reconcileValidTokens(validTokens);
   return validTokens.has(token);
 }
 
@@ -763,6 +815,80 @@ function isPublicPath(method: string, pathname: string): boolean {
   return false;
 }
 
+export type RequestAuthDecision =
+  | { ok: true; context?: RequestAuthContext; credentialToken: string }
+  | { ok: false; status: 403; error: string; code?: string };
+
+export interface RequestAuthSource {
+  resolve: (
+    req: IncomingMessage,
+    validTokens: Set<string>,
+    corsOrigin?: string | null,
+  ) => RequestAuthDecision | null;
+}
+
+function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal | undefined {
+  return options?.resolvePrincipal?.(token);
+}
+
+function bearerRequestAuthContext(
+  source: 'authorization-header' | 'events-query',
+  token: string,
+  principal: RequestAuthPrincipal | undefined,
+): RequestAuthContext | undefined {
+  if (!principal) return undefined;
+  return {
+    source,
+    token,
+    principal,
+    csrf: { required: false, validated: false },
+  };
+}
+
+export function resolveRequestAuthDecision(
+  req: IncomingMessage,
+  validTokens: Set<string>,
+  options?: HttpAuthGuardOptions,
+  corsOrigin?: string | null,
+): RequestAuthDecision | null {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const pathname = url.pathname;
+  const hasAuthorizationHeader = req.headers.authorization !== undefined;
+  const token = extractBearerToken(req.headers.authorization);
+
+  if (token && verifyToken(token, validTokens)) {
+    const principal = resolveRequestPrincipal(token, options);
+    return {
+      ok: true,
+      credentialToken: token,
+      context: bearerRequestAuthContext('authorization-header', token, principal),
+    };
+  }
+
+  const hasEventsQueryToken = pathname === '/api/events' && url.searchParams.has('token');
+  if (hasEventsQueryToken) {
+    const queryToken = url.searchParams.get('token') ?? undefined;
+    if (queryToken && verifyToken(queryToken, validTokens)) {
+      const principal = resolveRequestPrincipal(queryToken, options);
+      return {
+        ok: true,
+        credentialToken: queryToken,
+        context: bearerRequestAuthContext('events-query', queryToken, principal),
+      };
+    }
+  }
+
+  const explicitAuthAttempt = hasAuthorizationHeader || hasEventsQueryToken;
+  if (explicitAuthAttempt) return null;
+
+  for (const source of options?.authSources ?? []) {
+    const decision = source.resolve(req, validTokens, corsOrigin);
+    if (decision) return decision;
+  }
+
+  return null;
+}
+
 /**
  * CLI-10 /.
  *
@@ -827,6 +953,7 @@ export function httpAuthGuard(
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
+  options?: HttpAuthGuardOptions,
 ): boolean | Promise<boolean> {
   if (!authEnabled) return true;
   if (req.method === 'OPTIONS') return true;
@@ -834,21 +961,23 @@ export function httpAuthGuard(
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
   if (isPublicPath(req.method ?? '', pathname)) return true;
 
-  const token = extractBearerToken(req.headers.authorization);
-  let acceptedToken: string | undefined;
-  if (verifyToken(token, validTokens)) {
-    acceptedToken = token;
-  } else if (pathname === '/api/events') {
-    // EventSource can't set headers — accept token as query param, but ONLY
-    // for the SSE endpoint to avoid leaking credentials in URLs/logs/referrers.
-    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
-    const qsToken = url.searchParams.get('token');
-    if (qsToken && verifyToken(qsToken, validTokens)) {
-      acceptedToken = qsToken;
-    }
+  const authDecision = resolveRequestAuthDecision(req, validTokens, options, corsOrigin);
+  if (authDecision?.ok === false) {
+    res.writeHead(authDecision.status, {
+      'Content-Type': 'application/json',
+      ...corsHeaders(corsOrigin ?? '*'),
+    });
+    res.end(JSON.stringify({
+      error: authDecision.error,
+      ...(authDecision.code ? { code: authDecision.code } : {}),
+    }));
+    return false;
   }
 
-  if (acceptedToken) {
+  if (authDecision?.ok === true) {
+    if (authDecision.context) setRequestAuthContext(req, authDecision.context);
+    const acceptedCredentialToken = authDecision.credentialToken;
+
     const now = Date.now();
 
     // CLI-10: stale-timestamp gate. If the client opted into the
@@ -867,7 +996,7 @@ export function httpAuthGuard(
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(
           JSON.stringify({ error: 'Stale or unparseable x-dkg-timestamp' }),
@@ -903,7 +1032,7 @@ export function httpAuthGuard(
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(JSON.stringify({
           error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
@@ -925,13 +1054,13 @@ export function httpAuthGuard(
       // pre-check and the full verifier enforce identical replay
       // semantics.
       pruneNonces(now);
-      const preBodyNonceScope = createHash('sha256').update(acceptedToken).digest('hex');
+      const preBodyNonceScope = createHash('sha256').update(acceptedCredentialToken).digest('hex');
       const preBodyNonceKey = `${preBodyNonceScope}:${nonceHeader}`;
       if (seenNonces.has(preBodyNonceKey)) {
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          'Access-Control-Allow-Origin': corsOrigin ?? '*',
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(JSON.stringify({ error: 'Replayed nonce' }));
         return false;
@@ -941,7 +1070,7 @@ export function httpAuthGuard(
       // buffering the body. The actual HMAC check happens there
       // (or synchronously below for body-less requests).
       (req as unknown as { __dkgSignedAuth?: SignedAuthPending }).__dkgSignedAuth = {
-        token: acceptedToken,
+        token: acceptedCredentialToken,
         timestamp: tsHeader,
         nonce: nonceHeader,
         signature: sigHeader,
@@ -1036,7 +1165,7 @@ export function httpAuthGuard(
             status === 401 ? { 'WWW-Authenticate': 'Bearer realm="dkg-node"' } : {};
           res.writeHead(status, {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': corsOrigin ?? '*',
+            ...corsHeaders(corsOrigin ?? '*'),
             ...extraHeaders,
           });
           res.end(
@@ -1110,8 +1239,9 @@ export function httpAuthGuard(
   res.writeHead(401, {
     'Content-Type': 'application/json',
     'WWW-Authenticate': 'Bearer realm="dkg-node"',
-    'Access-Control-Allow-Origin': corsOrigin ?? '*',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    ...corsHeaders(corsOrigin ?? '*', {
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    }),
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
   return false;
@@ -1509,7 +1639,7 @@ function installSignedRequestResponseGuard(
       origWriteHead.call(res, 401, {
         'Content-Type': 'application/json',
         'WWW-Authenticate': 'Bearer realm="dkg-node"',
-        'Access-Control-Allow-Origin': corsOrigin ?? '*',
+        ...corsHeaders(corsOrigin ?? '*'),
       });
       (origEnd as (chunk?: string) => ServerResponse)(
         JSON.stringify({ error: `Signed request rejected: ${reason}` }),

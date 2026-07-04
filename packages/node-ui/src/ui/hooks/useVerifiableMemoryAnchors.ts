@@ -31,7 +31,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 import type { Triple } from './useMemoryEntities.js';
 
 /** Namespace for synthetic visualisation triples — unique to VM decoration
@@ -238,9 +238,9 @@ export function useVerifiableMemoryAnchors(
 
     (async () => {
       try {
-        const res = await fetch('/api/query', {
+        const res = await apiFetch('/api/query', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             // Do NOT send contextGraphId here. buildAnchorsQuery already scopes to
             // the CG via its exact STRSTARTS(?g, "<cgUri>/") and enumerates EVERY sub-graph's

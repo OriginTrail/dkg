@@ -411,7 +411,25 @@ describe('fileUrl hash handling', () => {
   });
 
   it('defaults bare hashes to sha256: prefix', () => {
-    expect(api).toContain('`${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`');
+    expect(api).toContain('apiDaemonPath(`/api/file/${encodeURIComponent(normalizedHash)}${params}`)');
+  });
+});
+
+describe('DaemonPath transport boundary', () => {
+  const api = readFile('api.ts');
+  const filePreviewModal = readRawFile('components/Modals/FilePreviewModal.tsx');
+
+  it('keeps direct daemon fetches behind typed path builders', () => {
+    expect(api).not.toMatch(/apiFetch\(['"`]\/api/);
+    expect(api).not.toMatch(/fetchWithTimeout\(['"`]\/api/);
+    expect(api).toContain("fetchWithTimeout(apiDaemonPath('/api/connect')");
+    expect(api).toContain("apiFetch(apiDaemonPath('/api/openclaw-channel/send')");
+    expect(api).toContain("apiFetch(apiDaemonPath('/api/hermes-channel/send')");
+  });
+
+  it('keeps file-preview blob helpers on DaemonPath values', () => {
+    expect(filePreviewModal).toContain('authenticatedBlobUrl(url: DaemonPath)');
+    expect(filePreviewModal).toContain('handleDownload = async (downloadUrl: DaemonPath');
   });
 });
 
@@ -487,6 +505,23 @@ describe('mock detection request fan-out guard', () => {
     expect(wrapper).toContain('let detectMockModePromise: Promise<boolean> | null = null;');
     expect(wrapper).toContain('if (detectMockModePromise) return detectMockModePromise;');
     expect(wrapper).toContain('detectMockModePromise = (async () => {');
+  });
+});
+
+describe('dashboard browser auth bootstrap', () => {
+  const api = readFile('api.ts');
+  const wrapper = readFile('api-wrapper.ts');
+  const nodeEventsHook = readFileSync(resolve(UI_DIR, 'hooks', 'useNodeEvents.ts'), 'utf-8');
+
+  it('does not read or declare the legacy browser bearer token global', () => {
+    expect(api).not.toContain('__DKG_TOKEN__');
+    expect(wrapper).not.toContain('__DKG_TOKEN__');
+    expect(nodeEventsHook).not.toContain('__DKG_TOKEN__');
+  });
+
+  it('opens the browser SSE feed without a token query string', () => {
+    expect(nodeEventsHook).toContain("new EventSource('/api/events')");
+    expect(nodeEventsHook).not.toContain('?token=');
   });
 });
 

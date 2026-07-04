@@ -5,7 +5,8 @@
  * the HTTP API), this spec exercises the REAL user journey through the browser:
  *
  *   1. Import a Markdown file into Working Memory via the Import modal.
- *   2. Click the Promote control to move WM → SWM.
+ *   2. Seed a default-graph WM assertion and click the Promote control to move
+ *      it WM → SWM.
  *   3. Click the Publish control to move SWM → VM.
  *
  * It asserts BOTH that the UI is functional AND — the critical part — that the
@@ -13,14 +14,11 @@
  * (surface-independent, so the spec doesn't depend on which layer-view variant
  * renders the buttons).
  *
- * WHY THIS REPRODUCES THE BUG: the fixture is a Markdown doc that the
- * deterministic extractor turns into one NAMED root entity plus BLANK-NODE
- * section subjects. Promote's WM-cleanup deletes those blank-node-bearing
- * triples; on the rc.15 fresh-install default backend (oxigraph-server, which
- * devnet nodes 1-2 now run) a `DELETE DATA` with blank nodes is rejected, so a
- * pre-fix promote left WM populated and surfaced the "No triples were promoted"
- * no-op in the UI. The blank-node-safe adapter `delete()` is what makes this
- * spec go green.
+ * The import fixture is retained as browser coverage for the upload flow, but
+ * the promotion target is seeded through the JSON lifecycle API. Current SWM
+ * share intentionally rejects assertion payloads that preserve original RDF
+ * named-graph identity; the API-seeded assertion stays in the KA default graph
+ * while still carrying blank-node section triples for the WM cleanup check.
  *
  * Run: `pnpm test:e2e` — the Playwright webServer boots (or reuses) the devnet.
  */
@@ -57,6 +55,7 @@ test.describe.configure({ mode: 'serial' });
 const run: {
   cgId?: string;
   cgName?: string;
+  assertionName?: string;
   dataGraph?: string;
   markerUri?: string;
   rootUri?: string;
@@ -114,12 +113,68 @@ async function openImportModal(page: Page) {
   await importBtn.click();
 }
 
-/** A promote control on whichever layer-view surface renders (testid-agnostic). */
-function promoteControl(page: Page) {
+async function expectOk(res: Response, label: string) {
+  if (!res.ok) {
+    throw new Error(`${label} failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+async function createPromotableDefaultGraphAssertion() {
+  const stamp = Date.now();
+  const name = `e2e-ui-promote-${stamp}`;
+  const root = `urn:e2e:ui-promote:${stamp}`;
+  const defaultGraph = `did:dkg:context-graph:${run.cgId}`;
+  const res = await devnetApiFetch('/api/knowledge-assets', {
+    method: 'POST',
+    body: JSON.stringify({
+      contextGraphId: run.cgId,
+      name,
+      quads: [
+        {
+          subject: root,
+          predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+          object: 'http://dkg.io/ontology/core/Entity',
+          graph: defaultGraph,
+        },
+        {
+          subject: root,
+          predicate: 'http://schema.org/name',
+          object: `"UI Promote ${stamp}"`,
+          graph: defaultGraph,
+        },
+        {
+          subject: root,
+          predicate: 'http://schema.org/hasPart',
+          object: '_:section1',
+          graph: defaultGraph,
+        },
+        {
+          subject: '_:section1',
+          predicate: 'http://schema.org/name',
+          object: '"Background"',
+          graph: defaultGraph,
+        },
+      ],
+      finalize: true,
+      alsoShareSwm: false,
+    }),
+  });
+  await expectOk(res, 'create promotable assertion');
+
+  const assertion = await findWmAssertion(run.cgId!, name);
+  run.assertionName = assertion.name;
+  run.dataGraph = assertion.dataGraphUri;
+  run.markerUri = assertion.markerUri;
+  run.rootUri = root;
+}
+
+function assertionPromoteControl(page: Page, assertionName: string) {
   return page
-    .getByTestId('widget-promote-all-btn')
-    .or(page.getByTestId('list-promote-all-btn'))
-    .or(page.getByTestId('mlv-promote-all-btn'));
+    .locator('.v10-item-row')
+    .filter({ hasText: assertionName })
+    .locator('button')
+    .filter({ hasText: /SWM|Promote/i })
+    .first();
 }
 
 /** A publish control on whichever layer-view surface renders. */
@@ -135,7 +190,8 @@ async function resultText(page: Page): Promise<string> {
   const containers = page
     .getByTestId('layer-action-result')
     .or(page.getByTestId('list-action-result'))
-    .or(page.getByTestId('mlv-promote-result'));
+    .or(page.getByTestId('mlv-promote-result'))
+    .or(page.locator('.v10-promote-result'));
   const n = await containers.count();
   let text = '';
   for (let i = 0; i < n; i++) {
@@ -169,36 +225,53 @@ test.describe('WM → SWM → VM via the UI', () => {
     await importFilesModal.clickDone();
 
     // The assertion now exists in WM. Discover its data graph + marker URI.
+    let imported: Awaited<ReturnType<typeof findWmAssertion>> | undefined;
     await expect(async () => {
-      const a = await findWmAssertion(run.cgId!, FIXTURE_NAME_PART);
-      run.dataGraph = a.dataGraphUri;
-      run.markerUri = a.markerUri;
+      imported = await findWmAssertion(run.cgId!, FIXTURE_NAME_PART);
     }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
 
-    const roots = await namedRootsInGraph(run.cgId!, run.dataGraph!);
+    const roots = await namedRootsInGraph(run.cgId!, imported!.dataGraphUri);
     expect(roots.length, 'fixture extracts exactly one named root entity').toBe(1);
-    run.rootUri = roots[0];
 
-    // Pre-promote invariants: the WM assertion holds content INCLUDING
-    // blank-node section subjects, and SWM has none of it yet.
-    expect(await countTriplesInGraph(run.cgId!, run.dataGraph!)).toBeGreaterThan(0);
+    // Import invariant: the WM assertion holds content INCLUDING blank-node
+    // section subjects. Clean it up afterwards because SWM share correctly
+    // rejects this import shape's assertion-scoped named-graph payload.
+    expect(await countTriplesInGraph(run.cgId!, imported!.dataGraphUri)).toBeGreaterThan(0);
     expect(
-      await countBlankNodeTriplesInGraph(run.cgId!, run.dataGraph!),
+      await countBlankNodeTriplesInGraph(run.cgId!, imported!.dataGraphUri),
       'fixture must contain blank-node section triples (the bug trigger)',
     ).toBeGreaterThan(0);
-    expect(await countRootInSharedMemory(run.cgId!, run.rootUri!)).toBe(0);
-    expect(await readMemoryLayerMarker(run.cgId!, run.markerUri!)).toBe('WM');
+    expect(await readMemoryLayerMarker(run.cgId!, imported!.markerUri)).toBe('WM');
+
+    const discard = await devnetApiFetch(`/api/knowledge-assets/${encodeURIComponent(imported!.name)}/wm/discard`, {
+      method: 'POST',
+      body: JSON.stringify({ contextGraphId: run.cgId }),
+    });
+    await expectOk(discard, 'discard imported assertion');
   });
 
   test('promotes WM → SWM via the UI and the triples actually migrate', async ({ shell, page }) => {
-    test.skip(!run.dataGraph || !run.rootUri, 'Import step did not produce an assertion');
+    await createPromotableDefaultGraphAssertion();
+    test.skip(!run.dataGraph || !run.rootUri, 'Setup did not produce an assertion');
+
+    // Pre-promote invariants: the WM assertion holds default-graph content plus
+    // blank-node section triples, and SWM has none of it yet.
+    expect(await countTriplesInGraph(run.cgId!, run.dataGraph!)).toBeGreaterThan(0);
+    expect(
+      await countBlankNodeTriplesInGraph(run.cgId!, run.dataGraph!),
+      'promote target must contain blank-node section triples',
+    ).toBeGreaterThan(0);
+    expect(await countRootInSharedMemory(run.cgId!, run.rootUri!)).toBe(0);
+    expect(await readMemoryLayerMarker(run.cgId!, run.markerUri!)).toBe('WM');
+
     await shell.goto();
     await openProjectTab(page, run.cgName!);
 
     // Switch to the Working Memory layer where the promote control lives.
     await page.locator('button.v10-layer-switch-btn[data-layer="wm"]').first().click();
+    await page.getByRole('button', { name: 'Assertions' }).click();
 
-    const promote = promoteControl(page);
+    const promote = assertionPromoteControl(page, run.assertionName!);
     await expect(promote).toBeVisible({ timeout: 15_000 });
     await promote.click();
 
@@ -208,8 +281,12 @@ test.describe('WM → SWM → VM via the UI', () => {
     await expect(async () => {
       const text = await resultText(page);
       expect(text.length, 'a promote result must render').toBeGreaterThan(0);
+      expect(text, 'promote must report a successful migration').toMatch(/Promoted \d+ triple/i);
       expect(text, 'promote must not report the no-op (the bug symptom)').not.toMatch(
         /No triples were promoted/i,
+      );
+      expect(text, 'promote must not report a named-graph guard failure').not.toMatch(
+        /named-graph|graph identity|✕/i,
       );
     }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
 

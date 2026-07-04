@@ -535,6 +535,33 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "node-ui tests"
         run: pnpm --filter @origintrail-official/dkg-node-ui test
+      - name: "node-ui static bundle contract"
+        shell: bash
+        run: |
+          pnpm --filter @origintrail-official/dkg-node-ui build:ui
+          test -f packages/node-ui/dist-ui/index.html
+          if grep -R "__DKG_TOKEN__" packages/node-ui/dist-ui; then
+            echo "dist-ui must not contain legacy browser bearer-token bootstrap"
+            exit 1
+          fi
+          node - <<'NODE'
+          const { readFileSync, existsSync } = require('node:fs');
+          const { join, dirname } = require('node:path');
+          const indexPath = join('packages', 'node-ui', 'dist-ui', 'index.html');
+          const html = readFileSync(indexPath, 'utf8');
+          const refs = [...html.matchAll(/(?:src|href)="([^"]+\.(?:js|css))"/g)].map((m) => m[1]);
+          if (refs.length === 0) {
+            throw new Error('dist-ui/index.html did not reference any JS/CSS assets');
+          }
+          for (const ref of refs) {
+            if (ref.startsWith('/') && !ref.startsWith('/ui/')) {
+              throw new Error(`UI asset reference must be relative or rooted under /ui/: ${ref}`);
+            }
+            const normalized = ref.startsWith('/ui/') ? ref.slice('/ui/'.length) : ref.replace(/^\.\//, '');
+            const assetPath = join(dirname(indexPath), normalized);
+            if (!existsSync(assetPath)) throw new Error(`Missing referenced UI asset: ${ref}`);
+          }
+          NODE
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. The suite boots a live
   # 4-node devnet (Hardhat + four DKG daemons) via Playwright's `webServer`

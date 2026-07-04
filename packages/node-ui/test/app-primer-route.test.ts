@@ -19,8 +19,8 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
 }));
 
 vi.mock('../src/ui/api.js', () => ({
-  authHeaders: () => ({}),
   fileUrl: () => '',
+  withDashboardSessionCredentials: (init?: RequestInit) => init ?? {},
 }));
 
 vi.mock('../src/ui/components/Shell/Header.js', () => ({
@@ -61,6 +61,10 @@ vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({
   ContextGraphPrimerView: () => React.createElement('div', { 'data-testid': 'primer-view' }, 'Primer'),
 }));
 
+const {
+  resetDashboardSession,
+  useAuthenticatedDashboardSession,
+} = await import('./helpers/dashboard-session.js');
 const { App } = await import('../src/ui/App.js');
 
 describe('Context Graph primer route', () => {
@@ -68,6 +72,7 @@ describe('Context Graph primer route', () => {
 
   beforeEach(() => {
     document.body.innerHTML = '<div id="root"></div>';
+    useAuthenticatedDashboardSession();
     useTabsStore.setState({
       tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
       activeTabId: 'dashboard',
@@ -81,6 +86,7 @@ describe('Context Graph primer route', () => {
       });
     }
     root = null;
+    resetDashboardSession();
     document.body.innerHTML = '';
     vi.clearAllMocks();
   });

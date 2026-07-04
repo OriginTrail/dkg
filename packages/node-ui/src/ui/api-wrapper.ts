@@ -33,13 +33,6 @@ export function subscribeMockMode(listener: MockModeListener): () => void {
   };
 }
 
-function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = (window as any).__DKG_TOKEN__;
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -47,9 +40,8 @@ function delay(ms: number): Promise<void> {
 async function probeMockMode(): Promise<boolean> {
   for (let attempt = 1; attempt <= MOCK_MODE_DETECTION_ATTEMPTS; attempt += 1) {
     try {
-      const resp = await fetch('/api/status', {
+      const resp = await realApi.apiFetch('/api/status', {
         cache: 'no-store',
-        headers: authHeaders(),
         signal: AbortSignal.timeout(MOCK_MODE_DETECTION_TIMEOUT_MS),
       });
       if (resp.ok || resp.status === 401) {

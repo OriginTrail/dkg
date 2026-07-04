@@ -6,7 +6,7 @@
  * Renderer from @openuidev/react-lang, which parses streaming output and
  * progressively builds the component tree.
  */
-import { authHeaders } from '../api.js';
+import { apiFetch } from '../api.js';
 
 export type GenuiEvent =
   | { type: 'start'; entityUri: string; entityRdfType: string | null; entityTypeLabel: string | null }
@@ -23,9 +23,9 @@ export interface GenuiStreamOpts {
 }
 
 export async function* streamGenUI(opts: GenuiStreamOpts): AsyncGenerator<GenuiEvent> {
-  const res = await fetch('/api/genui/render', {
+  const res = await apiFetch('/api/genui/render', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contextGraphId: opts.contextGraphId,
       entityUri: opts.entityUri,

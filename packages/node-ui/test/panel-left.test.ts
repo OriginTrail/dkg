@@ -9,6 +9,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { setDashboardSessionForTesting } from '../src/ui/dashboardSessionTestSupport.js';
 
 const fetchCurrentAgentMock = vi.fn();
 const fetchLocalAgentIntegrationsMock = vi.fn();
@@ -60,11 +61,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       container.remove();
     }
+    setDashboardSessionForTesting({ state: 'unauthenticated', authenticated: false });
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    setDashboardSessionForTesting({ state: 'auth-disabled', authenticated: true, authDisabled: true });
     localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
     // useNodeEvents (used by PanelLeft) opens an EventSource on mount.
