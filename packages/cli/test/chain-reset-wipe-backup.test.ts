@@ -551,7 +551,11 @@ describe('skipChainResetWipe (env switch, #679)', () => {
   });
 
   it('reads real process.env on the no-arg path: unset → false', () => {
-    // No stub → the var is absent from the runner env.
+    // Explicitly clear the var so the assertion never depends on the runner's
+    // ambient env (a dev/CI with DKG_SKIP_CHAIN_RESET_WIPE=1 would otherwise
+    // make this a false failure). `vi.stubEnv(key, undefined)` deletes it;
+    // the describe-level afterEach `vi.unstubAllEnvs()` restores it.
+    vi.stubEnv('DKG_SKIP_CHAIN_RESET_WIPE', undefined);
     expect(skipChainResetWipe()).toBe(false);
   });
 });
