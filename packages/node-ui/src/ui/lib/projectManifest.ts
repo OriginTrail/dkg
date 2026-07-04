@@ -10,9 +10,13 @@
  * calls those helpers; this module just gives the React components
  * a typed surface to call.
  */
-import { apiFetch } from '../api.js';
+import { apiFetch, daemonPath, type DaemonPath } from '../api.js';
 
-async function postJson<T = unknown>(path: string, body: unknown): Promise<T> {
+function manifestPath(contextGraphId: string, action: 'publish' | 'plan-install' | 'install'): DaemonPath {
+  return daemonPath(`/api/context-graph/${encodeURIComponent(contextGraphId)}/manifest/${action}`);
+}
+
+async function postJson<T = unknown>(path: DaemonPath, body: unknown): Promise<T> {
   const res = await apiFetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -58,7 +62,7 @@ export function publishProjectManifest(
   req: PublishManifestRequest = {},
 ): Promise<PublishManifestResult> {
   return postJson<PublishManifestResult>(
-    `/api/context-graph/${encodeURIComponent(contextGraphId)}/manifest/publish`,
+    manifestPath(contextGraphId, 'publish'),
     req,
   );
 }
@@ -121,7 +125,7 @@ export function planProjectManifestInstall(
   req: InstallContextRequest,
 ): Promise<PlanInstallResult> {
   return postJson<PlanInstallResult>(
-    `/api/context-graph/${encodeURIComponent(contextGraphId)}/manifest/plan-install`,
+    manifestPath(contextGraphId, 'plan-install'),
     req,
   );
 }
@@ -147,7 +151,7 @@ export function installProjectManifest(
   req: InstallContextRequest,
 ): Promise<InstallResult> {
   return postJson<InstallResult>(
-    `/api/context-graph/${encodeURIComponent(contextGraphId)}/manifest/install`,
+    manifestPath(contextGraphId, 'install'),
     req,
   );
 }

@@ -54,7 +54,9 @@ export function isConfiguredDashboardCorsOrigin(req: IncomingMessage, corsOrigin
 }
 
 export function hasTrustedForwardedProto(req: IncomingMessage, proto: "http" | "https"): boolean {
-  return isLoopbackAddress(req.socket.remoteAddress ?? "") && requestForwardedProto(req) === proto;
+  if (requestForwardedProto(req) !== proto) return false;
+  if (isLoopbackAddress(req.socket.remoteAddress ?? "")) return true;
+  return proto === "https" && hasMatchingForwardedHttpsBrowserOrigin(req);
 }
 
 function requestForwardedProto(req: IncomingMessage): "http" | "https" | undefined {
@@ -119,6 +121,18 @@ function requestOrigin(req: IncomingMessage): string | undefined {
   if (!host) return undefined;
   const proto = hasTrustedForwardedProto(req, "https") ? "https" : "http";
   return parseOrigin(`${proto}://${host}`);
+}
+
+function hasMatchingForwardedHttpsBrowserOrigin(req: IncomingMessage): boolean {
+  const externalOrigin = requestHostOrigin(req, "https");
+  if (!externalOrigin) return false;
+  return parseOrigin(firstHeaderValue(req.headers.origin)) === externalOrigin ||
+    parseOrigin(firstHeaderValue(req.headers.referer)) === externalOrigin;
+}
+
+function requestHostOrigin(req: IncomingMessage, proto: "http" | "https"): string | undefined {
+  const host = firstHeaderValue(req.headers.host);
+  return host ? parseOrigin(`${proto}://${host}`) : undefined;
 }
 
 function trustedDashboardOrigins(req: IncomingMessage, corsOrigin?: string | null): Set<string> {

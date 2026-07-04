@@ -11,6 +11,7 @@ import {
   verifyDashboardCsrf,
 } from '../src/daemon/dashboard-session.js';
 import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
+import { hasTrustedDashboardOrigin } from '../src/daemon/dashboard-session-policy.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
 import { getRequestAuthContext, httpAuthGuard, type RequestAuthPrincipal } from '../src/auth.js';
 
@@ -34,6 +35,38 @@ describe('dashboard session trust policy helpers', () => {
     expect(isAllowedLoopbackHostname('127.0.0.1')).toBe(true);
     expect(isAllowedLoopbackHostname('[::1]')).toBe(true);
     expect(isAllowedLoopbackHostname('example.com')).toBe(false);
+  });
+
+  it('trusts HTTPS proxy origins from non-loopback peers only when browser metadata matches Host', () => {
+    const matching = {
+      headers: {
+        host: 'node.example',
+        origin: 'https://node.example',
+        'x-forwarded-proto': 'https',
+      },
+      socket: { remoteAddress: '172.18.0.2' },
+    } as IncomingMessage;
+    expect(hasTrustedDashboardOrigin(matching)).toBe(true);
+
+    const matchingReferer = {
+      headers: {
+        host: 'node.example',
+        referer: 'https://node.example/dashboard',
+        'x-forwarded-proto': 'https',
+      },
+      socket: { remoteAddress: '172.18.0.2' },
+    } as IncomingMessage;
+    expect(hasTrustedDashboardOrigin(matchingReferer)).toBe(true);
+
+    const hostile = {
+      headers: {
+        host: 'node.example',
+        origin: 'https://attacker.example',
+        'x-forwarded-proto': 'https',
+      },
+      socket: { remoteAddress: '172.18.0.2' },
+    } as IncomingMessage;
+    expect(hasTrustedDashboardOrigin(hostile)).toBe(false);
   });
 });
 
@@ -445,6 +478,43 @@ describe('dashboard browser sessions', () => {
     await expect(status.json()).resolves.toMatchObject({ authenticated: true });
   });
 
+  it('allows same-origin HTTPS dashboards behind a TLS-terminating proxy', async () => {
+    const externalOrigin = 'https://node.example';
+    const started = await startServer();
+    server = started.server;
+
+    const exchange = await rawRequest(started.baseUrl, '/api/dashboard/session/exchange', {
+      method: 'POST',
+      headers: {
+        Host: 'node.example',
+        Origin: externalOrigin,
+        'Content-Type': 'application/json',
+        'X-Forwarded-Proto': 'https',
+      },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = Array.isArray(exchange.headers['set-cookie'])
+      ? exchange.headers['set-cookie'][0]
+      : exchange.headers['set-cookie'];
+    expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('Secure');
+    const cookie = setCookie!.split(';')[0];
+    const body = JSON.parse(exchange.body) as { csrfToken: string };
+
+    const protectedPost = await rawRequest(started.baseUrl, '/api/protected', {
+      method: 'POST',
+      headers: {
+        Host: 'node.example',
+        Origin: externalOrigin,
+        Cookie: cookie,
+        'X-DKG-CSRF': body.csrfToken,
+        'X-Forwarded-Proto': 'https',
+      },
+    });
+    expect(protectedPost.status).toBe(200);
+  });
+
   it('marks dashboard session cookies Secure when forwarded protocol is https', async () => {
     const started = await startServer();
     server = started.server;
@@ -499,6 +569,27 @@ describe('dashboard browser sessions', () => {
 
     expect(headers['Set-Cookie']).toContain('dkg_ui_session=');
     expect(String(headers['Set-Cookie'])).not.toContain('Secure');
+  });
+
+  it('marks non-loopback proxy cookies Secure when forwarded HTTPS matches the browser origin', () => {
+    const req = {
+      headers: {
+        host: 'node.example',
+        origin: 'https://node.example',
+        'x-forwarded-proto': 'https',
+      },
+      socket: { remoteAddress: '172.18.0.2' },
+    } as IncomingMessage;
+    const headers: Record<string, string | string[]> = {};
+    const res = {
+      getHeader: (name: string) => headers[name],
+      setHeader: (name: string, value: string | string[]) => { headers[name] = value; },
+    } as ServerResponse;
+
+    setDashboardSessionCookie(req, res, 'forwarded-https-session');
+
+    expect(headers['Set-Cookie']).toContain('dkg_ui_session=');
+    expect(String(headers['Set-Cookie'])).toContain('Secure');
   });
 
   it('resolves a deterministic principal when exchanging an agent-scoped token', async () => {
