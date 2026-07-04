@@ -378,6 +378,46 @@ describe('dashboard browser sessions', () => {
     });
   });
 
+  it('serves the CSRF endpoint only for a live dashboard session', async () => {
+    const started = await startServer();
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    const body = await bootstrap.json() as { csrfToken: string; expiresAt: number };
+
+    const csrf = await fetch(`${started.baseUrl}/api/dashboard/session/csrf`, {
+      headers: { Cookie: cookie },
+    });
+    expect(csrf.status).toBe(200);
+    await expect(csrf.json()).resolves.toMatchObject({
+      csrfToken: body.csrfToken,
+      expiresAt: body.expiresAt,
+    });
+
+    const missingCookie = await fetch(`${started.baseUrl}/api/dashboard/session/csrf`);
+    expect(missingCookie.status).toBe(401);
+    await expect(missingCookie.json()).resolves.toMatchObject({
+      error: 'Dashboard session required',
+    });
+  });
+
+  it('rejects the CSRF endpoint after the backing session token is invalidated', async () => {
+    const validTokens = new Set([VALID_TOKEN, AGENT_TOKEN]);
+    const started = await startServer({ validTokens });
+    server = started.server;
+    const bootstrap = await fetch(`${started.baseUrl}/api/dashboard/session/loopback`, loopbackBootstrapInit(started.baseUrl));
+    const cookie = cookieFrom(bootstrap);
+    validTokens.delete(VALID_TOKEN);
+
+    const csrf = await fetch(`${started.baseUrl}/api/dashboard/session/csrf`, {
+      headers: { Cookie: cookie },
+    });
+    expect(csrf.status).toBe(401);
+    await expect(csrf.json()).resolves.toMatchObject({
+      error: 'Dashboard session required',
+    });
+  });
+
   it('routes dashboard-cookie agent sessions through requestAgentAddress for agent identity', async () => {
     const started = await startServer();
     server = started.server;
