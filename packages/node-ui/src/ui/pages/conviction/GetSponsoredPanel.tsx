@@ -3,7 +3,7 @@ import { useFetch } from '../../hooks.js';
 import { fetchWalletsBalances, fetchPca, pcaAgentAccount, describePcaError } from '../../api.js';
 import { formatEth, formatEthTooltip } from '../../lib/formatEth.js';
 import { usePcaStore } from '../../stores/pca.js';
-import { classifyCoverage } from '../../pca/coverage.js';
+import { classifyCoverage, type PcaCoverageResult } from '../../pca/coverage.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
@@ -28,20 +28,29 @@ function faucetUrl(chainId: string | null | undefined): string | undefined {
 
 interface ProbeRow {
   wallet: string;
-  registered: boolean | null;
   /**
-   * N1 — registered AND the sponsor PCA is spendable (not expired/swept, has
-   * budget): only then does an approved wallet actually COVER the publish. A
-   * registered wallet on a dead PCA must not render "Ready" (#9 false coverage).
+   * The CANONICAL coverage result for this wallet on the probed account — carried as the
+   * discriminated union (#1344), NOT flattened into parallel `registered`/`covers`/
+   * `adapterUnsupported` flags that could express impossible states. Every derived signal
+   * (approved count, N1 coverage, S6 "Ready", the #1356 capability-gap split) reads the
+   * single `.outcome` discriminant. A transport failure maps to the `inconclusive`
+   * variant with `adapterUnsupported:false` (couldn't read ≠ capability gap).
    */
-  covers: boolean;
-  /**
-   * #1356 — true iff this probe was inconclusive because the chain adapter can't answer
-   * PCA queries on this chain (a capability gap — retrying is futile). False for a
-   * registered/covering/transient-failure row. Lets the all-inconclusive message say
-   * "not supported here" instead of "the lookup failed. Retry.".
-   */
-  adapterUnsupported: boolean;
+  coverage: PcaCoverageResult;
+}
+
+/** The S6 approval-row status derived from the single coverage discriminant. */
+function sponsorRowStatus(c: PcaCoverageResult): { text: string; tone: 'success' | 'warn' | 'danger' | 'neutral' } {
+  switch (c.outcome) {
+    case 'covers':
+      return { text: 'approved', tone: 'success' };
+    case 'uncovered':
+      return { text: 'approved, but that PCA is expired, swept, or out of budget - publishes will not get the discount', tone: 'warn' };
+    case 'unregistered':
+      return { text: 'not approved - ask the PCA owner to approve it', tone: 'danger' };
+    case 'inconclusive':
+      return { text: 'unknown', tone: 'neutral' };
+  }
 }
 
 /**
@@ -102,31 +111,24 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       const rows = await Promise.all(
         wallets.map((w) =>
           fetchPca(id, w, { extended: true })
-            .then((snap): ProbeRow => {
-              // #1344 — single canonical classifier (reads snap.probedKey): S2
-              // adapterSupported===false → registered null (neutral "unknown" row, not a
-              // false not-approved; all-unsupported → wholesale "retry") + N1 covers =
-              // outcome 'covers' (registered AND the PCA is spendable; S6 "Ready" == S5 GREEN).
-              const c = classifyCoverage(snap);
-              return {
-                wallet: w,
-                registered: c.registered,
-                covers: c.outcome === 'covers',
-                // #1356 — capability gap only lives on the inconclusive variant.
-                adapterUnsupported: c.outcome === 'inconclusive' ? c.adapterUnsupported : false,
-              };
-            })
-            .catch((): ProbeRow => ({ wallet: w, registered: null, covers: false, adapterUnsupported: false })),
+            // #1344 — single canonical classifier (reads snap.probedKey); the row keeps the
+            // whole discriminated result. S2 adapterSupported===false → inconclusive
+            // (neutral "unknown" row, not a false not-approved; all-unsupported → wholesale
+            // "not supported"); N1 coverage / S6 "Ready" == outcome 'covers'.
+            .then((snap): ProbeRow => ({ wallet: w, coverage: classifyCoverage(snap) }))
+            // A transport failure couldn't determine coverage → inconclusive, NOT a
+            // capability gap (retry may resolve it).
+            .catch((): ProbeRow => ({ wallet: w, coverage: { outcome: 'inconclusive', registered: null, adapterUnsupported: false } })),
         ),
       );
       // L4: the per-wallet .catch swallows failures, so every-row-null means the
       // lookup failed wholesale (vs genuine 0-approved, which is registered:false).
       // Surface that as an error — don't render a false "0 of N approved".
-      if (rows.length > 0 && rows.every((r) => r.registered === null)) {
+      if (rows.length > 0 && rows.every((r) => r.coverage.outcome === 'inconclusive')) {
         // #1356 — split the CAPABILITY GAP (the chain adapter can't answer PCA
         // queries here — retrying is futile) from a transient RPC failure (retry).
         // Only claim "not supported" when EVERY inconclusive probe is an adapter gap.
-        const allAdapterGap = rows.every((r) => r.adapterUnsupported);
+        const allAdapterGap = rows.every((r) => r.coverage.outcome === 'inconclusive' && r.coverage.adapterUnsupported);
         setProbeError(
           allAdapterGap
             ? 'PCA approval isn’t verifiable on this chain’s adapter — not supported here. You can still publish without a discount.'
@@ -138,7 +140,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       // N2: persist the sponsor id once ≥1 wallet is approved so the overview/chip
       // pick it up (NOT on the wholesale-failure path). Downstream re-probes the
       // chain independently, so nothing trusts this S6 result — safe vs #9.
-      if (rows.some((r) => r.registered === true)) trackAccount(id);
+      if (rows.some((r) => r.coverage.registered === true)) trackAccount(id);
       setProbed({ accountId: id, rows });
     } catch (err) {
       setProbeError(describePcaError(err, { accountId: id })?.message ?? 'Couldn’t check approval.');
@@ -147,9 +149,9 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const approvedCount = probed?.rows.filter((r) => r.registered === true).length ?? 0;
+  const approvedCount = probed?.rows.filter((r) => r.coverage.registered === true).length ?? 0;
   // N1: Ready requires actual COVERAGE (spendable PCA), not bare registration.
-  const ready = !!probed && probed.rows.some((r) => r.covers && isFunded(r.wallet));
+  const ready = !!probed && probed.rows.some((r) => r.coverage.outcome === 'covers' && isFunded(r.wallet));
 
   return (
     <PcaModalShell
@@ -258,30 +260,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               <p className="v10-pca-approve-summary">
                 Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets ✓
               </p>
-              {probed.rows.map((r) => (
-                <WalletRow
-                  key={r.wallet}
-                  address={r.wallet}
-                  status={
-                    r.registered === true
-                      ? r.covers
-                        ? 'approved'
-                        : 'approved, but that PCA is expired, swept, or out of budget - publishes will not get the discount'
-                      : r.registered === false
-                        ? 'not approved - ask the PCA owner to approve it'
-                        : 'unknown'
-                  }
-                  statusTone={
-                    r.registered === true
-                      ? r.covers
-                        ? 'success'
-                        : 'warn'
-                      : r.registered === false
-                        ? 'danger'
-                        : 'neutral'
-                  }
-                />
-              ))}
+              {probed.rows.map((r) => {
+                const s = sponsorRowStatus(r.coverage);
+                return <WalletRow key={r.wallet} address={r.wallet} status={s.text} statusTone={s.tone} />;
+              })}
             </div>
           )}
         </section>
