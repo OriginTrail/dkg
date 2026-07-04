@@ -9,17 +9,18 @@ export interface VmPublishGate {
   blocked: boolean;
   /** Cause-agnostic gate reason (TRAC coverage OR gas). */
   reason: string;
-  /** id of the eligibility chip (an aria-describedby target). */
-  verdictId: string;
   /** id of the visually-hidden gate-reason node the widget renders when blocked. */
   reasonId: string;
   /** The pure eligibility chip view, or null when the node tracks no PCA (no chip noise). */
   chip: React.ReactNode;
+  /** The aria-describedby ids — ONLY targets that are actually rendered (the chip when a PCA
+   *  is tracked, the reason node when blocked), so the button never references a missing id. */
+  describedByIds: string[];
   /** Spread onto the publish button so the whole a11y wiring lives in one place. */
   ariaProps: {
     'aria-disabled': true | undefined;
     title: string | undefined;
-    'aria-describedby': string;
+    'aria-describedby': string | undefined;
   };
 }
 
@@ -45,17 +46,24 @@ export function useVmPublishGate(contextGraphId: string): VmPublishGate {
   const verdictId = useId();
   const reasonId = useId();
 
-  // Pure view off the single read; guarded so a node tracking no PCA shows no chip.
-  const chip = trackedIds.length > 0 ? <PublishEligibilityChipView {...elig} id={verdictId} /> : null;
+  // Render targets and their aria-describedby refs are derived from the SAME conditions, so
+  // the button never references an id that isn't in the DOM (no dangling aria-describedby):
+  // the chip (id=verdictId) renders only when a PCA is tracked; the reason node (id=reasonId)
+  // only when blocked.
+  const chipShown = trackedIds.length > 0;
+  const chip = chipShown ? <PublishEligibilityChipView {...elig} id={verdictId} /> : null;
+  const describedByIds = [
+    ...(chipShown ? [verdictId] : []),
+    ...(blocked ? [reasonId] : []),
+  ];
 
   const ariaProps = {
     // Persistent policy gate uses aria-disabled (keeps the button focusable + announceable);
     // native `disabled` is reserved for the transient busy state by the consumer.
     'aria-disabled': (blocked || undefined) as true | undefined,
     title: blocked ? reason : undefined,
-    // When blocked, also point at the SR-only reason node so the announcement matches the visual.
-    'aria-describedby': blocked ? `${verdictId} ${reasonId}` : verdictId,
+    'aria-describedby': describedByIds.join(' ') || undefined,
   };
 
-  return { blocked, reason, verdictId, reasonId, chip, ariaProps };
+  return { blocked, reason, reasonId, chip, describedByIds, ariaProps };
 }

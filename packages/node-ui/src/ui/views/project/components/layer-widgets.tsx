@@ -105,10 +105,11 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
 // ─── Shared layer-action scaffolding (promote + publish) ─────────────────────
 
 /**
- * The busy/result/error lifecycle shared by the promote and publish CTAs. `run(body)`
- * clears state, executes the body (which returns the success text, or throws), lifts the
- * outcome up via `onResult`, and fires `onComplete` on success. `body` gets a `setAssertion`
- * hook so a mid-loop failure can surface "<name>: …" (issue #864) via `describePromoteError`.
+ * The busy/result/error lifecycle shared by the promote and publish CTAs — STATE only.
+ * `run(body, formatError)` clears state, executes the body (which returns the success text,
+ * or throws), lifts the outcome up via `onResult`, and fires `onComplete` on success. Error
+ * COPY is owned by each caller via `formatError` (promote and publish word failures
+ * differently — the runner stays generic and never leaks promote wording onto publish).
  */
 function useLayerAction(
   onResult?: (r: { ok: boolean; text: string } | null) => void,
@@ -125,18 +126,16 @@ function useLayerAction(
   }, [result, error]);
 
   const run = useCallback(
-    async (body: (ctx: { setAssertion: (name: string | null) => void }) => Promise<string>) => {
+    async (body: () => Promise<string>, formatError: (err: unknown) => string) => {
       setBusy(true);
       setError(null);
       setResult(null);
-      let currentAssertion: string | null = null;
       try {
-        const text = await body({ setAssertion: (name) => { currentAssertion = name; } });
+        const text = await body();
         setResult(text);
         onComplete?.();
-      } catch (err: any) {
-        const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
-        setError(typed ? typed.message : (err?.message ?? 'Action failed'));
+      } catch (err) {
+        setError(formatError(err));
       } finally {
         setBusy(false);
       }
@@ -182,38 +181,47 @@ interface LayerActionProps {
 export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
   const promote = useCallback(() => {
-    void run(async ({ setAssertion }) => {
-      // Seal each draft before sharing — promote moves content OUT of Working Memory, after
-      // which it can no longer be finalized, and a later vm/publish requires a finalized
-      // assertion. The seal is CG-independent (#1116) and promote is off-chain, so no
-      // client-side CG pre-registration is needed. (See OT-RFC-44 Design B.)
-      const assertions = await listAssertions(contextGraphId, 'wm');
-      let promoted = 0;
-      let noopCount = 0;
-      for (const a of assertions) {
-        setAssertion(a.name);
-        // Seal the draft first; tolerate already-sealed / nothing-to-seal so re-runs and
-        // empty drafts don't abort the batch (surface real errors).
-        try {
-          await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
-        } catch (e: any) {
-          const m = String(e?.message ?? '');
-          if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+    // Issue #864 — track the in-flight assertion so a mid-loop failure surfaces "<name>: …"
+    // via describePromoteError; shared between the body and the promote error formatter.
+    let currentAssertion: string | null = null;
+    void run(
+      async () => {
+        // Seal each draft before sharing — promote moves content OUT of Working Memory, after
+        // which it can no longer be finalized, and a later vm/publish requires a finalized
+        // assertion. The seal is CG-independent (#1116) and promote is off-chain, so no
+        // client-side CG pre-registration is needed. (See OT-RFC-44 Design B.)
+        const assertions = await listAssertions(contextGraphId, 'wm');
+        let promoted = 0;
+        let noopCount = 0;
+        for (const a of assertions) {
+          currentAssertion = a.name;
+          // Seal the draft first; tolerate already-sealed / nothing-to-seal so re-runs and
+          // empty drafts don't abort the batch (surface real errors).
+          try {
+            await knowledgeAssetFinalize(contextGraphId, a.name, a.subGraph ? { subGraphName: a.subGraph } : {});
+          } catch (e: any) {
+            const m = String(e?.message ?? '');
+            if (!/already|finaliz|sealed|promoted|no quads|reserved/i.test(m)) throw e;
+          }
+          // PR #710 — thread `subGraph` so sub-graph-scoped assertions hit the correct
+          // daemon lookup key `(cg, name, subGraph)`.
+          const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
+          promoted += res.promotedCount;
+          if (res.promotedCount === 0) noopCount += 1;
         }
-        // PR #710 — thread `subGraph` so sub-graph-scoped assertions hit the correct
-        // daemon lookup key `(cg, name, subGraph)`.
-        const res = await promoteAssertion(contextGraphId, a.name, 'all', a.subGraph);
-        promoted += res.promotedCount;
-        if (res.promotedCount === 0) noopCount += 1;
-      }
-      // Issue #864 — flag the "nothing was actually moved" case so users on the bulk-promote
-      // widget aren't lied to by a "Promoted 0 triples" success toast.
-      if (promoted > 0) {
-        const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
-        return `Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`;
-      }
-      return 'No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.';
-    });
+        // Issue #864 — flag the "nothing was actually moved" case so users on the bulk-promote
+        // widget aren't lied to by a "Promoted 0 triples" success toast.
+        if (promoted > 0) {
+          const tail = noopCount > 0 ? ` (${noopCount} had nothing to promote)` : '';
+          return `Promoted ${promoted} triple${promoted !== 1 ? 's' : ''} to Shared Memory${tail}`;
+        }
+        return 'No triples were promoted — every assertion was already in Shared Memory or its content is still being committed.';
+      },
+      (err: any) => {
+        const typed = describePromoteError(currentAssertion ?? 'an assertion', err);
+        return typed ? typed.message : (err?.message ?? 'Action failed');
+      },
+    );
   }, [contextGraphId, run]);
 
   if (count === 0) return null;
@@ -252,25 +260,30 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     // The policy gate is aria-disabled (button stays focusable/announceable), not natively
     // disabled, so the click still fires — block the action here.
     if (gate.blocked) return;
-    void run(async () => {
-      setCostCovered(null);
-      // SWM -> VM: publish each shared assertion as ONE Knowledge Asset (Design B) via the
-      // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
-      // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
-      // burns gas.
-      const assertions = await listAssertions(contextGraphId, 'swm');
-      // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
-      const r = await publishAssertionsToVm(contextGraphId, assertions);
-      if (r.published > 0) {
-        const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
-        const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
-        // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
-        setCostCovered(r.convictionCostCovered ?? null);
-        return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`;
-      }
-      if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
-      throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
-    });
+    void run(
+      async () => {
+        setCostCovered(null);
+        // SWM -> VM: publish each shared assertion as ONE Knowledge Asset (Design B) via the
+        // per-assertion vm/publish path. No pre-register: the daemon runs preconditions first
+        // and only auto-registers on its CG_NOT_REGISTERED retry, so a doomed publish never
+        // burns gas.
+        const assertions = await listAssertions(contextGraphId, 'swm');
+        // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
+        const r = await publishAssertionsToVm(contextGraphId, assertions);
+        if (r.published > 0) {
+          const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
+          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
+          setCostCovered(r.convictionCostCovered ?? null);
+          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`;
+        }
+        if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
+        throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
+      },
+      // Publish-appropriate: the raw message (matches the old catch, which fell through
+      // describePromoteError → null for publish errors). Never says "an assertion".
+      (err: any) => err?.message ?? 'Action failed',
+    );
   }, [contextGraphId, run, gate.blocked]);
 
   if (count === 0) return null;

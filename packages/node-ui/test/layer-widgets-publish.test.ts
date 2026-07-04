@@ -101,6 +101,21 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     expect(container.querySelector('[data-testid="pca-discount-badge"]')).toBeNull();
     await unmount();
   });
+
+  // OTwiA — a publish error is formatted with the RAW message (publish-appropriate), never
+  // the promote-specific "an assertion" wording that describePromoteError synthesizes.
+  it('formats a publish error with the raw message, never promote wording ("an assertion")', async () => {
+    apiMocks.publishAssertionsToVm.mockRejectedValue(new Error('VM publish tx reverted'));
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
+    );
+    await clickPublish(container);
+    await flush();
+    const res = container.querySelector('[data-testid="layer-action-result"]');
+    expect(res?.textContent).toContain('VM publish tx reverted');
+    expect(res?.textContent).not.toContain('an assertion');
+    await unmount();
+  });
 });
 
 describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
@@ -227,13 +242,28 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
     await unmount();
   });
 
-  it('renders no chip when the node tracks no PCA (guard preserved)', async () => {
+  it('renders no chip when the node tracks no PCA, and the button has NO dangling aria-describedby', async () => {
     usePcaStore.setState({ trackedIds: [] });
-    setVerdict('eligible');
-    const { unmount } = await render(
+    setVerdict('eligible'); // not blocked → no reason node either
+    const { container, unmount } = await render(
       React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
+    // No chip rendered → its id isn't in the DOM…
     expect(chipViewMock.PublishEligibilityChipView).not.toHaveBeenCalled();
+    // …so the button must not reference it (OVs0A: describedByIds are atomic with targets).
+    expect(publishBtn(container).getAttribute('aria-describedby')).toBeNull();
+    await unmount();
+  });
+
+  it('when a PCA is tracked but not blocked, aria-describedby references only the (rendered) chip', async () => {
+    setVerdict('eligible'); // tracked (default ['7']), not blocked
+    const { container, unmount } = await render(
+      React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
+    );
+    const describedby = publishBtn(container).getAttribute('aria-describedby');
+    // Exactly one id (the chip's verdictId) — no reason id, since not blocked.
+    expect(describedby).toBeTruthy();
+    expect(describedby!.trim().split(/\s+/)).toHaveLength(1);
     await unmount();
   });
 });
