@@ -60,5 +60,28 @@ function appendSetCookie(res: ServerResponse, value: string): void {
 function isHttpsRequest(req: IncomingMessage): boolean {
   const forwardedProto = req.headers["x-forwarded-proto"];
   const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
-  return proto === "https" || Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted);
+  return firstForwardedValue(proto) === "https" ||
+    forwardedHeaderHasHttpsProto(req.headers.forwarded) ||
+    Boolean((req.socket as unknown as { encrypted?: boolean }).encrypted);
+}
+
+function firstForwardedValue(value: string | string[] | undefined): string | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return raw?.split(",")[0]?.trim()?.toLowerCase();
+}
+
+function forwardedHeaderHasHttpsProto(value: string | string[] | undefined): boolean {
+  const headers = Array.isArray(value) ? value : value ? [value] : [];
+  for (const header of headers) {
+    for (const element of header.split(",")) {
+      for (const param of element.split(";")) {
+        const [rawKey, ...rawValueParts] = param.split("=");
+        if (rawKey.trim().toLowerCase() !== "proto") continue;
+        const rawValue = rawValueParts.join("=").trim();
+        const unquoted = rawValue.replace(/^"|"$/g, "").toLowerCase();
+        if (unquoted === "https") return true;
+      }
+    }
+  }
+  return false;
 }
