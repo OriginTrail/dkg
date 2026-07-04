@@ -102,6 +102,7 @@ describe('DashboardSessionGate', () => {
     ]);
 
     expect(container.textContent).toContain('Sign in to DKG Node Dashboard');
+    expect(container.textContent).toContain("using this daemon's DKG_HOME");
     const usernameInput = container.querySelector('input[type="text"]') as HTMLInputElement | null;
     const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null;
     const form = container.querySelector('form') as HTMLFormElement | null;

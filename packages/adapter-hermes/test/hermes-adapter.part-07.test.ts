@@ -150,6 +150,46 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
+  it('#1439: creates dashboard credentials in the daemon-url resolved DKG home', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const daemonDkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-daemon-url-'));
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const oldDkgHome = process.env.DKG_HOME;
+    delete process.env.DKG_HOME;
+    const resolver = vi.mocked(resolveDkgHome);
+    const originalResolveDkgHome = resolver.getMockImplementation();
+    resolver.mockReturnValue(daemonDkgHome);
+    try {
+      const ensureDashboardCredentials = vi.fn(async () => {});
+
+      await runSetup(
+        {
+          hermesHome,
+          daemonUrl: 'http://127.0.0.1:9300',
+          verify: false,
+          start: false,
+          fund: false,
+        },
+        { ensureDashboardCredentials },
+      );
+
+      expect(resolveDkgHome).toHaveBeenCalledWith({ daemonUrl: 'http://127.0.0.1:9300' });
+      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(daemonDkgHome);
+    } finally {
+      if (originalResolveDkgHome) resolver.mockImplementation(originalResolveDkgHome);
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      rmSync(hermesHome, { recursive: true, force: true });
+      rmSync(daemonDkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('#1439: a failing dashboard credential hook does not flip setup to degraded', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-1439f-'));

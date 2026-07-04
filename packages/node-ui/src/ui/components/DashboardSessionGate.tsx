@@ -57,7 +57,9 @@ function DashboardLoginForm() {
             aria-describedby={error ? 'dashboard-session-login-error' : undefined}
           />
         </label>
-        <p className="v10-session-reset-copy">Lost the password? Run <code>dkg auth dashboard reset-password</code> on this machine.</p>
+        <p className="v10-session-reset-copy">
+          Lost the password? Run <code>dkg auth dashboard reset-password</code> on the node host using this daemon's DKG_HOME.
+        </p>
         {error && <div id="dashboard-session-login-error" className="v10-session-error" role="alert">{error}</div>}
         <button className="dkg-btn dkg-btn-solid" type="submit" disabled={submitting || username.trim().length === 0 || password.length === 0}>
           {submitting ? 'Signing in...' : 'Sign in'}

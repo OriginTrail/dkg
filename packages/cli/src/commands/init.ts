@@ -623,8 +623,9 @@ program
       console.log('\nDashboard login created:');
       console.log(`  Username: ${dashboardCredentialResult.username}`);
       console.log(`  Password: ${dashboardCredentialResult.password}`);
-      console.log(`  Credential hash: ${dashboardCredentialResult.path}`);
+      console.log(`  Credential file: ${dashboardCredentialResult.path}`);
       console.log('  Save this password securely. It will not be shown again.');
+      console.log('  Treat this terminal output as secret-bearing.');
     }
 
     // Auto-fund from testnet faucet if available

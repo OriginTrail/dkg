@@ -181,8 +181,9 @@ dashboardAuthCmd
     console.log('Dashboard password reset.');
     console.log(`Username: ${result.username}`);
     console.log(`Password: ${result.password}`);
-    console.log(`\nCredential hash saved to ${result.path}`);
+    console.log(`\nCredential file saved to ${result.path}`);
     console.log('Save this password securely. It will not be shown again.');
+    console.log('Treat this terminal output as secret-bearing.');
     console.log('Existing password-login dashboard sessions will be invalidated on their next request.');
   });
 }

@@ -290,13 +290,13 @@ async function handleDashboardLoginExchange(
   if (!verified.ok) {
     if (verified.reason === "missing") {
       jsonResponse(res, 503, {
-        error: "Dashboard credentials are not configured. Run dkg auth dashboard reset-password on this machine.",
+        error: "Dashboard credentials are not configured. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
       }, options.corsOrigin);
       return;
     }
     if (verified.reason === "invalid") {
       jsonResponse(res, 503, {
-        error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on this machine.",
+        error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
       }, options.corsOrigin);
       return;
     }

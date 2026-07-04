@@ -88,6 +88,27 @@ describe('dashboard credentials', () => {
       .resolves.toMatchObject({ ok: true });
   });
 
+  it('does not overwrite a concurrently created credential during ensure', async () => {
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        ensureDashboardCredentials({
+          path: credentialPath,
+          username: `operator-${index}`,
+          password: `password-${index}`,
+        })),
+    );
+
+    const created = results.filter((result) => result.created);
+    expect(created).toHaveLength(1);
+    const winner = created[0];
+    expect(winner.created).toBe(true);
+    const existing = results.filter((result) => !result.created);
+    expect(existing).toHaveLength(5);
+    expect(new Set(results.map((result) => result.username))).toEqual(new Set([winner.username]));
+    await expect(verifyDashboardCredentials(winner.username, winner.password, credentialPath))
+      .resolves.toMatchObject({ ok: true });
+  });
+
   it('resets the password and changes the credential fingerprint', async () => {
     await ensureDashboardCredentials({
       path: credentialPath,

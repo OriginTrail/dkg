@@ -1,5 +1,5 @@
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, writeFile, chmod, unlink } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile, chmod, unlink, link } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -116,7 +116,15 @@ export async function ensureDashboardCredentials(options: {
 
   const password = options.password ?? generateDashboardPassword();
   const record = await createDashboardCredentialRecord(options.username, password);
-  await writeDashboardCredentialRecord(record, path);
+  try {
+    await writeDashboardCredentialRecord(record, path, { overwrite: false });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "EEXIST") {
+      const raced = await readDashboardCredentialRecord(path);
+      if (raced) return { created: false, path, username: raced.username };
+    }
+    throw err;
+  }
   return {
     created: true,
     path,
@@ -238,13 +246,22 @@ async function readDashboardCredentialFile(path: string): Promise<DashboardCrede
   };
 }
 
-async function writeDashboardCredentialRecord(record: DashboardCredentialRecord, path: string): Promise<void> {
+async function writeDashboardCredentialRecord(
+  record: DashboardCredentialRecord,
+  path: string,
+  options: { overwrite?: boolean } = {},
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tempPath = `${path}.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}.tmp`;
   try {
     await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
     await chmod(tempPath, 0o600).catch(() => undefined);
-    await rename(tempPath, path);
+    if (options.overwrite === false) {
+      await link(tempPath, path);
+      await unlink(tempPath).catch(() => undefined);
+    } else {
+      await rename(tempPath, path);
+    }
     await chmod(path, 0o600).catch(() => undefined);
   } catch (err) {
     await unlink(tempPath).catch(() => undefined);

@@ -47,6 +47,8 @@ describe('dashboard credential setup helper', () => {
 
     const firstOutput = logCapture.text();
     expect(firstOutput).toContain('Dashboard login created');
+    expect(firstOutput).toContain('Credential file:');
+    expect(firstOutput).toContain('Treat this terminal output as secret-bearing.');
     const password = firstOutput.match(/Password: ([^\n]+)/)?.[1];
     expect(password).toBeTruthy();
     await expect(verifyDashboardCredentials('node-admin', password!, dashboardCredentialsPath(tempDir)))
@@ -62,6 +64,16 @@ describe('dashboard credential setup helper', () => {
     expect(await readFile(dashboardCredentialsPath(tempDir), 'utf8')).not.toContain(password!);
   });
 
+  it('skips credential creation when persisted API auth is disabled', async () => {
+    await writeFile(join(tempDir, 'config.json'), JSON.stringify({ auth: { enabled: false } }));
+
+    await ensureDashboardCredentialsForSetup(tempDir);
+
+    expect(logCapture.text()).toContain('Dashboard login: skipped');
+    expect(logCapture.text()).toContain('API authentication disabled');
+    await expect(readFile(dashboardCredentialsPath(tempDir), 'utf8')).rejects.toThrow();
+  });
+
   it('warns with reset-password guidance when the credential file is invalid', async () => {
     await writeFile(dashboardCredentialsPath(tempDir), '{"version":1,"password":"plaintext"}\n');
 
@@ -70,5 +82,6 @@ describe('dashboard credential setup helper', () => {
     const warning = warnCapture.text();
     expect(warning).toContain('could not create dashboard login credentials');
     expect(warning).toContain('dkg auth dashboard reset-password');
+    expect(warning).toContain(`DKG_HOME=${tempDir}`);
   });
 });
