@@ -149,6 +149,7 @@ import {
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
+import { createSseHub } from './sse-hub.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -2551,42 +2552,9 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  interface SseClient {
-    res: ServerResponse;
-    dashboardSessionId?: string;
-    heartbeat?: ReturnType<typeof setInterval>;
-    expiryTimer?: ReturnType<typeof setTimeout>;
-  }
-
-  const sseClients = new Set<SseClient>();
-
-  function removeSseClient(client: SseClient): void {
-    if (!sseClients.delete(client)) return;
-    if (client.heartbeat) clearInterval(client.heartbeat);
-    if (client.expiryTimer) clearTimeout(client.expiryTimer);
-  }
-
-  function closeSseClient(client: SseClient): void {
-    removeSseClient(client);
-    if (!client.res.writableEnded) {
-      try { client.res.end(); } catch { /* already closed */ }
-    }
-  }
-
-  function closeDashboardSessionSseClients(sessionId: string): void {
-    for (const client of Array.from(sseClients)) {
-      if (client.dashboardSessionId === sessionId) closeSseClient(client);
-    }
-  }
-
-  function sseBroadcast(event: string, payload: Record<string, unknown>) {
-    const data = JSON.stringify(payload);
-    const msg = `event: ${event}\ndata: ${data}\n\n`;
-    for (const client of sseClients) {
-      try { client.res.write(msg); } catch { closeSseClient(client); }
-    }
-  }
+  const sseHub = createSseHub();
+  const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
+  const sseBroadcast = (event: string, payload: Record<string, unknown>) => sseHub.broadcast(event, payload);
   function emitMemoryGraphChanged(event: MemoryGraphChangedEvent) {
     if (!event.contextGraphId) return;
     sseBroadcast("memory_graph_changed", {
@@ -3152,14 +3120,6 @@ export async function runDaemonInner(
         const dashboardSession = requestAuth?.source === "dashboard-session"
           ? requestAuth.dashboardSession
           : undefined;
-        const client: SseClient = {
-          res,
-          dashboardSessionId: dashboardSession?.sessionId,
-        };
-        if (dashboardSession) {
-          const delayMs = Math.max(0, dashboardSession.expiresAt - Date.now());
-          client.expiryTimer = setTimeout(() => closeSseClient(client), delayMs);
-        }
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3167,11 +3127,8 @@ export async function runDaemonInner(
           ...corsHeaders(resolveCorsOrigin(req, corsAllowed)),
         });
         res.write(`event: connected\ndata: {}\n\n`);
-        sseClients.add(client);
-        client.heartbeat = setInterval(() => {
-          try { res.write(`: heartbeat\n\n`); } catch { closeSseClient(client); }
-        }, 30_000);
-        req.on("close", () => closeSseClient(client));
+        const subscription = sseHub.add(res, dashboardSession);
+        req.on("close", () => subscription.close());
         return;
       }
 
