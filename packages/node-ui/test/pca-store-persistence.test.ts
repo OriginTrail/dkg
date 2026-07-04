@@ -9,6 +9,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PcaTopUpPending } from '../src/ui/stores/pca.js';
+
 const PCA_SCOPE = '84532:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 const PCA_KEY = `dkg-pca:${PCA_SCOPE}`;
 // A DIFFERENT deployment on the SAME chain (distinct nft+token) — a marker stored
@@ -166,14 +168,33 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     usePcaStore.getState().setScope(PCA_SCOPE);
   }
 
+  // A valid top-up marker; override only the field(s) a test varies.
+  const topUpMarker = (overrides: Partial<PcaTopUpPending> = {}): PcaTopUpPending => ({
+    accountId: '3',
+    ownerEoa: '0xabc',
+    submittedAt: 1,
+    txHash: '0xdead',
+    ...overrides,
+  });
+
+  // One row per sanitizeTopUpPending reject branch: [label, storage key, raw value].
+  // `raw` is intentionally `unknown` — the last two rows are non-object (null / primitive).
+  const invalidTopUpEntries: [string, string, unknown][] = [
+    ['missing txHash', '4', { accountId: '4', ownerEoa: '0xo', submittedAt: 1 }],
+    ['accountId/key mismatch', '5', { accountId: '6', ownerEoa: '0xo', submittedAt: 1, txHash: '0xh' }],
+    ['non-digit key', 'abc', { accountId: 'abc', ownerEoa: '0xo', submittedAt: 1, txHash: '0xh' }],
+    ['empty ownerEoa', '7', { accountId: '7', ownerEoa: '', submittedAt: 1, txHash: '0xh' }],
+    ['non-finite submittedAt', '8', { accountId: '8', ownerEoa: '0xo', submittedAt: 'soon', txHash: '0xh' }],
+    ['null raw', '9', null],
+    ['primitive raw', '10', 'nope'],
+  ];
+
   it('setTopUpPending writes localStorage SYNCHRONOUSLY (no timer advance)', async () => {
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
 
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
+    usePcaStore.getState().setTopUpPending(topUpMarker());
 
     // Same double-spend guard tier as create-pending: it must hit storage
     // immediately, with NO `await wait(...)`.
@@ -187,14 +208,9 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
   it('a top-up marker (with optional tokens/previousTopUpBufferTrac) survives a reload', async () => {
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
-    usePcaStore.getState().setTopUpPending({
-      accountId: '3',
-      ownerEoa: '0xabc',
-      submittedAt: 42,
-      txHash: '0xdead',
-      tokens: '100',
-      previousTopUpBufferTrac: '50',
-    });
+    usePcaStore
+      .getState()
+      .setTopUpPending(topUpMarker({ submittedAt: 42, tokens: '100', previousTopUpBufferTrac: '50' }));
 
     // Do NOT advance timers — persistNow already wrote synchronously; simulate a
     // crash/refresh immediately after submit.
@@ -215,9 +231,7 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
     const spy = vi.spyOn(localStorage, 'setItem');
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
+    usePcaStore.getState().setTopUpPending(topUpMarker());
     expect(spy).toHaveBeenCalledTimes(1); // the synchronous set
     spy.mockClear();
 
@@ -238,47 +252,17 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     spy.mockRestore();
   });
 
-  it('load drops malformed top-up entries, keeping only fully-valid ones', async () => {
-    // One valid entry ('3') plus one malformed entry per STRUCTURED reject branch of
-    // sanitizeTopUpPending (5): missing txHash, key/accountId mismatch, non-digit key,
-    // empty ownerEoa, non-finite submittedAt. (The non-object-raw branch is covered in
-    // its own test below.)
+  // Table-driven: every sanitizeTopUpPending reject branch (5 structured + 2
+  // non-object) must be dropped on load while the one fully-valid entry ('3')
+  // survives. The row label gives a per-branch failure signal. The seeded valid '3'
+  // stays an explicit literal (it's a raw JSON blob, not a live marker).
+  it.each(invalidTopUpEntries)('load drops a malformed top-up entry (%s)', async (_label, key, raw) => {
     localStorage.setItem(
       PCA_KEY,
       JSON.stringify({
         topUpPending: {
           '3': { accountId: '3', ownerEoa: '0xowner', submittedAt: 1, txHash: '0xhash' },
-          '4': { accountId: '4', ownerEoa: '0xo', submittedAt: 1 }, // missing txHash
-          '5': { accountId: '6', ownerEoa: '0xo', submittedAt: 1, txHash: '0xh' }, // key/accountId mismatch
-          abc: { accountId: 'abc', ownerEoa: '0xo', submittedAt: 1, txHash: '0xh' }, // non-digit key
-          '7': { accountId: '7', ownerEoa: '', submittedAt: 1, txHash: '0xh' }, // empty ownerEoa
-          '8': { accountId: '8', ownerEoa: '0xo', submittedAt: 'soon', txHash: '0xh' }, // non-finite submittedAt
-        },
-      }),
-    );
-
-    const { usePcaStore } = await loadFreshStore();
-    setScope(usePcaStore);
-    const pending = usePcaStore.getState().topUpPending;
-    expect(Object.keys(pending)).toEqual(['3']);
-    expect(pending['3']).toEqual({
-      accountId: '3',
-      ownerEoa: '0xowner',
-      submittedAt: 1,
-      txHash: '0xhash',
-    });
-  });
-
-  // The `raw == null || typeof raw !== 'object'` branch of sanitizeTopUpPending,
-  // isolated so a regression here fails distinctly from the structured-field checks.
-  it('load drops non-object top-up entries (null / primitive raw)', async () => {
-    localStorage.setItem(
-      PCA_KEY,
-      JSON.stringify({
-        topUpPending: {
-          '3': { accountId: '3', ownerEoa: '0xowner', submittedAt: 1, txHash: '0xhash' },
-          '9': null, // raw == null
-          '10': 'nope', // raw is a primitive, not an object
+          [key]: raw,
         },
       }),
     );
@@ -294,16 +278,8 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
 
-    expect(() =>
-      usePcaStore
-        .getState()
-        .setTopUpPending({ accountId: '', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' }),
-    ).not.toThrow();
-    expect(() =>
-      usePcaStore
-        .getState()
-        .setTopUpPending({ accountId: 'abc', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' }),
-    ).not.toThrow();
+    expect(() => usePcaStore.getState().setTopUpPending(topUpMarker({ accountId: '' }))).not.toThrow();
+    expect(() => usePcaStore.getState().setTopUpPending(topUpMarker({ accountId: 'abc' }))).not.toThrow();
 
     // The guard returns before any state mutation or write.
     expect(usePcaStore.getState().topUpPending).toEqual({});
@@ -315,10 +291,10 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     setScope(usePcaStore);
     usePcaStore
       .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xa', submittedAt: 1, txHash: '0x3' });
+      .setTopUpPending(topUpMarker({ accountId: '3', ownerEoa: '0xa', txHash: '0x3' }));
     usePcaStore
       .getState()
-      .setTopUpPending({ accountId: '7', ownerEoa: '0xb', submittedAt: 2, txHash: '0x7' });
+      .setTopUpPending(topUpMarker({ accountId: '7', ownerEoa: '0xb', submittedAt: 2, txHash: '0x7' }));
     expect(Object.keys(usePcaStore.getState().topUpPending).sort()).toEqual(['3', '7']);
 
     usePcaStore.getState().clearTopUpPending('3');
@@ -335,9 +311,7 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
     const spy = vi.spyOn(localStorage, 'setItem');
 
     usePcaStore.getState().trackAccount('5'); // queues a debounced write
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' }); // synchronous, cancels the timer
+    usePcaStore.getState().setTopUpPending(topUpMarker()); // synchronous, cancels the timer
 
     // One synchronous write; the cancelled debounce must NOT fire a second.
     expect(spy).toHaveBeenCalledTimes(1);
@@ -359,11 +333,7 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
       throw new Error('quota');
     });
 
-    expect(() =>
-      usePcaStore
-        .getState()
-        .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' }),
-    ).not.toThrow();
+    expect(() => usePcaStore.getState().setTopUpPending(topUpMarker())).not.toThrow();
 
     // The write failed, but the session still knows a top-up is in flight.
     expect(usePcaStore.getState().topUpPending['3']?.txHash).toBe('0xdead');
@@ -374,9 +344,7 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
   it('top-up markers are isolated per deployment scope', async () => {
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore); // scope A
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xdead' });
+    usePcaStore.getState().setTopUpPending(topUpMarker());
 
     // A different deployment on the same chain shows no marker...
     usePcaStore.getState().setScope(PCA_SCOPE_B);
@@ -391,12 +359,8 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
   it('setTopUpPending overwrites the same accountId (last-write-wins)', async () => {
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 1, txHash: '0xAAA' });
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 2, txHash: '0xBBB' });
+    usePcaStore.getState().setTopUpPending(topUpMarker({ txHash: '0xAAA' }));
+    usePcaStore.getState().setTopUpPending(topUpMarker({ submittedAt: 2, txHash: '0xBBB' }));
 
     expect(usePcaStore.getState().topUpPending['3'].txHash).toBe('0xBBB');
     expect(JSON.parse(localStorage.getItem(PCA_KEY)!).topUpPending['3'].txHash).toBe('0xBBB');
@@ -407,12 +371,8 @@ describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)'
   it('setTopUpPending preserves an existing create-pending marker in the merged snapshot', async () => {
     const { usePcaStore } = await loadFreshStore();
     setScope(usePcaStore);
-    usePcaStore
-      .getState()
-      .setCreatePending({ ownerEoa: '0xowner', submittedAt: 1, txHash: '0xcreate' });
-    usePcaStore
-      .getState()
-      .setTopUpPending({ accountId: '3', ownerEoa: '0xabc', submittedAt: 2, txHash: '0xtopup' });
+    usePcaStore.getState().setCreatePending({ ownerEoa: '0xowner', submittedAt: 1, txHash: '0xcreate' });
+    usePcaStore.getState().setTopUpPending(topUpMarker({ submittedAt: 2, txHash: '0xtopup' }));
 
     const reloaded = await loadFreshStore();
     setScope(reloaded.usePcaStore);
