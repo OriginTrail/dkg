@@ -36,6 +36,23 @@ import {
   skipChainResetWipe,
 } from '../src/daemon/chain-reset-wipe.js';
 
+// The ESM `node:fs` namespace can't be spied (its exports aren't configurable),
+// so to force a deterministic, cross-platform `renameSync` failure we mock the
+// module: every fn delegates to the real implementation, and `renameSync` throws
+// only while `fsControl.throwOnRename` is set. A plain gated function (not a
+// vi.fn) so the suite's `vi.restoreAllMocks()` can't reset it between tests.
+const fsControl = vi.hoisted(() => ({ throwOnRename: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...orig,
+    renameSync: ((...args: Parameters<typeof orig.renameSync>): void => {
+      if (fsControl.throwOnRename) throw new Error('EPERM: mocked rename');
+      return orig.renameSync(...args);
+    }) as typeof orig.renameSync,
+  };
+});
+
 const STATE_FILE = '.network-state.json';
 const NEW_MARKER = 'v10-rs-staking-consolidation-2026-04-30';
 const OLD_MARKER = 'v9-mainnet-launch-2025-12-01';
@@ -79,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsControl.throwOnRename = false; // defensive: never let a rename-failure injection leak
   vi.restoreAllMocks();
   rmSync(dataDir, { recursive: true, force: true });
 });
@@ -291,36 +309,56 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
     );
     writeFileSync(join(dataDir, 'store.nq'), 'PRECIOUS');
 
-    // Pin Date.now so the backup target name is deterministic, then pre-create
-    // that exact path as a NON-EMPTY DIRECTORY. renameSync(file → existing dir)
-    // throws on every platform (EISDIR / EPERM) — a deterministic, cross-platform
-    // rename failure that (unlike chmod) also reproduces on Windows.
+    // The collision guard picks a FREE target before renaming, so blocking the
+    // target path no longer forces a failure — inject the throw at `renameSync`
+    // itself (via the mocked node:fs). Deterministic and cross-platform (works on
+    // Windows, unlike chmod).
+    fsControl.throwOnRename = true; // reset defensively in afterEach
+    const logs: string[] = [];
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      log: (m) => logs.push(m),
+    });
+
+    // The wipe ran, but the store.nq backup step failed at renameSync...
+    expect(result.wiped).toBe(true);
+    expect(result.backedUpFiles).toEqual([]);
+    const storeFailure = result.failedFiles.find((f) => f.file === 'store.nq');
+    expect(storeFailure).toBeDefined();
+    expect(storeFailure!.error).toContain('mocked rename'); // proves the mock intercepted
+    // Rename threw before moving → the original store.nq is still there (recoverable).
+    expect(readFileSync(join(dataDir, 'store.nq'), 'utf8')).toBe('PRECIOUS');
+    // Marker NOT persisted — the wipe must retry on the next boot.
+    expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
+    expect(logs.some((l) => l.includes('marker was not persisted'))).toBe(true);
+  });
+
+  it('never overwrites an existing backup — appends a counter on a name collision (🔴 OXNZb)', async () => {
+    // Pin the clock so the generated backup name is known. renameSync silently
+    // OVERWRITES an existing file, so if the exact target name already exists the
+    // guard must append `-<n>` rather than clobber the prior recovery snapshot.
     const FIXED = 1_700_000_000_000;
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(FIXED);
     try {
-      const blockingDir = join(
-        dataDir,
-        `store.nq.pre-wipe-v10-rs-staking-consolidation-2026-04-30-${FIXED}`,
+      writeFileSync(
+        join(dataDir, STATE_FILE),
+        JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: FIXED }),
       );
-      mkdirSync(blockingDir, { recursive: true });
-      writeFileSync(join(blockingDir, 'occupied'), 'x');
+      // NEW_MARKER is sanitize-clean and < 120 chars, so this is the exact base.
+      const base = `store.nq.pre-wipe-v10-rs-staking-consolidation-2026-04-30-${FIXED}`;
+      writeFileSync(join(dataDir, base), 'PRIOR_BACKUP'); // occupies the base name
+      writeFileSync(join(dataDir, 'store.nq'), 'NEW_STORE');
 
-      const logs: string[] = [];
-      const result = await chainResetWipe({
-        dataDir,
-        currentMarker: NEW_MARKER,
-        log: (m) => logs.push(m),
-      });
+      const result = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
 
-      // The wipe ran, but the store.nq backup step failed.
-      expect(result.wiped).toBe(true);
-      expect(result.backedUpFiles).toEqual([]);
-      expect(result.failedFiles.some((f) => f.file === 'store.nq')).toBe(true);
-      // Rename failed → the original store.nq is still there (recoverable).
-      expect(readFileSync(join(dataDir, 'store.nq'), 'utf8')).toBe('PRECIOUS');
-      // Marker NOT persisted — the wipe must retry on the next boot.
-      expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
-      expect(logs.some((l) => l.includes('marker was not persisted'))).toBe(true);
+      expect(result.failedFiles).toEqual([]);
+      // The fresh backup takes the SUFFIXED name, not the occupied base.
+      expect(result.backedUpFiles).toEqual([`${base}-1`]);
+      // The prior backup is byte-for-byte intact (NOT clobbered)...
+      expect(readFileSync(join(dataDir, base), 'utf8')).toBe('PRIOR_BACKUP');
+      // ...and the new backup holds the just-wiped store.nq bytes.
+      expect(readFileSync(join(dataDir, `${base}-1`), 'utf8')).toBe('NEW_STORE');
     } finally {
       nowSpy.mockRestore();
     }

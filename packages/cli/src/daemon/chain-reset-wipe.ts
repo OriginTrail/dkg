@@ -420,6 +420,75 @@ function rotateStoreBackups(
   }
 }
 
+/**
+ * Back up `store.nq` (ALWAYS, never a hard delete) by renaming it — O(1) on the
+ * same filesystem — to `store.nq.pre-wipe-<marker>-<ts>`, so a wrongly-triggered
+ * wipe is recoverable by moving the file back; rotation then bounds disk to
+ * MAX_STORE_BACKUPS snapshots. The active store still leaves its live path, so
+ * the operator wipe invariant holds. A rename failure is treated exactly like a
+ * wipe failure (pushed to `failedFiles`) so the marker isn't persisted and the
+ * wipe retries next boot. Returns the backup/failure entries for the caller to
+ * merge; no-ops (empty arrays) when there is no `store.nq`.
+ */
+function backupStoreNq(
+  dataDir: string,
+  currentMarker: string,
+  log: (msg: string) => void,
+): { backedUpFiles: string[]; failedFiles: Array<{ file: string; error: string }> } {
+  const backedUpFiles: string[] = [];
+  const failedFiles: Array<{ file: string; error: string }> = [];
+
+  const storeAbs = join(dataDir, 'store.nq');
+  if (!existsSync(storeAbs)) {
+    return { backedUpFiles, failedFiles };
+  }
+
+  // Bound the marker portion so the total filename stays well under the
+  // 255-byte path-component limit (ENAMETOOLONG would otherwise make the
+  // rename fail → failedFiles → re-wipe every boot for long markers).
+  // Uniqueness comes from the trailing timestamp, not the marker, so
+  // truncation is safe; the RAW marker still persists in .network-state.json.
+  const sanitizedMarker = String(currentMarker)
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 120);
+  const now = Date.now();
+  // Collision-safe target: renameSync silently OVERWRITES an existing file, so
+  // if this exact name already exists (same truncated marker AND same ms —
+  // unreachable in practice, but a silent-data-loss path on a recovery feature)
+  // we must not clobber the prior backup. Append a counter until the name is
+  // free, so store.nq only leaves its live path onto a guaranteed-unique target.
+  const base = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${now}`;
+  let backupName = base;
+  for (let n = 1; existsSync(join(dataDir, backupName)); n++) {
+    backupName = `${base}-${n}`;
+  }
+
+  try {
+    renameSync(storeAbs, join(dataDir, backupName));
+    // Stamp the backup's mtime to NOW. `renameSync` preserves store.nq's
+    // CONTENT mtime, which can be far older than this backup's creation (the
+    // #679 dev case: store.nq untouched between quick branch switches). If
+    // rotation ranked by that inherited mtime it could evict a NEWER recovery
+    // snapshot and keep an older one — so we make mtime reflect backup-creation
+    // time. Best-effort: on failure the keepName exemption still protects the
+    // fresh snapshot this run, so a missed stamp never loses today's backup.
+    try {
+      utimesSync(join(dataDir, backupName), new Date(now), new Date(now));
+    } catch (err) {
+      log(`  WARN: could not stamp backup mtime for ${backupName}: ${(err as Error).message}`);
+    }
+    backedUpFiles.push(backupName);
+    log(`  backed up: store.nq → ${backupName}`);
+    rotateStoreBackups(dataDir, backupName, log);
+  } catch (err) {
+    const message = (err as Error).message;
+    failedFiles.push({ file: 'store.nq', error: message });
+    log(`  WARN: failed to back up store.nq → ${backupName}: ${message}`);
+  }
+
+  return { backedUpFiles, failedFiles };
+}
+
 function performWipe(
   dataDir: string,
   walPath: string | undefined,
@@ -451,47 +520,13 @@ function performWipe(
     }
   };
 
-  // store.nq: ALWAYS backed up (rename, O(1) same-fs) rather than deleted, so
-  // a wrongly-triggered wipe is recoverable by moving the file back; rotation
-  // then bounds disk to MAX_STORE_BACKUPS snapshots. The active store is still
-  // cleared from its live path, so the operator wipe invariant holds. A rename
-  // failure is treated exactly like a wipe failure (pushed to failedFiles) so
-  // the marker isn't persisted and the wipe retries next boot.
-  const storeAbs = join(dataDir, 'store.nq');
-  if (existsSync(storeAbs)) {
-    // Bound the marker portion so the total filename stays well under the
-    // 255-byte path-component limit (ENAMETOOLONG would otherwise make the
-    // rename fail → failedFiles → re-wipe every boot for long markers).
-    // Uniqueness comes from the trailing timestamp, not the marker, so
-    // truncation is safe; the RAW marker still persists in .network-state.json.
-    const sanitizedMarker = String(backup.currentMarker)
-      .replace(/[^A-Za-z0-9._-]/g, '_')
-      .slice(0, 120);
-    const now = Date.now();
-    const backupName = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${now}`;
-    try {
-      renameSync(storeAbs, join(dataDir, backupName));
-      // Stamp the backup's mtime to NOW. `renameSync` preserves store.nq's
-      // CONTENT mtime, which can be far older than this backup's creation (the
-      // #679 dev case: store.nq untouched between quick branch switches). If
-      // rotation ranked by that inherited mtime it could evict a NEWER recovery
-      // snapshot and keep an older one — so we make mtime reflect backup-creation
-      // time. Best-effort: on failure the keepName exemption still protects the
-      // fresh snapshot this run, so a missed stamp never loses today's backup.
-      try {
-        utimesSync(join(dataDir, backupName), new Date(now), new Date(now));
-      } catch (err) {
-        log(`  WARN: could not stamp backup mtime for ${backupName}: ${(err as Error).message}`);
-      }
-      backedUpFiles.push(backupName);
-      log(`  backed up: store.nq → ${backupName}`);
-      rotateStoreBackups(dataDir, backupName, log);
-    } catch (err) {
-      const message = (err as Error).message;
-      failedFiles.push({ file: 'store.nq', error: message });
-      log(`  WARN: failed to back up store.nq → ${backupName}: ${message}`);
-    }
-  }
+  // store.nq: always backed up (never hard-deleted), delegated to
+  // backupStoreNq which owns the rename + mtime stamp + rotation and reports
+  // its backup/failure entries for us to merge.
+  const storeBackup = backupStoreNq(dataDir, backup.currentMarker, log);
+  backedUpFiles.push(...storeBackup.backedUpFiles);
+  failedFiles.push(...storeBackup.failedFiles);
+
   wipeAbs(join(dataDir, 'store.nq.tmp'), 'store.nq.tmp');
 
   // Random sampling WAL: wipe the resolved runtime path (which the
