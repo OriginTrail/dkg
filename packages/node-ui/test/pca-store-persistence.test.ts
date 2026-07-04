@@ -155,11 +155,11 @@ describe('usePcaStore (dkg-pca persistence — double-mint marker durability)', 
 // can't seed a phantom in-flight top-up.
 describe('usePcaStore (dkg-pca persistence — top-up marker durability, #1376)', () => {
   beforeEach(() => localStorage.clear());
-  // Structural (not by-convention) isolation: the storage-failure case installs a
-  // THROWING setItem mock, so a mid-test assertion failure would otherwise poison
-  // later tests. Drain any queued debounce, restore all mocks, then clear.
-  afterEach(async () => {
-    await wait(DEBOUNCE_WAIT_MS);
+  // Restore mocks after every test (cheap, synchronous) so the storage-failure case's
+  // THROWING setItem mock can't leak past a mid-test assertion failure. Timer isolation
+  // is explicit and targeted: the few tests that queue a debounced write flush it inline
+  // (they must, to assert the delayed write), so no unconditional teardown sleep is needed.
+  afterEach(() => {
     vi.restoreAllMocks();
     localStorage.clear();
   });
