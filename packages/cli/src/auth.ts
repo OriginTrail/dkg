@@ -852,6 +852,7 @@ export function resolveRequestAuthDecision(
 ): RequestAuthDecision | null {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
   const pathname = url.pathname;
+  const hasAuthorizationHeader = req.headers.authorization !== undefined;
   const token = extractBearerToken(req.headers.authorization);
 
   if (token && verifyToken(token, validTokens)) {
@@ -876,7 +877,7 @@ export function resolveRequestAuthDecision(
     }
   }
 
-  const explicitAuthAttempt = Boolean(token) || hasEventsQueryToken;
+  const explicitAuthAttempt = hasAuthorizationHeader || hasEventsQueryToken;
   if (explicitAuthAttempt) return null;
 
   for (const source of options?.authSources ?? []) {

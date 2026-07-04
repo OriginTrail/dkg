@@ -98,4 +98,56 @@ describe('dashboard session client', () => {
     expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-old');
     expect(headerValue(calls[3]?.headers, 'X-DKG-CSRF')).toBe('csrf-new');
   });
+
+  it('refreshes stale CSRF and retries once after an unsafe protected API 403', async () => {
+    const calls: Array<{ url: string; method: string; headers?: HeadersInit }> = [];
+    let protectedCalls = 0;
+    useAuthenticatedDashboardSession({
+      source: 'loopback',
+      csrfToken: 'csrf-tab-stale',
+      expiresAt: Date.now() + 60_000,
+    });
+
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers });
+      if (url === '/api/protected') {
+        protectedCalls += 1;
+        if (protectedCalls === 1) {
+          return new Response(JSON.stringify({ error: 'Invalid or missing dashboard CSRF token' }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/dashboard/session/status') {
+        return new Response(JSON.stringify({
+          authenticated: true,
+          source: 'loopback',
+          csrfToken: 'csrf-cookie-current',
+          expiresAt: Date.now() + 60_000,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const res = await apiFetch('/api/protected', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ ok: true });
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'POST /api/protected',
+      'GET /api/dashboard/session/status',
+      'POST /api/protected',
+    ]);
+    expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-tab-stale');
+    expect(headerValue(calls[2]?.headers, 'X-DKG-CSRF')).toBe('csrf-cookie-current');
+  });
 });

@@ -126,13 +126,21 @@ export function withDashboardSessionCredentials(init: RequestInit = {}): Request
   };
 }
 
+function isUnsafeMethod(method: string | undefined): boolean {
+  const normalized = (method ?? 'GET').toUpperCase();
+  return normalized === 'POST' || normalized === 'PUT' || normalized === 'PATCH' || normalized === 'DELETE';
+}
+
 export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const path = assertDaemonPath(input);
   const sessionBeforeRequest = getDashboardSession();
   const withSession = () => fetch(path, withDashboardSessionCredentials(init));
 
   const res = await withSession();
-  if (res.status !== 401 || !isDashboardSessionReady(sessionBeforeRequest)) return res;
+  const shouldRefreshSession =
+    isDashboardSessionReady(sessionBeforeRequest) &&
+    (res.status === 401 || (res.status === 403 && isUnsafeMethod(init.method)));
+  if (!shouldRefreshSession) return res;
 
   invalidateDashboardSession();
   const refreshed = await ensureDashboardSession();
