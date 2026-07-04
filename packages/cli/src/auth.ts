@@ -12,6 +12,7 @@ import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dkgDir } from './config.js';
+import { corsHeaders } from './http-cors.js';
 
 export type RequestAuthPrincipal = {
   kind: 'agent' | 'node-admin';
@@ -946,18 +947,6 @@ export function resolveRequestAuthDecision(
  * synchronously to a bare `boolean` so existing fast-path callers do
  * not pay an awaiting cost on hot routes.
  */
-function authCorsHeaders(
-  corsOrigin?: string | null,
-  extraHeaders: Record<string, string> = {},
-): Record<string, string> {
-  const origin = corsOrigin ?? '*';
-  return {
-    'Access-Control-Allow-Origin': origin,
-    ...(origin !== '*' ? { 'Access-Control-Allow-Credentials': 'true' } : {}),
-    ...extraHeaders,
-  };
-}
-
 export function httpAuthGuard(
   req: IncomingMessage,
   res: ServerResponse,
@@ -976,7 +965,7 @@ export function httpAuthGuard(
   if (authDecision?.ok === false) {
     res.writeHead(authDecision.status, {
       'Content-Type': 'application/json',
-      ...authCorsHeaders(corsOrigin),
+      ...corsHeaders(corsOrigin ?? '*'),
     });
     res.end(JSON.stringify({
       error: authDecision.error,
@@ -1007,7 +996,7 @@ export function httpAuthGuard(
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          ...authCorsHeaders(corsOrigin),
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(
           JSON.stringify({ error: 'Stale or unparseable x-dkg-timestamp' }),
@@ -1043,7 +1032,7 @@ export function httpAuthGuard(
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          ...authCorsHeaders(corsOrigin),
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(JSON.stringify({
           error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
@@ -1071,7 +1060,7 @@ export function httpAuthGuard(
         res.writeHead(401, {
           'Content-Type': 'application/json',
           'WWW-Authenticate': 'Bearer realm="dkg-node"',
-          ...authCorsHeaders(corsOrigin),
+          ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(JSON.stringify({ error: 'Replayed nonce' }));
         return false;
@@ -1176,7 +1165,7 @@ export function httpAuthGuard(
             status === 401 ? { 'WWW-Authenticate': 'Bearer realm="dkg-node"' } : {};
           res.writeHead(status, {
             'Content-Type': 'application/json',
-            ...authCorsHeaders(corsOrigin),
+            ...corsHeaders(corsOrigin ?? '*'),
             ...extraHeaders,
           });
           res.end(
@@ -1250,7 +1239,7 @@ export function httpAuthGuard(
   res.writeHead(401, {
     'Content-Type': 'application/json',
     'WWW-Authenticate': 'Bearer realm="dkg-node"',
-    ...authCorsHeaders(corsOrigin, {
+    ...corsHeaders(corsOrigin ?? '*', {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     }),
   });
@@ -1650,7 +1639,7 @@ function installSignedRequestResponseGuard(
       origWriteHead.call(res, 401, {
         'Content-Type': 'application/json',
         'WWW-Authenticate': 'Bearer realm="dkg-node"',
-        ...authCorsHeaders(corsOrigin),
+        ...corsHeaders(corsOrigin ?? '*'),
       });
       (origEnd as (chunk?: string) => ServerResponse)(
         JSON.stringify({ error: `Signed request rejected: ${reason}` }),

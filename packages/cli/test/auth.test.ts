@@ -11,6 +11,7 @@ import {
   getRequestAuthContext,
   loadTokens,
   resolveRequestAuthDecision,
+  type RequestAuthSource,
 } from '../src/auth.js';
 
 // ---------------------------------------------------------------------------
@@ -286,11 +287,16 @@ describe('httpAuthGuard', () => {
   const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:http-guard' };
   let server: Server;
   let baseUrl: string;
+  let corsOrigin: string | null;
+  let authSources: RequestAuthSource[] | undefined;
 
   beforeEach(async () => {
+    corsOrigin = null;
+    authSources = undefined;
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (!(await httpAuthGuard(req, res, true, validTokens, null, {
+      if (!(await httpAuthGuard(req, res, true, validTokens, corsOrigin, {
         resolvePrincipal: () => principal,
+        authSources,
       }))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, requestAuth: getRequestAuthContext(req) ?? null }));
@@ -398,6 +404,47 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(401);
     const body = await res.json();
     expect(body.error).toContain('Unauthorized');
+  });
+
+  it('adds credentialed configured CORS headers to missing-token auth failures', async () => {
+    corsOrigin = 'https://dashboard.example';
+
+    const res = await fetch(`${baseUrl}/api/query`, {
+      method: 'POST',
+      headers: { Origin: corsOrigin },
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get('access-control-allow-origin')).toBe(corsOrigin);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
+  });
+
+  it('adds credentialed configured CORS headers to auth-source 403 failures', async () => {
+    corsOrigin = 'https://dashboard.example';
+    authSources = [{
+      resolve: () => ({
+        ok: false,
+        status: 403,
+        error: 'Invalid or missing dashboard CSRF token',
+        code: 'DASHBOARD_CSRF_INVALID',
+      }),
+    }];
+
+    const res = await fetch(`${baseUrl}/api/query`, {
+      method: 'POST',
+      headers: { Origin: corsOrigin },
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(403);
+    expect(body).toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+      code: 'DASHBOARD_CSRF_INVALID',
+    });
+    expect(res.headers.get('access-control-allow-origin')).toBe(corsOrigin);
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('vary')).toBe('Origin');
   });
 
   it('rejects Hermes provider persistence without token', async () => {

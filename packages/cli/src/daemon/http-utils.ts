@@ -23,6 +23,8 @@ import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
+import { corsHeaders } from '../http-cors.js';
+export { corsHeaders };
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
   if (err instanceof PayloadTooLargeError) return true;
@@ -1482,17 +1484,6 @@ export function resolveCorsOrigin(
   const origin = req.headers.origin;
   if (!origin) return undefined;
   return allowlist.includes(origin) ? origin : undefined;
-}
-
-export function corsHeaders(origin?: string | null): Record<string, string> {
-  if (!origin) return {};
-  const headers: Record<string, string> = {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-DKG-CSRF",
-  };
-  if (origin !== "*") headers["Access-Control-Allow-Credentials"] = "true";
-  if (origin !== "*") headers["Vary"] = "Origin";
-  return headers;
 }
 
 export class HttpRateLimiter {
