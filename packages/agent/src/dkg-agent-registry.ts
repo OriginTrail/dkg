@@ -380,6 +380,24 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
+// The bounded-probe retry helper is co-located with its outcome model in the
+// confirmation module (imported here for the facade, not re-exported from index).
+import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
+
+// The single PCA capability boundary: narrows the optional
+// `chain.isPublishingConvictionAgent` into a bound boolean probe, or `null` when
+// the adapter lacks the read, so both the direct read and the confirmation
+// derive supported/unsupported from one place. `.call(chain, …)` preserves the
+// adapter's `this` binding.
+function pcaRegisteredProbe(
+  chain: { isPublishingConvictionAgent?: (accountId: bigint, agent: string) => Promise<boolean> },
+  accountId: bigint,
+  agent: string,
+): (() => Promise<boolean>) | null {
+  const read = chain.isPublishingConvictionAgent;
+  return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
+
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
     // Tail-chain serialization: every caller waits for the prior
@@ -1507,8 +1525,22 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   async isPublishingConvictionAgent(this: DKGAgent, accountId: bigint, agent: string): Promise<boolean | null> {
-    if (typeof this.chain.isPublishingConvictionAgent !== 'function') return null;
-    return this.chain.isPublishingConvictionAgent(accountId, agent);
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    return probe ? probe() : null;
+  }
+
+  // Best-effort on-chain confirmation of a just-mined agent registration. The
+  // receipt is already authoritative for `registered:true`; this only refines the
+  // advisory `PcaConfirmationOutcome` and never flips the registration. The
+  // capability gap (`unsupported`) is decided here via `pcaRegisteredProbe`, so
+  // the retry state machine only reasons about boolean reads.
+  async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
+    accountId: bigint,
+    agent: string,
+  ): Promise<PcaConfirmationOutcome> {
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    if (!probe) return 'unsupported';
+    return confirmPcaAgentRegistration(probe);
   }
 
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {

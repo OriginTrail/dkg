@@ -401,11 +401,13 @@ describe('ApiClient', () => {
   });
 
   describe('PCA V10 endpoints', () => {
-    it('registerPcaAgent() POSTs the V10 agent route with an { agent } body', async () => {
+    it('registerPcaAgent() POSTs the V10 agent route and NORMALIZES a current response into { registered, advisory }', async () => {
       const body = {
         accountId: '7',
         agent: '0x1111111111111111111111111111111111111111',
         registered: true,
+        verified: true,
+        adapterSupported: true,
         txHash: '0xabc',
         blockNumber: 42,
       };
@@ -414,12 +416,39 @@ describe('ApiClient', () => {
 
       const result = await client.registerPcaAgent('7', '0x1111111111111111111111111111111111111111');
 
-      expect(result).toEqual(body);
+      // R15 — the client is the version-skew boundary: it normalizes the wire
+      // response into a stable { registered, advisory } (no raw verified/adapterSupported).
+      expect(result).toEqual({
+        accountId: '7',
+        agent: '0x1111111111111111111111111111111111111111',
+        registered: true,
+        advisory: 'confirmed',
+        txHash: '0xabc',
+        blockNumber: 42,
+      });
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/pca/7/agent`);
       expect(calls[0].opts.method).toBe('POST');
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({
         agent: '0x1111111111111111111111111111111111111111',
       });
+    });
+
+    it('registerPcaAgent() does NOT report a legacy registered:false response as registered (R14/R15)', async () => {
+      // pre-#1346 daemon: `verified` absent, registered:false (unconfirmed/failed tx).
+      const body = {
+        accountId: '7',
+        agent: '0x1111111111111111111111111111111111111111',
+        registered: false,
+        adapterSupported: false,
+        txHash: '0xabc',
+        blockNumber: 42,
+      };
+      globalThis.fetch = createTrackingFetch({ ok: true, status: 200, body }).fetch;
+
+      const result = await client.registerPcaAgent('7', '0x1111111111111111111111111111111111111111');
+
+      expect(result.registered).toBe(false);
+      expect(result.advisory).toBe('legacy-unverified');
     });
 
     it('deregisterPcaAgent() DELETEs the V10 agent-address route', async () => {

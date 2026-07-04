@@ -18,6 +18,7 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
+import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
@@ -513,24 +514,29 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: 'agent must not be the zero address' });
     }
     try {
+      // Register on-chain, then best-effort confirm. Like its sibling PCA routes,
+      // this handler orchestrates the agent-facade calls inline and owns input
+      // validation + chain-error classification (the catch below):
+      //   - null       ⟹ the chain adapter exposes no PCA surface (503).
+      //   - success:false ⟹ the tx mined but reverted — never a registration (502).
       const result = await agent.registerPublishingConvictionAgent(accountId, agentAddr);
       if (result === null) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
-      // Tx mined → authoritative 200. Verification is best-effort: own
-      // try/catch keeps a probe failure off the outer catch (no false 500).
-      let verified: boolean | null = null;
-      try {
-        verified = await agent.isPublishingConvictionAgent(accountId, agentAddr);
-      } catch {
-        verified = null;
+      if (result.success === false) {
+        return jsonResponse(res, 502, { error: 'PCA agent registration transaction was mined but did not succeed on-chain' });
       }
-      return jsonResponse(res, 200, {
-        accountId: idStr,
+      // Advisory on-chain confirmation of the just-mined registration — refines
+      // the wire `{ verified, adapterSupported }` but NEVER flips the
+      // authoritative `registered:true` from the mined receipt.
+      const confirmation = await agent.confirmPublishingConvictionAgentRegistration(accountId, agentAddr);
+      const body: RegisterPcaAgentResponse = {
+        accountId: accountId.toString(),
         agent: agentAddr,
-        registered: verified === true,
-        adapterSupported: verified !== null,
+        registered: true,
+        ...pcaConfirmationToWire(confirmation),
         txHash: result.hash,
         blockNumber: result.blockNumber,
-      });
+      };
+      return jsonResponse(res, 200, body);
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       if (isNoChain(msg)) return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);

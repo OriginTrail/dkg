@@ -201,15 +201,19 @@ describe('daemon /api/pca V10 caller contract', () => {
     expect(called).toBe(false);
   });
 
-  it('POST /api/pca/:id/agent registers an agent → 200 with txHash', async () => {
+  it('POST /api/pca/:id/agent registers an agent → 200 with txHash, confirming the SAME (accountId, agent)', async () => {
     let registered: { id: bigint; agent: string } | null = null;
+    let confirmArgs: [bigint, string] | null = null;
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async (id: bigint, a: string) => {
         registered = { id, agent: a };
         return { hash: '0xreg', blockNumber: 9, success: true };
       },
-      isPublishingConvictionAgent: async () => true,
+      confirmPublishingConvictionAgentRegistration: async (id: bigint, a: string) => {
+        confirmArgs = [id, a];
+        return 'confirmed';
+      },
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -217,14 +221,48 @@ describe('daemon /api/pca V10 caller contract', () => {
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
     expect(body.registered).toBe(true);
+    expect(body.verified).toBe(true);
     expect(registered).toEqual({ id: 1n, agent: addr });
+    // #1346 (R7) — the advisory confirmation must describe the SAME PCA + agent
+    // that were just registered; a hard-coded 0n / swapped arg would mislabel
+    // `verified`. Pins the route→facade argument wiring.
+    expect(confirmArgs).toEqual([1n, addr]);
   });
 
-  it('register: mined tx authoritative even if the verification probe throws → 200, not 500', async () => {
+  // R19 — the success response IDENTITY fields (accountId, agent) are assembled
+  // by the route; pin them. accountId is canonicalized from the path (a
+  // non-canonical '007' → '7'), and agent echoes the submitted address.
+  it('register: success response echoes canonical accountId + the submitted agent', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      isPublishingConvictionAgent: async () => { throw new Error('probe RPC blip'); },
+      confirmPublishingConvictionAgentRegistration: async () => 'confirmed',
+    };
+    const { res, done } = runCtx('POST', '/api/pca/007/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.accountId).toBe('7'); // canonicalized from '007'
+    expect(body.agent).toBe(addr);
+    expect(body.txHash).toBe('0xreg');
+    expect(body.blockNumber).toBe(9);
+  });
+
+  // #1346 / PR #1423 R2 — the mined tx is authoritative, so a lagging/throwing
+  // on-chain read must NEVER flip `registered` to false. The retry/probe logic
+  // now lives on the typed facade
+  // (`DKGAgent.confirmPublishingConvictionAgentRegistration`, pinned by the
+  // agent-level tests); the route is a thin serializer of the facade's advisory
+  // `{ verified, adapterSupported }`. These cases pin that route mapping across
+  // the four advisory shapes.
+
+  // Inconclusive: every probe threw (RPC lag) — the read SURFACE exists, so
+  // adapterSupported stays true, verified is null (distinct from no-capability).
+  it('register: facade inconclusive (verified:null, adapterSupported:true) → 200 registered:true', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'inconclusive',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
@@ -232,37 +270,79 @@ describe('daemon /api/pca V10 caller contract', () => {
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
     expect(body.blockNumber).toBe(9);
-    expect(body.registered).toBe(false);
-    expect(body.adapterSupported).toBe(false);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(null);
+    expect(body.adapterSupported).toBe(true);
   });
 
-  it('register: probe returns null (adapter has no probe) → 200, registered:false, adapterSupported:false', async () => {
+  // No probe surface: the typed facade maps an adapter without the probe read
+  // to verified:null WITH adapterSupported:false (genuine capability gap).
+  it('register: facade no probe surface (verified:null, adapterSupported:false) → 200 registered:true', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      isPublishingConvictionAgent: async () => null,
+      confirmPublishingConvictionAgentRegistration: async () => 'unsupported',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.txHash).toBe('0xreg');
-    expect(body.registered).toBe(false);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(null);
     expect(body.adapterSupported).toBe(false);
   });
 
-  it('register: probe returns true → 200, registered:true, adapterSupported:true', async () => {
+  it('register: facade confirms (verified:true, adapterSupported:true) → 200 registered:true', async () => {
     const addr = '0x' + '1'.repeat(40);
     const agent = {
       registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
-      isPublishingConvictionAgent: async () => true,
+      confirmPublishingConvictionAgentRegistration: async () => 'confirmed',
     };
     const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
     await done;
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.body);
     expect(body.registered).toBe(true);
+    expect(body.verified).toBe(true);
     expect(body.adapterSupported).toBe(true);
+  });
+
+  // A persistently-false advisory read (probe never observed the mined tx)
+  // stays advisory — registration remains authoritative-true.
+  it('register: facade advisory-false (verified:false, adapterSupported:true) → 200 registered:true', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xreg', blockNumber: 9, success: true }),
+      confirmPublishingConvictionAgentRegistration: async () => 'not_observed',
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBe(true);
+    expect(body.verified).toBe(false);
+    expect(body.adapterSupported).toBe(true);
+  });
+
+  // #1346 (R7) — a mined-but-FAILED registration tx (TxResult.success:false)
+  // must NOT be reported as a registered agent, and must not reach the advisory
+  // confirmation. The built-in adapter throws on a status=0 receipt, but the
+  // shared TxResult contract lets an adapter surface success:false.
+  it('register: mined tx with success:false → 502, not registered, and no confirm', async () => {
+    const addr = '0x' + '1'.repeat(40);
+    let confirmCalled = false;
+    const agent = {
+      registerPublishingConvictionAgent: async () => ({ hash: '0xdead', blockNumber: 10, success: false }),
+      confirmPublishingConvictionAgentRegistration: async () => { confirmCalled = true; return 'inconclusive'; },
+    };
+    const { res, done } = runCtx('POST', '/api/pca/1/agent', agent, { agent: addr });
+    await done;
+    expect(res.statusCode).toBe(502);
+    const body = JSON.parse(res.body);
+    expect(body.registered).toBeUndefined();
+    expect(body.error).toMatch(/did not succeed/i);
+    expect(confirmCalled).toBe(false); // never confirm a failed registration
   });
 
   it('DELETE /api/pca/:id/agent/:address deregisters an agent → 200', async () => {
@@ -356,7 +436,8 @@ describe('daemon /api/pca V10 caller contract', () => {
         state.agents.delete(a.toLowerCase());
         return { hash: '0xd', blockNumber: 2, success: true };
       },
-      isPublishingConvictionAgent: async (_id: bigint, a: string) => state.agents.has(a.toLowerCase()),
+      confirmPublishingConvictionAgentRegistration: async (_id: bigint, a: string) =>
+        state.agents.has(a.toLowerCase()) ? 'confirmed' : 'not_observed',
       topUpPublishingConvictionAccount: async (_id: bigint, amount: bigint) => {
         state.topUp += amount;
         return { hash: '0xt', blockNumber: 3, success: true };
