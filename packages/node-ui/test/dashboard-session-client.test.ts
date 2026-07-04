@@ -150,4 +150,31 @@ describe('dashboard session client', () => {
     expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-tab-stale');
     expect(headerValue(calls[2]?.headers, 'X-DKG-CSRF')).toBe('csrf-cookie-current');
   });
+
+  it('does not refresh or retry generic unsafe 403 responses', async () => {
+    const calls: Array<{ url: string; method: string; headers?: HeadersInit }> = [];
+    useAuthenticatedDashboardSession({
+      source: 'loopback',
+      csrfToken: 'csrf-current',
+      expiresAt: Date.now() + 60_000,
+    });
+
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers });
+      return new Response(JSON.stringify({ error: 'NotAccountOwner' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const res = await apiFetch('/api/protected', { method: 'DELETE' });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toEqual({ error: 'NotAccountOwner' });
+    expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual([
+      'DELETE /api/protected',
+    ]);
+    expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-current');
+  });
 });

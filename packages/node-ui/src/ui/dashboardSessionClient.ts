@@ -131,6 +131,17 @@ function isUnsafeMethod(method: string | undefined): boolean {
   return normalized === 'POST' || normalized === 'PUT' || normalized === 'PATCH' || normalized === 'DELETE';
 }
 
+async function isDashboardCsrfError(res: Response): Promise<boolean> {
+  if (res.status !== 403) return false;
+  let body: { error?: unknown } | null = null;
+  try {
+    body = await readJson<{ error?: unknown }>(res.clone());
+  } catch {
+    return false;
+  }
+  return body?.error === 'Invalid or missing dashboard CSRF token';
+}
+
 export async function daemonFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const path = assertDaemonPath(input);
   const sessionBeforeRequest = getDashboardSession();
@@ -139,7 +150,7 @@ export async function daemonFetch(input: string, init: RequestInit = {}): Promis
   const res = await withSession();
   const shouldRefreshSession =
     isDashboardSessionReady(sessionBeforeRequest) &&
-    (res.status === 401 || (res.status === 403 && isUnsafeMethod(init.method)));
+    (res.status === 401 || (isUnsafeMethod(init.method) && await isDashboardCsrfError(res)));
   if (!shouldRefreshSession) return res;
 
   invalidateDashboardSession();
