@@ -1,5 +1,6 @@
 import { usePcaStore } from '../../stores/pca.js';
 import { usePublishEligibility, type PublishEligibility } from '../../hooks/usePublishEligibility.js';
+import { pcaPublishBlocked } from '../../pca/publishGate.js';
 
 /**
  * The SWM→VM publish spend-gate — PURE POLICY (no DOM ids, no chip props, no presentation).
@@ -32,9 +33,9 @@ export interface VmPublishGate {
 export function useVmPublishGate(contextGraphId: string): VmPublishGate {
   const trackedIds = usePcaStore((s) => s.trackedIds);
   const eligibility = usePublishEligibility(contextGraphId, 30_000);
-  const { verdict, ownerPublish, anyGasFunded } = eligibility;
 
-  const blocked = verdict === 'fallthrough-no-funds' && !(ownerPublish && anyGasFunded);
+  // The hook owns the single poll + store read; the DECISION is a pure, reusable helper.
+  const blocked = pcaPublishBlocked(eligibility);
   const reason = 'Publish will fail — no signing wallet can fund it (coverage or gas).';
   const chipVisible = trackedIds.length > 0;
 
