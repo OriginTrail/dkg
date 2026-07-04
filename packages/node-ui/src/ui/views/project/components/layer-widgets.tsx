@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback } from 'react';
+import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { listAssertions, promoteAssertion, describePromoteError, knowledgeAssetFinalize, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
@@ -254,7 +254,14 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
 export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
   const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  // Pure-policy hook: gate decision + resolved eligibility. ALL presentation lives here.
   const gate = useVmPublishGate(contextGraphId);
+  const verdictId = useId();
+  const reasonId = useId();
+  // aria-describedby references ONLY targets this component actually renders — chip (verdictId)
+  // when a PCA is tracked, reason node (reasonId) when blocked — so it's atomic by construction.
+  const describedBy =
+    [gate.chipVisible ? verdictId : null, gate.blocked ? reasonId : null].filter(Boolean).join(' ') || undefined;
 
   const publish = useCallback(() => {
     // The policy gate is aria-disabled (button stays focusable/announceable), not natively
@@ -302,21 +309,13 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
               renders nothing unless this publish drew on a PCA (#9). Distinct from the S5
               predictive chip. */}
           <DiscountAppliedBadge convictionCostCovered={costCovered} />
-          {/* S5 — the PCA fall-through chip, rendered off the gate's single eligibility read
-              (id=verdictId so the button can reference it). Shown only when a PCA is tracked. */}
-          {gate.chipVisible && (
-            <PublishEligibilityChipView
-              verdict={gate.verdict}
-              accountId={gate.accountId}
-              discountBps={gate.discountBps}
-              accountUntracked={gate.accountUntracked}
-              ownerPublish={gate.ownerPublish}
-              id={gate.verdictId}
-            />
-          )}
+          {/* S5 — the PCA fall-through chip, fed STRAIGHT from the gate's single eligibility
+              read (no prop re-listing). id=verdictId so the button can reference it. Shown
+              only when a PCA is tracked. */}
+          {gate.chipVisible && <PublishEligibilityChipView {...gate.eligibility} id={verdictId} />}
           {/* SR-only cause for the policy gate — referenced by aria-describedby so the
               announced reason matches the visual state. */}
-          {gate.blocked && <span id={gate.reasonId} className="v10-sr-only">{gate.reason}</span>}
+          {gate.blocked && <span id={reasonId} className="v10-sr-only">{gate.reason}</span>}
         </>
       }
     >
@@ -326,11 +325,11 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
         // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
         // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when
-        // blocked). aria-describedby references only rendered targets (gate.describedByIds).
+        // blocked). aria-describedby references only rendered targets (describedBy, above).
         disabled={busy}
         aria-disabled={gate.blocked || undefined}
         title={gate.blocked ? gate.reason : undefined}
-        aria-describedby={gate.describedByIds.join(' ') || undefined}
+        aria-describedby={describedBy}
         onClick={publish}
       >
         {busy ? '...' : '◉ Publish to Verifiable Memory'}

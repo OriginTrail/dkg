@@ -216,15 +216,17 @@ describe('PublishVmWidget — S5 publish CTA gate (#1382)', () => {
   // Shared-eligibility contract (#1382): the widget resolves the verdict ONCE and drives the
   // REAL chip view with it — button and chip can't disagree, one poll, and (OVzKw) the
   // button's aria-describedby points at an element that actually EXISTS in the DOM.
-  it('drives the REAL chip from its single read; aria-describedby points at the rendered chip', async () => {
+  it('drives the REAL chip from EXACTLY ONE read; aria-describedby points at the rendered chip', async () => {
     eligMock.usePublishEligibility.mockReturnValue({
       verdict: 'eligible', ownerPublish: false, anyGasFunded: false, accountId: '7', discountBps: 3000,
     } as any);
     const { container, unmount } = await render(
       React.createElement(PublishVmWidget, { count: 1, contextGraphId: 'cg' }),
     );
-    // Single shared read via useVmPublishGate.
+    // ONE shared read: the widget (via useVmPublishGate) polls once; the pure chip doesn't
+    // re-poll. A double-poll regression (chip owning its own hook) would make this > 1.
     expect(eligMock.usePublishEligibility).toHaveBeenCalledWith('cg', 30_000);
+    expect(eligMock.usePublishEligibility).toHaveBeenCalledTimes(1);
     // The REAL chip rendered the supplied verdict.
     const chip = container.querySelector('[data-testid="pca-publish-eligibility"]');
     expect(chip).toBeTruthy();
