@@ -860,6 +860,7 @@ function staticSecurityHeaders(isHtml: boolean): Record<string, string> {
       "img-src 'self' data: blob:",
       "font-src 'self'",
       "connect-src 'self' http: https: ws: wss:",
+      "frame-src 'self' blob:",
       "object-src 'none'",
       "base-uri 'none'",
       "frame-ancestors 'none'",
