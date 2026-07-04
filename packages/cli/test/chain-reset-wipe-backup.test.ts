@@ -79,6 +79,9 @@ function seedAllFiles(dataDir: string) {
 }
 
 function readPersistedMarker(dir: string): string | null {
+  // No state file → no persisted marker (null), not a throw — the first-boot
+  // skip case deliberately writes no state file.
+  if (!existsSync(join(dir, STATE_FILE))) return null;
   return JSON.parse(readFileSync(join(dir, STATE_FILE), 'utf8')).chainResetMarker;
 }
 
