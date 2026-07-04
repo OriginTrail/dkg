@@ -35,13 +35,20 @@ type RegisterPcaAgentResponseBase = {
  */
 export type RegisterPcaAgentResponse = RegisterPcaAgentResponseBase & { registered: true } & PcaAgentConfirmation;
 
-/** Derive the wire advisory fields from the agent's single confirmation outcome. */
+/** Derive the wire advisory fields from the agent's single confirmation outcome.
+ *  The `never` default makes this compiler-exhaustive: a future
+ *  `PcaConfirmationOutcome` member must add a case here (compile error otherwise)
+ *  rather than falling through to an undefined wire shape. */
 export function pcaConfirmationToWire(outcome: PcaConfirmationOutcome): PcaAgentConfirmation {
   switch (outcome) {
     case 'confirmed':    return { adapterSupported: true, verified: true };
     case 'not_observed': return { adapterSupported: true, verified: false };
     case 'inconclusive': return { adapterSupported: true, verified: null };
     case 'unsupported':  return { adapterSupported: false, verified: null };
+    default: {
+      const _exhaustive: never = outcome;
+      return _exhaustive;
+    }
   }
 }
 

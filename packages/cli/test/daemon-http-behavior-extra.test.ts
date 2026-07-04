@@ -43,7 +43,7 @@
  * a real chain") enforced in CI.
  */
 
-import { beforeAll, afterAll, describe, expect, it, vi } from 'vitest';
+import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
