@@ -597,7 +597,7 @@ describe('handleNodeUIRequest CORS origin handling', () => {
     expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 
-  it('sets Access-Control-Allow-Origin when corsOrigin is provided', async () => {
+  it('sets credentialed CORS headers when a specific corsOrigin is provided', async () => {
     const fakeDb = { getMetrics: () => [], getErrorHotspots: () => [], getLatestSnapshot: () => ({}) } as any;
     harness.setArgs({
       db: fakeDb,
@@ -608,6 +608,9 @@ describe('handleNodeUIRequest CORS origin handling', () => {
     const res = await fetch(`${baseUrl}/api/metrics`);
     expect(res.status).toBe(200);
     expect(res.headers.get('access-control-allow-origin')).toBe('https://example.com');
+    expect(res.headers.get('access-control-allow-credentials')).toBe('true');
+    expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization, X-DKG-CSRF');
+    expect(res.headers.get('vary')).toBe('Origin');
   });
 
   it('omits Access-Control-Allow-Origin when corsOrigin is explicitly null (rejected origin)', async () => {

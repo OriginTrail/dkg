@@ -874,7 +874,11 @@ function json(res: ServerResponse, status: number, data: unknown): true {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (origin) {
     headers['Access-Control-Allow-Origin'] = origin;
-    if (origin !== '*') headers['Vary'] = 'Origin';
+    headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-DKG-CSRF';
+    if (origin !== '*') {
+      headers['Access-Control-Allow-Credentials'] = 'true';
+      headers['Vary'] = 'Origin';
+    }
   }
   res.writeHead(status, headers);
   res.end(JSON.stringify(data));
