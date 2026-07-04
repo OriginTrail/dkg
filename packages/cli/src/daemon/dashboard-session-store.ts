@@ -5,7 +5,8 @@ export const DASHBOARD_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 export interface DashboardSessionRecord {
   compatToken: string;
   csrfToken: string;
-  source: "loopback" | "exchange";
+  source: "loopback" | "exchange" | "login";
+  credentialFingerprint?: string;
   issuedAt: number;
   expiresAt: number;
   lastUsedAt: number;
@@ -16,6 +17,8 @@ export interface AuthenticatedDashboardSession {
   compatToken: string;
   csrfToken: string;
   source: DashboardSessionRecord["source"];
+  credentialFingerprint?: string;
+  issuedAt: number;
   expiresAt: number;
 }
 
@@ -26,6 +29,7 @@ export class DashboardSessionStore {
     compatToken: string,
     source: DashboardSessionRecord["source"],
     now = Date.now(),
+    options: { credentialFingerprint?: string } = {},
   ): {
     sessionId: string;
     record: DashboardSessionRecord;
@@ -36,6 +40,7 @@ export class DashboardSessionStore {
       compatToken,
       csrfToken: randomBytes(32).toString("base64url"),
       source,
+      ...(options.credentialFingerprint ? { credentialFingerprint: options.credentialFingerprint } : {}),
       issuedAt: now,
       expiresAt: now + DASHBOARD_SESSION_TTL_MS,
       lastUsedAt: now,
@@ -55,6 +60,8 @@ export class DashboardSessionStore {
       compatToken: record.compatToken,
       csrfToken: record.csrfToken,
       source: record.source,
+      ...(record.credentialFingerprint ? { credentialFingerprint: record.credentialFingerprint } : {}),
+      issuedAt: record.issuedAt,
       expiresAt: record.expiresAt,
     };
   }

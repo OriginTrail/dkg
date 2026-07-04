@@ -144,11 +144,17 @@ import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '
 import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens } from '../auth.js';
 import {
   DashboardSessionStore,
+  DashboardLoginAttemptLimiter,
   createDashboardSessionAuthSource,
   getDashboardSessionCookie,
   handleDashboardSessionRequest,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
+import {
+  readDashboardCredentialFingerprintSync,
+  readDashboardCredentialSummary,
+  verifyDashboardCredentials,
+} from './dashboard-credentials.js';
 import { createSseHub } from './sse-hub.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -2876,7 +2882,32 @@ export async function runDaemonInner(
   } else {
     log("API authentication disabled (auth.enabled = false)");
   }
+  const dashboardCredentialSummary = await readDashboardCredentialSummary();
+  if (authEnabled) {
+    if (dashboardCredentialSummary.invalid) {
+      log(
+        `Dashboard login credentials unavailable: ${dashboardCredentialSummary.path} is invalid; run "dkg auth dashboard reset-password"`,
+      );
+    } else if (dashboardCredentialSummary.exists) {
+      log(`Dashboard login enabled for ${dashboardCredentialSummary.username} (${dashboardCredentialSummary.path})`);
+    } else {
+      log(
+        `Dashboard login credentials not configured; run "dkg auth dashboard reset-password" (${dashboardCredentialSummary.path})`,
+      );
+    }
+  }
   const dashboardSessions = new DashboardSessionStore();
+  const dashboardLoginLimiter = new DashboardLoginAttemptLimiter();
+  const selectDashboardLoginCompatToken = () => {
+    reconcileValidTokens(validTokens);
+    if (bridgeAuthToken && validTokens.has(bridgeAuthToken)) return bridgeAuthToken;
+    for (const token of validTokens) {
+      if (!agent.resolveAgentByToken(token)) return token;
+    }
+    return undefined;
+  };
+  const isDashboardCredentialFingerprintCurrent = (credentialFingerprint: string) =>
+    readDashboardCredentialFingerprintSync() === credentialFingerprint;
   const resolveDashboardPrincipal = (token: string) => {
     const agentAddress = agent.resolveAgentAddress(token);
     return {
@@ -2884,8 +2915,19 @@ export async function runDaemonInner(
       agentAddress,
     };
   };
+  const authenticateDashboardSession = (request: IncomingMessage) => {
+    const session = dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request));
+    if (session?.source === "login") {
+      if (!session.credentialFingerprint || !isDashboardCredentialFingerprintCurrent(session.credentialFingerprint)) {
+        dashboardSessions.revoke(session.sessionId);
+        closeDashboardSessionSseClients(session.sessionId);
+        return null;
+      }
+    }
+    return session;
+  };
   const dashboardSessionAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    authenticate: authenticateDashboardSession,
     resolvePrincipal: resolveDashboardPrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
@@ -3067,6 +3109,16 @@ export async function runDaemonInner(
             refreshValidTokens: () => reconcileValidTokens(validTokens),
             corsOrigin: reqCorsOrigin,
             onSessionRevoked: closeDashboardSessionSseClients,
+            ...(authEnabled
+              ? {
+                  dashboardLogin: {
+                    verifyCredentials: verifyDashboardCredentials,
+                    selectCompatToken: selectDashboardLoginCompatToken,
+                    attemptLimiter: dashboardLoginLimiter,
+                    isCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
+                  },
+                }
+              : {}),
           },
         );
         if (handledSession) return;

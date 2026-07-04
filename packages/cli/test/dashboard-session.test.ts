@@ -3,12 +3,14 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import {
   DASHBOARD_SESSION_COOKIE,
   DashboardSessionStore,
+  DashboardLoginAttemptLimiter,
   createDashboardSessionAuthSource,
   getDashboardSessionCookie,
   handleDashboardSessionRequest,
   isAllowedLoopbackHostname,
   isLoopbackAddress,
   verifyDashboardCsrf,
+  type DashboardLoginOptions,
 } from '../src/daemon/dashboard-session.js';
 import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
 import { hasTrustedDashboardOrigin } from '../src/daemon/dashboard-session-policy.js';
@@ -91,6 +93,7 @@ async function startServer(options: {
   corsOrigin?: string | null;
   signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<unknown>;
   authEnabled?: boolean;
+  dashboardLogin?: DashboardLoginOptions;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
@@ -112,7 +115,20 @@ async function startServer(options: {
     publisher: { getIdentityId: () => 1n },
   };
   const dashboardAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => sessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    authenticate: (request) => {
+      const session = sessions.authenticateSessionId(getDashboardSessionCookie(request));
+      if (
+        session?.source === 'login' &&
+        options.dashboardLogin?.isCredentialFingerprintCurrent &&
+        (!session.credentialFingerprint ||
+          !options.dashboardLogin.isCredentialFingerprintCurrent(session.credentialFingerprint))
+      ) {
+        sessions.revoke(session.sessionId);
+        options.onSessionRevoked?.(session.sessionId);
+        return null;
+      }
+      return session;
+    },
     resolvePrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
@@ -124,6 +140,7 @@ async function startServer(options: {
       refreshValidTokens: options.refreshValidTokens,
       onSessionRevoked: options.onSessionRevoked,
       corsOrigin: options.corsOrigin,
+      ...(options.dashboardLogin ? { dashboardLogin: options.dashboardLogin } : {}),
     })) {
       return;
     }
@@ -425,6 +442,160 @@ describe('dashboard browser sessions', () => {
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
       },
     });
+  });
+
+  it('exchanges dashboard username/password for a usable dashboard session cookie', async () => {
+    const verifyCredentials = vi.fn(async (username: string, password: string) =>
+      username === 'node-admin' && password === 'secret-password'
+        ? { ok: true as const, credentialFingerprint: 'credential-a' }
+        : { ok: false as const, reason: 'mismatch' as const });
+    const selectCompatToken = vi.fn(() => VALID_TOKEN);
+    const started = await startServer({
+      dashboardLogin: { verifyCredentials, selectCompatToken },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    await expect(exchange.json()).resolves.toMatchObject({ authenticated: true, source: 'login' });
+    expect(verifyCredentials).toHaveBeenCalledWith('node-admin', 'secret-password');
+    expect(selectCompatToken).toHaveBeenCalledTimes(1);
+
+    const res = await fetch(`${started.baseUrl}/api/protected`, {
+      headers: { Cookie: setCookie.split(';')[0] },
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      authorization: null,
+      requestAuth: {
+        source: 'dashboard-session',
+        internalCredentialToken: VALID_TOKEN,
+        principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
+        dashboardSession: { source: 'login' },
+      },
+    });
+  });
+
+  it('rejects wrong dashboard username/password without setting a cookie', async () => {
+    const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason: 'mismatch' as const }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'wrong-password' }),
+    });
+    expect(exchange.status).toBe(401);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    await expect(exchange.json()).resolves.toMatchObject({
+      error: 'Invalid dashboard username or password',
+    });
+  });
+
+  it('rejects hostile dashboard login origins before credential verification', async () => {
+    const verifyCredentials = vi.fn(async () => ({ ok: true as const, credentialFingerprint: 'credential-a' }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://attacker.example',
+        'Sec-Fetch-Site': 'cross-site',
+      },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(403);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    expect(verifyCredentials).not.toHaveBeenCalled();
+    await expect(exchange.json()).resolves.toMatchObject({ error: 'Untrusted dashboard request origin' });
+  });
+
+  it('rate-limits repeated dashboard login failures', async () => {
+    let now = 1_000;
+    const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason: 'mismatch' as const }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+        attemptLimiter: new DashboardLoginAttemptLimiter({
+          maxFailures: 2,
+          failureWindowMs: 60_000,
+          lockoutMs: 60_000,
+          now: () => now,
+        }),
+      },
+    });
+    server = started.server;
+    const request = () => fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'wrong-password' }),
+    });
+
+    expect((await request()).status).toBe(401);
+    now += 1_000;
+    expect((await request()).status).toBe(401);
+    now += 1_000;
+    const locked = await request();
+    expect(locked.status).toBe(429);
+    expect(locked.headers.get('retry-after')).toBe('59');
+    await expect(locked.json()).resolves.toMatchObject({
+      error: 'Too many dashboard sign-in attempts. Try again later.',
+    });
+    expect(verifyCredentials).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidates password-login sessions after the credential file fingerprint changes', async () => {
+    let currentFingerprint = 'credential-a';
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({
+      onSessionRevoked,
+      dashboardLogin: {
+        verifyCredentials: async () => ({ ok: true as const, credentialFingerprint: currentFingerprint }),
+        selectCompatToken: () => VALID_TOKEN,
+        isCredentialFingerprintCurrent: (fingerprint) => fingerprint === currentFingerprint,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(200);
+    const cookie = cookieFrom(exchange);
+    currentFingerprint = 'credential-b';
+
+    const status = await fetch(`${started.baseUrl}/api/dashboard/session/status`, {
+      headers: { Cookie: cookie },
+    });
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({ authenticated: false });
+    expect(onSessionRevoked).toHaveBeenCalledTimes(1);
+
+    const protectedRes = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
+    expect(protectedRes.status).toBe(401);
   });
 
   it('rejects invalid bearer-token dashboard exchange attempts without setting a cookie', async () => {

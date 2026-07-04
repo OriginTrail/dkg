@@ -6,6 +6,7 @@ import {
   ensureDashboardSession,
   exchangeDashboardSession,
   getDashboardSession,
+  loginDashboardSession,
 } from '../src/ui/dashboardSessionClient.js';
 import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
@@ -235,6 +236,36 @@ describe('dashboard session client', () => {
     expect(getDashboardSession()).toMatchObject({
       state: 'authenticated',
       csrfToken: 'csrf-exchanged',
+    });
+  });
+
+  it('posts username/password login without exposing an API token payload', async () => {
+    const calls: Array<{ url: string; method: string; body?: BodyInit | null }> = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, method: init?.method ?? 'GET', body: init?.body });
+      return new Response(JSON.stringify({
+        authenticated: true,
+        source: 'login',
+        csrfToken: 'csrf-login',
+        expiresAt: Date.now() + 60_000,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    await expect(loginDashboardSession('node-admin', 'secret-password')).resolves.toMatchObject({
+      state: 'authenticated',
+      source: 'login',
+      csrfToken: 'csrf-login',
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      url: '/api/dashboard/session/exchange',
+      method: 'POST',
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
     });
   });
 });

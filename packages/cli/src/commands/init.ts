@@ -539,6 +539,22 @@ program
     };
     await saveConfig(config);
 
+    let dashboardCredentialResult: {
+      created: boolean;
+      path: string;
+      username: string;
+      password?: string;
+    } | null = null;
+    if (enableAuth) {
+      try {
+        const { ensureDashboardCredentials } = await import('../daemon/dashboard-credentials.js');
+        dashboardCredentialResult = await ensureDashboardCredentials();
+      } catch (err: any) {
+        console.warn(`\nWarning: could not create dashboard login credentials (${err?.message ?? String(err)}).`);
+        console.warn('Run "dkg auth dashboard reset-password" after setup to create them.');
+      }
+    }
+
     // Generate wallets eagerly so they're available for faucet funding
     let walletAddresses: string[] = [];
     try {
@@ -559,6 +575,9 @@ program
     console.log(`  context graphs: ${contextGraphs.length ? contextGraphs.join(', ') : '(none)'}`);
     console.log(`  apiPort:    ${config.apiPort}`);
     console.log(`  auth:       ${enableAuth ? `enabled (token in ${dkgAuthTokenPath(dkgDir())})` : 'disabled'}`);
+    if (enableAuth && dashboardCredentialResult) {
+      console.log(`  dashboard login: ${dashboardCredentialResult.username} (${dashboardCredentialResult.path})`);
+    }
     console.log(
       `  store:      ${
         storeBlock
@@ -599,6 +618,13 @@ program
     }
     if (walletAddresses.length) {
       console.log(`  wallets:    ${walletAddresses.join(', ')}`);
+    }
+    if (dashboardCredentialResult?.created && dashboardCredentialResult.password) {
+      console.log('\nDashboard login created:');
+      console.log(`  Username: ${dashboardCredentialResult.username}`);
+      console.log(`  Password: ${dashboardCredentialResult.password}`);
+      console.log(`  Credential hash: ${dashboardCredentialResult.path}`);
+      console.log('  Save this password securely. It will not be shown again.');
     }
 
     // Auto-fund from testnet faucet if available

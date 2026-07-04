@@ -146,12 +146,43 @@ authCmd
   .command('status')
   .description('Show whether authentication is enabled')
   .action(async () => {
+    const { readDashboardCredentialSummary } = await import('../daemon/dashboard-credentials.js');
     const config = await loadConfig();
     const enabled = config.auth?.enabled !== false;
+    const dashboardCredentials = await readDashboardCredentialSummary();
     console.log(`  Authentication: ${enabled ? 'enabled' : 'disabled'}`);
     console.log(`  Token file:     ${join(dkgDir(), 'auth.token')}`);
     if (config.auth?.tokens?.length) {
       console.log(`  Config tokens:  ${config.auth.tokens.length}`);
     }
+    if (dashboardCredentials.invalid) {
+      console.log(`  Dashboard login: unavailable (invalid credential file)`);
+      console.log(`  Dashboard file:  ${dashboardCredentials.path}`);
+    } else if (dashboardCredentials.exists) {
+      console.log(`  Dashboard login: configured (${dashboardCredentials.username})`);
+      console.log(`  Dashboard file:  ${dashboardCredentials.path}`);
+    } else {
+      console.log(`  Dashboard login: not configured`);
+      console.log(`  Dashboard file:  ${dashboardCredentials.path}`);
+    }
+  });
+
+const dashboardAuthCmd = authCmd
+  .command('dashboard')
+  .description('Manage dashboard username/password login');
+
+dashboardAuthCmd
+  .command('reset-password')
+  .description('Generate a new dashboard password')
+  .option('--username <username>', 'Dashboard username to store')
+  .action(async (opts: { username?: string }) => {
+    const { resetDashboardPassword } = await import('../daemon/dashboard-credentials.js');
+    const result = await resetDashboardPassword(opts.username ? { username: opts.username } : {});
+    console.log('Dashboard password reset.');
+    console.log(`Username: ${result.username}`);
+    console.log(`Password: ${result.password}`);
+    console.log(`\nCredential hash saved to ${result.path}`);
+    console.log('Save this password securely. It will not be shown again.');
+    console.log('Existing password-login dashboard sessions will be invalidated on their next request.');
   });
 }

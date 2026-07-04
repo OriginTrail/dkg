@@ -38,6 +38,81 @@ export interface DashboardSessionHandlerOptions {
   refreshValidTokens?: () => void;
   corsOrigin?: string | null;
   onSessionRevoked?: (sessionId: string) => void;
+  dashboardLogin?: DashboardLoginOptions;
+}
+
+export type DashboardLoginVerification =
+  | { ok: true; credentialFingerprint?: string }
+  | { ok: false; reason?: "missing" | "invalid" | "mismatch" };
+
+export interface DashboardLoginOptions {
+  verifyCredentials: (username: string, password: string) => Promise<DashboardLoginVerification>;
+  selectCompatToken: () => string | undefined;
+  attemptLimiter?: DashboardLoginAttemptLimiter;
+  isCredentialFingerprintCurrent?: (credentialFingerprint: string) => boolean;
+}
+
+interface DashboardLoginAttempt {
+  count: number;
+  firstFailureAt: number;
+  lockedUntil?: number;
+}
+
+export class DashboardLoginAttemptLimiter {
+  private attempts = new Map<string, DashboardLoginAttempt>();
+
+  constructor(private readonly options: {
+    maxFailures?: number;
+    failureWindowMs?: number;
+    lockoutMs?: number;
+    now?: () => number;
+  } = {}) {}
+
+  check(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
+    const now = this.now();
+    const attempt = this.attempts.get(key);
+    if (!attempt) return { ok: true };
+    if (attempt.lockedUntil && attempt.lockedUntil > now) {
+      return { ok: false, retryAfterMs: attempt.lockedUntil - now };
+    }
+    if (attempt.lockedUntil || now - attempt.firstFailureAt > this.failureWindowMs()) {
+      this.attempts.delete(key);
+    }
+    return { ok: true };
+  }
+
+  recordFailure(key: string): void {
+    const now = this.now();
+    const existing = this.attempts.get(key);
+    const attempt: DashboardLoginAttempt = !existing || now - existing.firstFailureAt > this.failureWindowMs()
+      ? { count: 0, firstFailureAt: now }
+      : existing;
+    attempt.count += 1;
+    if (attempt.count >= this.maxFailures()) {
+      attempt.lockedUntil = now + this.lockoutMs();
+    }
+    this.attempts.set(key, attempt);
+  }
+
+  recordSuccess(key: string): void {
+    this.attempts.delete(key);
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private maxFailures(): number {
+    return this.options.maxFailures ?? 5;
+  }
+
+  private failureWindowMs(): number {
+    return this.options.failureWindowMs ?? 5 * 60 * 1000;
+  }
+
+  private lockoutMs(): number {
+    return this.options.lockoutMs ?? 5 * 60 * 1000;
+  }
 }
 
 export async function handleDashboardSessionRequest(
@@ -51,7 +126,12 @@ export async function handleDashboardSessionRequest(
   if (!path.startsWith("/api/dashboard/session")) return false;
 
   const sessionId = getDashboardSessionCookie(req);
-  const session = store.authenticateSessionId(sessionId);
+  const rawSession = store.authenticateSessionId(sessionId);
+  const session = isStaleDashboardLoginSession(rawSession, options) ? null : rawSession;
+  if (rawSession && !session) {
+    store.revoke(rawSession.sessionId);
+    options.onSessionRevoked?.(rawSession.sessionId);
+  }
 
   if (req.method === "GET" && path === "/api/dashboard/session/status") {
     if (!options.authEnabled) {
@@ -119,6 +199,10 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 400, { error: "Invalid JSON body" }, options.corsOrigin);
       return true;
     }
+    if (isDashboardLoginBody(body)) {
+      await handleDashboardLoginExchange(req, res, store, options, body);
+      return true;
+    }
     const bodyToken = typeof (body as { token?: unknown }).token === "string"
       ? ((body as { token: string }).token).trim()
       : undefined;
@@ -165,6 +249,82 @@ export async function handleDashboardSessionRequest(
   return true;
 }
 
+async function handleDashboardLoginExchange(
+  req: IncomingMessage,
+  res: ServerResponse,
+  store: DashboardSessionStore,
+  options: DashboardSessionHandlerOptions,
+  body: unknown,
+): Promise<void> {
+  const username = typeof (body as { username?: unknown }).username === "string"
+    ? (body as { username: string }).username.trim()
+    : "";
+  const password = typeof (body as { password?: unknown }).password === "string"
+    ? (body as { password: string }).password
+    : "";
+  const token = typeof (body as { token?: unknown }).token === "string"
+    ? (body as { token: string }).token.trim()
+    : "";
+  if (token || extractBearerToken(req.headers.authorization)) {
+    jsonResponse(res, 400, { error: "Dashboard session exchange accepts either token or username/password" }, options.corsOrigin);
+    return;
+  }
+  if (!options.dashboardLogin) {
+    jsonResponse(res, 503, { error: "Dashboard username/password login is not configured" }, options.corsOrigin);
+    return;
+  }
+  if (!username || !password) {
+    jsonResponse(res, 401, { error: "Invalid dashboard username or password" }, options.corsOrigin);
+    return;
+  }
+
+  const attemptKey = dashboardLoginAttemptKey(req, username);
+  const limiterState = options.dashboardLogin.attemptLimiter?.check(attemptKey);
+  if (limiterState && !limiterState.ok) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil(limiterState.retryAfterMs / 1000))));
+    jsonResponse(res, 429, { error: "Too many dashboard sign-in attempts. Try again later." }, options.corsOrigin);
+    return;
+  }
+
+  const verified = await options.dashboardLogin.verifyCredentials(username, password);
+  if (!verified.ok) {
+    if (verified.reason === "missing") {
+      jsonResponse(res, 503, {
+        error: "Dashboard credentials are not configured. Run dkg auth dashboard reset-password on this machine.",
+      }, options.corsOrigin);
+      return;
+    }
+    if (verified.reason === "invalid") {
+      jsonResponse(res, 503, {
+        error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on this machine.",
+      }, options.corsOrigin);
+      return;
+    }
+    options.dashboardLogin.attemptLimiter?.recordFailure(attemptKey);
+    jsonResponse(res, 401, { error: "Invalid dashboard username or password" }, options.corsOrigin);
+    return;
+  }
+
+  options.dashboardLogin.attemptLimiter?.recordSuccess(attemptKey);
+  const compatToken = options.dashboardLogin.selectCompatToken();
+  if (!verifyToken(compatToken, options.validTokens)) {
+    jsonResponse(res, 503, { error: "Dashboard login is unavailable until an API token is configured" }, options.corsOrigin);
+    return;
+  }
+  const created = store.create(
+    compatToken!,
+    "login",
+    Date.now(),
+    verified.credentialFingerprint ? { credentialFingerprint: verified.credentialFingerprint } : {},
+  );
+  setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
+  jsonResponse(res, 200, sessionResponse({
+    csrfToken: created.record.csrfToken,
+    source: created.record.source,
+    expiresAt: created.record.expiresAt,
+  }), options.corsOrigin);
+}
+
 function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken" | "source" | "expiresAt">) {
   return {
     authenticated: true,
@@ -178,4 +338,24 @@ function hasJsonContentType(req: IncomingMessage): boolean {
   const raw = req.headers["content-type"];
   const value = Array.isArray(raw) ? raw[0] : raw;
   return value?.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
+function isDashboardLoginBody(body: unknown): body is { username?: unknown; password?: unknown } {
+  return !!body &&
+    typeof body === "object" &&
+    ("username" in body || "password" in body);
+}
+
+function dashboardLoginAttemptKey(req: IncomingMessage, username: string): string {
+  return `${req.socket.remoteAddress ?? "unknown"}:${username.trim().toLowerCase()}`;
+}
+
+function isStaleDashboardLoginSession(
+  session: AuthenticatedDashboardSession | null,
+  options: DashboardSessionHandlerOptions,
+): boolean {
+  if (!session || session.source !== "login") return false;
+  if (!options.dashboardLogin?.isCredentialFingerprintCurrent) return false;
+  return !session.credentialFingerprint ||
+    !options.dashboardLogin.isCredentialFingerprintCurrent(session.credentialFingerprint);
 }
