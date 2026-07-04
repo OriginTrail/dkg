@@ -57,6 +57,7 @@ async function startServer(options: {
   onSessionRevoked?: (sessionId: string) => void;
   corsOrigin?: string | null;
   signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<unknown>;
+  authEnabled?: boolean;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
   const validTokens = options.validTokens ?? new Set([VALID_TOKEN, AGENT_TOKEN]);
   const sessions = new DashboardSessionStore();
@@ -85,7 +86,7 @@ async function startServer(options: {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     if (await handleDashboardSessionRequest(req, res, url, sessions, {
-      authEnabled: true,
+      authEnabled: options.authEnabled ?? true,
       validTokens,
       refreshValidTokens: options.refreshValidTokens,
       onSessionRevoked: options.onSessionRevoked,
@@ -188,6 +189,18 @@ describe('dashboard browser sessions', () => {
     const res = await fetch(`${started.baseUrl}/api/dashboard/session/status`);
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({ authenticated: false });
+  });
+
+  it('reports authenticated dashboard status when API auth is disabled', async () => {
+    const started = await startServer({ authEnabled: false });
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/status`);
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      authenticated: true,
+      authDisabled: true,
+    });
   });
 
   it('sets an HttpOnly SameSite session cookie on loopback bootstrap', async () => {

@@ -2552,12 +2552,12 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  let sseValidTokens: Set<string> | undefined;
+  const authEnabled = config.auth?.enabled !== false;
+  const validTokens = await loadTokens(config.auth);
   const sseHub = createSseHub({
     isDashboardSessionTokenValid: (token) => {
-      if (!sseValidTokens) return true;
-      reconcileValidTokens(sseValidTokens);
-      return sseValidTokens.has(token);
+      reconcileValidTokens(validTokens);
+      return validTokens.has(token);
     },
   });
   const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
@@ -2858,9 +2858,6 @@ export async function runDaemonInner(
 
   // --- Authentication ---
 
-  const authEnabled = config.auth?.enabled !== false;
-  const validTokens = await loadTokens(config.auth);
-  sseValidTokens = validTokens;
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0
