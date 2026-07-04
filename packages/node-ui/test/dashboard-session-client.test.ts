@@ -1,7 +1,12 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { apiFetch } from '../src/ui/dashboardSessionClient.js';
+import {
+  apiFetch,
+  ensureDashboardSession,
+  exchangeDashboardSession,
+  getDashboardSession,
+} from '../src/ui/dashboardSessionClient.js';
 import { resetDashboardSession, useAuthenticatedDashboardSession } from './helpers/dashboard-session.js';
 
 function headerValue(headers: HeadersInit | undefined, name: string): string | undefined {
@@ -12,6 +17,14 @@ function headerValue(headers: HeadersInit | undefined, name: string): string | u
     return found?.[1];
   }
   return (headers as Record<string, string>)[name];
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 describe('dashboard session client', () => {
@@ -181,5 +194,44 @@ describe('dashboard session client', () => {
       'DELETE /api/protected',
     ]);
     expect(headerValue(calls[0]?.headers, 'X-DKG-CSRF')).toBe('csrf-current');
+  });
+
+  it('does not let a stale status refresh overwrite a newer token exchange', async () => {
+    const status = deferred<Response>();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/dashboard/session/status') return status.promise;
+      if (url === '/api/dashboard/session/exchange') {
+        return new Response(JSON.stringify({
+          authenticated: true,
+          source: 'exchange',
+          csrfToken: 'csrf-exchanged',
+          expiresAt: Date.now() + 60_000,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    const staleRefresh = ensureDashboardSession();
+    await expect(exchangeDashboardSession('operator-token')).resolves.toMatchObject({
+      state: 'authenticated',
+      csrfToken: 'csrf-exchanged',
+    });
+
+    status.resolve(new Response(JSON.stringify({ authenticated: false }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await expect(staleRefresh).resolves.toMatchObject({
+      state: 'authenticated',
+      csrfToken: 'csrf-exchanged',
+    });
+    expect(getDashboardSession()).toMatchObject({
+      state: 'authenticated',
+      csrfToken: 'csrf-exchanged',
+    });
   });
 });

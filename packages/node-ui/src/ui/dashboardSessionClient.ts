@@ -18,7 +18,10 @@ export {
 
 export type DaemonPath = `/${string}`;
 
+let dashboardSessionWriteVersion = 0;
+
 function invalidateDashboardSession(): void {
+  dashboardSessionWriteVersion += 1;
   clearDashboardSessionPromise();
   setDashboardSession({ state: 'unauthenticated', authenticated: false });
 }
@@ -44,8 +47,10 @@ export async function ensureDashboardSession(): Promise<DashboardSessionStatus> 
   const existingPromise = getDashboardSessionPromise();
   if (existingPromise) return existingPromise;
 
+  const refreshVersion = dashboardSessionWriteVersion;
   const nextPromise = (async () => {
     const status = await requestSessionStatus();
+    if (refreshVersion !== dashboardSessionWriteVersion) return getDashboardSession();
     if (isDashboardSessionReady(status ?? undefined)) {
       return setDashboardSession(status!);
     }
@@ -57,11 +62,12 @@ export async function ensureDashboardSession(): Promise<DashboardSessionStatus> 
   try {
     return await nextPromise;
   } finally {
-    clearDashboardSessionPromise();
+    if (getDashboardSessionPromise() === nextPromise) clearDashboardSessionPromise();
   }
 }
 
 export async function exchangeDashboardSession(token: string): Promise<DashboardSessionStatus> {
+  dashboardSessionWriteVersion += 1;
   clearDashboardSessionPromise();
   const res = await fetch('/api/dashboard/session/exchange', {
     method: 'POST',
