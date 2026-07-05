@@ -3133,7 +3133,10 @@ export class EVMChainAdapterBase {
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationListenerStarted) return;
     try {
-      await this.hubRotationPoller.start(this.contracts.hub);
+      await this.hubRotationPoller.start(
+        this.contracts.hub,
+        await contractAddress(this.contracts.hub),
+      );
       this.hubRotationListenerStarted = this.hubRotationPoller.isStarted;
     } catch {
       /* provider doesn't support log polling — TTL refresh (RS)
@@ -3144,7 +3147,7 @@ export class EVMChainAdapterBase {
   protected async pollHubRotationEvents(): Promise<void> {
     const hub = this.contracts.hub;
     if (!hub) return;
-    await this.hubRotationPoller.poll(hub);
+    await this.hubRotationPoller.poll(hub, await contractAddress(hub));
   }
 
   protected applyHubRotationEventName(name: string): void {
