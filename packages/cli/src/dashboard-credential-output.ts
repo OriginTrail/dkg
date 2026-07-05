@@ -1,22 +1,14 @@
-export interface DashboardCredentialCreatedOutput {
-  created: true;
-  path: string;
-  username: string;
-  password: string;
-}
-
-export interface DashboardCredentialExistingOutput {
-  created: false;
-  path: string;
-  username: string;
-}
+import type {
+  DashboardCredentialCreation,
+  DashboardCredentialExisting,
+} from "./daemon/dashboard-credentials.js";
 
 export interface DashboardCredentialOutputOptions {
   prefix?: string;
 }
 
 export function printDashboardCredentialsCreatedForSetup(
-  result: DashboardCredentialCreatedOutput,
+  result: DashboardCredentialCreation,
   options: DashboardCredentialOutputOptions = {},
 ): void {
   printDashboardCredentialSecretBlock(result, {
@@ -28,7 +20,7 @@ export function printDashboardCredentialsCreatedForSetup(
 }
 
 export function printDashboardCredentialsConfiguredForSetup(
-  result: DashboardCredentialExistingOutput,
+  result: DashboardCredentialExisting,
   options: DashboardCredentialOutputOptions = {},
 ): void {
   console.log(withPrefix(options.prefix, `Dashboard login: configured (${result.username}) (${result.path})`));
@@ -56,7 +48,7 @@ export function printDashboardCredentialsRepairWarningForSetup(
   ));
 }
 
-export function printDashboardCredentialsCreatedForInit(result: DashboardCredentialCreatedOutput): void {
+export function printDashboardCredentialsCreatedForInit(result: DashboardCredentialCreation): void {
   printDashboardCredentialSecretBlock(result, {
     heading: "Dashboard login created:",
     pathLabel: "Credential file:",
@@ -65,7 +57,7 @@ export function printDashboardCredentialsCreatedForInit(result: DashboardCredent
   });
 }
 
-export function printDashboardPasswordReset(result: DashboardCredentialCreatedOutput): void {
+export function printDashboardPasswordReset(result: DashboardCredentialCreation): void {
   printDashboardCredentialSecretBlock(result, {
     heading: "Dashboard password reset.",
     pathLabel: "Credential file saved to",
@@ -75,7 +67,7 @@ export function printDashboardPasswordReset(result: DashboardCredentialCreatedOu
 }
 
 function printDashboardCredentialSecretBlock(
-  result: DashboardCredentialCreatedOutput,
+  result: DashboardCredentialCreation,
   options: {
     heading: string;
     pathLabel: string;

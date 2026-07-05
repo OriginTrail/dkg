@@ -33,6 +33,10 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { printDashboardCredentialsCreatedForInit } from '../dashboard-credential-output.js';
+import type {
+  DashboardCredentialCreation,
+  DashboardCredentialExisting,
+} from '../daemon/dashboard-credentials.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -193,12 +197,9 @@ export function buildInitAutoUpdate(opts: {
   } as AutoUpdateConfig;
 }
 
-export interface InitDashboardCredentialResult {
-  created: boolean;
-  path: string;
-  username: string;
-  password?: string;
-}
+export type InitDashboardCredentialResult =
+  | DashboardCredentialCreation
+  | DashboardCredentialExisting;
 
 export async function ensureDashboardCredentialsForInit(
   enableAuth: boolean,
@@ -217,13 +218,8 @@ export async function ensureDashboardCredentialsForInit(
 export function printCreatedDashboardCredentialsForInit(
   dashboardCredentialResult: InitDashboardCredentialResult | null,
 ): void {
-  if (!dashboardCredentialResult?.created || !dashboardCredentialResult.password) return;
-  printDashboardCredentialsCreatedForInit({
-    created: true,
-    path: dashboardCredentialResult.path,
-    username: dashboardCredentialResult.username,
-    password: dashboardCredentialResult.password,
-  });
+  if (!dashboardCredentialResult?.created) return;
+  printDashboardCredentialsCreatedForInit(dashboardCredentialResult);
 }
 
 export function registerInitCommand(program: Command): void {
