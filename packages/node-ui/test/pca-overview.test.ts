@@ -293,6 +293,46 @@ describe('ConvictionOverview — S1 discovery', () => {
     await unmount();
   });
 
+  it('recovers connected-wallet discovery via Retry after an ERC721 read failure (useConnectedWalletPcas error path)', async () => {
+    // The Retry button is the only user recovery when ERC721 enumeration of
+    // connected-wallet PCAs fails; the extraction moved that path into the hook, so
+    // pin: first read fails -> error banner (not a false "no PCAs") -> Retry bumps
+    // the hook nonce -> the wallet-managed PCA recovers.
+    let balanceCalls = 0;
+    const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+      if (functionName === 'balanceOf') {
+        balanceCalls += 1;
+        if (balanceCalls === 1) throw new Error('rpc unavailable');
+        return 1n;
+      }
+      if (functionName === 'tokenOfOwnerByIndex') return 12n;
+      throw new Error(`unexpected ${functionName}`);
+    });
+    mocks.publicClientFor.mockReturnValue({ readContract });
+    mocks.fetchPca.mockImplementation(async (id: string) => ({ ...snapFixture(id), owner: HW }));
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: HW as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'read PCAs owned by the connected wallet');
+    const errBanner = container.querySelector('[data-testid="pca-wallet-discovery-error"]') as HTMLElement;
+    const retry = Array.from(errBanner.querySelectorAll('button')).find((b) => b.textContent === 'Retry')!;
+    await act(async () => {
+      retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(container, 'wallet-managed');
+    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('PCA #12');
+    expect(balanceCalls).toBeGreaterThanOrEqual(2);
+    await unmount();
+  });
+
   it('edge empty state shows the warning-tone no-discount banner', async () => {
     useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', blockExplorerUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
