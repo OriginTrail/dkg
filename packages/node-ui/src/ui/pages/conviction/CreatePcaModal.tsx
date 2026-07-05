@@ -31,7 +31,6 @@ import {
   formatPcaTrac,
   discountTierForTrac,
   PrimaryNodePicker,
-  type DeviceConfirmStep,
 } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 
@@ -43,15 +42,6 @@ function pctFromBps(bps: number): string {
 }
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
-
-function initialHardwareCreateSteps(): DeviceConfirmStep[] {
-  return [
-    { id: 'approve', label: 'Approve exact TRAC allowance', state: 'pending' },
-    // id normalized to the shared 'action' step (label unchanged); the id is non-visible.
-    { id: 'action', label: 'Sign Create PCA', state: 'pending' },
-    { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
-  ];
-}
 
 /**
  * S2 — Create PCA (single-page, 4 sections for HW owner-key selection; DRIFT-1/2).
@@ -125,7 +115,7 @@ export function CreatePcaModal({
       confirmed: 'Create confirmed on-chain',
       failed: 'Wallet transaction failed',
     },
-    initialSteps: initialHardwareCreateSteps,
+    flow: () => ({ requiresApproval: true, actionLabel: 'Sign Create PCA' }),
   });
   const owner = useOwnerActionSubmitter({ ownerKey, onWalletProgress: createProgress.onProgress });
   const finishCreate = usePcaStore((s) => s.finishCreate);
@@ -487,7 +477,7 @@ export function CreatePcaModal({
         )}
         {hardwareSelected && phase === 'creating' && (
           <DeviceConfirmProgress
-            steps={createProgress.steps.length ? createProgress.steps : initialHardwareCreateSteps()}
+            steps={createProgress.steps.length ? createProgress.steps : createProgress.initialSteps()}
             currentLabel={createProgress.currentLabel}
             blockExplorerUrl={explorer}
           />

@@ -1,25 +1,20 @@
-import type { DeviceConfirmStep } from '../components/Pca/index.js';
 import { describeWalletTxError } from '../web3/walletTxError.js';
+import type { WalletTxFlow } from './useWalletTxProgress.js';
 
 /** The two device-signed owner actions in the PCA detail view. */
 export type DetailDeviceAction = 'topup' | 'remove';
 
 /**
- * Seed template for the detail-view device-confirm progress. Top-up is the
- * allowance-then-action 3-step flow; remove is a single-signature 2-step flow
- * (no approve step).
+ * Device-confirm flow for the detail-view owner actions. Top-up is the
+ * allowance-then-action flow (approve -> action -> confirm); remove is a
+ * single-signature flow (action -> confirm, no approve step). The shared
+ * `Approve exact TRAC allowance` / `Confirm on-chain receipt` labels come from
+ * `useWalletTxProgress` defaults.
  */
-export function initialDetailDeviceSteps(action: DetailDeviceAction): DeviceConfirmStep[] {
+export function detailDeviceFlow(action: DetailDeviceAction): WalletTxFlow {
   return action === 'topup'
-    ? [
-        { id: 'approve', label: 'Approve exact TRAC allowance', state: 'pending' },
-        { id: 'action', label: 'Sign top-up', state: 'pending' },
-        { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
-      ]
-    : [
-        { id: 'action', label: 'Sign remove wallet', state: 'pending' },
-        { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
-      ];
+    ? { requiresApproval: true, actionLabel: 'Sign top-up' }
+    : { requiresApproval: false, actionLabel: 'Sign remove wallet' };
 }
 
 /** Action-step failure copy; a rejected remove gets a "no wallet was removed" message. */

@@ -10,14 +10,37 @@ import type { WalletTxProgressEvent } from '../web3/walletOwnerActionSubmitter.j
  * `currentLabel` — plus the single approve -> action -> confirm reducer that
  * transitions them from the submitter's `WalletTxProgressEvent`s.
  *
- * The reducer is the optional-approve, id-addressed (`.find`) form: the `approve`
- * step is present for allowance-then-action flows (topup / create) and absent for
- * the single-signature remove flow. Labels + the action-step error formatter are
- * injected so each caller keeps its exact copy (asserted verbatim in tests).
+ * The hook OWNS the step ids (`approve?` / `action` / `confirm`): callers describe
+ * the flow with a typed {@link WalletTxFlow} descriptor, not a loose array of
+ * `DeviceConfirmStep`s with magic ids — so there is no hidden id convention to get
+ * wrong (a missing/mis-named `action` step can't slip past the type checker into a
+ * runtime `undefined` deref). The `approve` step is present for allowance-then-action
+ * flows (topup / create) and absent for the single-signature remove flow. Labels +
+ * the action-step error formatter are injected so each caller keeps its exact copy
+ * (asserted verbatim in tests).
  *
  * `variant` (topup/remove/create) is held in a ref, not state, so the reducer
  * closure always reads the latest action without being in a dependency array.
  */
+
+const DEFAULT_APPROVE_STEP_LABEL = 'Approve exact TRAC allowance';
+const DEFAULT_CONFIRM_STEP_LABEL = 'Confirm on-chain receipt';
+
+/**
+ * A canonical device-confirm flow. The hook renders it to the fixed step ids
+ * `approve?` -> `action` -> `confirm`; the caller only names the flow + labels.
+ */
+export interface WalletTxFlow {
+  /** Whether an allowance-approval step precedes the action (topup/create) or not (remove). */
+  requiresApproval: boolean;
+  /** Approve-step label; defaults to "Approve exact TRAC allowance". */
+  approveLabel?: string;
+  /** Action-step label — e.g. "Sign top-up" / "Sign remove wallet" / "Sign Create PCA". */
+  actionLabel: string;
+  /** Confirm-step label; defaults to "Confirm on-chain receipt". */
+  confirmLabel?: string;
+}
+
 export interface WalletTxProgressLabels<V extends string = string> {
   /** Resting label before the sequence starts (also after `reset`). */
   idle: string;
@@ -37,11 +60,8 @@ export interface WalletTxProgressLabels<V extends string = string> {
 
 export interface UseWalletTxProgressOptions<V extends string = string> {
   labels: WalletTxProgressLabels<V>;
-  /**
-   * Seed template for a fresh run. Ids must be `approve` (optional) / `action` /
-   * `confirm`; the `action` step's label is caller-specific.
-   */
-  initialSteps: (variant?: V) => DeviceConfirmStep[];
+  /** The canonical flow for a run; the hook builds the `approve?`/`action`/`confirm` steps + ids. */
+  flow: (variant?: V) => WalletTxFlow;
   /** Approve-step failure copy. Defaults to `describeWalletTxError(err, 'approve')`. */
   describeApproveError?: (err: unknown) => string;
   /** Action-step failure copy. Defaults to `describeWalletTxError(err, 'action')`. */
@@ -57,11 +77,24 @@ export interface WalletTxProgress<V extends string = string> {
   begin: (variant?: V) => void;
   /** Clear the progress (daemon/hot path renders none). */
   reset: () => void;
+  /** The initial all-pending steps for a variant — for a pre-run render fallback. */
+  initialSteps: (variant?: V) => DeviceConfirmStep[];
+}
+
+/** Render a flow descriptor to the canonical `approve?` -> `action` -> `confirm` steps. */
+function buildSteps(flow: WalletTxFlow): DeviceConfirmStep[] {
+  const steps: DeviceConfirmStep[] = [];
+  if (flow.requiresApproval) {
+    steps.push({ id: 'approve', label: flow.approveLabel ?? DEFAULT_APPROVE_STEP_LABEL, state: 'pending' });
+  }
+  steps.push({ id: 'action', label: flow.actionLabel, state: 'pending' });
+  steps.push({ id: 'confirm', label: flow.confirmLabel ?? DEFAULT_CONFIRM_STEP_LABEL, state: 'pending' });
+  return steps;
 }
 
 export function useWalletTxProgress<V extends string = string>({
   labels,
-  initialSteps,
+  flow,
   describeApproveError,
   describeActionError,
 }: UseWalletTxProgressOptions<V>): WalletTxProgress<V> {
@@ -69,6 +102,7 @@ export function useWalletTxProgress<V extends string = string>({
   const [steps, setSteps] = useState<DeviceConfirmStep[]>([]);
   const [currentLabel, setCurrentLabel] = useState<string>(labels.idle);
 
+  const initialSteps = (variant?: V): DeviceConfirmStep[] => buildSteps(flow(variant));
   const approveErrorOf = describeApproveError ?? ((err: unknown) => describeWalletTxError(err, 'approve').message);
   const actionErrorOf =
     describeActionError ?? ((err: unknown) => describeWalletTxError(err, 'action').message);
@@ -148,5 +182,5 @@ export function useWalletTxProgress<V extends string = string>({
     setCurrentLabel(labels.idle);
   };
 
-  return { steps, currentLabel, onProgress, begin, reset };
+  return { steps, currentLabel, onProgress, begin, reset, initialSteps };
 }

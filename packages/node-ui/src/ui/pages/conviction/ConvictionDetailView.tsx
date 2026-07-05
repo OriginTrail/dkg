@@ -4,7 +4,7 @@ import { fetchPca, fetchWalletsBalances, type PcaSnapshot } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import { useWalletBootstrap } from '../../hooks/useWalletBootstrap.js';
-import { initialDetailDeviceSteps, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
+import { detailDeviceFlow, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 import {
@@ -152,7 +152,7 @@ function DetailBody({
       confirmed: 'Transaction confirmed on-chain',
       failed: 'Wallet transaction failed',
     },
-    initialSteps: (v) => initialDetailDeviceSteps(v ?? 'topup'),
+    flow: (v) => detailDeviceFlow(v ?? 'topup'),
     describeActionError: (err, v) => describeDetailWalletError(err, v ?? 'topup'),
   });
   const owner = useOwnerActionSubmitter({
