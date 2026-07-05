@@ -216,9 +216,14 @@ test.describe('WM → SWM → VM via the UI', () => {
     // Migration contract (surface-independent): the assertion's content left
     // WM (blank nodes included), landed in SWM (root + skolemized children),
     // and the memoryLayer marker flipped to SWM.
+    // The promote UI reports success as soon as the request is accepted, but the
+    // WM→SWM store migration lands in oxigraph asynchronously; under a loaded CI
+    // devnet it can exceed 20s (Received: 0 / "Timeout 20000ms exceeded"). Poll to
+    // 60s — matching the VM-publish wait below — so this is a real migration
+    // assertion, not a race against store propagation.
     await expect(async () => {
       expect(await countRootInSharedMemory(run.cgId!, run.rootUri!)).toBeGreaterThan(0);
-    }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
+    }).toPass({ timeout: 60_000, intervals: [1000, 2000, 5000] });
 
     expect(
       await countBlankNodeTriplesInGraph(run.cgId!, run.dataGraph!),
