@@ -930,7 +930,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     ]);
   });
 
-  it('uses an explicit lane failure-backoff policy', async () => {
+  it('uses an explicit lane failure-backoff policy and caps repeated failures', async () => {
     const filters: EventFilter[] = [];
     let calls = 0;
     let now = 0;
@@ -940,7 +940,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
-        if (calls <= 2) throw new Error('rpc down');
+        if (calls <= 3) throw new Error('rpc down');
       },
     } as unknown as ChainAdapter;
     const lane: ChainEventPollerLaneSpec = {
@@ -969,8 +969,13 @@ describe('ChainEventPoller lane runner and cursors', () => {
     await runner.poll();
     now = 30;
     await runner.poll();
+    now = 54;
+    await runner.poll();
+    now = 55;
+    await runner.poll();
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
       [1, 100],
       [1, 100],
       [1, 100],
