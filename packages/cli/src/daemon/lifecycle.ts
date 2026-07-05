@@ -143,9 +143,8 @@ import { createPublicSnapshotStore, createPublisherControlFromStore, startPublis
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   loadTokens,
-  httpAuthGuard,
+  httpAuthGuardResult,
   reconcileValidTokens,
-  type RequestAuthContext,
 } from '../auth.js';
 import { resolveDashboardSseSession } from './dashboard-sse-session.js';
 import {
@@ -3122,11 +3121,9 @@ export async function runDaemonInner(
         if (handledSession) return;
       }
 
-      // Auth guard rejects invalid/missing credentials. Capture the accepted
-      // auth context explicitly so route dispatch and SSE do not depend on the
-      // legacy request-symbol compatibility handoff.
-      let requestAuthContext: RequestAuthContext | undefined;
-      const authAllowed = await httpAuthGuard(
+      // Auth guard rejects invalid/missing credentials and returns the accepted
+      // auth context as the canonical handoff for route dispatch and SSE.
+      const authResult = await httpAuthGuardResult(
         req,
         res,
         authEnabled,
@@ -3135,12 +3132,10 @@ export async function runDaemonInner(
         {
           resolvePrincipal: resolveDashboardPrincipal,
           authSources: [dashboardSessionAuthSource],
-          onRequestAuth: (context) => {
-            requestAuthContext = context;
-          },
         },
       );
-      if (!authAllowed) return;
+      if (!authResult.allowed) return;
+      const requestAuthContext = authResult.requestAuthContext;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
