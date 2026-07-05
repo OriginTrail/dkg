@@ -119,7 +119,9 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
-const HUB_ROTATION_POLL_INTERVAL_MS = DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+// Keep generic Hub binding invalidation responsive for read paths while still
+// replacing four hidden ethers subscription pollers with one owned log poller.
+const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /**
