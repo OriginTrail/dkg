@@ -79,6 +79,16 @@ export interface PcaOwnerAccess {
 }
 
 /**
+ * The write gate as a pure function of the resolved owner mode + wrong-network. The single
+ * source of the `writesEnabled` formula — `resolvePcaOwnerAccess` uses it, and display
+ * consumers that already carry a pre-resolved mode (e.g. PcaAccountCard's
+ * `ownerIsPrimaryWallet` fallback) read the gate here instead of re-deriving the boolean.
+ */
+export function ownerModeWritesEnabled(mode: PcaOwnerMode, wrongNetwork: boolean): boolean {
+  return mode === 'daemon' || (mode === 'wallet' && !wrongNetwork);
+}
+
+/**
  * The one pure owner-access classifier. Sync, side-effect-free, and the single encoding of
  * inv-17 + the wrong-network gate. Both faces of the model (the sync display hook below and
  * the async re-fetching submitter resolver) reduce to this.
@@ -134,7 +144,7 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
   }
 
   const wrongNetwork = walletWrongNetwork;
-  const writesEnabled = mode === 'daemon' || (mode === 'wallet' && !wrongNetwork);
+  const writesEnabled = ownerModeWritesEnabled(mode, wrongNetwork);
   const submitterKind: OwnerActionSubmitterKind =
     mode === 'daemon' ? 'daemon' : mode === 'wallet' ? 'wallet' : 'read-only';
 

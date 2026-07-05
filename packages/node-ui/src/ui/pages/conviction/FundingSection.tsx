@@ -13,7 +13,7 @@ import { usePendingTopUpReconciliation } from '../../pca/usePendingTopUpReconcil
 import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
-import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
+import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
 
 /** Funding — top-up + the W2 ambiguous-broadcast / pending-receipt honesty. */
 export function FundingSection({
@@ -21,8 +21,7 @@ export function FundingSection({
   snapshot,
   ownerTrac,
   explorer,
-  ownerMode,
-  ownerWritesEnabled,
+  access,
   ownerTitle,
   owner,
   deviceProgress,
@@ -32,8 +31,7 @@ export function FundingSection({
   snapshot: PcaSnapshot;
   ownerTrac?: string;
   explorer: string | null;
-  ownerMode: DetailOwnerMode;
-  ownerWritesEnabled: boolean;
+  access: PcaOwnerAccess;
   ownerTitle?: string;
   owner: OwnerActionSubmitter;
   deviceProgress: WalletTxProgress<DetailDeviceAction>;
@@ -50,7 +48,7 @@ export function FundingSection({
   usePendingTopUpReconciliation({ accountId, setFund, refresh });
 
   const runFund = async () => {
-    if (ownerMode === 'wallet') {
+    if (access.mode === 'wallet') {
       deviceProgress.begin('topup');
     } else {
       deviceProgress.reset();
@@ -112,7 +110,7 @@ export function FundingSection({
         });
         return;
       }
-      if (ownerMode === 'wallet') {
+      if (access.mode === 'wallet') {
         const info = describeWalletTxError(
           err,
           err instanceof WalletTxStepError ? err.txStep : err instanceof WalletReceiptWaitError ? err.txStep ?? 'action' : 'action',
@@ -145,7 +143,7 @@ export function FundingSection({
           value={topUp}
           onChange={(e) => setTopUp(e.target.value)}
           placeholder="Top up (TRAC)"
-          disabled={!ownerWritesEnabled || fund.busy || !!topUpPending}
+          disabled={!access.writesEnabled || fund.busy || !!topUpPending}
           aria-label="Top-up amount in TRAC"
         />
         <button
@@ -153,7 +151,7 @@ export function FundingSection({
           className="v10-pca-card-btn primary"
           data-testid="pca-topup-btn"
           onClick={runFund}
-          disabled={!ownerWritesEnabled || fund.busy || !!topUpPending || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
+          disabled={!access.writesEnabled || fund.busy || !!topUpPending || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
           title={ownerTitle}
         >
           {fund.busy ? 'Adding…' : 'Add funds'}

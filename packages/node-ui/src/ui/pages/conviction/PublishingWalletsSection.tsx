@@ -8,7 +8,7 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
-import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
+import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -18,8 +18,7 @@ export function PublishingWalletsSection({
   snapshot,
   wallets,
   explorer,
-  ownerMode,
-  ownerWritesEnabled,
+  access,
   ownerTitle,
   owner,
   deviceProgress,
@@ -29,8 +28,7 @@ export function PublishingWalletsSection({
   snapshot: PcaSnapshot;
   wallets: string[];
   explorer: string | null;
-  ownerMode: DetailOwnerMode;
-  ownerWritesEnabled: boolean;
+  access: PcaOwnerAccess;
   ownerTitle?: string;
   owner: OwnerActionSubmitter;
   deviceProgress: WalletTxProgress<DetailDeviceAction>;
@@ -69,7 +67,7 @@ export function PublishingWalletsSection({
     }
   };
   const runRemove = async (addr: string) => {
-    if (ownerMode === 'wallet') {
+    if (access.mode === 'wallet') {
       deviceProgress.begin('remove');
     } else {
       deviceProgress.reset();
@@ -84,7 +82,7 @@ export function PublishingWalletsSection({
     } catch (err) {
       setRemoveState({
         busy: false,
-        error: ownerMode === 'wallet'
+        error: access.mode === 'wallet'
           ? describeDetailWalletError(err, 'remove')
           : describePcaError(err, { accountId })?.message ?? (err as Error)?.message ?? 'Remove failed.',
         result: null,
@@ -112,7 +110,7 @@ export function PublishingWalletsSection({
               <PcaAgentList
                 agents={agentsForThis.agents}
                 nodeWallets={wallets}
-                ownerIsPrimary={ownerWritesEnabled}
+                ownerIsPrimary={access.writesEnabled}
                 ownerTitle={ownerTitle}
                 confirmRemove={confirmRemove}
                 onAskRemove={(a) => setConfirmRemove(a)}
@@ -138,7 +136,7 @@ export function PublishingWalletsSection({
                   key={w}
                   accountId={accountId}
                   wallet={w}
-                  ownerIsPrimary={ownerWritesEnabled}
+                  ownerIsPrimary={access.writesEnabled}
                   ownerTitle={ownerTitle}
                   confirming={confirmRemove === w}
                   onAskRemove={() => setConfirmRemove(w)}
@@ -164,7 +162,7 @@ export function PublishingWalletsSection({
           type="button"
           className="v10-pca-card-btn primary"
           onClick={() => setApproveOpen(true)}
-          disabled={!ownerWritesEnabled}
+          disabled={!access.writesEnabled}
           title={ownerTitle}
         >
           + Approve publishing wallet

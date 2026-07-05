@@ -6,7 +6,8 @@ import {
   describePcaError,
 } from '../../api.js';
 import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
-import { resolveWalletBinding, planSelfCoverage, type SignableOwner } from '../../pca/walletBinding.js';
+import { usePcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { resolveWalletBinding, planSelfCoverage } from '../../pca/walletBinding.js';
 import {
   approveBatchReducer,
   initialApproveBatchState,
@@ -84,6 +85,10 @@ export function ApproveWalletsModal({
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
   const connectedWallet = useWalletStore((s) => s.address);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  // #1375 — the shared owner-access model for THIS account (drives the managed-target display
+  // predicate + the signer candidates). The async, per-account signerKindForAccount below
+  // deliberately stays a separate re-fetching seam (inv-16 / P4).
+  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet });
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -156,19 +161,8 @@ export function ApproveWalletsModal({
   );
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
-  const targetWalletManaged =
-    !!snapshot?.owner &&
-    !!connectedWallet &&
-    !walletWrongNetwork &&
-    !sameAddress(snapshot.owner, ownerWallet) &&
-    sameAddress(snapshot.owner, connectedWallet);
-  const signableOwners = useMemo<SignableOwner[]>(
-    () => [
-      { address: ownerWallet, kind: 'daemon' },
-      { address: connectedWallet, kind: 'wallet' },
-    ],
-    [connectedWallet, ownerWallet],
-  );
+  const targetWalletManaged = access.mode === 'wallet' && access.writesEnabled;
+  const signableOwners = access.signableOwners;
 
   const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {
     if (!id) return undefined;

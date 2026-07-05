@@ -14,6 +14,7 @@ import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../pca/address.js';
+import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -23,13 +24,6 @@ type OverviewAccount = ResolvedPcaAccount & {
   connectedWallet: string | null;
   walletWrongNetwork: boolean;
 };
-
-function ownerModeFor(owner: string | undefined, primaryWallet: string | undefined, connectedWallet: string | null): PcaAccountOwnerMode {
-  if (!owner) return 'unknown';
-  if (eq(owner, primaryWallet)) return 'daemon';
-  if (connectedWallet && eq(owner, connectedWallet) && !eq(owner, primaryWallet)) return 'wallet';
-  return 'external';
-}
 
 /**
  * S1 Conviction Overview + S7 role-adaptive landing (UX section 5.1/5.7). Role only
@@ -116,13 +110,18 @@ export function ConvictionOverview() {
   const enhancedAccounts = useMemo<OverviewAccount[]>(
     () =>
       accounts.map((account) => {
-        const ownerMode = ownerModeFor(account.snapshot?.owner, primaryWallet, connectedWallet);
-        return {
-          ...account,
-          ownerMode,
+        const access = resolvePcaOwnerAccess({
+          owner: account.snapshot?.owner,
           primaryWallet,
           connectedWallet,
-          walletWrongNetwork: ownerMode === 'wallet' && wrongNetwork,
+          walletWrongNetwork: wrongNetwork,
+        });
+        return {
+          ...account,
+          ownerMode: access.mode,
+          primaryWallet,
+          connectedWallet,
+          walletWrongNetwork: access.mode === 'wallet' && access.wrongNetwork,
         };
       }),
     [accounts, connectedWallet, primaryWallet, wrongNetwork],

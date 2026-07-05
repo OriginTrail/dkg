@@ -8,8 +8,11 @@ import {
 } from '../../components/Pca/index.js';
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
+import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
 
-export type PcaAccountOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
+/** The owner-mode union — re-exported from the owner-access model (no longer re-declared
+ *  here) so existing importers keep a stable name. */
+export type PcaAccountOwnerMode = PcaOwnerMode;
 
 export type PcaAccountCardAccount = ResolvedPcaAccount & {
   ownerMode?: PcaAccountOwnerMode;
@@ -95,7 +98,7 @@ export function PcaAccountCard({
     blockExplorerUrl ? `${blockExplorerUrl}/address/${snapshot.owner}` : undefined;
   const ownerMode: PcaAccountOwnerMode = account.ownerMode ?? (ownerIsPrimaryWallet ? 'daemon' : 'external');
   const walletWrongNetwork = ownerMode === 'wallet' && !!account.walletWrongNetwork;
-  const ownerWritesEnabled = ownerMode === 'daemon' || (ownerMode === 'wallet' && !walletWrongNetwork);
+  const ownerWritesEnabled = ownerModeWritesEnabled(ownerMode, walletWrongNetwork);
   const connectedAs = account.connectedWallet;
   const ownerActionTitle =
     ownerMode === 'daemon'
