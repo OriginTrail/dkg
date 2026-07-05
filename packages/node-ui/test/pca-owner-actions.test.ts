@@ -300,4 +300,22 @@ describe('useOwnerActionSubmitter access-path (resolve signer once)', () => {
     expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
     expect(mocks.walletSubmitter.settle).not.toHaveBeenCalled();
   });
+
+  it('UNKNOWN access falls back to the RESOLVING path (re-fetches → self-heals), not pinned read-only', async () => {
+    // A genuinely daemon-owned account whose caller snapshot transiently missed (or a
+    // just-created replacement PCA not yet chain-readable) ⇒ access.mode==='unknown'. The
+    // write must re-fetch + resolve daemon, NOT fail read-only forever on the access path.
+    mocks.fetchPca.mockResolvedValue({ owner: HOT });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
+    mocks.pcaAddAgent.mockResolvedValue({ registered: true });
+    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HOT });
+    expect(access.mode).toBe('unknown');
+
+    await expect(useOwnerActionSubmitter({ accountId: '7', access }).registerAgent('7', AGENT))
+      .resolves.toEqual({ registered: true });
+
+    // Fell back to the resolving path: RE-FETCHED the owner and resolved daemon → registered.
+    expect(mocks.fetchPca).toHaveBeenCalledWith('7');
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('7', AGENT);
+  });
 });

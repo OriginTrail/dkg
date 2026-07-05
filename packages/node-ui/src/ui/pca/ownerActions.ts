@@ -251,8 +251,12 @@ function accessOwnerActionSubmitter(access: PcaOwnerAccess, args: OwnerActionSub
  *
  * When `access` is supplied (item 3 / #1375), the submitter is resolved ONCE from
  * `access.submitterKind` and the manage writes submit directly — no per-write re-fetch.
+ * EXCEPT when `access.mode === 'unknown'` (the caller's PCA snapshot hasn't loaded, or a
+ * just-created replacement PCA isn't chain-readable yet): fall back to the RESOLVING path so
+ * a write re-fetches the owner and self-heals on retry. Pinning the access-path there would
+ * stick submitterKind at 'read-only' and fail every click on a genuinely daemon-owned account.
  */
 export function useOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
-  if (args.access) return accessOwnerActionSubmitter(args.access, args);
+  if (args.access && args.access.mode !== 'unknown') return accessOwnerActionSubmitter(args.access, args);
   return resolvingOwnerActionSubmitter(args);
 }
