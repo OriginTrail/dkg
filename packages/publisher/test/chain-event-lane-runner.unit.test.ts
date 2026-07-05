@@ -3,6 +3,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence } from '../src/chain-event-poller.js';
+import { ChainEventLaneRunner, type ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import type { JournalEntry } from '../src/publish-journal.js';
 
@@ -926,6 +927,53 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(saveCalls).toEqual([
       { lane: 'contextGraphDiscovery', block: 100 },
       { lane: 'contextGraphDiscovery', block: 200 },
+    ]);
+  });
+
+  it('uses an explicit lane failure-backoff policy', async () => {
+    const filters: EventFilter[] = [];
+    let calls = 0;
+    let now = 0;
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 100,
+      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
+        filters.push(f);
+        calls++;
+        if (calls <= 2) throw new Error('rpc down');
+      },
+    } as unknown as ChainAdapter;
+    const lane: ChainEventPollerLaneSpec = {
+      name: 'contextGraphDiscovery',
+      enabled: () => true,
+      eventTypes: () => ['ContextGraphCreated'],
+      requiresFullHistory: () => false,
+      cadenceMs: 20,
+      failureBackoff: { initialMs: 10, maxMs: 25 },
+      dispatch: async () => { /* sink */ },
+    };
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [lane],
+      maxRange: 1000,
+      clock: () => now,
+      log: { info() {}, warn() {}, error() {} } as any,
+    });
+
+    await runner.poll();
+    now = 9;
+    await runner.poll();
+    now = 10;
+    await runner.poll();
+    now = 29;
+    await runner.poll();
+    now = 30;
+    await runner.poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
     ]);
   });
 

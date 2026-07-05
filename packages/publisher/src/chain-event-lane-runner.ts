@@ -27,6 +27,11 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
+export interface ChainEventPollerFailureBackoffPolicy {
+  initialMs?: number;
+  maxMs?: number;
+}
+
 export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
   enabled(): boolean;
@@ -34,9 +39,15 @@ export interface ChainEventPollerLaneSpec {
   requiresFullHistory(): boolean;
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
+  failureBackoff?: ChainEventPollerFailureBackoffPolicy;
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
+}
+
+interface NormalizedFailureBackoffPolicy {
+  initialMs: number;
+  maxMs: number;
 }
 
 interface ChainEventPollerLaneRuntime {
@@ -46,6 +57,7 @@ interface ChainEventPollerLaneRuntime {
   requiresFullHistory: boolean;
   canUseLegacyAggregateCursor: boolean;
   liveSeedLookbackBlocks: number;
+  failureBackoff: NormalizedFailureBackoffPolicy;
 }
 
 interface ChainEventPollerLaneScanResult {
@@ -53,6 +65,11 @@ interface ChainEventPollerLaneScanResult {
   blockNumber: number;
   advanced: boolean;
 }
+
+type ChainEventLaneScheduleOutcome =
+  | { kind: 'noWork'; now: number }
+  | { kind: 'success'; now: number; caughtUp: boolean }
+  | { kind: 'failure'; now: number };
 
 export interface ChainEventLaneRunnerConfig {
   chain: ChainAdapter;
@@ -126,6 +143,7 @@ export class ChainEventLaneRunner {
         requiresFullHistory,
         canUseLegacyAggregateCursor: spec.canUseLegacyAggregateCursor?.() ?? !requiresFullHistory,
         liveSeedLookbackBlocks: this.liveSeedLookbackBlocks(spec),
+        failureBackoff: this.failureBackoffPolicy(spec),
       }];
     });
   }
@@ -135,6 +153,24 @@ export class ChainEventLaneRunner {
     return Number.isFinite(lookback) && lookback >= 0
       ? Math.floor(lookback)
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
+  }
+
+  private failureBackoffPolicy(spec: ChainEventPollerLaneSpec): NormalizedFailureBackoffPolicy {
+    const initialMs = this.scheduleDelayMs(
+      spec.failureBackoff?.initialMs,
+      Math.max(FAILURE_BACKOFF_INITIAL_MS, spec.cadenceMs),
+    );
+    const maxMs = Math.max(
+      initialMs,
+      this.scheduleDelayMs(spec.failureBackoff?.maxMs, FAILURE_BACKOFF_MAX_MS),
+    );
+    return { initialMs, maxMs };
+  }
+
+  private scheduleDelayMs(value: number | undefined, fallback: number): number {
+    return Number.isFinite(value) && value! >= 0
+      ? Math.floor(value!)
+      : fallback;
   }
 
   private stateFor(lane: ChainEventPollerLane): ChainEventPollerLaneState {
@@ -251,7 +287,7 @@ export class ChainEventLaneRunner {
       : fromBlock + this.maxRange - 1;
 
     if (fromBlock > upperBound) {
-      state.nextRunAtMs = now + lane.spec.cadenceMs;
+      this.applyLaneSchedule(lane, { kind: 'noWork', now });
       return { lane, blockNumber: state.lastBlock, advanced: false };
     }
 
@@ -269,26 +305,33 @@ export class ChainEventLaneRunner {
       }
 
       state.lastBlock = upperBound;
-      state.failureBackoffMs = undefined;
       advanced = true;
+      this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.backoffFailedLane(lane, now);
-    } finally {
-      if (advanced) {
-        state.nextRunAtMs = caughtUp ? now + lane.spec.cadenceMs : undefined;
-      }
+      this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
     return { lane, blockNumber: state.lastBlock, advanced };
   }
 
-  private backoffFailedLane(lane: ChainEventPollerLaneRuntime, now: number): void {
-    const previous = lane.state.failureBackoffMs;
+  private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
+    const state = lane.state;
+    if (outcome.kind === 'noWork') {
+      state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
+      return;
+    }
+    if (outcome.kind === 'success') {
+      state.failureBackoffMs = undefined;
+      state.nextRunAtMs = outcome.caughtUp ? outcome.now + lane.spec.cadenceMs : undefined;
+      return;
+    }
+
+    const previous = state.failureBackoffMs;
     const next = previous == null
-      ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)
-      : Math.min(previous * 2, FAILURE_BACKOFF_MAX_MS);
-    lane.state.failureBackoffMs = next;
-    lane.state.nextRunAtMs = now + next;
+      ? lane.failureBackoff.initialMs
+      : Math.min(previous * 2, lane.failureBackoff.maxMs);
+    state.failureBackoffMs = next;
+    state.nextRunAtMs = outcome.now + next;
   }
 
   private applyHistoryModeTransition(
