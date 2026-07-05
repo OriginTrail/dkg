@@ -562,6 +562,10 @@ jobs:
             if (!existsSync(assetPath)) throw new Error(`Missing referenced UI asset: ${ref}`);
           }
           NODE
+      - name: Install Playwright Chromium for production-static smoke
+        run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: "node-ui production-static Playwright smoke"
+        run: pnpm --filter @origintrail-official/dkg-node-ui test:e2e:static
 
   # node-ui Playwright e2e — REAL NODE, NO MOCKS. The suite boots a live
   # 4-node devnet (Hardhat + four DKG daemons) via Playwright's `webServer`

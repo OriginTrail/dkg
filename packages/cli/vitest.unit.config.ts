@@ -27,6 +27,9 @@ export default defineConfig({
           'test/auth-dashboard-command.test.ts',
           'test/dashboard-credentials.test.ts',
           'test/dashboard-credential-setup.test.ts',
+          'test/dashboard-session-policy.test.ts',
+          'test/dashboard-session-exchange.test.ts',
+          'test/dashboard-login-attempt-limiter.test.ts',
           'test/dashboard-session.test.ts',
           'test/sse-hub.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means

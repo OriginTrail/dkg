@@ -61,6 +61,10 @@ vi.mock('../src/ui/views/ContextGraphPrimerView.js', () => ({
   ContextGraphPrimerView: () => React.createElement('div', { 'data-testid': 'primer-view' }, 'Primer'),
 }));
 
+vi.mock('../src/ui/pages/Network.js', () => ({
+  NetworkPage: () => React.createElement('div', { 'data-testid': 'network-page' }, 'Network'),
+}));
+
 const {
   resetDashboardSession,
   useAuthenticatedDashboardSession,
@@ -89,6 +93,7 @@ describe('Context Graph primer route', () => {
     resetDashboardSession();
     document.body.innerHTML = '';
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it('activates the primer tab before the shell renders the dashboard', async () => {
@@ -109,5 +114,36 @@ describe('Context Graph primer route', () => {
     expect(document.querySelector('[data-testid="primer-view"]')).toBeTruthy();
     expect(useTabsStore.getState().activeTabId).toBe('context-graph-primer');
     expect(useTabsStore.getState().tabs.some(tab => tab.id === 'context-graph-primer')).toBe(true);
+  });
+
+  it('keeps protected dashboard routes behind the shared session boundary', async () => {
+    const container = document.getElementById('root');
+    if (!container) throw new Error('Missing root');
+    root = createRoot(container);
+    resetDashboardSession();
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url === '/api/dashboard/session/status') {
+        return new Response(JSON.stringify({ authenticated: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    await act(async () => {
+      root!.render(
+        React.createElement(
+          MemoryRouter,
+          { initialEntries: ['/network'] },
+          React.createElement(App),
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(document.querySelector('[data-testid="dashboard-session-unlock"]')).toBeTruthy();
+    expect(document.querySelector('[data-testid="network-page"]')).toBeNull();
   });
 });

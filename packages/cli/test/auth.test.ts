@@ -21,6 +21,7 @@ import {
 } from '../src/daemon/dashboard-session-cookie.js';
 import { resolveDashboardSseSession } from '../src/daemon/dashboard-sse-session.js';
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
+import { resolveRequestPrincipal, resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -237,6 +238,61 @@ describe('resolveRequestAuthDecision', () => {
 
     expect(decision).toBeNull();
     expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe('resolveRouteRequestIdentity', () => {
+  const agent = {
+    resolveAgentByToken: (token: string | undefined) => token === 'agent-token'
+      ? 'did:dkg:agent:token'
+      : undefined,
+    resolveAgentAddress: (token: string | undefined) => token === 'agent-token'
+      ? 'did:dkg:agent:token'
+      : 'did:dkg:agent:default',
+  };
+
+  it('derives compatibility token and principal from an auth-guard context', () => {
+    const req = { headers: {} } as IncomingMessage;
+    setRequestAuthContext(req, {
+      source: 'dashboard-session',
+      internalCredentialToken: 'agent-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: 'session-a',
+        source: 'login',
+        expiresAt: Date.now() + 60_000,
+      },
+    });
+
+    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+      credentialToken: 'agent-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
+      requestAuth: { source: 'dashboard-session' },
+    });
+  });
+
+  it('falls back to bearer credentials for compatibility callers without resolved auth context', () => {
+    const req = {
+      headers: { authorization: 'Bearer agent-token' },
+    } as IncomingMessage;
+
+    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+      credentialToken: 'agent-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:token' },
+      requestAuth: undefined,
+    });
+  });
+
+  it('uses the canonical principal helper for token-backed and node-admin callers', () => {
+    expect(resolveRequestPrincipal(agent, 'agent-token')).toEqual({
+      kind: 'agent',
+      agentAddress: 'did:dkg:agent:token',
+    });
+    expect(resolveRequestPrincipal(agent, undefined)).toEqual({
+      kind: 'node-admin',
+      agentAddress: 'did:dkg:agent:default',
+    });
   });
 });
 
