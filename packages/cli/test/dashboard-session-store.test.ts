@@ -2,22 +2,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { IncomingMessage, Server } from 'node:http';
 import {
   DASHBOARD_SESSION_COOKIE,
-  DashboardLoginAttemptLimiter,
   DashboardSessionStore,
-  type DashboardLoginVerification,
 } from '../src/daemon/dashboard-session.js';
-import { getDashboardSessionCookie, setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
-import {
-  AGENT_TOKEN,
-  DEFAULT_AGENT_ADDRESS,
-  ROTATED_TOKEN,
-  TOKEN_AGENT_ADDRESS,
-  VALID_TOKEN,
-  cookieFrom,
-  loopbackBootstrapInit,
-  rawRequest,
-  startDashboardSessionServer as startServer,
-} from './dashboard-session-test-harness.js';
+import { getDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
+import { VALID_TOKEN } from './dashboard-session-test-harness.js';
 
 describe('dashboard session store invariants', () => {
   let server: Server | undefined;

@@ -3135,7 +3135,6 @@ export async function runDaemonInner(
         },
       );
       if (!authResult.allowed) return;
-      const requestAuthContext = authResult.requestAuthContext;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked
@@ -3164,7 +3163,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession, requestAuthContext);
+        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession);
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3279,7 +3278,6 @@ export async function runDaemonInner(
         admissionStats,
         emitMemoryGraphChanged,
         emitNotification,
-        requestAuthContext,
       );
     } catch (err: any) {
       // Single top-level error→HTTP mapping (in http-utils.ts

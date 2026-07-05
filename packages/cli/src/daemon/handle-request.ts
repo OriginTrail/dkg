@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, type RequestAuthContext } from '../auth.js';
+import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -367,12 +367,11 @@ export async function handleRequest(
   admission: AdmissionStatsView,
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
   emitNotification?: (event: NotificationSseEvent) => void,
-  requestAuthContext?: RequestAuthContext,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  const requestIdentity = resolveRouteRequestIdentity(req, agent, requestAuthContext);
+  const requestIdentity = resolveRouteRequestIdentity(req, agent);
   const requestAuth = requestIdentity.requestAuth;
   const requestToken = requestIdentity.credentialToken;
   const requestAgentAddress = requestIdentity.principal.agentAddress;

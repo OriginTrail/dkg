@@ -360,31 +360,6 @@ describe('resolveRouteRequestIdentity', () => {
     });
   });
 
-  it('prefers an explicit auth context over the legacy request-symbol context', () => {
-    const req = { headers: { authorization: 'Bearer agent-token' } } as IncomingMessage;
-    setRequestAuthContext(req, {
-      source: 'authorization-header',
-      token: 'legacy-token',
-      principal: { kind: 'node-admin', agentAddress: 'did:dkg:agent:legacy' },
-      csrf: { required: false, validated: false },
-    });
-
-    expect(resolveRouteRequestIdentity(req, agent, {
-      source: 'dashboard-session',
-      internalCredentialToken: 'explicit-token',
-      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:explicit' },
-      csrf: { required: false, validated: false },
-      dashboardSession: {
-        sessionId: 'session-explicit',
-        source: 'login',
-        expiresAt: Date.now() + 60_000,
-      },
-    })).toMatchObject({
-      credentialToken: 'explicit-token',
-      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:explicit' },
-      requestAuth: { source: 'dashboard-session' },
-    });
-  });
 
   it('falls back to bearer credentials for compatibility callers without resolved auth context', () => {
     const req = {
@@ -483,14 +458,13 @@ describe('httpAuthGuard', () => {
         authSources,
       });
       if (!authResult.allowed) return;
-      const requestAuthContext = authResult.requestAuthContext;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
       res.end(JSON.stringify({
         ok: true,
-        requestAuth: requestAuthContext ?? null,
+        requestAuth: getRequestAuthContext(req) ?? null,
         dashboardSseSession: url.pathname === '/api/events'
-          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse, requestAuthContext) ?? null
+          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
           : null,
       }));
     });

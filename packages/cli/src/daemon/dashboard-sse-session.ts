@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import { getRequestAuthContext, type RequestAuthContext } from "../auth.js";
+import { getRequestAuthContext } from "../auth.js";
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import type { SseDashboardSession } from "./sse-hub.js";
 
@@ -10,9 +10,8 @@ export type DashboardSseSessionAuthenticator = (
 export function resolveDashboardSseSession(
   req: IncomingMessage,
   authenticateDashboardSession: DashboardSseSessionAuthenticator,
-  explicitRequestAuth?: RequestAuthContext,
 ): SseDashboardSession | undefined {
-  const requestAuth = explicitRequestAuth ?? getRequestAuthContext(req);
+  const requestAuth = getRequestAuthContext(req);
   if (requestAuth?.source !== "dashboard-session") return undefined;
   const activeSession = authenticateDashboardSession(req);
   if (

@@ -1,6 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Server } from 'node:http';
-import { DashboardLoginAttemptLimiter } from '../src/daemon/dashboard-session.js';
 import {
   AGENT_TOKEN,
   DEFAULT_AGENT_ADDRESS,

@@ -9,7 +9,7 @@ import {
   type DashboardLoginOptions,
 } from '../src/daemon/dashboard-session.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
-import { httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
+import { getRequestAuthContext, httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
 
 export const VALID_TOKEN = 'dashboard-backed-token';
 export const ROTATED_TOKEN = 'dashboard-rotated-token';
@@ -84,7 +84,6 @@ export async function startDashboardSessionServer(options: {
       authSources: [dashboardAuthSource],
     });
     if (!authResult.allowed) return;
-    const requestAuthContext = authResult.requestAuthContext;
     if (
       url.pathname === '/api/agent/identity' ||
       /^\/api\/context-graph\/[^/]+\/sign-join$/.test(url.pathname)
@@ -118,7 +117,6 @@ export async function startDashboardSessionServer(options: {
         {} as any,
         undefined,
         undefined,
-        requestAuthContext,
       );
       return;
     }
@@ -126,7 +124,7 @@ export async function startDashboardSessionServer(options: {
     res.end(JSON.stringify({
       ok: true,
       authorization: req.headers.authorization ?? null,
-      requestAuth: requestAuthContext ?? null,
+      requestAuth: getRequestAuthContext(req) ?? null,
     }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

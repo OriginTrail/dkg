@@ -1,21 +1,12 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { Server } from 'node:http';
 import {
-  DASHBOARD_SESSION_COOKIE,
-  DashboardLoginAttemptLimiter,
-  DashboardSessionStore,
-  type DashboardLoginVerification,
-} from '../src/daemon/dashboard-session.js';
-import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
-import {
   AGENT_TOKEN,
   DEFAULT_AGENT_ADDRESS,
-  ROTATED_TOKEN,
   TOKEN_AGENT_ADDRESS,
   VALID_TOKEN,
   cookieFrom,
   loopbackBootstrapInit,
-  rawRequest,
   startDashboardSessionServer as startServer,
 } from './dashboard-session-test-harness.js';
 
