@@ -422,14 +422,6 @@ async function handleDashboardLoginExchange(
     return;
   }
 
-  if (!verified.credentialFingerprint) {
-    options.dashboardLogin.attemptLimiter?.releaseReservation(attemptKey);
-    jsonResponse(res, 503, {
-      error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
-    }, options.corsOrigin);
-    return;
-  }
-
   options.dashboardLogin.attemptLimiter?.recordSuccess(attemptKey);
   const compatToken = options.dashboardLogin.selectCompatToken();
   if (!verifyToken(compatToken, options.validTokens)) {

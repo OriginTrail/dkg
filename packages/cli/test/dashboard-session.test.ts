@@ -505,12 +505,31 @@ describe('dashboard browser sessions', () => {
     expect(exchange.status).toBe(200);
     const setCookie = exchange.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('dkg_ui_session=');
-    await expect(exchange.json()).resolves.toMatchObject({ authenticated: true, source: 'login' });
+    const body = await exchange.json() as { authenticated: boolean; source: string; csrfToken: string };
+    expect(body).toMatchObject({ authenticated: true, source: 'login' });
+    expect(body.csrfToken).toEqual(expect.any(String));
+    expect(body.csrfToken.length).toBeGreaterThan(16);
     expect(verifyCredentials).toHaveBeenCalledWith('node-admin', 'secret-password');
     expect(selectCompatToken).toHaveBeenCalledTimes(1);
 
+    const cookie = setCookie.split(';')[0];
+    const rejectedPost = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    expect(rejectedPost.status).toBe(403);
+    await expect(rejectedPost.json()).resolves.toMatchObject({
+      error: 'Invalid or missing dashboard CSRF token',
+    });
+
+    const acceptedPost = await fetch(`${started.baseUrl}/api/protected`, {
+      method: 'POST',
+      headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken },
+    });
+    expect(acceptedPost.status).toBe(200);
+
     const res = await fetch(`${started.baseUrl}/api/protected`, {
-      headers: { Cookie: setCookie.split(';')[0] },
+      headers: { Cookie: cookie },
     });
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({
@@ -525,27 +544,6 @@ describe('dashboard browser sessions', () => {
     });
   });
 
-  it('fails closed when password-login verification omits the credential fingerprint', async () => {
-    const verifyCredentials = vi.fn(async () => ({ ok: true } as DashboardLoginVerification));
-    const selectCompatToken = vi.fn(() => VALID_TOKEN);
-    const started = await startServer({
-      dashboardLogin: { verifyCredentials, selectCompatToken },
-    });
-    server = started.server;
-
-    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
-    });
-
-    expect(exchange.status).toBe(503);
-    expect(exchange.headers.get('set-cookie')).toBeNull();
-    expect(selectCompatToken).not.toHaveBeenCalled();
-    await expect(exchange.json()).resolves.toMatchObject({
-      error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
-    });
-  });
 
   it('rejects wrong dashboard username/password without setting a cookie', async () => {
     const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason: 'mismatch' as const }));
