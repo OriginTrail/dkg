@@ -89,7 +89,7 @@ describe('DashboardSessionGate', () => {
     useAuthenticatedDashboardSession();
   });
 
-  it('requires operator token exchange before protected API calls run', async () => {
+  it('requires dashboard username/password sign-in before protected API calls run', async () => {
     await act(async () => {
       root!.render(React.createElement(DashboardSessionGate, null, React.createElement(ProtectedProbe)));
     });
@@ -101,12 +101,16 @@ describe('DashboardSessionGate', () => {
       'GET /api/dashboard/session/status',
     ]);
 
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement | null;
+    expect(container.textContent).toContain('Sign in to DKG Node Dashboard');
+    expect(container.textContent).toContain("using this daemon's DKG_HOME");
+    const usernameInput = container.querySelector('input[type="text"]') as HTMLInputElement | null;
+    const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null;
     const form = container.querySelector('form') as HTMLFormElement | null;
-    if (!input || !form) throw new Error('unlock form missing');
+    if (!usernameInput || !passwordInput || !form) throw new Error('login form missing');
+    expect(usernameInput.value).toBe('node-admin');
 
     await act(async () => {
-      setInputValue(input, 'operator-token');
+      setInputValue(passwordInput, 'secret-password');
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -115,12 +119,12 @@ describe('DashboardSessionGate', () => {
 
     const exchange = calls.find((call) => call.url === '/api/dashboard/session/exchange');
     expect(exchange?.method).toBe('POST');
-    expect(exchange?.body).toBe(JSON.stringify({ token: 'operator-token' }));
+    expect(exchange?.body).toBe(JSON.stringify({ username: 'node-admin', password: 'secret-password' }));
 
     await act(async () => {
       resolveExchange?.(new Response(JSON.stringify({
         authenticated: true,
-        source: 'exchange',
+        source: 'login',
         csrfToken: 'csrf-remote',
         expiresAt: Date.now() + 60_000,
       }), {
@@ -136,18 +140,18 @@ describe('DashboardSessionGate', () => {
     expect(calls.some((call) => call.url === '/api/status')).toBe(true);
   });
 
-  it('keeps the unlock gate active and re-enables submit after a failed token exchange', async () => {
+  it('keeps the login gate active and re-enables submit after failed credentials', async () => {
     await act(async () => {
       root!.render(React.createElement(DashboardSessionGate, null, React.createElement(ProtectedProbe)));
     });
     await flush();
 
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement | null;
+    const passwordInput = container.querySelector('input[type="password"]') as HTMLInputElement | null;
     const form = container.querySelector('form') as HTMLFormElement | null;
-    if (!input || !form) throw new Error('unlock form missing');
+    if (!passwordInput || !form) throw new Error('login form missing');
 
     await act(async () => {
-      setInputValue(input, 'wrong-token');
+      setInputValue(passwordInput, 'wrong-password');
       form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -156,11 +160,11 @@ describe('DashboardSessionGate', () => {
 
     const exchange = calls.find((call) => call.url === '/api/dashboard/session/exchange');
     expect(exchange?.method).toBe('POST');
-    expect(exchange?.body).toBe(JSON.stringify({ token: 'wrong-token' }));
+    expect(exchange?.body).toBe(JSON.stringify({ username: 'node-admin', password: 'wrong-password' }));
 
     await act(async () => {
       resolveExchange?.(new Response(JSON.stringify({
-        error: 'Invalid dashboard session token',
+        error: 'Invalid dashboard username or password',
       }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -171,9 +175,9 @@ describe('DashboardSessionGate', () => {
 
     const alert = container.querySelector('[role="alert"]');
     const submit = container.querySelector('button[type="submit"]') as HTMLButtonElement | null;
-    expect(alert?.textContent).toContain('Invalid dashboard session token');
+    expect(alert?.textContent).toContain('Invalid dashboard username or password');
     expect(submit?.disabled).toBe(false);
-    expect(submit?.textContent).toBe('Unlock');
+    expect(submit?.textContent).toBe('Sign in');
     expect(container.querySelector('[data-testid="dashboard-session-unlock"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="protected-probe"]')).toBeNull();
     expect(calls.some((call) => call.url === '/api/status')).toBe(false);

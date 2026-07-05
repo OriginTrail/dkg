@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
-import type { runSetup as RunSetupFn } from '@origintrail-official/dkg-adapter-openclaw';
 import { assertSelectableNetwork } from './config.js';
+import { ensureDashboardCredentialsForSetup } from './dashboard-credential-setup.js';
 
 /**
  * Options surface for the `dkg openclaw setup` subcommand as parsed by
@@ -23,7 +23,13 @@ export interface OpenClawSetupCliOptions {
 
 export interface OpenClawSetupActionDeps {
   /** Adapter's `runSetup`. Injectable so tests can stub without spawning a CLI. */
-  runSetup: typeof RunSetupFn;
+  runSetup: (
+    opts: OpenClawSetupCliOptions,
+    runDeps?: {
+      ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+      loadOpWallets?: (dir: string) => Promise<unknown>;
+    },
+  ) => Promise<void>;
 }
 
 /**
@@ -42,6 +48,8 @@ export async function openclawSetupAction(
   // adapter eagerly creates wallets before the daemon starts (issue #1306)
   // without the adapter package depending on dkg-agent.
   await deps.runSetup(opts, {
+    ensureDashboardCredentials: (dkgHome: string) =>
+      ensureDashboardCredentialsForSetup(dkgHome),
     loadOpWallets: async (dir: string) => {
       const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
       return loadOpWallets(dir);

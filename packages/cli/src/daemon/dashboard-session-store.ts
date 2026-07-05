@@ -2,20 +2,32 @@ import { createHash, randomBytes } from "node:crypto";
 
 export const DASHBOARD_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
-export interface DashboardSessionRecord {
+export type DashboardSessionSource = "loopback" | "exchange" | "login";
+export type NonLoginDashboardSessionSource = Exclude<DashboardSessionSource, "login">;
+
+export type DashboardSessionRecord =
+  | DashboardSessionBaseRecord<NonLoginDashboardSessionSource>
+  | (DashboardSessionBaseRecord<"login"> & { credentialFingerprint: string });
+
+interface DashboardSessionBaseRecord<TSource extends DashboardSessionSource> {
   compatToken: string;
   csrfToken: string;
-  source: "loopback" | "exchange";
+  source: TSource;
   issuedAt: number;
   expiresAt: number;
   lastUsedAt: number;
 }
 
-export interface AuthenticatedDashboardSession {
+export type AuthenticatedDashboardSession =
+  | AuthenticatedDashboardSessionBase<NonLoginDashboardSessionSource>
+  | (AuthenticatedDashboardSessionBase<"login"> & { credentialFingerprint: string });
+
+interface AuthenticatedDashboardSessionBase<TSource extends DashboardSessionSource> {
   sessionId: string;
   compatToken: string;
   csrfToken: string;
-  source: DashboardSessionRecord["source"];
+  source: TSource;
+  issuedAt: number;
   expiresAt: number;
 }
 
@@ -24,14 +36,13 @@ export class DashboardSessionStore {
 
   create(
     compatToken: string,
-    source: DashboardSessionRecord["source"],
+    source: NonLoginDashboardSessionSource,
     now = Date.now(),
   ): {
     sessionId: string;
     record: DashboardSessionRecord;
   } {
     this.prune(now);
-    const sessionId = randomBytes(32).toString("base64url");
     const record: DashboardSessionRecord = {
       compatToken,
       csrfToken: randomBytes(32).toString("base64url"),
@@ -40,8 +51,28 @@ export class DashboardSessionStore {
       expiresAt: now + DASHBOARD_SESSION_TTL_MS,
       lastUsedAt: now,
     };
-    this.sessions.set(hashSessionId(sessionId), record);
-    return { sessionId, record };
+    return this.storeRecord(record);
+  }
+
+  createLoginSession(
+    compatToken: string,
+    credentialFingerprint: string,
+    now = Date.now(),
+  ): {
+    sessionId: string;
+    record: DashboardSessionRecord;
+  } {
+    this.prune(now);
+    const record: DashboardSessionRecord = {
+      compatToken,
+      csrfToken: randomBytes(32).toString("base64url"),
+      source: "login",
+      credentialFingerprint,
+      issuedAt: now,
+      expiresAt: now + DASHBOARD_SESSION_TTL_MS,
+      lastUsedAt: now,
+    };
+    return this.storeRecord(record);
   }
 
   authenticateSessionId(sessionId: string | null | undefined, now = Date.now()): AuthenticatedDashboardSession | null {
@@ -50,18 +81,38 @@ export class DashboardSessionStore {
     const record = this.sessions.get(hashSessionId(sessionId));
     if (!record || record.expiresAt <= now) return null;
     record.lastUsedAt = now;
-    return {
+    const authenticated = {
       sessionId,
       compatToken: record.compatToken,
       csrfToken: record.csrfToken,
-      source: record.source,
+      issuedAt: record.issuedAt,
       expiresAt: record.expiresAt,
+    };
+    if (record.source === "login") {
+      return {
+        ...authenticated,
+        source: "login",
+        credentialFingerprint: record.credentialFingerprint,
+      };
+    }
+    return {
+      ...authenticated,
+      source: record.source,
     };
   }
 
   revoke(sessionId: string | null | undefined): void {
     if (!sessionId) return;
     this.sessions.delete(hashSessionId(sessionId));
+  }
+
+  private storeRecord(record: DashboardSessionRecord): {
+    sessionId: string;
+    record: DashboardSessionRecord;
+  } {
+    const sessionId = randomBytes(32).toString("base64url");
+    this.sessions.set(hashSessionId(sessionId), record);
+    return { sessionId, record };
   }
 
   private prune(now: number): void {

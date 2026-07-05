@@ -91,9 +91,19 @@ button:focus:not(:focus-visible) { outline: none; }
 
 .v10-session-unlock-copy p,
 .v10-session-token-field span,
+.v10-session-reset-copy,
 .v10-session-error {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.v10-session-reset-copy {
+  margin: -4px 0 0;
+  line-height: 1.45;
+}
+
+.v10-session-reset-copy code {
+  color: var(--text-primary);
 }
 
 .v10-session-token-field {

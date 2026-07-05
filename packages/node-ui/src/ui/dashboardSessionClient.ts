@@ -69,6 +69,17 @@ export async function ensureDashboardSession(): Promise<DashboardSessionStatus> 
 }
 
 export async function exchangeDashboardSession(token: string): Promise<DashboardSessionStatus> {
+  return postDashboardSessionExchange({ token }, 'Dashboard unlock failed');
+}
+
+export async function loginDashboardSession(username: string, password: string): Promise<DashboardSessionStatus> {
+  return postDashboardSessionExchange({ username, password }, 'Dashboard sign in failed');
+}
+
+async function postDashboardSessionExchange(
+  payload: Record<string, string>,
+  fallbackMessage: string,
+): Promise<DashboardSessionStatus> {
   dashboardSessionWriteVersion += 1;
   clearDashboardSessionPromise();
   const res = await fetch('/api/dashboard/session/exchange', {
@@ -76,12 +87,12 @@ export async function exchangeDashboardSession(token: string): Promise<Dashboard
     cache: 'no-store',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
+    body: JSON.stringify(payload),
   });
   const body = await readJson<unknown>(res);
   const session = parseDashboardSessionStatus(body);
   if (!res.ok || !isDashboardSessionReady(session ?? undefined)) {
-    throw new Error(readDashboardSessionError(body) ?? `Dashboard unlock failed (${res.status})`);
+    throw new Error(readDashboardSessionError(body) ?? `${fallbackMessage} (${res.status})`);
   }
   return setDashboardSession(session!);
 }

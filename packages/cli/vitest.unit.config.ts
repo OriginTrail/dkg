@@ -24,6 +24,9 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/auth.test.ts',
+          'test/auth-dashboard-command.test.ts',
+          'test/dashboard-credentials.test.ts',
+          'test/dashboard-credential-setup.test.ts',
           'test/dashboard-session.test.ts',
           'test/sse-hub.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
@@ -80,6 +83,11 @@ export default defineConfig({
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
+          'test/init-dashboard-credentials.test.ts',
+          'test/mcp-setup.test.ts',
+          'test/hermes-setup-orchestration.test.ts',
+          'test/hermes-setup-cli-args.test.ts',
+          'test/openclaw-setup-cli-args.test.ts',
           'test/epcis-route-readiness.test.ts',
           // Notifications-pane redesign (A3) — assertion_activity emitter
           // helper. Pure logic + a tmp SQLite DashboardDB, no hardhat.

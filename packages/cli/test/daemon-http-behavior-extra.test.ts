@@ -57,6 +57,7 @@ import { getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-contex
 import { ApiClient } from '../src/api-client.js';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { daemonState } from '../src/daemon/state.js';
+import { dashboardCredentialsPath, resetDashboardPassword } from '../src/daemon/dashboard-credentials.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
@@ -382,6 +383,75 @@ describe('CLI-2 — CORS policy for /api/*', () => {
     const allowedHeaders = res.headers.get('access-control-allow-headers') ?? '';
     expect(allowedHeaders.toLowerCase()).toContain('x-dkg-csrf');
   });
+});
+
+describe('dashboard username/password login — production daemon wiring', () => {
+  it('accepts file-backed credentials, authorizes CSRF-protected API access, and rejects stale sessions after reset', async () => {
+    const d = daemon!;
+    const reset = await resetDashboardPassword({
+      path: dashboardCredentialsPath(d.home),
+      username: 'node-admin',
+      password: 'live-dashboard-password',
+    });
+
+    const exchange = await fetch(urlFor(d, '/api/dashboard/session/exchange'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: reset.username, password: reset.password }),
+    });
+    expect(exchange.status).toBe(200);
+    const setCookie = exchange.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Strict');
+    expect(setCookie).toContain('Path=/');
+    expect(setCookie.toLowerCase()).not.toContain('domain=');
+
+    const body = await exchange.json() as { authenticated?: boolean; source?: string; csrfToken?: string };
+    expect(body).toMatchObject({ authenticated: true, source: 'login' });
+    expect(body.csrfToken).toEqual(expect.any(String));
+    const cookie = setCookie.split(';')[0];
+
+    const rejected = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
+    });
+    expect(rejected.status).toBe(403);
+
+    const accepted = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookie,
+        'X-DKG-CSRF': body.csrfToken!,
+      },
+      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
+    });
+    expect(accepted.status).toBe(200);
+
+    await resetDashboardPassword({
+      path: dashboardCredentialsPath(d.home),
+      password: 'rotated-live-dashboard-password',
+    });
+
+    const statusAfterReset = await fetch(urlFor(d, '/api/dashboard/session/status'), {
+      headers: { Cookie: cookie },
+    });
+    expect(statusAfterReset.status).toBe(200);
+    await expect(statusAfterReset.json()).resolves.toMatchObject({ authenticated: false });
+
+    const staleCookieAccess = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookie,
+        'X-DKG-CSRF': body.csrfToken!,
+      },
+      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
+    });
+    expect(staleCookieAccess.status).toBe(401);
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------

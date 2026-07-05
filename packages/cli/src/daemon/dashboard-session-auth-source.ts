@@ -82,7 +82,6 @@ export function createDashboardSessionAuthSource(
         };
       }
       const principal = options.resolvePrincipal(session.compatToken);
-
       return {
         ok: true,
         credentialToken: session.compatToken,

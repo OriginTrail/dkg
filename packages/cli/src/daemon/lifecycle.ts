@@ -144,11 +144,18 @@ import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '
 import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens } from '../auth.js';
 import {
   DashboardSessionStore,
+  DashboardLoginAttemptLimiter,
+  authenticateDashboardSessionRequest,
   createDashboardSessionAuthSource,
-  getDashboardSessionCookie,
   handleDashboardSessionRequest,
+  selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
+import {
+  readDashboardCredentialFingerprintSync,
+  readDashboardCredentialSummary,
+  verifyDashboardCredentials,
+} from './dashboard-credentials.js';
 import { createSseHub } from './sse-hub.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -2554,11 +2561,14 @@ export async function runDaemonInner(
 
   const authEnabled = config.auth?.enabled !== false;
   const validTokens = await loadTokens(config.auth);
+  const isDashboardCredentialFingerprintCurrent = (credentialFingerprint: string) =>
+    readDashboardCredentialFingerprintSync() === credentialFingerprint;
   const sseHub = createSseHub({
     isDashboardSessionTokenValid: (token) => {
       reconcileValidTokens(validTokens);
       return validTokens.has(token);
     },
+    isDashboardSessionCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
   });
   const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
   const sseBroadcast = (event: string, payload: Record<string, unknown>) => sseHub.broadcast(event, payload);
@@ -2876,7 +2886,28 @@ export async function runDaemonInner(
   } else {
     log("API authentication disabled (auth.enabled = false)");
   }
+  const dashboardCredentialSummary = await readDashboardCredentialSummary();
+  if (authEnabled) {
+    if (dashboardCredentialSummary.invalid) {
+      log(
+        `Dashboard login credentials unavailable: ${dashboardCredentialSummary.path} is invalid; run "dkg auth dashboard reset-password"`,
+      );
+    } else if (dashboardCredentialSummary.exists) {
+      log(`Dashboard login enabled for ${dashboardCredentialSummary.username} (${dashboardCredentialSummary.path})`);
+    } else {
+      log(
+        `Dashboard login credentials not configured; run "dkg auth dashboard reset-password" (${dashboardCredentialSummary.path})`,
+      );
+    }
+  }
   const dashboardSessions = new DashboardSessionStore();
+  const dashboardLoginLimiter = new DashboardLoginAttemptLimiter();
+  const selectDashboardLoginToken = () => selectDashboardLoginCompatToken({
+    validTokens,
+    bridgeAuthToken,
+    resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+    refreshValidTokens: () => reconcileValidTokens(validTokens),
+  });
   const resolveDashboardPrincipal = (token: string) => {
     const agentAddress = agent.resolveAgentAddress(token);
     return {
@@ -2884,8 +2915,15 @@ export async function runDaemonInner(
       agentAddress,
     };
   };
+  const authenticateDashboardSession = (request: IncomingMessage) =>
+    authenticateDashboardSessionRequest(request, dashboardSessions, {
+      dashboardLogin: {
+        isCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
+      },
+      onSessionRevoked: closeDashboardSessionSseClients,
+    });
   const dashboardSessionAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => dashboardSessions.authenticateSessionId(getDashboardSessionCookie(request)),
+    authenticate: authenticateDashboardSession,
     resolvePrincipal: resolveDashboardPrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
@@ -3067,6 +3105,17 @@ export async function runDaemonInner(
             refreshValidTokens: () => reconcileValidTokens(validTokens),
             corsOrigin: reqCorsOrigin,
             onSessionRevoked: closeDashboardSessionSseClients,
+            authenticateSession: authenticateDashboardSession,
+            ...(authEnabled
+              ? {
+                  dashboardLogin: {
+                    verifyCredentials: verifyDashboardCredentials,
+                    selectCompatToken: selectDashboardLoginToken,
+                    attemptLimiter: dashboardLoginLimiter,
+                    isCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
+                  },
+                }
+              : {}),
           },
         );
         if (handledSession) return;
@@ -3114,12 +3163,22 @@ export async function runDaemonInner(
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         const requestAuth = getRequestAuthContext(req);
-        const dashboardSession = requestAuth?.source === "dashboard-session"
-          ? {
-              ...requestAuth.dashboardSession,
-              compatToken: requestAuth.internalCredentialToken,
-            }
-          : undefined;
+        const activeDashboardSession = requestAuth?.source === "dashboard-session"
+          ? authenticateDashboardSession(req)
+          : null;
+        const dashboardSession =
+          requestAuth?.source === "dashboard-session" &&
+          activeDashboardSession &&
+          activeDashboardSession.sessionId === requestAuth.dashboardSession.sessionId
+            ? {
+                sessionId: activeDashboardSession.sessionId,
+                expiresAt: activeDashboardSession.expiresAt,
+                compatToken: requestAuth.internalCredentialToken,
+                ...(activeDashboardSession.source === "login"
+                  ? { credentialFingerprint: activeDashboardSession.credentialFingerprint }
+                  : {}),
+              }
+            : undefined;
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",

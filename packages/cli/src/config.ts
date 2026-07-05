@@ -1539,13 +1539,33 @@ function isEnoent(err: unknown): boolean {
 }
 
 function readPersistedConfigSync(): unknown {
-  if (existsSync(configPath())) {
-    return JSON.parse(readFileSync(configPath(), 'utf-8'));
+  return readPersistedDkgConfig(dkgDir()) ?? null;
+}
+
+/**
+ * Read a DKG home config from either `config.json` (preferred) or
+ * `config.yaml` (fallback). Returns `undefined` on missing or corrupt files.
+ *
+ * Keep this path-based helper in the config layer so setup commands do not
+ * grow private JSON/YAML precedence rules while still being able to inspect a
+ * DKG home that may differ from the current process environment.
+ */
+export function readPersistedDkgConfig(dkgDirPath: string): Record<string, unknown> | undefined {
+  const jsonPath = join(dkgDirPath, 'config.json');
+  if (existsSync(jsonPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(jsonPath, 'utf-8'));
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+    } catch { /* corrupt JSON; fall through to YAML attempt */ }
   }
-  if (existsSync(configYamlPath())) {
-    return yaml.load(readFileSync(configYamlPath(), 'utf-8'));
+  const yamlPath = join(dkgDirPath, 'config.yaml');
+  if (existsSync(yamlPath)) {
+    try {
+      const raw = yaml.load(readFileSync(yamlPath, 'utf-8'));
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+    } catch { /* corrupt YAML; caller decides fallback */ }
   }
-  return null;
+  return undefined;
 }
 
 export function readNodeRoleFromConfigSync(): 'edge' | 'core' {

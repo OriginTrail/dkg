@@ -213,6 +213,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       adminWallet: { address: '0xadmin', privateKey: '0x0' },
       wallets: [{ address: '0xtest1', privateKey: '0x0' }],
     }) as any);
+    const ensureDashboardCredentials = recorder(async (_dkgHome: string) => {});
     // Shared faucet orchestrator — the SAME one openclaw/hermes use. Stubbed as
     // a recorder so tests assert it's invoked with (network, idempotencySeed,
     // didStartDaemon) on a normal setup and skipped under --no-fund / --dry-run.
@@ -252,6 +253,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       ensureDkgNodeConfig,
       startDaemon,
       loadOpWallets,
+      ensureDashboardCredentials,
       fundWalletsBestEffort,
       findDkgMonorepoRoot,
       resolveDkgConfigHome,
@@ -275,6 +277,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(typeof writeArgs.agentName).toBe('string');
     expect(writeArgs.agentName).toMatch(/^mcp-agent-/);
     expect(existsSync(join(tmpHome, '.dkg', 'config.json'))).toBe(true);
+    expect((deps.ensureDashboardCredentials as any).calls).toHaveLength(1);
+    expect((deps.ensureDashboardCredentials as any).calls[0][0]).toBe(join(tmpHome, '.dkg'));
 
     // (b) startDaemon was called once with the effective port.
     expect((deps.startDaemon as any).calls).toHaveLength(1);
@@ -298,6 +302,22 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     // Daemon start still runs unless --no-start was passed.
     expect((deps.startDaemon as any).calls).toHaveLength(1);
+  });
+
+  it('ensures dashboard credentials on rerun without rewriting node config', async () => {
+    const dkgDir = join(tmpHome, '.dkg');
+    mkdirSync(dkgDir, { recursive: true });
+    writeFileSync(
+      join(dkgDir, 'config.json'),
+      JSON.stringify({ name: 'persisted-agent', apiPort: 9200, nodeRole: 'edge' }, null, 2),
+    );
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    const deps = makeDeps();
+    await mcpSetupAction({ verify: false, fund: false }, deps);
+
+    expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.ensureDashboardCredentials as any).calls).toEqual([[join(tmpHome, '.dkg')]]);
   });
 
   // F6 (qa-review-round-1): when the existing-config skip-write branch
@@ -353,6 +373,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // configs / missing fields path the helper handles. Companion
     // assertion to the port-9300 case above.
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.ensureDashboardCredentials as any).calls).toEqual([[join(tmpHome, '.dkg')]]);
     expect((deps.startDaemon as any).calls).toEqual([]);
   });
 
@@ -435,7 +456,23 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // --dry-run must NOT create wallets.
     const dryDeps = makeDeps();
     await mcpSetupAction({ dryRun: true }, dryDeps);
+    expect((dryDeps.ensureDashboardCredentials as any).calls).toEqual([]);
     expect((dryDeps.loadOpWallets as any).calls).toEqual([]);
+  });
+
+  it('treats dashboard credential setup failures as best-effort with reset guidance', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps({
+      ensureDashboardCredentials: recorder(async () => { throw new Error('invalid credential file'); }),
+    });
+
+    await mcpSetupAction({ fund: false, verify: false }, deps);
+
+    expect((deps.ensureDashboardCredentials as any).calls).toHaveLength(1);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
+    const warnings = (warnSpy.calls as any[]).map((args) => args.join(' ')).join('\n');
+    expect(warnings).toContain('dkg auth dashboard reset-password');
   });
 
   it('#1306: a failing loadOpWallets is best-effort — setup continues', async () => {
@@ -460,6 +497,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     await mcpSetupAction({ printOnly: true }, deps);
 
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
+    expect((deps.ensureDashboardCredentials as any).calls).toEqual([]);
     expect((deps.startDaemon as any).calls).toEqual([]);
     // Codex Issue 5: --print-only now emits TWO JSON blocks (the
     // canonical mcpServers.dkg shape PLUS a VSCode-shape note).

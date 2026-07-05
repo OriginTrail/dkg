@@ -4,6 +4,7 @@ export interface SseDashboardSession {
   sessionId: string;
   expiresAt: number;
   compatToken: string;
+  credentialFingerprint?: string;
 }
 
 export interface SseSubscription {
@@ -14,6 +15,7 @@ interface SseClient {
   res: ServerResponse;
   dashboardSessionId?: string;
   dashboardSessionCompatToken?: string;
+  dashboardSessionCredentialFingerprint?: string;
   heartbeat?: ReturnType<typeof setInterval>;
   expiryTimer?: ReturnType<typeof setTimeout>;
 }
@@ -28,6 +30,7 @@ export interface SseHub {
 export function createSseHub(options: {
   heartbeatMs?: number;
   isDashboardSessionTokenValid?: (token: string) => boolean;
+  isDashboardSessionCredentialFingerprintCurrent?: (credentialFingerprint: string) => boolean;
 } = {}): SseHub {
   const heartbeatMs = options.heartbeatMs ?? 30_000;
   const clients = new Set<SseClient>();
@@ -50,6 +53,7 @@ export function createSseHub(options: {
       res,
       dashboardSessionId: dashboardSession?.sessionId,
       dashboardSessionCompatToken: dashboardSession?.compatToken,
+      dashboardSessionCredentialFingerprint: dashboardSession?.credentialFingerprint,
     };
     if (dashboardSession) {
       const delayMs = Math.max(0, dashboardSession.expiresAt - Date.now());
@@ -57,9 +61,7 @@ export function createSseHub(options: {
     }
     clients.add(client);
     client.heartbeat = setInterval(() => {
-      const tokenStillValid = !client.dashboardSessionCompatToken ||
-        options.isDashboardSessionTokenValid?.(client.dashboardSessionCompatToken) !== false;
-      if (!tokenStillValid) {
+      if (!isClientStillAuthorized(client)) {
         close(client);
         return;
       }
@@ -72,6 +74,10 @@ export function createSseHub(options: {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
     for (const client of clients) {
+      if (!isClientStillAuthorized(client)) {
+        close(client);
+        continue;
+      }
       try { client.res.write(msg); } catch { close(client); }
     }
   }
@@ -80,6 +86,14 @@ export function createSseHub(options: {
     for (const client of Array.from(clients)) {
       if (client.dashboardSessionId === sessionId) close(client);
     }
+  }
+
+  function isClientStillAuthorized(client: SseClient): boolean {
+    const tokenStillValid = !client.dashboardSessionCompatToken ||
+      options.isDashboardSessionTokenValid?.(client.dashboardSessionCompatToken) !== false;
+    const credentialStillCurrent = !client.dashboardSessionCredentialFingerprint ||
+      options.isDashboardSessionCredentialFingerprintCurrent?.(client.dashboardSessionCredentialFingerprint) !== false;
+    return tokenStillValid && credentialStillCurrent;
   }
 
   return {

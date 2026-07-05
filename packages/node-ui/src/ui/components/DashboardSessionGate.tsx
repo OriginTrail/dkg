@@ -1,29 +1,30 @@
 import React, { useEffect, useState } from 'react';
 import {
   ensureDashboardSession,
-  exchangeDashboardSession,
   getDashboardSession,
   isDashboardSessionReady,
+  loginDashboardSession,
   subscribeDashboardSession,
   type DashboardSessionStatus,
 } from '../dashboardSessionClient.js';
 
-function DashboardUnlockForm() {
-  const [token, setToken] = useState('');
+function DashboardLoginForm() {
+  const [username, setUsername] = useState('node-admin');
+  const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmed = token.trim();
-    if (!trimmed) return;
+    const trimmedUsername = username.trim();
+    if (!trimmedUsername || !password) return;
     setSubmitting(true);
     setError(null);
     try {
-      await exchangeDashboardSession(trimmed);
-      setToken('');
+      await loginDashboardSession(trimmedUsername, password);
+      setPassword('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Dashboard unlock failed');
+      setError(err instanceof Error ? err.message : 'Dashboard sign in failed');
     } finally {
       setSubmitting(false);
     }
@@ -33,22 +34,35 @@ function DashboardUnlockForm() {
     <div className="v10-session-gate" data-testid="dashboard-session-unlock">
       <form className="v10-session-unlock" onSubmit={submit}>
         <div className="v10-session-unlock-copy">
-          <h1>Unlock dashboard</h1>
-          <p>Enter a node API token to open a dashboard session.</p>
+          <h1>Sign in to DKG Node Dashboard</h1>
+          <p>Use the dashboard credentials created during setup, or reset them from this machine.</p>
         </div>
         <label className="v10-session-token-field">
-          <span>API token</span>
+          <span>Username</span>
           <input
-            type="password"
-            value={token}
-            onChange={(event) => setToken(event.target.value)}
-            autoComplete="off"
+            type="text"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+            autoComplete="username"
             spellCheck={false}
           />
         </label>
-        {error && <div className="v10-session-error" role="alert">{error}</div>}
-        <button className="dkg-btn dkg-btn-solid" type="submit" disabled={submitting || token.trim().length === 0}>
-          {submitting ? 'Unlocking...' : 'Unlock'}
+        <label className="v10-session-token-field">
+          <span>Password</span>
+          <input
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            autoComplete="current-password"
+            aria-describedby={error ? 'dashboard-session-login-error' : undefined}
+          />
+        </label>
+        <p className="v10-session-reset-copy">
+          Lost the password? Run <code>dkg auth dashboard reset-password</code> on the node host using this daemon's DKG_HOME.
+        </p>
+        {error && <div id="dashboard-session-login-error" className="v10-session-error" role="alert">{error}</div>}
+        <button className="dkg-btn dkg-btn-solid" type="submit" disabled={submitting || username.trim().length === 0 || password.length === 0}>
+          {submitting ? 'Signing in...' : 'Sign in'}
         </button>
       </form>
     </div>
@@ -86,7 +100,7 @@ export function DashboardSessionGate({ children }: { children: React.ReactNode }
     );
   }
 
-  if (!isDashboardSessionReady(session)) return <DashboardUnlockForm />;
+  if (!isDashboardSessionReady(session)) return <DashboardLoginForm />;
 
   return <>{children}</>;
 }

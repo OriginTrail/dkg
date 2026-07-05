@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import { assertSelectableNetwork } from './config.js';
+import { ensureDashboardCredentialsForSetup } from './dashboard-credential-setup.js';
 
 export type HermesMemoryMode = 'primary' | 'tools-only';
 
@@ -56,7 +57,10 @@ export interface NormalizedHermesSetupOptions {
 export interface HermesSetupActionDeps {
   runSetup: (
     opts: NormalizedHermesSetupOptions,
-    runDeps?: { loadOpWallets?: (dir: string) => Promise<unknown> },
+    runDeps?: {
+      loadOpWallets?: (dir: string) => Promise<unknown>;
+      ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+    },
   ) => Promise<void>;
 }
 
@@ -123,6 +127,8 @@ export async function hermesSetupAction(
       nodeSkillContent: loadBundledDkgNodeSkill(),
     },
     {
+      ensureDashboardCredentials: (dkgHome: string) =>
+        ensureDashboardCredentialsForSetup(dkgHome, { prefix: '[hermes-setup]' }),
       loadOpWallets: async (dir: string) => {
         const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
         return loadOpWallets(dir);
