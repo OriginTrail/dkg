@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Command } from 'commander';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -140,6 +140,32 @@ describe('openclawSetupAction — --no-fund/--fund flag threading', () => {
         .resolves.not.toContain(password);
     } finally {
       console.log = originalLog;
+      await rm(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it('#1451: injected dashboard credential hook is best-effort on invalid credential files', async () => {
+    const runSetupArgs: any[] = [];
+    const runSetup = async (...args: any[]) => { runSetupArgs.push(args); };
+
+    await openclawSetupAction({ dryRun: true }, makeCommand('default'), { runSetup: runSetup as any });
+
+    const [, runDeps] = runSetupArgs[0] as [unknown, {
+      afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
+    }];
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
+
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-openclaw-dashboard-hook-invalid-'));
+    try {
+      await writeFile(dashboardCredentialsPath(dkgHome), '{"version":1,"password":"plaintext"}\n');
+
+      await expect(runDeps.afterConfigBootstrap!(dkgHome)).resolves.toBeUndefined();
+
+      const warnings = warnCalls.map((args) => args.join(' ')).join('\n');
+      expect(warnings).toContain('[setup] Could not create dashboard login credentials');
+      expect(warnings).toContain(`DKG_HOME=${dkgHome}`);
+      expect(warnings).toContain('dkg auth dashboard reset-password');
+    } finally {
       await rm(dkgHome, { recursive: true, force: true });
     }
   });

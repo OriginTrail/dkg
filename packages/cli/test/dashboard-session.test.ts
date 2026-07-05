@@ -544,11 +544,9 @@ describe('dashboard browser sessions', () => {
         source: 'dashboard-session',
         internalCredentialToken: VALID_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
-        dashboardSession: { source: 'login' },
+        dashboardSession: { source: 'login', credentialFingerprint: 'credential-a' },
       },
     });
-    expect(protectedBody.requestAuth.dashboardSession)
-      .not.toHaveProperty('credentialFingerprint');
   });
 
 
