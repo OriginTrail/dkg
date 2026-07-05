@@ -35,6 +35,7 @@ import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_M
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import { HubRotationPoller } from './hub-rotation-poller.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -117,8 +118,6 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 );
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
-
-export const CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS = 9_000;
 
 const HUB_ROTATION_POLL_INTERVAL_MS = DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
@@ -528,11 +527,7 @@ export class EVMChainAdapterBase {
 
   protected hubRotationListenerStarted = false;
 
-  protected hubRotationPollTimer: ReturnType<typeof setInterval> | null = null;
-
-  protected hubRotationPollInFlight: Promise<void> | null = null;
-
-  protected hubRotationLastScannedBlock: number | undefined;
+  protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
    * Single-flight guard for the best-effort
@@ -796,6 +791,12 @@ export class EVMChainAdapterBase {
       () => this.chainId,
       async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
     );
+    this.hubRotationPoller = new HubRotationPoller({
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
+      intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
+      reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
+      onContractName: (name) => this.applyHubRotationEventName(name),
+    });
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -3132,15 +3133,8 @@ export class EVMChainAdapterBase {
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationListenerStarted) return;
     try {
-      await this.pollHubRotationEvents();
-      this.hubRotationPollTimer = setInterval(() => {
-        if (this.hubRotationPollInFlight) return;
-        this.hubRotationPollInFlight = this.pollHubRotationEvents()
-          .catch(() => { /* optional listener path */ })
-          .finally(() => { this.hubRotationPollInFlight = null; });
-      }, HUB_ROTATION_POLL_INTERVAL_MS);
-      if (this.hubRotationPollTimer.unref) this.hubRotationPollTimer.unref();
-      this.hubRotationListenerStarted = true;
+      await this.hubRotationPoller.start(this.contracts.hub);
+      this.hubRotationListenerStarted = this.hubRotationPoller.isStarted;
     } catch {
       /* provider doesn't support log polling — TTL refresh (RS)
        * and `withHubStaleRetry` (writes) are the fallbacks */
@@ -3150,62 +3144,7 @@ export class EVMChainAdapterBase {
   protected async pollHubRotationEvents(): Promise<void> {
     const hub = this.contracts.hub;
     if (!hub) return;
-
-    const topics = this.hubRotationEventTopics(hub);
-    if (topics.length === 0) return;
-
-    const head = await this.readProvider(
-      'Hub rotation poll getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-    );
-    const candidateFromBlock = this.hubRotationLastScannedBlock == null
-      ? head - HUB_ROTATION_REORG_BUFFER_BLOCKS
-      : this.hubRotationLastScannedBlock + 1 - HUB_ROTATION_REORG_BUFFER_BLOCKS;
-    const recentFromBlock = head - HUB_ROTATION_REORG_BUFFER_BLOCKS;
-    const fromBlock = Math.max(
-      0,
-      Math.min(candidateFromBlock, recentFromBlock),
-    );
-    const hubAddress = await this.hubContractAddress(hub);
-    const logs = await this.readProvider<ethers.Log[]>(
-      'Hub rotation poll getLogs',
-      (provider) => provider.getLogs({
-        address: hubAddress,
-        fromBlock,
-        toBlock: head,
-        topics: [topics],
-      }),
-      { policy: 'wideLogScan' },
-    );
-
-    for (const log of logs) {
-      try {
-        const parsed = hub.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (!parsed) continue;
-        this.applyHubRotationEventName(parsed.args?.contractName ?? parsed.args?.[0]);
-      } catch {
-        // Ignore malformed/unexpected Hub logs. The topic filter should already
-        // constrain these, but a parse miss must not wedge the poll cursor.
-      }
-    }
-    this.hubRotationLastScannedBlock = head;
-  }
-
-  protected hubRotationEventTopics(hub: Contract): string[] {
-    return [
-      'ContractChanged',
-      'NewContract',
-      'AssetStorageChanged',
-      'NewAssetStorage',
-    ].flatMap((eventName) => {
-      const event = hub.interface.getEvent(eventName);
-      return event?.topicHash ? [event.topicHash] : [];
-    });
-  }
-
-  protected async hubContractAddress(hub: Contract): Promise<string> {
-    const target = (hub as unknown as { target?: unknown }).target;
-    return typeof target === 'string' ? target : hub.getAddress();
+    await this.hubRotationPoller.poll(hub);
   }
 
   protected applyHubRotationEventName(name: unknown): void {
@@ -3278,10 +3217,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
-    if (this.hubRotationPollTimer) {
-      clearInterval(this.hubRotationPollTimer);
-      this.hubRotationPollTimer = null;
-    }
+    this.hubRotationPoller.stop();
     this.hubRotationListenerStarted = false;
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }

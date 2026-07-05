@@ -19,9 +19,8 @@ interface ChainEventPollerLaneState {
   lastBlock: number;
   headKnown: boolean;
   requiresFullHistory?: boolean;
-  lastRunAt?: number;
+  nextRunAtMs?: number;
   failureBackoffMs?: number;
-  retryAfterMs?: number;
 }
 
 const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
@@ -181,10 +180,8 @@ export class ChainEventLaneRunner {
   }
 
   private laneDue(lane: ChainEventPollerLaneRuntime, now: number): boolean {
-    const retryAfterMs = lane.state.retryAfterMs;
-    if (retryAfterMs != null && now < retryAfterMs) return false;
-    const lastRunAt = lane.state.lastRunAt;
-    return lastRunAt == null || now - lastRunAt >= lane.spec.cadenceMs;
+    const nextRunAtMs = lane.state.nextRunAtMs;
+    return nextRunAtMs == null || now >= nextRunAtMs;
   }
 
   private async persistScanResults(
@@ -254,7 +251,7 @@ export class ChainEventLaneRunner {
       : fromBlock + this.maxRange - 1;
 
     if (fromBlock > upperBound) {
-      state.lastRunAt = now;
+      state.nextRunAtMs = now + lane.spec.cadenceMs;
       return { lane, blockNumber: state.lastBlock, advanced: false };
     }
 
@@ -273,13 +270,14 @@ export class ChainEventLaneRunner {
 
       state.lastBlock = upperBound;
       state.failureBackoffMs = undefined;
-      state.retryAfterMs = undefined;
       advanced = true;
     } catch (err) {
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.backoffFailedLane(lane, now);
     } finally {
-      state.lastRunAt = advanced && caughtUp ? now : undefined;
+      if (advanced) {
+        state.nextRunAtMs = caughtUp ? now + lane.spec.cadenceMs : undefined;
+      }
     }
     return { lane, blockNumber: state.lastBlock, advanced };
   }
@@ -290,7 +288,7 @@ export class ChainEventLaneRunner {
       ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)
       : Math.min(previous * 2, FAILURE_BACKOFF_MAX_MS);
     lane.state.failureBackoffMs = next;
-    lane.state.retryAfterMs = now + next;
+    lane.state.nextRunAtMs = now + next;
   }
 
   private applyHistoryModeTransition(

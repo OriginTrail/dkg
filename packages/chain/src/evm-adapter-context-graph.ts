@@ -11,7 +11,6 @@
 
 import {
   EVMChainAdapterBase,
-  CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS,
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from './evm-adapter-base.js';
@@ -19,13 +18,6 @@ import { isTooLowAllowanceError } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-
-function normalizeLiveTailLookbackBlocks(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS;
-  }
-  return Math.max(0, Math.floor(value));
-}
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
@@ -135,16 +127,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const eventFilter = registry.filters.NameClaimed();
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const incremental = options?.incremental === true && fromBlock === undefined;
-    const liveTailOnly = options?.liveTailOnly === true && fromBlock === undefined && !incremental;
     const seedIncrementalWatermark =
       options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
-    const liveTailLookback = normalizeLiveTailLookbackBlocks(options?.liveTailLookbackBlocks);
     const watermark = incremental
       ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
       : undefined;
     const scan =
       fromBlock === undefined
-        ? liveTailOnly || (incremental && watermark !== undefined)
+        ? incremental && watermark !== undefined
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
           : await this.resolveContractDeployBlock(
               registryAddress,
@@ -154,9 +144,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
     const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
     const start = fromBlock ?? (
-      liveTailOnly
-        ? liveTailLookback <= 0 ? head + 1 : Math.max(0, head - liveTailLookback + 1)
-        : incremental && watermark !== undefined
+      incremental && watermark !== undefined
         ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
         : deployBlock
     );
@@ -170,10 +158,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if ((incremental || liveTailOnly) && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
-      const scanKind = liveTailOnly ? 'live-tail' : 'incremental';
+    if (incremental && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
-        `listContextGraphsFromChain: ${scanKind} ContextGraphNameRegistry scan would need ` +
+        `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
           `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
           `${blockBudget} blocks). ` +
@@ -188,8 +175,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let preferred: JsonRpcProvider | undefined;
     let scannedAnyPage = false;
 
-    // Daemon scans can surface scanned-prefix results after a later page
-    // failure. Public list-all calls should remain all-or-error.
+    // Incremental daemon scans can resume from the scanned prefix after a later
+    // page failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
       try {
@@ -222,7 +209,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
         }
       } catch (err) {
-        if ((incremental || liveTailOnly) && scannedAnyPage) {
+        if (incremental && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
             `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +

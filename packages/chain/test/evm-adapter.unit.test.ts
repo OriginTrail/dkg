@@ -1239,6 +1239,59 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.hubRotationListenerStarted).toBe(false);
   });
 
+  it('startHubRotationListener processes Hub rotations from the recurring poll timer', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const changed = iface.encodeEventLog(iface.getEvent('NewContract')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    let poll = 0;
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000 + poll),
+      getLogs: recorder(async (_filter: any) => {
+        poll++;
+        return poll === 1
+          ? []
+          : [{ topics: changed.topics, data: changed.data }];
+      }),
+      destroy: recorder(() => undefined),
+    };
+    const on = recorder(async () => {
+      throw new Error('ethers subscription should not be installed');
+    });
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001', on };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.hubRotationListenerStarted = false;
+    a.initialized = true;
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(on.calls).toEqual([]);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(a.initialized).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+      expect(provider.getLogs.calls).toHaveLength(2);
+      expect(a.cachedKav10Address).toBeUndefined();
+      expect(a.initialized).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('pollHubRotationEvents clamps the range when failover observes a lower head', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
@@ -1257,7 +1310,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.primaryProvider = provider;
     a.provider = provider;
     a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001' };
-    a.hubRotationLastScannedBlock = 1_000;
+    a.hubRotationPoller.lastScannedBlock = 1_000;
 
     await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();
 
@@ -1266,7 +1319,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       fromBlock: 850,
       toBlock: 900,
     });
-    expect(a.hubRotationLastScannedBlock).toBe(900);
+    expect(a.hubRotationPoller.lastScannedBlock).toBe(900);
   });
 
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {

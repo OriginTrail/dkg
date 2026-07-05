@@ -672,24 +672,12 @@ export function shouldUseIncrementalChainDiscoveryScan(input: {
   return input.watermarkSeeded;
 }
 
-export const CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS = 9_000;
-
 export function chainDiscoveryScanOptions(incremental: boolean):
   | { incremental: true }
-  | {
-      liveTailOnly: true;
-      liveTailLookbackBlocks: number;
-      seedIncrementalWatermark: true;
-      throwOnChainScanFailure: true;
-    } {
+  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
   return incremental
     ? { incremental: true }
-    : {
-        liveTailOnly: true,
-        liveTailLookbackBlocks: CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
-        seedIncrementalWatermark: true,
-        throwOnChainScanFailure: true,
-      };
+    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
