@@ -58,14 +58,9 @@ export class DashboardLoginAttemptLimiter {
       attempt = { failures: 0, inFlight: 0, firstFailureAt: now };
     }
     if (attempt.failures + attempt.inFlight >= this.maxFailures()) {
-      attempt.lockedUntil = now + this.lockoutMs();
-      this.attempts.set(key, attempt);
       return { ok: false, retryAfterMs: this.lockoutMs() };
     }
     attempt.inFlight += 1;
-    if (attempt.failures + attempt.inFlight >= this.maxFailures()) {
-      attempt.lockedUntil = now + this.lockoutMs();
-    }
     this.attempts.set(key, attempt);
     return { ok: true };
   }
@@ -76,7 +71,7 @@ export class DashboardLoginAttemptLimiter {
     if (!attempt) return;
     attempt.inFlight = Math.max(0, attempt.inFlight - 1);
     attempt.failures += 1;
-    if (attempt.failures + attempt.inFlight >= this.maxFailures()) {
+    if (attempt.failures >= this.maxFailures()) {
       attempt.lockedUntil = now + this.lockoutMs();
     }
     this.attempts.set(key, attempt);
@@ -89,9 +84,6 @@ export class DashboardLoginAttemptLimiter {
     if (attempt.failures === 0 && attempt.inFlight === 0) {
       this.attempts.delete(key);
       return;
-    }
-    if (attempt.failures + attempt.inFlight < this.maxFailures()) {
-      delete attempt.lockedUntil;
     }
     this.attempts.set(key, attempt);
   }

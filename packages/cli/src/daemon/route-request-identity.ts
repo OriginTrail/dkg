@@ -12,6 +12,16 @@ export interface RouteRequestIdentity {
   principal: RequestAuthPrincipal;
 }
 
+export function resolveRequestPrincipal(
+  agent: RouteIdentityAgent,
+  token: string | undefined,
+): RequestAuthPrincipal {
+  return {
+    kind: token && agent.resolveAgentByToken(token) ? "agent" : "node-admin",
+    agentAddress: agent.resolveAgentAddress(token),
+  };
+}
+
 export function resolveRouteRequestIdentity(
   req: IncomingMessage,
   agent: RouteIdentityAgent,
@@ -20,10 +30,7 @@ export function resolveRouteRequestIdentity(
   const credentialToken = requestAuth?.source === "dashboard-session"
     ? requestAuth.internalCredentialToken
     : requestAuth?.token ?? extractBearerToken(req.headers.authorization);
-  const principal = requestAuth?.principal ?? {
-    kind: credentialToken && agent.resolveAgentByToken(credentialToken) ? "agent" as const : "node-admin" as const,
-    agentAddress: agent.resolveAgentAddress(credentialToken),
-  };
+  const principal = requestAuth?.principal ?? resolveRequestPrincipal(agent, credentialToken);
 
   return {
     requestAuth,

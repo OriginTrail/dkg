@@ -21,7 +21,7 @@ import {
 } from '../src/daemon/dashboard-session-cookie.js';
 import { resolveDashboardSseSession } from '../src/daemon/dashboard-sse-session.js';
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
-import { resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
+import { resolveRequestPrincipal, resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -281,6 +281,17 @@ describe('resolveRouteRequestIdentity', () => {
       credentialToken: 'agent-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:token' },
       requestAuth: undefined,
+    });
+  });
+
+  it('uses the canonical principal helper for token-backed and node-admin callers', () => {
+    expect(resolveRequestPrincipal(agent, 'agent-token')).toEqual({
+      kind: 'agent',
+      agentAddress: 'did:dkg:agent:token',
+    });
+    expect(resolveRequestPrincipal(agent, undefined)).toEqual({
+      kind: 'node-admin',
+      agentAddress: 'did:dkg:agent:default',
     });
   });
 });

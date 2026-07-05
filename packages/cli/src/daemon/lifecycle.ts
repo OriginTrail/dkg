@@ -156,6 +156,7 @@ import {
   selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
 } from './dashboard-session.js';
+import { resolveRequestPrincipal } from './route-request-identity.js';
 import {
   readDashboardCredentialFingerprintSync,
   readDashboardCredentialSummary,
@@ -2913,13 +2914,7 @@ export async function runDaemonInner(
     resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
     refreshValidTokens: () => reconcileValidTokens(validTokens),
   });
-  const resolveDashboardPrincipal = (token: string) => {
-    const agentAddress = agent.resolveAgentAddress(token);
-    return {
-      kind: agent.resolveAgentByToken(token) ? "agent" as const : "node-admin" as const,
-      agentAddress,
-    };
-  };
+  const resolveDashboardPrincipal = (token: string) => resolveRequestPrincipal(agent, token);
   const authenticateDashboardSession = (request: IncomingMessage) =>
     authenticateDashboardSessionRequest(request, dashboardSessions, {
       dashboardLogin: {

@@ -45,6 +45,19 @@ describe('DashboardLoginAttemptLimiter', () => {
     expect(limiter.reserveAttempt('127.0.0.1')).toMatchObject({ ok: false });
   });
 
+  it('does not persist a lockout for temporary in-flight capacity', () => {
+    const limiter = new DashboardLoginAttemptLimiter({ maxFailures: 2, lockoutMs: 60_000 });
+
+    expectReserved(limiter, '127.0.0.1').fail();
+    const inFlight = expectReserved(limiter, '127.0.0.1');
+
+    expect(limiter.reserveAttempt('127.0.0.1')).toEqual({ ok: false, retryAfterMs: 60_000 });
+
+    inFlight.release();
+
+    expectReserved(limiter, '127.0.0.1').release();
+  });
+
   it('success resets prior failures', () => {
     const limiter = new DashboardLoginAttemptLimiter({ maxFailures: 2, lockoutMs: 60_000 });
 
