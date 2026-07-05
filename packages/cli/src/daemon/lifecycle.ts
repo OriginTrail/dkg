@@ -600,23 +600,29 @@ export function mergePreferredRelays(input: {
 }
 
 export function shouldUseIncrementalChainDiscoveryScan(input: {
-  run: number;
   watermarkSeeded: boolean;
-  fullScanEvery: number;
 }): boolean {
-  return (
-    input.watermarkSeeded &&
-    input.run !== 0 &&
-    input.run % input.fullScanEvery !== 0
-  );
+  return input.watermarkSeeded;
 }
+
+export const CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS = 9_000;
 
 export function chainDiscoveryScanOptions(incremental: boolean):
   | { incremental: true }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  | {
+      liveTailOnly: true;
+      liveTailLookbackBlocks: number;
+      seedIncrementalWatermark: true;
+      throwOnChainScanFailure: true;
+    } {
   return incremental
     ? { incremental: true }
-    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+    : {
+        liveTailOnly: true,
+        liveTailLookbackBlocks: CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
+        seedIncrementalWatermark: true,
+        throwOnChainScanFailure: true,
+      };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1923,15 +1929,10 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
-  let chainScanRuns = 0;
   const runChainDiscoveryScan = async () => {
     try {
-      const run = chainScanRuns++;
       const incremental = shouldUseIncrementalChainDiscoveryScan({
-        run,
         watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-        fullScanEvery: CHAIN_FULL_SCAN_EVERY,
       });
       const found = await agent.discoverContextGraphsFromChain(
         chainDiscoveryScanOptions(incremental),

@@ -1,26 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
   chainDiscoveryScanOptions,
   shouldUseIncrementalChainDiscoveryScan,
 } from '../src/daemon/lifecycle.js';
 
 describe('shouldUseIncrementalChainDiscoveryScan', () => {
-  it('starts with a full scan before any watermark seed exists', () => {
+  it('uses bounded live-tail seeding before any watermark seed exists', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
-        run: 0,
         watermarkSeeded: false,
-        fullScanEvery: 48,
       }),
     ).toBe(false);
   });
 
-  it('keeps retrying full scans until a watermark seed succeeds', () => {
+  it('keeps bounded live-tail seeding until a watermark seed succeeds', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
-        run: 1,
         watermarkSeeded: false,
-        fullScanEvery: 48,
       }),
     ).toBe(false);
   });
@@ -28,27 +25,25 @@ describe('shouldUseIncrementalChainDiscoveryScan', () => {
   it('uses incremental scans after a successful watermark seed', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
-        run: 1,
         watermarkSeeded: true,
-        fullScanEvery: 48,
       }),
     ).toBe(true);
   });
 
-  it('keeps the scheduled full-resync cadence after a watermark seed', () => {
+  it('does not schedule automatic full-resync scans after a watermark seed', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
-        run: 48,
         watermarkSeeded: true,
-        fullScanEvery: 48,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
 describe('chainDiscoveryScanOptions', () => {
-  it('uses failure-throwing watermark seeding for full daemon scans', () => {
+  it('uses failure-throwing bounded live-tail watermark seeding before incremental scans', () => {
     expect(chainDiscoveryScanOptions(false)).toEqual({
+      liveTailOnly: true,
+      liveTailLookbackBlocks: CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
       seedIncrementalWatermark: true,
       throwOnChainScanFailure: true,
     });
