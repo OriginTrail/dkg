@@ -32,6 +32,11 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
+import { printDashboardCredentialsCreatedForInit } from '../dashboard-credential-output.js';
+import type {
+  DashboardCredentialCreation,
+  DashboardCredentialExisting,
+} from '../daemon/dashboard-credentials.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -192,12 +197,9 @@ export function buildInitAutoUpdate(opts: {
   } as AutoUpdateConfig;
 }
 
-export interface InitDashboardCredentialResult {
-  created: boolean;
-  path: string;
-  username: string;
-  password?: string;
-}
+export type InitDashboardCredentialResult =
+  | DashboardCredentialCreation
+  | DashboardCredentialExisting;
 
 export async function ensureDashboardCredentialsForInit(
   enableAuth: boolean,
@@ -216,13 +218,8 @@ export async function ensureDashboardCredentialsForInit(
 export function printCreatedDashboardCredentialsForInit(
   dashboardCredentialResult: InitDashboardCredentialResult | null,
 ): void {
-  if (!dashboardCredentialResult?.created || !dashboardCredentialResult.password) return;
-  console.log('\nDashboard login created:');
-  console.log(`  Username: ${dashboardCredentialResult.username}`);
-  console.log(`  Password: ${dashboardCredentialResult.password}`);
-  console.log(`  Credential file: ${dashboardCredentialResult.path}`);
-  console.log('  Save this password securely. It will not be shown again.');
-  console.log('  Treat this terminal output as secret-bearing.');
+  if (!dashboardCredentialResult?.created) return;
+  printDashboardCredentialsCreatedForInit(dashboardCredentialResult);
 }
 
 export function registerInitCommand(program: Command): void {

@@ -1645,12 +1645,23 @@ export function verifyMemorySlotInvariants(configPath?: string): void {
  * `SetupOptions` so the adapter stays free of a `@origintrail-official/dkg-agent`
  * dependency: the cli layer (which has dkg-agent) provides `loadOpWallets`.
  */
+type PostConfigSetupHook = (dkgHome: string) => Promise<unknown>;
+
 export interface RunSetupDeps {
   /**
-   * Create dashboard username/password credentials when missing. Injected only
-   * by CLI setup entry points so daemon/UI-driven adapter setup stays silent.
+   * Optional setup lifecycle hook invoked after DKG node config bootstrap and
+   * before wallet creation / daemon start. CLI setup entry points use this for
+   * CLI-owned best-effort side effects while daemon/UI-driven adapter setup
+   * omits it. Required setup work should stay explicit instead of being hidden
+   * behind this optional hook.
    */
-  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  afterConfigBootstrap?: PostConfigSetupHook;
+  /**
+   * @deprecated Use `afterConfigBootstrap`. Kept as a runtime fallback so
+   * JavaScript callers on the previous dependency shape do not silently lose
+   * dashboard credential provisioning.
+   */
+  ensureDashboardCredentials?: PostConfigSetupHook;
   /**
    * Eagerly create the node's operational wallets (generate-if-absent) after
    * the config write and before the daemon starts, so faucet funding and
@@ -1747,15 +1758,16 @@ export async function runSetup(options: SetupOptions, deps: RunSetupDeps = {}): 
     log(`[dry-run] Would write ${join(dkgDir(), 'config.json')} (${network.networkName}, port ${apiPort})`);
   }
 
-  // Create dashboard login credentials after the node config home is known and
-  // before wallets / daemon startup. Best-effort: the operator can repair an
-  // invalid file with the dashboard reset command without losing setup progress.
-  if (!dryRun && deps.ensureDashboardCredentials) {
+  // Run CLI-owned setup side effects after the node config home is known and
+  // before wallets / daemon startup. Best-effort so adapter setup remains
+  // recoverable and daemon/UI-driven setup can omit terminal-only side effects.
+  const afterConfigBootstrap = deps.afterConfigBootstrap ?? deps.ensureDashboardCredentials;
+  if (!dryRun && afterConfigBootstrap) {
     const dashboardCredentialHome = dkgDir();
     try {
-      await deps.ensureDashboardCredentials(dashboardCredentialHome);
+      await afterConfigBootstrap(dashboardCredentialHome);
     } catch (err: any) {
-      warn(`Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" with DKG_HOME=${dashboardCredentialHome} after setup to create or repair them.`);
+      warn(`Post-config setup hook failed (${err?.message ?? String(err)}); continuing.`);
     }
   }
 

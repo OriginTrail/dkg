@@ -490,7 +490,29 @@ describe('runSetup Step 5 — faucet funding', () => {
     }
   });
 
-  it('#1439: creates dashboard credentials via the injected hook, skipped on --dry-run', async () => {
+  it('#1443: invokes the post-config setup hook, skipped on --dry-run', async () => {
+    const env = setupFaucetEnv();
+    try {
+      const afterConfigBootstrap = vi.fn(async () => {});
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false },
+        { afterConfigBootstrap },
+      );
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap.mock.calls[0][0]).toBe(env.dkgHome);
+
+      afterConfigBootstrap.mockClear();
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false, dryRun: true },
+        { afterConfigBootstrap },
+      );
+      expect(afterConfigBootstrap).not.toHaveBeenCalled();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('#1451: honors deprecated ensureDashboardCredentials hook as a runtime fallback', async () => {
     const env = setupFaucetEnv();
     try {
       const ensureDashboardCredentials = vi.fn(async () => {});
@@ -500,29 +522,22 @@ describe('runSetup Step 5 — faucet funding', () => {
       );
       expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
       expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(env.dkgHome);
-
-      ensureDashboardCredentials.mockClear();
-      await runSetup(
-        { workspace: env.workspace, network: 'testnet', start: false, verify: false, dryRun: true },
-        { ensureDashboardCredentials },
-      );
-      expect(ensureDashboardCredentials).not.toHaveBeenCalled();
     } finally {
       env.restore();
     }
   });
 
-  it('#1439: a failing dashboard credential hook is best-effort', async () => {
+  it('#1443: a failing post-config setup hook is best-effort', async () => {
     const env = setupFaucetEnv();
     try {
-      const ensureDashboardCredentials = vi.fn(async () => { throw new Error('invalid credential file'); });
+      const afterConfigBootstrap = vi.fn(async () => { throw new Error('invalid credential file'); });
       await expect(
         runSetup(
           { workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false },
-          { ensureDashboardCredentials },
+          { afterConfigBootstrap },
         ),
       ).resolves.toBeUndefined();
-      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
     } finally {
       env.restore();
     }

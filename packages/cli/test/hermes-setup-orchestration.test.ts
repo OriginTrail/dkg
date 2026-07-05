@@ -149,11 +149,11 @@ describe('runHermesSetup orchestration (S2 step 6 + S4 step 6 deferred sweep)', 
 
   it('#1439: --dry-run does not invoke dashboard credential creation', async () => {
     const { runHermesSetup } = await import('@origintrail-official/dkg-adapter-hermes');
-    const ensureDashboardCredentials = vi.fn(async () => {});
+    const afterConfigBootstrap = vi.fn(async () => {});
 
-    await runHermesSetup({ hermesHome, dryRun: true }, { ensureDashboardCredentials });
+    await runHermesSetup({ hermesHome, dryRun: true }, { afterConfigBootstrap });
 
-    expect(ensureDashboardCredentials).toHaveBeenCalledTimes(0);
+    expect(afterConfigBootstrap).toHaveBeenCalledTimes(0);
   });
 
   // H-AC-50: `--port` validation rejects out-of-range values BEFORE

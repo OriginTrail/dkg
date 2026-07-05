@@ -116,9 +116,44 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
-  it('#1439: creates dashboard credentials via the injected hook, skipped on --dry-run', async () => {
+  it('#1443: invokes the post-config setup hook, skipped on --dry-run', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-1439-'));
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      const afterConfigBootstrap = vi.fn(async () => {});
+
+      await runSetup(
+        { hermesHome, verify: false, start: false, fund: false },
+        { afterConfigBootstrap },
+      );
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap.mock.calls[0][0]).toBe(dkgHome);
+
+      afterConfigBootstrap.mockClear();
+      await runSetup(
+        { hermesHome, verify: false, start: false, fund: false, dryRun: true },
+        { afterConfigBootstrap },
+      );
+      expect(afterConfigBootstrap).not.toHaveBeenCalled();
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      rmSync(hermesHome, { recursive: true, force: true });
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it('#1451: honors deprecated ensureDashboardCredentials hook as a runtime fallback', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-legacy-hook-'));
     vi.stubGlobal('fetch', async () =>
       new Response(JSON.stringify({ ok: true }), {
         status: 200,
@@ -136,13 +171,6 @@ describe('Hermes profile setup helpers', () => {
       );
       expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
       expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(dkgHome);
-
-      ensureDashboardCredentials.mockClear();
-      await runSetup(
-        { hermesHome, verify: false, start: false, fund: false, dryRun: true },
-        { ensureDashboardCredentials },
-      );
-      expect(ensureDashboardCredentials).not.toHaveBeenCalled();
     } finally {
       if (oldDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = oldDkgHome;
@@ -171,7 +199,7 @@ describe('Hermes profile setup helpers', () => {
     homeResolver.mockReturnValue(daemonDkgHome);
     vi.mocked(startDaemon).mockClear();
     try {
-      const ensureDashboardCredentials = vi.fn(async () => {});
+      const afterConfigBootstrap = vi.fn(async () => {});
 
       await runSetup(
         {
@@ -180,14 +208,14 @@ describe('Hermes profile setup helpers', () => {
           verify: false,
           fund: false,
         },
-        { ensureDashboardCredentials },
+        { afterConfigBootstrap },
       );
 
       expect(startDaemon).toHaveBeenCalledWith(9300);
       expect(resolveDkgHome).toHaveBeenCalledWith({ daemonUrl: 'http://127.0.0.1:9300' });
-      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
-      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(configDkgHome);
-      expect(ensureDashboardCredentials.mock.calls[0][0]).not.toBe(daemonDkgHome);
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap.mock.calls[0][0]).toBe(configDkgHome);
+      expect(afterConfigBootstrap.mock.calls[0][0]).not.toBe(daemonDkgHome);
     } finally {
       if (originalResolveDkgConfigHome) configResolver.mockImplementation(originalResolveDkgConfigHome);
       if (originalResolveDkgHome) homeResolver.mockImplementation(originalResolveDkgHome);
@@ -215,7 +243,7 @@ describe('Hermes profile setup helpers', () => {
     const originalResolveDkgHome = resolver.getMockImplementation();
     resolver.mockReturnValue(daemonDkgHome);
     try {
-      const ensureDashboardCredentials = vi.fn(async () => {});
+      const afterConfigBootstrap = vi.fn(async () => {});
 
       await runSetup(
         {
@@ -225,12 +253,12 @@ describe('Hermes profile setup helpers', () => {
           start: false,
           fund: false,
         },
-        { ensureDashboardCredentials },
+        { afterConfigBootstrap },
       );
 
       expect(resolveDkgHome).toHaveBeenCalledWith({ daemonUrl: 'http://127.0.0.1:9300' });
-      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
-      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(daemonDkgHome);
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap.mock.calls[0][0]).toBe(daemonDkgHome);
     } finally {
       if (originalResolveDkgHome) resolver.mockImplementation(originalResolveDkgHome);
       if (oldDkgHome === undefined) delete process.env.DKG_HOME;
@@ -240,7 +268,7 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
-  it('#1439: a failing dashboard credential hook does not flip setup to degraded', async () => {
+  it('#1443: a failing post-config setup hook does not flip setup to degraded', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-1439f-'));
     vi.stubGlobal('fetch', async () =>
@@ -252,12 +280,12 @@ describe('Hermes profile setup helpers', () => {
     const oldDkgHome = process.env.DKG_HOME;
     process.env.DKG_HOME = dkgHome;
     try {
-      const ensureDashboardCredentials = vi.fn(async () => { throw new Error('invalid credential file'); });
+      const afterConfigBootstrap = vi.fn(async () => { throw new Error('invalid credential file'); });
       const result = await runHermesSetup(
         { hermesHome, verify: false, start: false, fund: false },
-        { ensureDashboardCredentials },
+        { afterConfigBootstrap },
       );
-      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(afterConfigBootstrap).toHaveBeenCalledTimes(1);
       expect(result.warnings.join('\n')).not.toContain('dashboard login credentials');
       expect(result.errors.join('\n')).not.toContain('dashboard login credentials');
     } finally {

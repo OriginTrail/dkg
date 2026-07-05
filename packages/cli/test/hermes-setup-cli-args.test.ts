@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Command } from 'commander';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -82,10 +82,10 @@ describe('hermesSetupAction', () => {
     // dashboard credentials can be created by explicit CLI setup flows.
     const [, runDeps] = runSetupArgs[0] as [unknown, {
       loadOpWallets?: unknown;
-      ensureDashboardCredentials?: unknown;
+      afterConfigBootstrap?: unknown;
     }];
     expect(typeof runDeps?.loadOpWallets).toBe('function');
-    expect(typeof runDeps?.ensureDashboardCredentials).toBe('function');
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
   });
 
   it('#1439: injected dashboard credential hook creates credentials through the setup helper', async () => {
@@ -99,16 +99,16 @@ describe('hermesSetupAction', () => {
     );
 
     const [, runDeps] = runSetupArgs[0] as [unknown, {
-      ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+      afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
     }];
-    expect(typeof runDeps?.ensureDashboardCredentials).toBe('function');
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
 
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-hermes-dashboard-hook-'));
     const logCalls: unknown[][] = [];
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { logCalls.push(args); };
     try {
-      await runDeps.ensureDashboardCredentials!(dkgHome);
+      await runDeps.afterConfigBootstrap!(dkgHome);
       const credentialPath = dashboardCredentialsPath(dkgHome);
       const logs = logCalls.map((args) => args.join(' ')).join('\n');
       const password = logs.match(/Password: ([^\n]+)/)?.[1]?.trim();
@@ -122,6 +122,40 @@ describe('hermesSetupAction', () => {
         .resolves.not.toContain(password);
     } finally {
       console.log = originalLog;
+      await rm(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it('#1451: injected dashboard credential hook is best-effort on invalid credential files', async () => {
+    const runSetupArgs: any[] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupArgs.push(args); };
+
+    await hermesSetupAction(
+      { verify: false, start: false, dryRun: true },
+      makeCommand(),
+      { runSetup: runSetup as any },
+    );
+
+    const [, runDeps] = runSetupArgs[0] as [unknown, {
+      afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
+    }];
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
+
+    const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-hermes-dashboard-hook-invalid-'));
+    const warnCalls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnCalls.push(args); };
+    try {
+      await writeFile(dashboardCredentialsPath(dkgHome), '{"version":1,"password":"plaintext"}\n');
+
+      await expect(runDeps.afterConfigBootstrap!(dkgHome)).resolves.toBeUndefined();
+
+      const warnings = warnCalls.map((args) => args.join(' ')).join('\n');
+      expect(warnings).toContain('[hermes-setup] Could not create dashboard login credentials');
+      expect(warnings).toContain(`DKG_HOME=${dkgHome}`);
+      expect(warnings).toContain('dkg auth dashboard reset-password');
+    } finally {
+      console.warn = originalWarn;
       await rm(dkgHome, { recursive: true, force: true });
     }
   });

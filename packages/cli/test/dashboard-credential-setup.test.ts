@@ -3,7 +3,10 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureDashboardCredentialsForSetup } from '../src/dashboard-credential-setup.js';
+import {
+  ensureDashboardCredentialsForSetup,
+  ensureDashboardCredentialsForSetupBestEffort,
+} from '../src/dashboard-credential-setup.js';
 import {
   dashboardCredentialsPath,
   verifyDashboardCredentials,
@@ -89,5 +92,16 @@ describe('dashboard credential setup helper', () => {
 
     await expect(ensureDashboardCredentialsForSetup(tempDir)).rejects.toThrow();
     expect(warnCapture.text()).toBe('');
+  });
+
+  it('warns with reset guidance from the CLI-owned best-effort wrapper', async () => {
+    await writeFile(dashboardCredentialsPath(tempDir), '{"version":1,"password":"plaintext"}\n');
+
+    await expect(ensureDashboardCredentialsForSetupBestEffort(tempDir))
+      .resolves.toBeUndefined();
+
+    expect(warnCapture.text()).toContain('Could not create dashboard login credentials');
+    expect(warnCapture.text()).toContain(`DKG_HOME=${tempDir}`);
+    expect(warnCapture.text()).toContain('dkg auth dashboard reset-password');
   });
 });
