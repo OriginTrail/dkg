@@ -1268,7 +1268,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.hubRotationListenerStarted).toBe(false);
   });
 
-  it('startHubRotationListener ignores replayed startup logs and processes post-start timer rotations', async () => {
+  it('startHubRotationListener defers seed logs until the first post-start buffered poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
@@ -1351,7 +1351,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         toBlock: 1_001,
       });
       expect(a.contracts.contextGraphs).toEqual({ fresh: true });
-      expect(a.contracts.randomSampling).toEqual({ fresh: 'rs' });
+      expect(a.contracts.randomSampling).toBeUndefined();
       expect(a.cachedKav10Address).toBeUndefined();
       expect(a.initialized).toBe(false);
     } finally {
