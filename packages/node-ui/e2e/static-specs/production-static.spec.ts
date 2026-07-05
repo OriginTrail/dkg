@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handleNodeUIStaticRequest } from '../../src/api.js';
+import { handleNodeUIStaticRequest } from '../../src/static-ui.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '../..');

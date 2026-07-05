@@ -4,11 +4,10 @@ import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
 } from "./dashboard-session-store.js";
+import type { DashboardLoginSessionPolicy } from "./dashboard-login-options.js";
 
 export interface DashboardSessionAuthenticatorOptions {
-  dashboardLogin?: {
-    isCredentialFingerprintCurrent?: (credentialFingerprint: string) => boolean;
-  };
+  dashboardLogin?: DashboardLoginSessionPolicy;
   onSessionRevoked?: (sessionId: string) => void;
 }
 

@@ -10,10 +10,14 @@ export {
   parseDashboardSessionExchange,
   selectDashboardLoginCompatToken,
   type DashboardLoginCompatTokenSelectionOptions,
-  type DashboardLoginOptions,
-  type DashboardLoginVerification,
   type DashboardSessionExchangeInvalidRequest,
   type DashboardSessionExchangeLoginRequest,
   type DashboardSessionExchangeRequest,
   type DashboardSessionExchangeTokenRequest,
 } from "./dashboard-login-exchange.js";
+export {
+  type DashboardLoginExchangeConfig,
+  type DashboardLoginOptions,
+  type DashboardLoginSessionPolicy,
+  type DashboardLoginVerification,
+} from "./dashboard-login-options.js";

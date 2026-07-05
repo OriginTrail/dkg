@@ -6,21 +6,11 @@ import { dashboardSessionResponse } from "./dashboard-session-response.js";
 import {
   DashboardSessionStore,
 } from "./dashboard-session-store.js";
-import {
-  dashboardLoginAttemptKey,
-  type DashboardLoginAttemptLimiter,
-} from "./dashboard-login-limiter.js";
-
-export type DashboardLoginVerification =
-  | { ok: true; credentialFingerprint: string }
-  | { ok: false; reason?: "missing" | "invalid" | "mismatch" };
-
-export interface DashboardLoginOptions {
-  verifyCredentials: (username: string, password: string) => Promise<DashboardLoginVerification>;
-  selectCompatToken: () => string | undefined;
-  attemptLimiter?: DashboardLoginAttemptLimiter;
-  isCredentialFingerprintCurrent?: (credentialFingerprint: string) => boolean;
-}
+import { dashboardLoginAttemptKey } from "./dashboard-login-limiter.js";
+import type {
+  DashboardLoginExchangeConfig,
+  DashboardLoginVerification,
+} from "./dashboard-login-options.js";
 
 export interface DashboardLoginCompatTokenSelectionOptions {
   validTokens: Set<string>;
@@ -45,7 +35,7 @@ export function selectDashboardLoginCompatToken(options: DashboardLoginCompatTok
 export interface DashboardLoginExchangeOptions {
   validTokens: Set<string>;
   corsOrigin?: string | null;
-  dashboardLogin?: DashboardLoginOptions;
+  dashboardLogin?: DashboardLoginExchangeConfig;
 }
 
 export async function handleDashboardLoginExchange(
