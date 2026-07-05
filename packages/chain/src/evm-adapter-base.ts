@@ -3147,8 +3147,7 @@ export class EVMChainAdapterBase {
     await this.hubRotationPoller.poll(hub);
   }
 
-  protected applyHubRotationEventName(name: unknown): void {
-    if (typeof name !== 'string') return;
+  protected applyHubRotationEventName(name: string): void {
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;

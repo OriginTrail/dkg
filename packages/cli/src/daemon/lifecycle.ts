@@ -672,10 +672,10 @@ export function shouldUseIncrementalChainDiscoveryScan(input: {
   return input.watermarkSeeded;
 }
 
-export function chainDiscoveryScanOptions(incremental: boolean):
+export function chainDiscoveryScanOptions(input: { watermarkSeeded: boolean }):
   | { incremental: true }
   | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
-  return incremental
+  return input.watermarkSeeded
     ? { incremental: true }
     : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
 }
@@ -2009,11 +2009,10 @@ export async function runDaemonInner(
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const runChainDiscoveryScan = async () => {
     try {
-      const incremental = shouldUseIncrementalChainDiscoveryScan({
-        watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-      });
       const found = await agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions(incremental),
+        chainDiscoveryScanOptions({
+          watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
+        }),
       );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);

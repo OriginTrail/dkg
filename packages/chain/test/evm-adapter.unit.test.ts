@@ -1184,7 +1184,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(backupProvider.getBlockNumber.calls).toEqual([[]]);
   });
 
-  it('startHubRotationListener polls Hub rotation topics without ethers subscriptions', async () => {
+  it('pollHubRotationEvents scans Hub rotation topics without ethers subscriptions', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
@@ -1199,6 +1199,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const provider = {
       getBlockNumber: recorder(async () => 1_000),
       getLogs: recorder(async (_filter: any) => [{
+        blockNumber: 1_000,
         topics: changed.topics,
         data: changed.data,
       }]),
@@ -1217,7 +1218,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.hubRotationListenerStarted = false;
     a.initialized = true;
 
-    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();
     a.destroy();
 
     expect(on.calls).toEqual([]);
@@ -1239,7 +1240,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.hubRotationListenerStarted).toBe(false);
   });
 
-  it('startHubRotationListener processes Hub rotations from the recurring poll timer', async () => {
+  it('startHubRotationListener ignores replayed startup logs and processes post-start timer rotations', async () => {
     vi.useFakeTimers({ now: 0 });
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
@@ -1248,19 +1249,21 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
     ]);
+    const oldRandomSampling = iface.encodeEventLog(iface.getEvent('NewContract')!, [
+      'RandomSampling',
+      '0x00000000000000000000000000000000000000b1',
+    ]);
     const changed = iface.encodeEventLog(iface.getEvent('NewContract')!, [
       'ContextGraphs',
       '0x00000000000000000000000000000000000000c1',
     ]);
-    let poll = 0;
+    let head = 1_000;
     const provider = {
-      getBlockNumber: recorder(async () => 1_000 + poll),
-      getLogs: recorder(async (_filter: any) => {
-        poll++;
-        return poll === 1
-          ? []
-          : [{ topics: changed.topics, data: changed.data }];
-      }),
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (_filter: any) => [
+        { blockNumber: 1_000, topics: oldRandomSampling.topics, data: oldRandomSampling.data },
+        { blockNumber: 1_001, topics: changed.topics, data: changed.data },
+      ]),
       destroy: recorder(() => undefined),
     };
     const on = recorder(async () => {
@@ -1271,6 +1274,9 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.primaryProvider = provider;
     a.provider = provider;
     a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001', on };
+    a.contracts.contextGraphs = { fresh: true };
+    a.contracts.randomSampling = { fresh: 'rs' };
+    a.contracts.randomSamplingStorage = { fresh: 'rss' };
     a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
     a.hubRotationListenerStarted = false;
     a.initialized = true;
@@ -1278,14 +1284,63 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(on.calls).toEqual([]);
-      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(a.contracts.contextGraphs).toEqual({ fresh: true });
+      expect(a.contracts.randomSampling).toEqual({ fresh: 'rs' });
       expect(a.initialized).toBe(true);
 
+      head = 1_001;
       await vi.advanceTimersByTimeAsync(5 * 60_000);
 
-      expect(provider.getLogs.calls).toHaveLength(2);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(a.contracts.contextGraphs).toEqual({ fresh: true });
+      expect(a.contracts.randomSampling).toEqual({ fresh: 'rs' });
       expect(a.cachedKav10Address).toBeUndefined();
       expect(a.initialized).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy clears the Hub rotation poll interval', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async (_filter: any) => []),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001' };
+    a.hubRotationListenerStarted = false;
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+
+      a.destroy();
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.destroy.calls).toHaveLength(1);
+      expect(a.hubRotationListenerStarted).toBe(false);
     } finally {
       a.destroy();
       vi.useRealTimers();
@@ -1319,7 +1374,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       fromBlock: 850,
       toBlock: 900,
     });
-    expect(a.hubRotationPoller.lastScannedBlock).toBe(900);
+    expect(a.hubRotationPoller.lastScannedBlock).toBe(1_000);
   });
 
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
