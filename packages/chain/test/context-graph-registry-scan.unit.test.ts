@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
 import {
-  CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS,
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
 } from '../src/evm-adapter-base.js';
@@ -232,15 +231,23 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
   });
 
   it('can seed the incremental watermark from an explicit successful full scan', async () => {
-    const registry = makeRegistry();
-    const { adapter, provider } = makeAdapter(registry, 4_000);
-    registry.queryFilter.setImpl(async () => []);
+    const historicalGraphBlock = 10_000;
+    const head = 20_000;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= historicalGraphBlock && historicalGraphBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: historicalGraphBlock }]
+          : [],
+      ),
+    });
+    const { adapter, provider } = makeAdapter(registry, head);
 
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
 
-    await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+    const seeded = await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
 
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(4_001);
+    expect(seeded.map((cg) => cg.blockNumber)).toEqual([historicalGraphBlock]);
+    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(head + 1);
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
     provider.getCode = seam(async () => {
@@ -252,34 +259,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     expect(provider.getCode.calls).toEqual([]);
     expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-      [4_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 4_000],
+      [head + 1 - CG_REGISTRY_REORG_BUFFER_BLOCKS, head],
     ]);
-  });
-
-  it('can seed the incremental watermark from a bounded live-tail scan without deploy-block probing', async () => {
-    const registry = makeRegistry();
-    const head = 20_000;
-    const { adapter, provider } = makeAdapter(registry, head);
-    provider.getCode = seam(async () => {
-      throw new Error('eth_getCode should not be called for daemon live-tail seeding');
-    });
-    registry.queryFilter.setImpl(async () => []);
-
-    await adapter.listContextGraphsFromChain(undefined, {
-      liveTailOnly: true,
-      liveTailLookbackBlocks: CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS,
-      seedIncrementalWatermark: true,
-    });
-
-    expect(provider.getCode.calls).toEqual([]);
-    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-      [11_001, 13_000],
-      [13_001, 15_000],
-      [15_001, 17_000],
-      [17_001, 19_000],
-      [19_001, 20_000],
-    ]);
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(head + 1);
   });
 
   it('reports no registry scan watermark after preflight cache invalidation', async () => {

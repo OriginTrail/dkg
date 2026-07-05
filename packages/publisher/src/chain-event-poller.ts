@@ -274,8 +274,7 @@ export class ChainEventPoller {
         eventTypes: () => ['NameClaimed', 'ContextGraphCreated'],
         // This poller is the low-latency live tail for new context graphs.
         // Historical recovery is handled by the daemon's
-        // discoverContextGraphsFromChain scan, which has its own bounded
-        // incremental watermark.
+        // discoverContextGraphsFromChain scan and incremental watermark.
         requiresFullHistory: () => false,
         canUseLegacyAggregateCursor: () => true,
         cadenceMs: this.intervalMs,

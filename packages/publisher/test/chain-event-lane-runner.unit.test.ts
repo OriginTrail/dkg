@@ -865,6 +865,70 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(saveCalls).toEqual([{ lane: 'contextGraphDiscovery', block: 100 }]);
   });
 
+  it('exponentially backs off repeated lane failures and resets after success', async () => {
+    const filters: EventFilter[] = [];
+    const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
+    let calls = 0;
+    let head = 100;
+    let now = 0;
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
+        filters.push(f);
+        calls++;
+        if (calls === 1 || calls === 2 || calls === 4) throw new Error('rpc down');
+      },
+    } as unknown as ChainAdapter;
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane(lane, block) { saveCalls.push({ lane, block }); },
+    };
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 20,
+      cursorPersistence: cursor,
+      clock: () => now,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 60_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 120_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 180_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
+    ]);
+    expect(saveCalls).toEqual([{ lane: 'contextGraphDiscovery', block: 100 }]);
+
+    head = 200;
+    now = 180_020;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 240_019;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 240_020;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
+      [101, 200],
+      [101, 200],
+    ]);
+    expect(saveCalls).toEqual([
+      { lane: 'contextGraphDiscovery', block: 100 },
+      { lane: 'contextGraphDiscovery', block: 200 },
+    ]);
+  });
+
   it('keeps headless scans due until a known head proves the lane is caught up', async () => {
     const filters: EventFilter[] = [];
     const adapter = {

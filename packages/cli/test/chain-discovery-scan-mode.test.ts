@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
   chainDiscoveryScanOptions,
   shouldUseIncrementalChainDiscoveryScan,
 } from '../src/daemon/lifecycle.js';
 
 describe('shouldUseIncrementalChainDiscoveryScan', () => {
-  it('uses bounded live-tail seeding before any watermark seed exists', () => {
+  it('uses historical watermark seeding before any watermark seed exists', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
         watermarkSeeded: false,
@@ -14,7 +13,7 @@ describe('shouldUseIncrementalChainDiscoveryScan', () => {
     ).toBe(false);
   });
 
-  it('keeps bounded live-tail seeding until a watermark seed succeeds', () => {
+  it('keeps historical seeding until a watermark seed succeeds', () => {
     expect(
       shouldUseIncrementalChainDiscoveryScan({
         watermarkSeeded: false,
@@ -40,10 +39,8 @@ describe('shouldUseIncrementalChainDiscoveryScan', () => {
 });
 
 describe('chainDiscoveryScanOptions', () => {
-  it('uses failure-throwing bounded live-tail watermark seeding before incremental scans', () => {
+  it('uses failure-throwing full-history watermark seeding before incremental scans', () => {
     expect(chainDiscoveryScanOptions(false)).toEqual({
-      liveTailOnly: true,
-      liveTailLookbackBlocks: CHAIN_DISCOVERY_LIVE_TAIL_LOOKBACK_BLOCKS,
       seedIncrementalWatermark: true,
       throwOnChainScanFailure: true,
     });
