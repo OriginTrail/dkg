@@ -341,4 +341,22 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     expect(mocks.fetchPca).toHaveBeenCalledWith('7');
     expect(mocks.pcaAddAgent).toHaveBeenCalledWith('7', AGENT);
   });
+
+  it('T5: daemon-owned target whose wallets are STILL LOADING (walletsUnknown) is NOT pinned read-only', async () => {
+    // The approve modal builds access before fetchWalletsBalances resolves — owner known,
+    // primaryWallet undefined. WITHOUT walletsUnknown that would misclassify a daemon-owned PCA
+    // as external → pin read-only → fail a valid owner approval. With walletsUnknown it is
+    // 'unknown', so the write re-fetches wallets and routes daemon; approval succeeds.
+    mocks.fetchPca.mockResolvedValue({ owner: HOT });
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
+    mocks.pcaAddAgent.mockResolvedValue({ registered: true });
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: undefined, connectedWallet: HW, walletsUnknown: true });
+    expect(access.mode).toBe('unknown'); // NOT 'external' — the fix
+
+    await expect(useResolvedOwnerActionSubmitter({ access }).registerAgent('8', AGENT))
+      .resolves.toEqual({ registered: true });
+
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', AGENT); // daemon, via the re-fetch
+    expect(mocks.walletSubmitter.registerAgent).not.toHaveBeenCalled();
+  });
 });

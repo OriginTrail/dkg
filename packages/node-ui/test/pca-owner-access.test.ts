@@ -26,7 +26,6 @@ vi.mock('../src/ui/web3/walletOwnerActionSubmitter.js', () => ({
 }));
 
 const { resolvePcaOwnerAccess } = await import('../src/ui/pca/ownerAccess.js');
-const { detailOwnerMode } = await import('../src/ui/pca/detailOwnerMode.js');
 const { resolveOwnerActionSubmitterKind } = await import('../src/ui/pca/ownerActions.js');
 
 const HOT = `0x${'11'.repeat(20)}`; // this node's primary operational (daemon) wallet
@@ -221,10 +220,6 @@ describe('call-site parity — the model reproduces every former owner-mode site
         primaryWallet: s.primary,
         connectedWallet: s.connected,
         walletWrongNetwork: s.wrong,
-      });
-
-      it('mode == detailOwnerMode', () => {
-        expect(access.mode).toBe(detailOwnerMode(s.owner, s.primary, s.connected));
       });
 
       it('mode == ConvictionOverview.ownerModeFor', () => {

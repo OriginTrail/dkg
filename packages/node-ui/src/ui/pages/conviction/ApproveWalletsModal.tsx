@@ -88,7 +88,12 @@ export function ApproveWalletsModal({
   // #1375 — the shared owner-access model for THIS account (drives the managed-target display
   // predicate + the signer candidates). The async, per-account signerKindForAccount below
   // deliberately stays a separate re-fetching seam (inv-16 / P4).
-  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet });
+  // `walletsUnknown` while the wallet balances are still loading: without it, a snapshot that
+  // loads BEFORE the wallets would see owner + an undefined primaryWallet and misclassify a
+  // daemon-owned PCA as external → pin read-only → fail a valid owner approval. Marking it
+  // unknown routes the resolved submitter through the re-fetching path (which self-heals to
+  // daemon once wallets[0] is readable).
+  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet, walletsUnknown: !wb });
   // Item 3 (#1375) — resolve THIS account's owner submitter ONCE from `access`, so the batch's
   // registerAgent (ALWAYS on the TARGET) submits directly with no per-write owner/wallet re-fetch.
   // The wallet branch keeps its per-prompt loadContext / assertStillConnected liveness guards.
