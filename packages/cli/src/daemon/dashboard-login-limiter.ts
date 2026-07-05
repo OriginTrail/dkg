@@ -27,7 +27,24 @@ export class DashboardLoginAttemptLimiter {
     now?: () => number;
   } = {}) {}
 
-  reserve(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
+  reserveAttempt(key: string): DashboardLoginAttemptReservation {
+    const reserved = this.reserve(key);
+    if (!reserved.ok) return reserved;
+    let finalized = false;
+    const finalize = (fn: () => void): void => {
+      if (finalized) return;
+      finalized = true;
+      fn();
+    };
+    return {
+      ok: true,
+      fail: () => finalize(() => this.completeFailure(key)),
+      release: () => finalize(() => this.releaseReservation(key)),
+      succeed: () => finalize(() => this.recordSuccess(key)),
+    };
+  }
+
+  private reserve(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
     const now = this.now();
     this.prune(now);
     let attempt = this.attempts.get(key);
@@ -53,35 +70,7 @@ export class DashboardLoginAttemptLimiter {
     return { ok: true };
   }
 
-  reserveAttempt(key: string): DashboardLoginAttemptReservation {
-    const reserved = this.reserve(key);
-    if (!reserved.ok) return reserved;
-    let finalized = false;
-    const finalize = (fn: () => void): void => {
-      if (finalized) return;
-      finalized = true;
-      fn();
-    };
-    return {
-      ok: true,
-      fail: () => finalize(() => this.completeFailure(key)),
-      release: () => finalize(() => this.releaseReservation(key)),
-      succeed: () => finalize(() => this.recordSuccess(key)),
-    };
-  }
-
-  check(key: string): { ok: true } | { ok: false; retryAfterMs: number } {
-    const now = this.now();
-    this.prune(now);
-    const attempt = this.attempts.get(key);
-    if (!attempt) return { ok: true };
-    if (attempt.lockedUntil && attempt.lockedUntil > now) {
-      return { ok: false, retryAfterMs: attempt.lockedUntil - now };
-    }
-    return { ok: true };
-  }
-
-  completeFailure(key: string): void {
+  private completeFailure(key: string): void {
     const now = this.now();
     const attempt = this.attempts.get(key);
     if (!attempt) return;
@@ -93,7 +82,7 @@ export class DashboardLoginAttemptLimiter {
     this.attempts.set(key, attempt);
   }
 
-  releaseReservation(key: string): void {
+  private releaseReservation(key: string): void {
     const attempt = this.attempts.get(key);
     if (!attempt) return;
     attempt.inFlight = Math.max(0, attempt.inFlight - 1);
@@ -107,12 +96,7 @@ export class DashboardLoginAttemptLimiter {
     this.attempts.set(key, attempt);
   }
 
-  recordFailure(key: string): void {
-    const reserved = this.reserve(key);
-    if (reserved.ok) this.completeFailure(key);
-  }
-
-  recordSuccess(key: string): void {
+  private recordSuccess(key: string): void {
     this.attempts.delete(key);
   }
 

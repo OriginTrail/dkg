@@ -477,24 +477,38 @@ describe('dashboard browser sessions', () => {
     ['invalid' as const, 'Dashboard credentials are unavailable'],
   ])('reports %s dashboard credentials without setting a cookie', async (reason, message) => {
     const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason }));
+    let now = 1_000;
     const started = await startServer({
       dashboardLogin: {
         verifyCredentials,
         selectCompatToken: () => VALID_TOKEN,
+        attemptLimiter: new DashboardLoginAttemptLimiter({
+          maxFailures: 1,
+          failureWindowMs: 60_000,
+          lockoutMs: 60_000,
+          now: () => now,
+        }),
       },
     });
     server = started.server;
 
-    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+    const request = () => fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
     });
-    expect(exchange.status).toBe(503);
-    expect(exchange.headers.get('set-cookie')).toBeNull();
-    const body = await exchange.json() as { error: string };
-    expect(body.error).toContain(message);
-    expect(body.error).toContain('reset-password');
+
+    const first = await request();
+    now += 1_000;
+    const second = await request();
+    for (const exchange of [first, second]) {
+      expect(exchange.status).toBe(503);
+      expect(exchange.headers.get('set-cookie')).toBeNull();
+      const body = await exchange.json() as { error: string };
+      expect(body.error).toContain(message);
+      expect(body.error).toContain('reset-password');
+    }
+    expect(verifyCredentials).toHaveBeenCalledTimes(2);
   });
 
   it('does not set a cookie when password login has no node-admin backing token', async () => {
