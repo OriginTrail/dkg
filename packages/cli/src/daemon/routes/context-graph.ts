@@ -394,6 +394,52 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+export interface ContextGraphSignJoinRouteAgent {
+  signJoinRequest(
+    contextGraphId: string,
+    callerAddress: string,
+  ): Promise<{ agentAddress: string }>;
+}
+
+export interface ContextGraphSignJoinRouteContext {
+  req: IncomingMessage;
+  res: ServerResponse;
+  agent: ContextGraphSignJoinRouteAgent;
+  path: string;
+  requestAgentAddress: string;
+}
+
+export async function handleContextGraphSignJoinRoute(
+  ctx: ContextGraphSignJoinRouteContext,
+): Promise<boolean> {
+  const { req, res, agent, path, requestAgentAddress } = ctx;
+
+  const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
+  if (req.method !== "POST" || !signJoinMatch) return false;
+
+  const contextGraphId = decodeURIComponent(signJoinMatch[1]);
+  try {
+    const callerAddress = requestAgentAddress;
+    try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
+    const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
+    jsonResponse(res, 200, {
+      ok: true,
+      contextGraphId,
+      delegation,
+      agentAddress: delegation.agentAddress,
+      forwarded: false,
+      next:
+        `This route only SIGNS the join request — nothing was sent to the curator. ` +
+        `To deliver it, POST /api/context-graph/${encodeURIComponent(contextGraphId)}/request-join ` +
+        `with body { "delegation": <the delegation object above>, "curatorPeerId": "<curator's libp2p peer id>", "agentName"?: "..." }.`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    jsonResponse(res, 400, { error: msg });
+  }
+  return true;
+}
+
 export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -1083,53 +1129,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  // POST /api/context-graph/{id}/sign-join — sign a join-request delegation
-  //
-  // SIGN-ONLY. Returns the signed `SignedAgentDelegation` for the caller's
-  // agent to whoever is asking. Does NOT forward over P2P — that is the
-  // sole responsibility of `/api/context-graph/{id}/request-join`.
-  //
-  // Why split? PR #448 review (2026-05-11): an earlier revision of this
-  // route also called `forwardJoinRequest` before returning, but the UI +
-  // CLI then POST the same delegation to `/request-join`, which forwards
-  // it again. Curators received the same join request twice (and emitted
-  // two `JOIN_REQUEST_RECEIVED` notifications) on every single click.
-  // Splitting sign vs forward also lets the CLI sign without a curator
-  // peer id (sign locally, forward later) — the previous mandatory
-  // `curatorPeerId` body param hard-broke `dkg context-graph request-join`.
-  const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
-  if (req.method === "POST" && signJoinMatch) {
-    const contextGraphId = decodeURIComponent(signJoinMatch[1]);
-    try {
-      const callerAddress = requestAgentAddress;
-      // Body is intentionally ignored — sign-only. Drain it so a JSON body
-      // sent by older clients doesn't sit on the socket.
-      try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
-      const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
-      return jsonResponse(res, 200, {
-        ok: true,
-        contextGraphId,
-        delegation,
-        // Back-compat surface for older HTTP clients reading the
-        // top-level `agentAddress`. The full signed delegation lives
-        // in `delegation`; callers that want delivery POST it (with
-        // a `curatorPeerId`) to `/request-join`.
-        agentAddress: delegation.agentAddress,
-        // #1103: callers repeatedly read this route's 200 as "the join
-        // request is on its way to the curator" and then waited forever
-        // (the curator's /join-requests stays empty — nothing was sent).
-        // Make the sign-only contract explicit in the response itself.
-        forwarded: false,
-        next:
-          `This route only SIGNS the join request — nothing was sent to the curator. ` +
-          `To deliver it, POST /api/context-graph/${encodeURIComponent(contextGraphId)}/request-join ` +
-          `with body { "delegation": <the delegation object above>, "curatorPeerId": "<curator's libp2p peer id>", "agentName"?: "..." }.`,
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return jsonResponse(res, 400, { error: msg });
-    }
-  }
+  if (await handleContextGraphSignJoinRoute({ req, res, agent, path, requestAgentAddress })) return;
 
   // ── Phase 8: project-manifest publish + install (UI-driven) ───────
   //

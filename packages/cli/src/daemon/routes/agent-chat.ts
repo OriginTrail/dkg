@@ -401,6 +401,41 @@ function parsePrecomputedUpdateAttestation(
   };
 }
 
+export interface AgentIdentityRouteAgent {
+  listLocalAgents(): Array<{ agentAddress: string; name?: string; framework?: string }>;
+  nodeName: string;
+  nodeFramework?: string;
+  peerId: string;
+  publisher: { getIdentityId(): bigint | number | string };
+}
+
+export interface AgentIdentityRouteContext {
+  req: IncomingMessage;
+  res: ServerResponse;
+  agent: AgentIdentityRouteAgent;
+  path: string;
+  requestAgentAddress: string;
+}
+
+export function handleAgentIdentityRoute(ctx: AgentIdentityRouteContext): boolean {
+  const { req, res, agent, path, requestAgentAddress } = ctx;
+
+  if (req.method !== "GET" || path !== "/api/agent/identity") return false;
+
+  const agentAddress = requestAgentAddress;
+  const localAgents = agent.listLocalAgents();
+  const current = localAgents.find((a) => a.agentAddress === agentAddress);
+  jsonResponse(res, 200, {
+    agentAddress,
+    agentDid: `did:dkg:agent:${agentAddress}`,
+    name: current?.name ?? agent.nodeName,
+    framework: current?.framework ?? agent.nodeFramework,
+    peerId: agent.peerId,
+    nodeIdentityId: String(agent.publisher.getIdentityId()),
+  });
+  return true;
+}
+
 export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -603,20 +638,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
   }
 
-  // GET /api/agent/identity — current agent identity for the requesting token
-  if (req.method === "GET" && path === "/api/agent/identity") {
-    const agentAddress = requestAgentAddress;
-    const localAgents = agent.listLocalAgents();
-    const current = localAgents.find((a) => a.agentAddress === agentAddress);
-    return jsonResponse(res, 200, {
-      agentAddress,
-      agentDid: `did:dkg:agent:${agentAddress}`,
-      name: current?.name ?? agent.nodeName,
-      framework: current?.framework ?? agent.nodeFramework,
-      peerId: agent.peerId,
-      nodeIdentityId: String(agent.publisher.getIdentityId()),
-    });
-  }
+  if (handleAgentIdentityRoute({ req, res, agent, path, requestAgentAddress })) return;
 
   // GET /api/agents — enriched with live connection health
   // Optional query params: ?framework=X &skill_type=X

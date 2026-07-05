@@ -463,6 +463,7 @@ describe('httpAuthGuard', () => {
       res.end(JSON.stringify({
         ok: true,
         requestAuth: getRequestAuthContext(req) ?? null,
+        authResultContext: authResult.requestAuthContext ?? null,
         dashboardSseSession: url.pathname === '/api/events'
           ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
           : null,
@@ -641,6 +642,7 @@ describe('httpAuthGuard', () => {
       principal,
       csrf: { required: false, validated: false },
     });
+    expect(body.authResultContext).toEqual(body.requestAuth);
   });
 
   it('resolves the same principal shape for valid SSE query-token auth', async () => {
@@ -653,6 +655,7 @@ describe('httpAuthGuard', () => {
       principal,
       csrf: { required: false, validated: false },
     });
+    expect(body.authResultContext).toEqual(body.requestAuth);
     expect(body.dashboardSseSession).toBeNull();
   });
 
@@ -691,6 +694,7 @@ describe('httpAuthGuard', () => {
       },
     });
     expect(body.requestAuth.dashboardSession).not.toHaveProperty('credentialFingerprint');
+    expect(body.authResultContext).toEqual(body.requestAuth);
     expect(body.dashboardSseSession).toMatchObject({
       sessionId: created.sessionId,
       expiresAt: created.record.expiresAt,

@@ -8,8 +8,10 @@ import {
   verifyDashboardCsrf,
   type DashboardLoginOptions,
 } from '../src/daemon/dashboard-session.js';
-import { handleRequest } from '../src/daemon/handle-request.js';
 import { getRequestAuthContext, httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
+import { handleAgentIdentityRoute } from '../src/daemon/routes/agent-chat.js';
+import { handleContextGraphSignJoinRoute } from '../src/daemon/routes/context-graph.js';
+import { resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
 
 export const VALID_TOKEN = 'dashboard-backed-token';
 export const ROTATED_TOKEN = 'dashboard-rotated-token';
@@ -36,7 +38,7 @@ export async function startDashboardSessionServer(options: {
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
   corsOrigin?: string | null;
-  signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<unknown>;
+  signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<{ agentAddress: string }>;
   authEnabled?: boolean;
   dashboardLogin?: DashboardLoginOptions;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
@@ -88,36 +90,18 @@ export async function startDashboardSessionServer(options: {
       url.pathname === '/api/agent/identity' ||
       /^\/api\/context-graph\/[^/]+\/sign-join$/.test(url.pathname)
     ) {
-      await handleRequest(
+      const requestIdentity = resolveRouteRequestIdentity(req, agent);
+      const routeContext = {
         req,
         res,
-        agent as any,
-        {} as any,
-        null,
-        { auth: { enabled: true } } as any,
-        Date.now(),
-        {} as any,
-        {} as any,
-        {} as any,
-        {} as any,
-        {} as any,
-        undefined,
-        'test-version',
-        'test-commit',
-        {} as any,
-        {} as any,
-        new Map(),
-        new Map(),
-        {} as any,
-        null,
-        validTokens,
-        '127.0.0.1',
-        { value: 0 },
-        [],
-        {} as any,
-        undefined,
-        undefined,
-      );
+        agent,
+        path: url.pathname,
+        requestAgentAddress: requestIdentity.principal.agentAddress,
+      };
+      if (handleAgentIdentityRoute(routeContext)) return;
+      if (await handleContextGraphSignJoinRoute(routeContext)) return;
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
