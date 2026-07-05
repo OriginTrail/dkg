@@ -304,6 +304,34 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('M9 — a mined-but-REVERTED pending top-up clears the marker + shows the revert error, never a false success', async () => {
+    // usePendingTopUpReconciliation fund-sensitive recovery branch: a reverted receipt
+    // must NOT present a failed top-up as confirmed, and must free the button (clear pending).
+    const getTransactionReceipt = vi.fn(async ({ hash }: { hash: string }) => {
+      expect(hash).toBe('0xpendingtopup');
+      return { status: 'reverted' };
+    });
+    mocks.publicClientFor.mockReturnValue({ getTransactionReceipt });
+    usePcaStore.setState({
+      topUpPending: {
+        '7': {
+          accountId: '7',
+          ownerEoa: W0,
+          submittedAt: Date.now(),
+          txHash: '0xpendingtopup',
+          tokens: '100',
+          previousTopUpBufferTrac: '12500.0',
+        },
+      },
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'The pending top-up transaction reverted on-chain.');
+    expect(usePcaStore.getState().topUpPending['7']).toBeUndefined();
+    expect(container.textContent).not.toContain('Top-up confirmed on-chain.');
+    await unmount();
+  });
+
   it('wallet top-up action rejection after approval uses step-aware allowance copy', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,

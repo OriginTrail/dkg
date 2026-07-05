@@ -13,7 +13,7 @@ import { usePendingTopUpReconciliation } from '../../pca/usePendingTopUpReconcil
 import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
-import type { DetailOwnerMode } from './ConvictionDetailView.js';
+import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
 
 /** Funding — top-up + the W2 ambiguous-broadcast / pending-receipt honesty. */
 export function FundingSection({

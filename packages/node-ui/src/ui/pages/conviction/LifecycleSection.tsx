@@ -5,7 +5,7 @@ import { useRenewalChaining } from '../../pca/useRenewalChaining.js';
 import type { PcaHealthState } from '../../pca/health.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
-import type { DetailOwnerMode } from './ConvictionDetailView.js';
+import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
 
 /** Lifecycle / Renew — re-mint a REPLACEMENT account (deliberately omits refresh; the mint is a NEW id). */
 export function LifecycleSection({

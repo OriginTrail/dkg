@@ -22,18 +22,10 @@ import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
-
-const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
-export type DetailOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
+import { eqAddress, detailOwnerMode, type DetailOwnerMode } from '../../pca/detailOwnerMode.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
-}
-
-function detailOwnerMode(owner: string, primaryWallet?: string, connectedWallet?: string | null): DetailOwnerMode {
-  if (eq(owner, primaryWallet)) return 'daemon';
-  if (connectedWallet && eq(owner, connectedWallet) && !eq(owner, primaryWallet)) return 'wallet';
-  return 'external';
 }
 
 /**
@@ -79,7 +71,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     ? 'unknown'
     : detailOwnerMode(snapshot.owner, wallets[0], connectedWallet);
   const ownerWritesEnabled = ownerMode === 'daemon' || (ownerMode === 'wallet' && !walletWrongNetwork);
-  const ownerInPool = wallets.some((w) => eq(w, snapshot.owner));
+  const ownerInPool = wallets.some((w) => eqAddress(w, snapshot.owner));
 
   const ownerGateReason = walletsUnknown
     ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
@@ -98,7 +90,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       accountId={accountId}
       snapshot={snapshot}
       wallets={wallets}
-      ownerTrac={wb?.balances?.find((b) => eq(b.address, snapshot.owner))?.trac}
+      ownerTrac={wb?.balances?.find((b) => eqAddress(b.address, snapshot.owner))?.trac}
       explorer={explorer}
       ownerMode={ownerMode}
       ownerWritesEnabled={ownerWritesEnabled}

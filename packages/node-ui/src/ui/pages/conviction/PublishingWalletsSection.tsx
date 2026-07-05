@@ -8,7 +8,7 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import type { OwnerActionSubmitter } from '../../pca/ownerActions.js';
 import type { WalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import type { DetailDeviceAction } from '../../pca/detailWalletTx.js';
-import type { DetailOwnerMode } from './ConvictionDetailView.js';
+import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
