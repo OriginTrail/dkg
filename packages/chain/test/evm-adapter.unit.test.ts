@@ -1212,7 +1212,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001', on };
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+      on,
+    };
     a.contracts.contextGraphs = { stale: true };
     a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
     a.hubRotationListenerStarted = false;
@@ -1273,7 +1277,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001', on };
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+      on,
+    };
     a.contracts.contextGraphs = { fresh: true };
     a.contracts.randomSampling = { fresh: 'rs' };
     a.contracts.randomSamplingStorage = { fresh: 'rss' };
@@ -1326,7 +1334,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001' };
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
     a.hubRotationListenerStarted = false;
 
     try {
@@ -1364,7 +1375,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://lagging.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001' };
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
     a.hubRotationPoller.lastScannedBlock = 1_000;
 
     await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();

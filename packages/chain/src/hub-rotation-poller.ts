@@ -35,13 +35,13 @@ export class HubRotationPoller {
     return this.started;
   }
 
-  async start(hub: Contract): Promise<void> {
+  async start(hub: Contract, hubAddress: string): Promise<void> {
     if (this.started) return;
 
     await this.seed(hub);
     this.timer = setInterval(() => {
       if (this.inFlight) return;
-      this.inFlight = this.poll(hub)
+      this.inFlight = this.poll(hub, hubAddress)
         .catch(() => { /* optional listener path */ })
         .finally(() => { this.inFlight = null; });
     }, this.intervalMs);
@@ -57,7 +57,7 @@ export class HubRotationPoller {
     this.started = false;
   }
 
-  async poll(hub: Contract): Promise<void> {
+  async poll(hub: Contract, hubAddress: string): Promise<void> {
     const topics = this.eventTopics(hub);
     if (topics.length === 0) return;
 
@@ -71,7 +71,6 @@ export class HubRotationPoller {
       : previousLastScannedBlock + 1 - this.reorgBufferBlocks;
     const recentFromBlock = head - this.reorgBufferBlocks;
     const fromBlock = Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
-    const hubAddress = await this.contractAddress(hub);
     const logs = await this.readProvider<ethers.Log[]>(
       'Hub rotation poll getLogs',
       (provider) => provider.getLogs({
@@ -124,10 +123,5 @@ export class HubRotationPoller {
       const event = hub.interface.getEvent(eventName);
       return event?.topicHash ? [event.topicHash] : [];
     });
-  }
-
-  private async contractAddress(hub: Contract): Promise<string> {
-    const target = (hub as unknown as { target?: unknown }).target;
-    return typeof target === 'string' ? target : hub.getAddress();
   }
 }
