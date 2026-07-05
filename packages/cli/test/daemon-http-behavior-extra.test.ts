@@ -386,7 +386,7 @@ describe('CLI-2 — CORS policy for /api/*', () => {
 });
 
 describe('dashboard username/password login — production daemon wiring', () => {
-  it('accepts file-backed credentials and authorizes CSRF-protected API access', async () => {
+  it('accepts file-backed credentials, authorizes CSRF-protected API access, and rejects stale sessions after reset', async () => {
     const d = daemon!;
     const reset = await resetDashboardPassword({
       path: dashboardCredentialsPath(d.home),
@@ -429,6 +429,28 @@ describe('dashboard username/password login — production daemon wiring', () =>
       body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
     });
     expect(accepted.status).toBe(200);
+
+    await resetDashboardPassword({
+      path: dashboardCredentialsPath(d.home),
+      password: 'rotated-live-dashboard-password',
+    });
+
+    const statusAfterReset = await fetch(urlFor(d, '/api/dashboard/session/status'), {
+      headers: { Cookie: cookie },
+    });
+    expect(statusAfterReset.status).toBe(200);
+    await expect(statusAfterReset.json()).resolves.toMatchObject({ authenticated: false });
+
+    const staleCookieAccess = await fetch(urlFor(d, '/api/query'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookie,
+        'X-DKG-CSRF': body.csrfToken!,
+      },
+      body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
+    });
+    expect(staleCookieAccess.status).toBe(401);
   }, 60_000);
 });
 
