@@ -3163,12 +3163,22 @@ export async function runDaemonInner(
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         const requestAuth = getRequestAuthContext(req);
-        const dashboardSession = requestAuth?.source === "dashboard-session"
-          ? {
-              ...requestAuth.dashboardSession,
-              compatToken: requestAuth.internalCredentialToken,
-            }
-          : undefined;
+        const activeDashboardSession = requestAuth?.source === "dashboard-session"
+          ? authenticateDashboardSession(req)
+          : null;
+        const dashboardSession =
+          requestAuth?.source === "dashboard-session" &&
+          activeDashboardSession &&
+          activeDashboardSession.sessionId === requestAuth.dashboardSession.sessionId
+            ? {
+                sessionId: activeDashboardSession.sessionId,
+                expiresAt: activeDashboardSession.expiresAt,
+                compatToken: requestAuth.internalCredentialToken,
+                ...(activeDashboardSession.source === "login"
+                  ? { credentialFingerprint: activeDashboardSession.credentialFingerprint }
+                  : {}),
+              }
+            : undefined;
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",

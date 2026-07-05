@@ -419,6 +419,12 @@ describe('localAgentIntegrations config round-trip', () => {
     await expect(loadConfig()).rejects.toThrow(SyntaxError);
   });
 
+  it('surfaces malformed config.json instead of falling back to defaults', async () => {
+    await writeFile(join(tempDir, 'config.json'), '{ not valid json', 'utf8');
+
+    await expect(loadConfig()).rejects.toThrow(SyntaxError);
+  });
+
   it('surfaces malformed config.yaml instead of falling back to defaults', async () => {
     await writeFile(join(tempDir, 'config.yaml'), 'name: [unterminated\napiPort: 9317\n', 'utf8');
 

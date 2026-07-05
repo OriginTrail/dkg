@@ -286,11 +286,11 @@ function isDashboardCredentialRecord(value: unknown): value is DashboardCredenti
     record.password.algorithm === "scrypt" &&
     typeof record.password.salt === "string" &&
     typeof record.password.hash === "string" &&
-    typeof record.password.keyLength === "number" &&
-    typeof record.password.N === "number" &&
-    typeof record.password.r === "number" &&
-    typeof record.password.p === "number" &&
-    typeof record.password.maxmem === "number" &&
+    record.password.keyLength === SCRYPT_KEY_LENGTH &&
+    record.password.N === SCRYPT_N &&
+    record.password.r === SCRYPT_R &&
+    record.password.p === SCRYPT_P &&
+    record.password.maxmem === SCRYPT_MAXMEM &&
     typeof record.createdAt === "string" &&
     typeof record.updatedAt === "string";
 }

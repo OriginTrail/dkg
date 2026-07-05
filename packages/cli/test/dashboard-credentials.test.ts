@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   DASHBOARD_CREDENTIALS_FILENAME,
   DEFAULT_DASHBOARD_USERNAME,
+  createDashboardCredentialRecord,
   ensureDashboardCredentials,
   readDashboardCredentialFingerprintSync,
   readDashboardCredentialSummary,
@@ -132,6 +133,19 @@ describe('dashboard credentials', () => {
       .resolves.toEqual({ ok: false, reason: 'mismatch' });
     await expect(verifyDashboardCredentials('operator', 'new-password', credentialPath))
       .resolves.toMatchObject({ ok: true });
+  });
+
+  it('rejects unsupported scrypt parameters before verification', async () => {
+    const record = await createDashboardCredentialRecord(
+      'node-admin',
+      'dashboard-password',
+    );
+    record.password.N = 2 ** 24;
+    record.password.maxmem = Number.MAX_SAFE_INTEGER;
+    await writeFile(credentialPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+
+    await expect(verifyDashboardCredentials('node-admin', 'dashboard-password', credentialPath))
+      .resolves.toEqual({ ok: false, reason: 'invalid' });
   });
 
   it('reports missing and invalid credential summaries without exposing secrets', async () => {

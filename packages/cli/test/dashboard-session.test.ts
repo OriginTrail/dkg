@@ -536,16 +536,19 @@ describe('dashboard browser sessions', () => {
       headers: { Cookie: cookie },
     });
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toMatchObject({
+    const protectedBody = await res.json();
+    expect(protectedBody).toMatchObject({
       ok: true,
       authorization: null,
       requestAuth: {
         source: 'dashboard-session',
         internalCredentialToken: VALID_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
-        dashboardSession: { source: 'login', credentialFingerprint: 'credential-a' },
+        dashboardSession: { source: 'login' },
       },
     });
+    expect(protectedBody.requestAuth.dashboardSession)
+      .not.toHaveProperty('credentialFingerprint');
   });
 
 
