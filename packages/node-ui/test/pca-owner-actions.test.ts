@@ -53,6 +53,7 @@ const {
   useOwnerActionSubmitter,
 } = await import('../src/ui/pca/ownerActions.js');
 const { useWalletStore } = await import('../src/ui/stores/wallet.js');
+const { resolvePcaOwnerAccess } = await import('../src/ui/pca/ownerAccess.js');
 
 const provider = { request: vi.fn(), on: vi.fn(), removeListener: vi.fn() } as any;
 
@@ -244,5 +245,59 @@ describe('owner submitter resolver', () => {
     expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
     expect(mocks.walletSubmitter.settle).not.toHaveBeenCalled();
     expect(mocks.fetchPca).not.toHaveBeenCalled();
+  });
+});
+
+// Item 3 (#1375) — when the caller passes the display-resolved `access`, the submitter is
+// selected ONCE up-front and the manage writes submit DIRECTLY, with no per-write owner/wallet
+// re-fetch. (The absent-access path above is unchanged; the wallet submitter's per-prompt
+// liveness guards still run on every write — covered by pca-wallet-owner-actions.)
+describe('useOwnerActionSubmitter access-path (resolve signer once)', () => {
+  it('daemon access submits via the daemon EOA WITHOUT re-fetching owner/wallets', async () => {
+    mocks.pcaAddAgent.mockResolvedValue({ registered: true });
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT });
+
+    await expect(useOwnerActionSubmitter({ accountId: '7', access }).registerAgent('7', AGENT))
+      .resolves.toEqual({ registered: true });
+
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('7', AGENT);
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+    expect(mocks.walletOwnerActionSubmitter).not.toHaveBeenCalled();
+  });
+
+  it('wallet access submits via the browser wallet WITHOUT re-fetching', async () => {
+    mocks.walletSubmitter.topUp.mockResolvedValue({ addedTokens: '5' });
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
+
+    await expect(useOwnerActionSubmitter({ accountId: '7', access }).topUp('7', '5'))
+      .resolves.toEqual({ addedTokens: '5' });
+
+    expect(mocks.walletOwnerActionSubmitter).toHaveBeenCalled();
+    expect(mocks.walletSubmitter.topUp).toHaveBeenCalledWith('7', '5');
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+  });
+
+  it('read-only access throws ReadOnlyOwnerActionError WITHOUT re-fetching or signing', async () => {
+    const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW });
+
+    await expect(useOwnerActionSubmitter({ accountId: '7', access }).deregisterAgent('7', AGENT))
+      .rejects.toBeInstanceOf(ReadOnlyOwnerActionError);
+
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    expect(mocks.walletSubmitter.deregisterAgent).not.toHaveBeenCalled();
+  });
+
+  it('settle stays daemon on the access path (never wallet-signs)', async () => {
+    mocks.pcaSettle.mockResolvedValue({ settled: true });
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
+
+    await expect(useOwnerActionSubmitter({ accountId: '7', access }).settle('7')).resolves.toEqual({ settled: true });
+
+    expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
+    expect(mocks.walletSubmitter.settle).not.toHaveBeenCalled();
   });
 });

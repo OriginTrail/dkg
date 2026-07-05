@@ -789,4 +789,56 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     expect(statusOf(container, ADDR_C).textContent?.toLowerCase()).toContain('aborted');
     await unmount();
   });
+
+  // MIXED-OWNER self-coverage (item 3 / #1375 P4) — deregisterSelf frees a wallet from its
+  // OWN-bound prevAccount, which can be owned DIFFERENTLY than the target. It must resolve the
+  // submitter PER-ACCOUNT (the resolving path), NOT reuse the target's resolve-once access-path
+  // submitter. Here the target #8 is DAEMON-owned but ADDR_B's prevAccount #9 is CONNECTED-WALLET
+  // -owned: the deregister must route through the WALLET submitter (owner of #9), never the daemon
+  // (which would revert NotAccountOwner). Guards the P4 regression the resolve-once refactor risked.
+  it('mixed-owner self-coverage: frees a wallet from its wallet-owned prevAccount via the WALLET submitter, while the daemon-owned target registers via the daemon', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Target #8 owner == wallets[0] (ADDR_A) → daemon-owned target (access.submitterKind='daemon').
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A, ADDR_B], balances: [], chainId: '84532', rpcUrl: null });
+    // ADDR_A unbound (registers directly); ADDR_B bound to #9.
+    mocks.pcaAgentAccount.mockImplementation(async (w: string) =>
+      w === ADDR_B ? { agent: w, accountId: '9' } : { agent: w, accountId: null },
+    );
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      // prevAccount #9 is CONNECTED-WALLET-owned + LIVE → own-bound via the connected wallet.
+      if (id === '9') return ownedSnap(CONNECTED_OWNER, { accountId: '9', baseEpochAllowance: '1000000000000000000000' });
+      // Target #8 is daemon-owned (owner == wallets[0] == ADDR_A).
+      const current = ownedSnap(ADDR_A, { accountId: '8' });
+      return key ? { ...current, probedKey: { key, registered: false } } : current;
+    });
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approved on-chain');
+
+    // THE PIN: ADDR_B is freed from the wallet-owned #9 via the WALLET submitter (resolved for #9),
+    // not the daemon-owned target's access-path submitter.
+    expect(mocks.walletDeregisterAgent).toHaveBeenCalledWith('9', ADDR_B);
+    // The daemon NEVER attempts to deregister from the wallet-owned account (would revert on-chain).
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    // Both wallets register on the daemon-owned target via the daemon submitter.
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A);
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_B);
+    // Deregister-from-old precedes register-on-new for the moved wallet.
+    const addBIdx = mocks.pcaAddAgent.mock.calls.findIndex((c) => c[1] === ADDR_B);
+    expect(mocks.walletDeregisterAgent.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.pcaAddAgent.mock.invocationCallOrder[addBIdx]);
+    await unmount();
+  });
 });

@@ -77,9 +77,9 @@ export function ApproveWalletsModal({
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
-  const owner = useOwnerActionSubmitter({ accountId });
-  // Renew — the OLD account's owner-action submitter (free the wallet there first).
-  // Resolved separately because the old PCA can have a different owner/signing branch.
+  // Renew — the OLD account's owner-action submitter (free the wallet there first). Resolved
+  // separately, via the async re-fetching path, because the old PCA can have a different
+  // owner/signing branch than THIS account.
   const deregisterOwner = useOwnerActionSubmitter({ accountId: deregisterFrom });
   const nodeWallets = wb?.wallets ?? [];
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
@@ -89,6 +89,16 @@ export function ApproveWalletsModal({
   // predicate + the signer candidates). The async, per-account signerKindForAccount below
   // deliberately stays a separate re-fetching seam (inv-16 / P4).
   const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet });
+  // Item 3 (#1375) — resolve THIS account's owner submitter ONCE from `access`, so the batch's
+  // registerAgent (ALWAYS on the TARGET) submits directly with no per-write owner/wallet re-fetch.
+  // The wallet branch keeps its per-prompt loadContext / assertStillConnected liveness guards.
+  const owner = useOwnerActionSubmitter({ accountId, access });
+  // Self-coverage's deregisterSelf frees a wallet from its OWN-bound `prevAccountId`, which VARIES
+  // per wallet and can be owned DIFFERENTLY than THIS target (daemon vs connected wallet). So it
+  // must resolve the submitter PER-ACCOUNT (the resolving path, keyed on the passed accountId) —
+  // the access-path `owner` would misroute it to the target's signer → NotAccountOwner revert. No
+  // onWalletProgress: the batch drives its own device prompts.
+  const crossAccountDeregister = useOwnerActionSubmitter({});
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -184,10 +194,11 @@ export function ApproveWalletsModal({
       { addresses, accountId, mode, selfCoverage, deregisterFrom, targetWalletManaged, signableOwners },
       {
         registerAgent: owner.registerAgent,
-        // Renew — free from the single OLD account; self-coverage — free from the
-        // per-wallet own-bound account. Both submitters resolve owner+network at call time.
+        // Both deregister submitters resolve the owner PER-ACCOUNT at call time (the account they
+        // free VARIES and can be owned differently than the target): renew frees from the single
+        // OLD `deregisterFrom`; self-coverage frees from each wallet's own-bound prevAccount.
         deregisterRenew: deregisterOwner.deregisterAgent,
-        deregisterSelf: owner.deregisterAgent,
+        deregisterSelf: crossAccountDeregister.deregisterAgent,
         resolveWalletBinding,
         planSelfCoverage,
         signerKindForAccount,

@@ -146,6 +146,9 @@ function DetailBody({
   });
   const owner = useOwnerActionSubmitter({
     accountId,
+    // Item 3 (#1375) — resolve the owner submitter ONCE from `access` (no per-write re-fetch);
+    // top-up / deregister on THIS account submit directly. Wallet liveness stays per-prompt.
+    access,
     onWalletProgress: access.mode === 'wallet' ? deviceProgress.onProgress : undefined,
   });
   const health = healthForSnapshot(snapshot);

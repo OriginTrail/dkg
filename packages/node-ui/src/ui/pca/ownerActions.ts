@@ -12,7 +12,7 @@ import {
   walletOwnerActionSubmitter,
   type WalletOwnerActionSubmitterDeps,
 } from '../web3/walletOwnerActionSubmitter.js';
-import { eqAddress as eq } from './address.js';
+import { resolvePcaOwnerAccess, type PcaOwnerAccess } from './ownerAccess.js';
 
 /**
  * OWNER-ACTION SEAM.
@@ -91,6 +91,13 @@ export type OwnerKey = 'hot' | 'hardware';
 
 export interface OwnerActionSubmitterArgs {
   accountId?: string;
+  /**
+   * The display-resolved owner access for `accountId` (item 3 / #1375). When provided, the
+   * submitter is selected ONCE up-front from `access.submitterKind` and the manage writes
+   * submit directly — no per-write owner/wallet re-fetch. Omit it to keep the async
+   * re-fetching path (create-time ownerKey, cross-account deregisterFrom).
+   */
+  access?: PcaOwnerAccess;
   /** Create-time selector. Manage-time routing fetches the PCA owner at call time. */
   ownerKey?: OwnerKey;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
@@ -113,6 +120,12 @@ function walletUnavailableReason(): string | null {
   return null;
 }
 
+/**
+ * inv-17 owner-kind classification for the async manage path. Now a thin delegation to the
+ * single model classifier — `resolvePcaOwnerAccess(...).submitterKind` (address-only; the
+ * network gate is applied separately in the resolving path below). This is the last inv-17
+ * copy, now living on the model.
+ */
 export function resolveOwnerActionSubmitterKind({
   owner,
   primaryWallet,
@@ -122,9 +135,22 @@ export function resolveOwnerActionSubmitterKind({
   primaryWallet?: string | null;
   connectedWallet?: string | null;
 }): OwnerActionSubmitterKind {
-  if (eq(owner, primaryWallet)) return 'daemon';
-  if (connectedWallet && eq(owner, connectedWallet) && !eq(owner, primaryWallet)) return 'wallet';
-  return 'read-only';
+  return resolvePcaOwnerAccess({ owner, primaryWallet, connectedWallet }).submitterKind;
+}
+
+/**
+ * Map a resolved owner-action kind to its submitter. Pure selection — NO fetch and NO
+ * `walletUnavailableReason` here: usability is enforced up-front by the display `writesEnabled`
+ * gate and, per prompt, by the wallet submitter's own loadContext / assertStillConnected /
+ * allowance liveness guards. `settle` stays daemon inside each returned submitter.
+ */
+export function ownerActionSubmitterForKind(
+  kind: OwnerActionSubmitterKind,
+  walletDeps: WalletOwnerActionSubmitterDeps = {},
+): OwnerActionSubmitter {
+  if (kind === 'daemon') return daemonOwnerActionSubmitter;
+  if (kind === 'read-only') return readOnlyOwnerActionSubmitter;
+  return walletOwnerActionSubmitter(walletDeps);
 }
 
 export async function resolveOwnerActionSubmitterForAccount(
@@ -152,22 +178,33 @@ export async function resolveOwnerActionSubmitterForAccount(
     connectedWallet,
   });
 
-  if (kind === 'daemon') return daemonOwnerActionSubmitter;
-  if (kind === 'read-only') return readOnlyOwnerActionSubmitter;
+  // This async face has no display gate in front of it (e.g. renew's cross-account
+  // deregisterFrom), so it KEEPS the pre-flight walletUnavailableReason for the wallet
+  // branch — unchanged from before. The submitter's per-prompt liveness guards still run.
+  if (kind === 'wallet') {
+    const reason = walletUnavailableReason();
+    if (reason) return unavailableSubmitter(reason);
+  }
+  return ownerActionSubmitterForKind(kind, walletDeps);
+}
 
-  const reason = walletUnavailableReason();
-  if (reason) return unavailableSubmitter(reason);
-  return walletOwnerActionSubmitter(walletDeps);
+/**
+ * Create-time submitter selection (no accountId/owner yet): `ownerKey: 'hardware'` signs with
+ * the browser wallet (pre-flight walletUnavailableReason), anything else uses the daemon. Shared
+ * by both the resolving and the access-path submitters — create never depends on `access`.
+ */
+function resolvingCreate(args: OwnerActionSubmitterArgs): OwnerActionSubmitter['create'] {
+  return async (createArgs) => {
+    if (args.ownerKey !== 'hardware') return daemonOwnerActionSubmitter.create(createArgs);
+    const reason = walletUnavailableReason();
+    if (reason) throw new OwnerActionUnavailableError(reason);
+    return walletOwnerActionSubmitter({ onProgress: args.onWalletProgress }).create(createArgs);
+  };
 }
 
 function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return {
-    async create(createArgs) {
-      if (args.ownerKey !== 'hardware') return daemonOwnerActionSubmitter.create(createArgs);
-      const reason = walletUnavailableReason();
-      if (reason) throw new OwnerActionUnavailableError(reason);
-      return walletOwnerActionSubmitter({ onProgress: args.onWalletProgress }).create(createArgs);
-    },
+    create: resolvingCreate(args),
     async registerAgent(accountId, address) {
       return (await resolveOwnerActionSubmitterForAccount(accountId, { onProgress: args.onWalletProgress })).registerAgent(accountId, address);
     },
@@ -177,6 +214,24 @@ function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): Own
     async topUp(accountId, tokens) {
       return (await resolveOwnerActionSubmitterForAccount(accountId, { onProgress: args.onWalletProgress })).topUp(accountId, tokens);
     },
+    settle: daemonOwnerActionSubmitter.settle,
+  };
+}
+
+/**
+ * Item 3 (#1375) — the resolve-signer-ONCE path. Selects the submitter up-front from the
+ * display-resolved `access.submitterKind`, so registerAgent / deregisterAgent / topUp submit
+ * DIRECTLY (no per-write owner/wallet re-fetch). The wallet submitter still runs its per-prompt
+ * loadContext / assertStillConnected / allowance liveness guards on every write (inv-16 intact).
+ * create stays on the ownerKey path; settle stays daemon.
+ */
+function accessOwnerActionSubmitter(access: PcaOwnerAccess, args: OwnerActionSubmitterArgs): OwnerActionSubmitter {
+  const resolved = ownerActionSubmitterForKind(access.submitterKind, { onProgress: args.onWalletProgress });
+  return {
+    create: resolvingCreate(args),
+    registerAgent: resolved.registerAgent,
+    deregisterAgent: resolved.deregisterAgent,
+    topUp: resolved.topUp,
     settle: daemonOwnerActionSubmitter.settle,
   };
 }
@@ -193,7 +248,11 @@ function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): Own
  * Create time has no accountId/owner yet, so `ownerKey: 'hardware' | 'hot'`
  * selects browser wallet vs daemon. Omitted ownerKey defaults to the existing
  * daemon create flow.
+ *
+ * When `access` is supplied (item 3 / #1375), the submitter is resolved ONCE from
+ * `access.submitterKind` and the manage writes submit directly — no per-write re-fetch.
  */
 export function useOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
+  if (args.access) return accessOwnerActionSubmitter(args.access, args);
   return resolvingOwnerActionSubmitter(args);
 }
