@@ -1,14 +1,12 @@
 import React, { useCallback, useEffect, useId, useMemo, useState } from 'react';
-import type { Address } from 'viem';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { pcaStorageScopeForContracts, usePcaStore } from '../../stores/pca.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 import { usePcaOverview, type ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { useDiscoveredPcas, type DiscoveredPca } from '../../hooks/useDiscoveredPcas.js';
-import { listPcaContracts, type PcaContracts } from '../../api.js';
-import { publicClientFor } from '../../web3/clients.js';
-import { publishingConvictionNftAbi } from '../../web3/pcaContract.js';
+import { useConnectedWalletPcas } from '../../hooks/useConnectedWalletPcas.js';
+import { listPcaContracts } from '../../api.js';
 import { WalletConnectControl, WalletRow, truncateAddress } from '../../components/Pca/index.js';
 import { isPcaSpendable } from '../../pca/coverage.js';
 import { PcaAccountCard, type PcaAccountOwnerMode } from './PcaAccountCard.js';
@@ -68,14 +66,9 @@ export function ConvictionOverview() {
     status: WalletBootstrapStatus;
     error: string | null;
   }>({ status: 'idle', error: null });
-  const [walletDiscovery, setWalletDiscovery] = useState<{
-    loading: boolean;
-    error: string | null;
-    ids: string[];
-  }>({ loading: false, error: null, ids: [] });
+  const connectedWalletPcas = useConnectedWalletPcas();
   const [bootstrapNonce, setBootstrapNonce] = useState(0);
-  const [walletDiscoveryNonce, setWalletDiscoveryNonce] = useState(0);
-  const overview = usePcaOverview(30_000, walletDiscovery.ids);
+  const overview = usePcaOverview(30_000, connectedWalletPcas.ids);
   const { accounts, loading, refresh, walletsInconclusive } = overview;
   const primaryWallet = overview.wallets[0];
 
@@ -105,55 +98,6 @@ export function ConvictionOverview() {
     };
   }, [bootstrapNonce, initWallet, setPcaScope, setWalletBootstrap]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function discoverConnectedWalletPcas(contracts: PcaContracts, wallet: `0x${string}`) {
-      setWalletDiscovery((prev) => ({ ...prev, loading: true, error: null }));
-      try {
-        if (!contracts.rpcUrls?.length) throw new Error('No PCA RPC endpoints were provided.');
-        const client = publicClientFor(contracts.chainId, contracts.rpcUrls);
-        const nft = contracts.nft as Address;
-        const owner = wallet as Address;
-        const balance = await client.readContract({
-          address: nft,
-          abi: publishingConvictionNftAbi,
-          functionName: 'balanceOf',
-          args: [owner],
-        });
-        const ids: string[] = [];
-        const count = typeof balance === 'bigint' ? balance : BigInt(String(balance));
-        for (let i = 0n; i < count; i += 1n) {
-          const tokenId = await client.readContract({
-            address: nft,
-            abi: publishingConvictionNftAbi,
-            functionName: 'tokenOfOwnerByIndex',
-            args: [owner, i],
-          });
-          ids.push((typeof tokenId === 'bigint' ? tokenId : BigInt(String(tokenId))).toString());
-        }
-        if (cancelled) return;
-        setWalletDiscovery({ loading: false, error: null, ids });
-      } catch (err) {
-        if (cancelled) return;
-        setWalletDiscovery({
-          loading: false,
-          error: (err as Error)?.message ?? 'Could not read connected-wallet PCAs.',
-          ids: [],
-        });
-      }
-    }
-
-    if (!connectedWallet || !walletBootstrap) {
-      setWalletDiscovery({ loading: false, error: null, ids: [] });
-      return () => {
-        cancelled = true;
-      };
-    }
-    void discoverConnectedWalletPcas(walletBootstrap, connectedWallet);
-    return () => {
-      cancelled = true;
-    };
-  }, [connectedWallet, walletBootstrap, walletDiscoveryNonce]);
   // GAP-1 - PCAs this node relates to on-chain (owned + agent-on) beyond the locally
   // tracked set. Agent-on auto-tracks (edge self-heal); the rest surface in the strip.
   // `ownedError` = the enumeration failed retryably (#9 - don't assert "you own none").
@@ -263,7 +207,6 @@ export function ConvictionOverview() {
   const hasCoveredWallet = walletCoverageRows.some((row) => row.tone === 'success');
 
   const retryWalletBootstrap = useCallback(() => setBootstrapNonce((n) => n + 1), []);
-  const retryWalletDiscovery = useCallback(() => setWalletDiscoveryNonce((n) => n + 1), []);
   const switchNetwork = useCallback(() => {
     void switchToExpectedChain();
   }, [switchToExpectedChain]);
@@ -466,16 +409,16 @@ export function ConvictionOverview() {
         </section>
       )}
 
-      {walletDiscovery.error && (
+      {connectedWalletPcas.error && (
         <section className="v10-pca-discovered" data-testid="pca-wallet-discovery-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t read PCAs owned by the connected wallet. Existing tracked PCAs are still shown.{' '}
-            <button type="button" className="v10-pca-card-btn" onClick={retryWalletDiscovery}>Retry</button>
+            <button type="button" className="v10-pca-card-btn" onClick={connectedWalletPcas.refresh}>Retry</button>
           </p>
         </section>
       )}
 
-      {walletDiscovery.loading && connectedWallet && (
+      {connectedWalletPcas.loading && connectedWallet && (
         <p className="v10-pca-overview-caveat" role="status">
           Reading PCAs owned by {truncateAddress(connectedWallet)}...
         </p>

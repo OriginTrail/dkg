@@ -156,6 +156,22 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('non-owner: gates top-up, approve, AND renew, while the wallet probe stays enabled (§8A matrix)', async () => {
+    // Guards the section split (#1348): the single ownerWritesEnabled gate must
+    // reach EVERY owner-write control across FundingSection / PublishingWalletsSection /
+    // LifecycleSection — not silently drop on approve or renew — and must NOT gate the probe.
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xSomeoneElse0000000000000000000000000000'], balances: [], chainId: '84532', rpcUrl: null });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Owner-only');
+    const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
+    expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    expect(byText('Approve publishing wallet')?.disabled).toBe(true);
+    // The wallet probe is deliberately ungated — available to everyone.
+    expect(byText('Probe')?.disabled).toBe(false);
+    await unmount();
+  });
+
   it('does not render deferred settlement or context-graph controls', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
