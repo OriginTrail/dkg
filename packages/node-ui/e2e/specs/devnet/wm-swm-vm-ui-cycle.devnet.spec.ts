@@ -52,6 +52,13 @@ const FIXTURE = join(__dir, '..', '..', 'fixtures', 'single-entity-fixture.md');
 // assertion graph URI contains this substring.
 const FIXTURE_NAME_PART = 'single-entity-fixture';
 
+// Shared "wait for the async store migration to land in oxigraph" policy. Both
+// the WM→SWM promote and the SWM→VM publish accept the request immediately but
+// migrate content into the store asynchronously; under a loaded CI devnet that
+// can exceed a 20s poll, so both propagation assertions poll to 60s.
+// (not `as const` — Playwright's toPass expects a mutable `intervals: number[]`)
+const STORE_PROPAGATION_WAIT = { timeout: 60_000, intervals: [1000, 2000, 5000] };
+
 test.describe.configure({ mode: 'serial' });
 
 const run: {
@@ -217,13 +224,13 @@ test.describe('WM → SWM → VM via the UI', () => {
     // WM (blank nodes included), landed in SWM (root + skolemized children),
     // and the memoryLayer marker flipped to SWM.
     // The promote UI reports success as soon as the request is accepted, but the
-    // WM→SWM store migration lands in oxigraph asynchronously; under a loaded CI
-    // devnet it can exceed 20s (Received: 0 / "Timeout 20000ms exceeded"). Poll to
-    // 60s — matching the VM-publish wait below — so this is a real migration
-    // assertion, not a race against store propagation.
+    // WM→SWM store migration lands in oxigraph asynchronously and can exceed a 20s
+    // poll under a loaded CI devnet (Received: 0 / "Timeout 20000ms exceeded") — so
+    // this is a real migration assertion, not a race against store propagation.
+    // Uses the shared STORE_PROPAGATION_WAIT policy (same as the VM-publish wait).
     await expect(async () => {
       expect(await countRootInSharedMemory(run.cgId!, run.rootUri!)).toBeGreaterThan(0);
-    }).toPass({ timeout: 60_000, intervals: [1000, 2000, 5000] });
+    }).toPass(STORE_PROPAGATION_WAIT);
 
     expect(
       await countBlankNodeTriplesInGraph(run.cgId!, run.dataGraph!),
@@ -264,6 +271,6 @@ test.describe('WM → SWM → VM via the UI', () => {
     // verified by the API-driven sibling spec.
     await expect(async () => {
       expect(await countRootInVmScope(run.cgId!, run.rootUri!)).toBeGreaterThan(0);
-    }).toPass({ timeout: 60_000, intervals: [1000, 2000, 5000] });
+    }).toPass(STORE_PROPAGATION_WAIT);
   });
 });
