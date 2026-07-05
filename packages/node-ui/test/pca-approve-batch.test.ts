@@ -9,6 +9,7 @@
 //   onApproved fires after BATCH_DONE · sequential ordering.
 
 import { describe, expect, it, vi } from 'vitest';
+import { ContractFunctionRevertedError } from 'viem';
 import {
   approveBatchReducer,
   initialApproveBatchState,
@@ -25,6 +26,16 @@ import { WalletOwnerActionAbortError } from '../src/ui/web3/walletOwnerActionSub
 const A = '0x' + 'a'.repeat(40);
 const B = '0x' + 'b'.repeat(40);
 const C = '0x' + 'c'.repeat(40);
+
+// A wallet-managed write reverts on-chain as a viem ContractFunctionRevertedError
+// (NOT an HttpError) — the daemon's describePcaError returns null for it, so it must
+// be classified by the module's own describeWalletPcaRevert fallback. (Same shape as
+// the helper in web3-wallet-tx-error.test.ts.)
+function revert(errorName: string): ContractFunctionRevertedError {
+  const e = new ContractFunctionRevertedError({ abi: [], functionName: 'addAgent', message: `reverted: ${errorName}` });
+  (e as unknown as { data: { errorName: string; args: unknown[] } }).data = { errorName, args: [] };
+  return e;
+}
 
 // ---- reducer ----
 describe('approveBatchReducer', () => {
@@ -300,5 +311,40 @@ describe('runApproveBatch — sequential loop + taxonomy', () => {
     expect(state.rows[A]).toMatchObject({ status: 'submitted', txHash: '0xbroadcast' });
     expect(state.rows[B].status).toBe('aborted');
     expect(state.verificationDelayed).toMatch(/verification failed|recheck/i);
+  });
+});
+
+// The wallet-managed on-chain REVERT path: registerAgent rejects with a viem contract
+// revert (not an HttpError) and the daemon classifier describePcaError returns null, so
+// the runner MUST fall through to `?? describeWalletPcaRevert(...)`. These drive that
+// fallback through runApproveBatch itself (no stubbing the final PcaErrorInfo), so a
+// regression that dropped the `??` or broke the revert-name switch is caught.
+describe('runApproveBatch — wallet contract-revert fallback (describeWalletPcaRevert)', () => {
+  it('AgentCapReached revert → cap sweep (current + remaining), break', async () => {
+    const registerAgent = vi.fn(async () => { throw revert('AgentCapReached'); });
+    // describePcaError default returns null → the ?? falls through to describeWalletPcaRevert
+    const { state } = await runBatch({ addresses: [A, B], targetWalletManaged: true }, { registerAgent: registerAgent as any });
+    expect(state.rows[A].status).toBe('cap');
+    expect(state.rows[B].status).toBe('cap'); // remaining swept before the break
+    expect(registerAgent).toHaveBeenCalledTimes(1); // broke after A
+  });
+
+  it('AgentAlreadyRegistered revert → N5 probe (registered:false + adapter ok → conflict), continues', async () => {
+    const registerAgent = vi.fn(async () => { throw revert('AgentAlreadyRegistered'); });
+    const probePca = vi.fn(async () => ({ probedKey: { key: A, registered: false, adapterSupported: true } }));
+    const { state } = await runBatch({ addresses: [A], targetWalletManaged: true }, { registerAgent: registerAgent as any, probePca: probePca as any });
+    expect(state.rows[A].status).toBe('conflict');
+    expect(probePca).toHaveBeenCalledWith('7', A); // fallback still runs the ambiguity probe
+  });
+
+  it('NotAccountOwner revert → per-row error, NOT the whole-batch abort (that is HttpError-403 only)', async () => {
+    const registerAgent = vi.fn(async () => { throw revert('NotAccountOwner'); });
+    const { state } = await runBatch({ addresses: [A, B], targetWalletManaged: true }, { registerAgent: registerAgent as any });
+    // A wallet CONTRACT-revert NotAccountOwner is classified (status 403) but reaches the
+    // generic branch — only `err instanceof HttpError && status===403` aborts the batch.
+    expect(state.rows[A].status).toBe('error');
+    expect(state.rows[A].message).toMatch(/not the owner/i);
+    expect(state.aborted).toBeNull(); // intentional: not the owner-gate whole-batch abort
+    expect(registerAgent).toHaveBeenCalledTimes(2); // per-row error → continues to B
   });
 });
