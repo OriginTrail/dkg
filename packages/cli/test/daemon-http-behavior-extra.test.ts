@@ -258,6 +258,64 @@ function urlFor(d: Daemon, path: string): string {
   return `http://127.0.0.1:${d.apiPort}${path}`;
 }
 
+async function openDashboardCookieEventStream(
+  d: Daemon,
+  cookie: string,
+): Promise<{ close: () => void; closed: Promise<void>; connected: Promise<void> }> {
+  const controller = new AbortController();
+  const res = await fetch(urlFor(d, '/api/events'), {
+    headers: { Cookie: cookie },
+    signal: controller.signal,
+  });
+  expect(res.status).toBe(200);
+  if (!res.body) throw new Error('/api/events returned no response body');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let connectedResolve!: () => void;
+  const connected = new Promise<void>((resolve) => { connectedResolve = resolve; });
+  const closed = (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buffer.indexOf('\n\n')) >= 0) {
+          const block = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (block.split('\n').some((line) => line.trim() === 'event: connected')) {
+            connectedResolve();
+          }
+        }
+      }
+    } catch (err: any) {
+      if (!controller.signal.aborted) throw err;
+    }
+  })();
+
+  return {
+    connected,
+    closed,
+    close: () => controller.abort(),
+  };
+}
+
+async function expectResolvesWithin<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Low-level raw request that does NOT set any implicit Content-Length or
  * transfer-encoding helpers the way `fetch` does. Needed for the oversized
@@ -451,6 +509,45 @@ describe('dashboard username/password login — production daemon wiring', () =>
       body: JSON.stringify({ sparql: 'SELECT * WHERE { ?s ?p ?o } LIMIT 1' }),
     });
     expect(staleCookieAccess.status).toBe(401);
+  }, 60_000);
+
+  it('closes real /api/events dashboard-cookie streams on logout', async () => {
+    const d = daemon!;
+    const reset = await resetDashboardPassword({
+      path: dashboardCredentialsPath(d.home),
+      username: 'node-admin',
+      password: 'live-dashboard-sse-password',
+    });
+
+    const exchange = await fetch(urlFor(d, '/api/dashboard/session/exchange'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: reset.username, password: reset.password }),
+    });
+    expect(exchange.status).toBe(200);
+    const body = await exchange.json() as { csrfToken?: string };
+    expect(body.csrfToken).toEqual(expect.any(String));
+    const cookie = (exchange.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(cookie).toContain('dkg_ui_session=');
+
+    const stream = await openDashboardCookieEventStream(d, cookie);
+    try {
+      await expectResolvesWithin(stream.connected, 3_000, 'dashboard SSE stream did not connect');
+
+      const logout = await fetch(urlFor(d, '/api/dashboard/session/logout'), {
+        method: 'POST',
+        headers: { Cookie: cookie, 'X-DKG-CSRF': body.csrfToken! },
+      });
+      expect(logout.status).toBe(200);
+
+      await expectResolvesWithin(
+        stream.closed,
+        3_000,
+        'dashboard SSE stream did not close after logout',
+      );
+    } finally {
+      stream.close();
+    }
   }, 60_000);
 });
 

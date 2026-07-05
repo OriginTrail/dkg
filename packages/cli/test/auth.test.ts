@@ -9,6 +9,7 @@ import {
   extractBearerToken,
   httpAuthGuard,
   getRequestAuthContext,
+  setRequestAuthContext,
   loadTokens,
   resolveRequestAuthDecision,
   type RequestAuthSource,
@@ -577,6 +578,34 @@ describe('httpAuthGuard', () => {
     expect(res.status).toBe(401);
     expect(onSessionRevoked).toHaveBeenCalledWith(created.sessionId);
     expect(store.authenticateSessionId(created.sessionId)).toBeNull();
+  });
+
+  it('refuses dashboard SSE metadata when the active session compat token changed after auth', () => {
+    const req = {} as IncomingMessage;
+    setRequestAuthContext(req, {
+      source: 'dashboard-session',
+      internalCredentialToken: 'token-a',
+      principal,
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: 'session-1',
+        source: 'login',
+        expiresAt: Date.now() + 60_000,
+        credentialFingerprint: 'credential-fingerprint-1',
+      },
+    });
+
+    const dashboardSession = resolveDashboardSseSession(req, () => ({
+      sessionId: 'session-1',
+      compatToken: 'token-b',
+      csrfToken: 'csrf-token',
+      source: 'login',
+      issuedAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      credentialFingerprint: 'credential-fingerprint-1',
+    }));
+
+    expect(dashboardSession).toBeUndefined();
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {
