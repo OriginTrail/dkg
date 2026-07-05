@@ -613,7 +613,7 @@ export function chainDiscoveryScanOptions(input: {
   if (
     typeof configuredFullScanEvery === 'number' &&
     Number.isFinite(configuredFullScanEvery) &&
-    configuredFullScanEvery > 0
+    configuredFullScanEvery >= 1
   ) {
     fullScanEvery = Math.floor(configuredFullScanEvery);
   }

@@ -120,7 +120,10 @@ export class HubRotationPoller {
       (provider) => provider.getBlockNumber(),
     );
     const fromBlock = Math.max(0, head - this.reorgBufferBlocks);
-    const logs = await this.readProvider<ethers.Log[]>(
+    // Probe log-scan support and position the high-water mark, but do not mark
+    // returned logs as seen. They must remain eligible for the first buffered
+    // post-start poll in case a real rotation landed during adapter init.
+    await this.readProvider<ethers.Log[]>(
       'Hub rotation seed getLogs',
       (provider) => provider.getLogs({
         address: binding.hubAddress,
@@ -130,7 +133,6 @@ export class HubRotationPoller {
       }),
       { policy: 'wideLogScan' },
     );
-    for (const log of logs) this.rememberLog(this.logIdentity(log), log);
     this.lastScannedBlock = head;
     this.pruneSeenLogs(head);
   }

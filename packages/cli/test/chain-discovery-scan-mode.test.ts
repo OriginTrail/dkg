@@ -39,4 +39,12 @@ describe('chainDiscoveryScanOptions', () => {
       fullScanEvery: 48,
     })).toEqual({ incremental: true });
   });
+
+  it('ignores fractional full-scan cadence overrides below one', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      run: 1,
+      fullScanEvery: 0.5,
+    })).toEqual({ incremental: true });
+  });
 });
