@@ -1,0 +1,48 @@
+/* PCA styles — S5 publish-CTA chip + preflight popover (E1) + predictive bell alerts (E2). Split from 26-pca.css (#1354); class names + cascade order unchanged. */
+
+/* ----- S5 publish-CTA chip + preflight popover (E1) ----- */
+.v10-pca-publish-chip { position: relative; margin-bottom: 8px; }
+.v10-pca-publish-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  width: min(420px, 92vw);
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.v10-pca-publish-conditions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.v10-pca-publish-cond { font-size: 11px; color: var(--text-secondary); }
+.v10-pca-publish-cond[data-tone='success'] { color: var(--text-success); }
+.v10-pca-publish-cond[data-tone='warn'] { color: var(--text-warning); }
+.v10-pca-publish-cond[data-tone='neutral'] { color: var(--text-tertiary); }
+.v10-pca-publish-wallets { display: flex; flex-direction: column; gap: 6px; }
+.v10-pca-publish-foot { margin: 0; font-size: 11px; color: var(--text-tertiary); line-height: 1.5; }
+
+/* ----- E2 predictive bell alerts ----- */
+.v10-pca-alert-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--border-default);
+}
+.v10-pca-alert-row[data-severity='danger'] { border-left-color: var(--text-danger); }
+.v10-pca-alert-row[data-severity='warn'] { border-left-color: var(--text-warning); }
+.v10-pca-alert-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+.v10-pca-alert-msg { font-size: 11px; color: var(--text-secondary); line-height: 1.45; margin-top: 2px; }
+.v10-pca-alert-action {
+  margin-top: 4px;
+  border: none;
+  background: transparent;
+  color: var(--text-link);
+  font-size: 11px;
+  padding: 0;
+  cursor: pointer;
+}
+.v10-pca-alert-action:hover { text-decoration: underline; }
+
