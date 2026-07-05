@@ -31,6 +31,7 @@ export class HubRotationPoller {
   private binding: HubRotationBinding | undefined;
   private readonly seenLogIds = new Map<string, number>();
   private started = false;
+  private startInFlight: Promise<void> | null = null;
 
   constructor(config: HubRotationPollerConfig) {
     this.readProvider = config.readProvider;
@@ -45,17 +46,15 @@ export class HubRotationPoller {
 
   async start(hub: Contract, hubAddress: string): Promise<void> {
     if (this.started) return;
+    if (this.startInFlight) return this.startInFlight;
 
-    this.bind(hub, hubAddress);
-    await this.seed();
-    this.timer = setInterval(() => {
-      if (this.inFlight) return;
-      this.inFlight = this.pollOnce()
-        .catch(() => { /* optional poller path */ })
-        .finally(() => { this.inFlight = null; });
-    }, this.intervalMs);
-    if (this.timer.unref) this.timer.unref();
-    this.started = true;
+    let startPromise!: Promise<void>;
+    startPromise = this.startOnce(hub, hubAddress)
+      .finally(() => {
+        if (this.startInFlight === startPromise) this.startInFlight = null;
+      });
+    this.startInFlight = startPromise;
+    return startPromise;
   }
 
   stop(): void {
@@ -72,6 +71,21 @@ export class HubRotationPoller {
       hubAddress: ethers.getAddress(hubAddress),
       topics: this.eventTopics(hub),
     };
+  }
+
+  private async startOnce(hub: Contract, hubAddress: string): Promise<void> {
+    if (this.started) return;
+
+    this.bind(hub, hubAddress);
+    await this.seed();
+    this.timer = setInterval(() => {
+      if (this.inFlight) return;
+      this.inFlight = this.pollOnce()
+        .catch(() => { /* optional poller path */ })
+        .finally(() => { this.inFlight = null; });
+    }, this.intervalMs);
+    if (this.timer.unref) this.timer.unref();
+    this.started = true;
   }
 
   async pollOnce(): Promise<void> {

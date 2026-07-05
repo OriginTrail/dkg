@@ -1186,6 +1186,63 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.hubRotationListenerStarted).toBe(false);
   });
 
+  it('startHubRotationListener coalesces concurrent poller starts', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    let seedEntered!: () => void;
+    const seedEnteredPromise = new Promise<void>((resolve) => { seedEntered = resolve; });
+    let releaseSeed!: () => void;
+    const seedGate = new Promise<void>((resolve) => { releaseSeed = resolve; });
+    let getLogsCalls = 0;
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => {
+        getLogsCalls++;
+        if (getLogsCalls === 1) {
+          seedEntered();
+          await seedGate;
+        }
+        return [];
+      }),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    a.hubRotationListenerStarted = false;
+
+    try {
+      const firstStart = a.startHubRotationListener();
+      await seedEnteredPromise;
+      expect(provider.getLogs.calls).toHaveLength(1);
+
+      const secondStart = a.startHubRotationListener();
+      releaseSeed();
+      await expect(Promise.all([firstStart, secondStart])).resolves.toBeDefined();
+
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(provider.getBlockNumber.calls).toHaveLength(2);
+      expect(provider.getLogs.calls).toHaveLength(2);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('startHubRotationListener skips optional poller setup when primary static validation fails but backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
