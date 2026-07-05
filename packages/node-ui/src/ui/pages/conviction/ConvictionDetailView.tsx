@@ -1,7 +1,7 @@
 import React from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchPca, fetchWalletsBalances, type PcaSnapshot } from '../../api.js';
-import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { useResolvedOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import { useWalletBootstrap } from '../../hooks/useWalletBootstrap.js';
 import { detailDeviceFlow, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
@@ -23,7 +23,8 @@ import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../pca/address.js';
-import { usePcaOwnerAccess, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -144,10 +145,10 @@ function DetailBody({
     flow: (v) => detailDeviceFlow(v ?? 'topup'),
     describeActionError: (err, v) => describeDetailWalletError(err, v ?? 'topup'),
   });
-  const owner = useOwnerActionSubmitter({
-    accountId,
-    // Item 3 (#1375) — resolve the owner submitter ONCE from `access` (no per-write re-fetch);
-    // top-up / deregister on THIS account submit directly. Wallet liveness stays per-prompt.
+  const owner = useResolvedOwnerActionSubmitter({
+    // Item 3 (#1375) — resolve the owner submitter ONCE from `access` for THIS account. daemon
+    // pins (server-side); a wallet-owned account re-verifies ownership per write (T1). Wallet
+    // device progress flows through onWalletProgress; the submitter liveness stays per-prompt.
     access,
     onWalletProgress: access.mode === 'wallet' ? deviceProgress.onProgress : undefined,
   });

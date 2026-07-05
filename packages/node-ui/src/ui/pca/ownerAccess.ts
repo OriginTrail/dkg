@@ -24,7 +24,6 @@
  * `web3/walletOwnerActionSubmitter.ts`.
  */
 import { eqAddress } from './address.js';
-import { isWrongNetwork, useWalletStore } from '../stores/wallet.js';
 import type { SignableOwner, SignableOwnerKind } from './walletBinding.js';
 import type { OwnerActionSubmitterKind } from './ownerActions.js';
 
@@ -151,24 +150,6 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
   return { mode, wrongNetwork, writesEnabled, submitterKind, signableOwners };
 }
 
-/**
- * Sync display face: reads the connected wallet + wrong-network from the wallet store and
- * runs the pure core against already-loaded owner/primaryWallet props. Use in render paths
- * (detail view, overview, cards). The async, deliberately re-fetching face stays in
- * `ownerActions.resolveOwnerActionSubmitterForAccount` — do not force it onto React state.
- */
-export function usePcaOwnerAccess(input: {
-  owner?: string | null;
-  primaryWallet?: string | null;
-  walletsUnknown?: boolean;
-}): PcaOwnerAccess {
-  const connectedWallet = useWalletStore((s) => s.address);
-  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
-  return resolvePcaOwnerAccess({
-    owner: input.owner,
-    primaryWallet: input.primaryWallet,
-    connectedWallet,
-    walletWrongNetwork,
-    walletsUnknown: input.walletsUnknown,
-  });
-}
+// The sync display hook `usePcaOwnerAccess` lives in `./usePcaOwnerAccess.ts` so THIS module
+// stays PURE (no React / wallet-store import) — the pure classifier is what the parity tests
+// and the async owner-action seam depend on.

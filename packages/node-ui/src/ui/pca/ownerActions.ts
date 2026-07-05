@@ -89,17 +89,20 @@ export const readOnlyOwnerActionSubmitter: OwnerActionSubmitter = {
 
 export type OwnerKey = 'hot' | 'hardware';
 
-export interface OwnerActionSubmitterArgs {
+/** Args for the per-call RESOLVING submitter (cross-account deregister, create). */
+export interface ResolvingOwnerActionSubmitterArgs {
+  /** Advisory only — the manage writes resolve per the accountId PASSED to each method. */
   accountId?: string;
-  /**
-   * The display-resolved owner access for `accountId` (item 3 / #1375). When provided, the
-   * submitter is selected ONCE up-front from `access.submitterKind` and the manage writes
-   * submit directly — no per-write owner/wallet re-fetch. Omit it to keep the async
-   * re-fetching path (create-time ownerKey, cross-account deregisterFrom).
-   */
-  access?: PcaOwnerAccess;
-  /** Create-time selector. Manage-time routing fetches the PCA owner at call time. */
+  /** Create-time selector: 'hardware' → browser wallet, else daemon. */
   ownerKey?: OwnerKey;
+  /** Optional UI progress hook for browser-wallet approve/action prompts. */
+  onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'];
+}
+
+/** Args for the same-account RESOLVED submitter (resolve-once from the display access). */
+export interface ResolvedOwnerActionSubmitterArgs {
+  /** The display-resolved owner access for THIS account. */
+  access: PcaOwnerAccess;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
   onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'];
 }
@@ -193,7 +196,7 @@ export async function resolveOwnerActionSubmitterForAccount(
  * the browser wallet (pre-flight walletUnavailableReason), anything else uses the daemon. Shared
  * by both the resolving and the access-path submitters — create never depends on `access`.
  */
-function resolvingCreate(args: OwnerActionSubmitterArgs): OwnerActionSubmitter['create'] {
+function resolvingCreate(args: ResolvingOwnerActionSubmitterArgs): OwnerActionSubmitter['create'] {
   return async (createArgs) => {
     if (args.ownerKey !== 'hardware') return daemonOwnerActionSubmitter.create(createArgs);
     const reason = walletUnavailableReason();
@@ -202,7 +205,9 @@ function resolvingCreate(args: OwnerActionSubmitterArgs): OwnerActionSubmitter['
   };
 }
 
-function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
+// Internal (NOT a hook) — the per-call resolving submitter. Exposed to components via
+// `useResolvingOwnerActionSubmitter`, and reused by the resolved submitter's fallback branches.
+function resolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return {
     create: resolvingCreate(args),
     async registerAgent(accountId, address) {
@@ -218,17 +223,28 @@ function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): Own
   };
 }
 
-/**
- * Item 3 (#1375) — the resolve-signer-ONCE path. Selects the submitter up-front from the
- * display-resolved `access.submitterKind`, so registerAgent / deregisterAgent / topUp submit
- * DIRECTLY (no per-write owner/wallet re-fetch). The wallet submitter still runs its per-prompt
- * loadContext / assertStillConnected / allowance liveness guards on every write (inv-16 intact).
- * create stays on the ownerKey path; settle stays daemon.
- */
-function accessOwnerActionSubmitter(access: PcaOwnerAccess, args: OwnerActionSubmitterArgs): OwnerActionSubmitter {
-  const resolved = ownerActionSubmitterForKind(access.submitterKind, { onProgress: args.onWalletProgress });
+// Internal (NOT a hook) — the same-account resolve-ONCE submitter, with the two safety fallbacks.
+function resolvedOwnerActionSubmitter(
+  access: PcaOwnerAccess,
+  onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'],
+): OwnerActionSubmitter {
+  // Route to the RESOLVING path (per-write re-fetch + re-classify) in two cases:
+  //  - access.mode === 'unknown': the caller's snapshot hasn't loaded, or a just-created
+  //    replacement PCA isn't chain-readable yet. Pinning would stick submitterKind at 'read-only'
+  //    and fail every click on a genuinely owned account; resolving self-heals on retry.
+  //  - submitterKind === 'wallet' (T1 / #1468, the SAFETY case): a browser-wallet write runs
+  //    approveExactIfNeeded (grants TRAC) BEFORE the owner-gated call, so it must re-verify
+  //    ownership at CALL time. A render-time-pinned wallet submitter could grant allowance and then
+  //    revert NotAccountOwner on a stale owner/connected wallet; the resolving path re-fetches the
+  //    owner (origin) and returns read-only FIRST when it no longer matches — no approve, no spend.
+  if (access.mode === 'unknown' || access.submitterKind === 'wallet') {
+    return resolvingOwnerActionSubmitter({ onWalletProgress });
+  }
+  // daemon (server-side, no browser approve) + read-only (never writes) pin ONCE — the resolve-
+  // once win. create stays on the ownerKey path; settle stays daemon.
+  const resolved = ownerActionSubmitterForKind(access.submitterKind, { onProgress: onWalletProgress });
   return {
-    create: resolvingCreate(args),
+    create: resolvingCreate({ onWalletProgress }),
     registerAgent: resolved.registerAgent,
     deregisterAgent: resolved.deregisterAgent,
     topUp: resolved.topUp,
@@ -237,26 +253,20 @@ function accessOwnerActionSubmitter(access: PcaOwnerAccess, args: OwnerActionSub
 }
 
 /**
- * Resolve the owner-action submitter for PCA owner writes.
- *
- * Manage writes resolve at call time by fetching the PCA owner, then applying
- * inv-17:
- *  - owner == node primary wallet (`wallets[0]`) -> daemon, even if connected.
- *  - owner == connected wallet and != `wallets[0]` -> browser wallet submitter.
- *  - otherwise -> read-only/no-op owner writes.
- *
- * Create time has no accountId/owner yet, so `ownerKey: 'hardware' | 'hot'`
- * selects browser wallet vs daemon. Omitted ownerKey defaults to the existing
- * daemon create flow.
- *
- * When `access` is supplied (item 3 / #1375), the submitter is resolved ONCE from
- * `access.submitterKind` and the manage writes submit directly — no per-write re-fetch.
- * EXCEPT when `access.mode === 'unknown'` (the caller's PCA snapshot hasn't loaded, or a
- * just-created replacement PCA isn't chain-readable yet): fall back to the RESOLVING path so
- * a write re-fetches the owner and self-heals on retry. Pinning the access-path there would
- * stick submitterKind at 'read-only' and fail every click on a genuinely daemon-owned account.
+ * The per-call RESOLVING submitter (T3 / #1468): every manage write re-fetches the PCA owner +
+ * re-classifies (via `resolveOwnerActionSubmitterForAccount`, keyed on the accountId PASSED to the
+ * method). Use for CROSS-account writes — renew's / self-coverage's deregister from a DIFFERENT
+ * account — and for create. This is the security seam; it must NOT be pinned onto React state.
  */
-export function useOwnerActionSubmitter(args: OwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
-  if (args.access && args.access.mode !== 'unknown') return accessOwnerActionSubmitter(args.access, args);
+export function useResolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return resolvingOwnerActionSubmitter(args);
+}
+
+/**
+ * The same-account RESOLVED submitter (T3 / #1468): resolves the signer ONCE from the display
+ * `access` for writes on THAT account (the resolve-once win), with the T1 wallet re-verify + the
+ * unknown-mode self-heal baked in (see `resolvedOwnerActionSubmitter`). create/settle unchanged.
+ */
+export function useResolvedOwnerActionSubmitter(args: ResolvedOwnerActionSubmitterArgs): OwnerActionSubmitter {
+  return resolvedOwnerActionSubmitter(args.access, args.onWalletProgress);
 }

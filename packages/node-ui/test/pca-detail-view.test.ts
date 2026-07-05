@@ -371,7 +371,14 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Owner wallet matches; switch network before signing owner actions.');
     expect(container.textContent).not.toContain('Connected owner wallet will sign');
+    // T4 (#1468) — the wrong-network gate must reach EVERY owner-write control across the
+    // Funding / PublishingWallets / Lifecycle sections, not just top-up.
+    const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
     expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    expect(byText('Approve publishing wallet')?.disabled).toBe(true);
+    // ...but the wallet probe stays available to everyone (deliberately ungated).
+    expect(byText('Probe')?.disabled).toBe(false);
     await unmount();
   });
 
