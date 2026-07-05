@@ -118,6 +118,11 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
+export const CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS = 9_000;
+
+const HUB_ROTATION_POLL_INTERVAL_MS = DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS;
+const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
+
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
  * failing over to the next eligible backend — generous enough for a slow
@@ -522,6 +527,12 @@ export class EVMChainAdapterBase {
   protected readonly pcaReadCache = new PcaReadCache();
 
   protected hubRotationListenerStarted = false;
+
+  protected hubRotationPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  protected hubRotationPollInFlight: Promise<void> | null = null;
+
+  protected hubRotationLastScannedBlock: number | undefined;
 
   /**
    * Single-flight guard for the best-effort
@@ -3108,53 +3119,108 @@ export class EVMChainAdapterBase {
    * on the update path it emits both `ContractChanged` AND
    * `NewContract`. Storage bindings resolved through
    * `getAssetStorageAddress(...)` emit the parallel `AssetStorageChanged`
-   * / `NewAssetStorage` events. We listen to all four events so the cache
+   * / `NewAssetStorage` events. We poll all four event topics so the cache
    * invalidates regardless of which Hub set owns the name, and both the
    * RS-pair invalidation and the generic boot-bound invalidation are
    * idempotent so duplicate notifications are harmless.
    *
-   * `Contract.on(...)` is async in ethers v6: a sync `try/catch` would
-   * miss provider rejections (e.g. HTTP-only endpoints that can't
-   * install filter subscriptions) and leave us with an unhandled
-   * rejection. We `await` every subscription and only set
-   * `hubRotationListenerStarted` after all succeed, so a failed
-   * provider can be retried by a future call site if we ever need to
-   * — and meanwhile the TTL refresh path (for RS) and the
-   * `withHubStaleRetry` write-side fallback (for all boot-bound
-   * contracts) still keep stale bindings recoverable without a
-   * working event subscription.
+   * We deliberately avoid `Contract.on(...)` here. With `polling: true`,
+   * ethers implements each subscription as its own steady `eth_getLogs`
+   * poller. One adapter-owned poller with an OR-topic filter preserves
+   * rotation detection without four hidden idle log streams.
    */
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationListenerStarted) return;
-    const onChange = (name: unknown): void => {
-      if (typeof name !== 'string') return;
-      if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
-        this.invalidateRandomSamplingPair();
-        return;
-      }
-      if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
-        this.invalidatePublishPreflightCache();
-        // Force the next public-method entry through `init()` so it
-        // re-resolves every binding. Do not clear the current handle
-        // here: the callback can fire between a public method's
-        // `await init()` and its first `this.contracts.X` read.
-        this.initialized = false;
-      }
-    };
     try {
-      await withTimeout(
-        this.ensureConfiguredStaticChainIdValidated(this.primaryProvider),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'Hub rotation listener chainId validation',
-      );
-      await this.contracts.hub.on('ContractChanged', onChange);
-      await this.contracts.hub.on('NewContract', onChange);
-      await this.contracts.hub.on('AssetStorageChanged', onChange);
-      await this.contracts.hub.on('NewAssetStorage', onChange);
+      await this.pollHubRotationEvents();
+      this.hubRotationPollTimer = setInterval(() => {
+        if (this.hubRotationPollInFlight) return;
+        this.hubRotationPollInFlight = this.pollHubRotationEvents()
+          .catch(() => { /* optional listener path */ })
+          .finally(() => { this.hubRotationPollInFlight = null; });
+      }, HUB_ROTATION_POLL_INTERVAL_MS);
+      if (this.hubRotationPollTimer.unref) this.hubRotationPollTimer.unref();
       this.hubRotationListenerStarted = true;
     } catch {
-      /* provider doesn't support filter subscriptions — TTL refresh (RS)
+      /* provider doesn't support log polling — TTL refresh (RS)
        * and `withHubStaleRetry` (writes) are the fallbacks */
+    }
+  }
+
+  protected async pollHubRotationEvents(): Promise<void> {
+    const hub = this.contracts.hub;
+    if (!hub) return;
+
+    const topics = this.hubRotationEventTopics(hub);
+    if (topics.length === 0) return;
+
+    const head = await this.readProvider(
+      'Hub rotation poll getBlockNumber',
+      (provider) => provider.getBlockNumber(),
+    );
+    const candidateFromBlock = this.hubRotationLastScannedBlock == null
+      ? head - HUB_ROTATION_REORG_BUFFER_BLOCKS
+      : this.hubRotationLastScannedBlock + 1 - HUB_ROTATION_REORG_BUFFER_BLOCKS;
+    const recentFromBlock = head - HUB_ROTATION_REORG_BUFFER_BLOCKS;
+    const fromBlock = Math.max(
+      0,
+      Math.min(candidateFromBlock, recentFromBlock),
+    );
+    const hubAddress = await this.hubContractAddress(hub);
+    const logs = await this.readProvider<ethers.Log[]>(
+      'Hub rotation poll getLogs',
+      (provider) => provider.getLogs({
+        address: hubAddress,
+        fromBlock,
+        toBlock: head,
+        topics: [topics],
+      }),
+      { policy: 'wideLogScan' },
+    );
+
+    for (const log of logs) {
+      try {
+        const parsed = hub.interface.parseLog({ topics: [...log.topics], data: log.data });
+        if (!parsed) continue;
+        this.applyHubRotationEventName(parsed.args?.contractName ?? parsed.args?.[0]);
+      } catch {
+        // Ignore malformed/unexpected Hub logs. The topic filter should already
+        // constrain these, but a parse miss must not wedge the poll cursor.
+      }
+    }
+    this.hubRotationLastScannedBlock = head;
+  }
+
+  protected hubRotationEventTopics(hub: Contract): string[] {
+    return [
+      'ContractChanged',
+      'NewContract',
+      'AssetStorageChanged',
+      'NewAssetStorage',
+    ].flatMap((eventName) => {
+      const event = hub.interface.getEvent(eventName);
+      return event?.topicHash ? [event.topicHash] : [];
+    });
+  }
+
+  protected async hubContractAddress(hub: Contract): Promise<string> {
+    const target = (hub as unknown as { target?: unknown }).target;
+    return typeof target === 'string' ? target : hub.getAddress();
+  }
+
+  protected applyHubRotationEventName(name: unknown): void {
+    if (typeof name !== 'string') return;
+    if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
+      this.invalidateRandomSamplingPair();
+      return;
+    }
+    if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
+      this.invalidatePublishPreflightCache();
+      // Force the next public-method entry through `init()` so it re-resolves
+      // every binding. Do not clear the current handle here: the callback can
+      // fire between a public method's `await init()` and its first
+      // `this.contracts.X` read.
+      this.initialized = false;
     }
   }
 
@@ -3212,6 +3278,11 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    if (this.hubRotationPollTimer) {
+      clearInterval(this.hubRotationPollTimer);
+      this.hubRotationPollTimer = null;
+    }
+    this.hubRotationListenerStarted = false;
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

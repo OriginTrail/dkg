@@ -294,6 +294,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       async save(n: number) { this.saved.push(n); },
     };
     let failContextLane = true;
+    let now = 0;
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
@@ -309,7 +310,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       publishHandler: makeHandler(),
       intervalMs: 20,
       cursorPersistence: cursor,
-      clock: () => 0,
+      clock: () => now,
       onContextGraphCreated: async () => { /* sink */ },
       onKARegisteredToContextGraph: async () => { /* sink */ },
     });
@@ -327,6 +328,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(cursor.saved).toEqual([]);
 
     failContextLane = false;
+    now = 60_000;
     await (poller as unknown as { poll(): Promise<void> }).poll();
 
     expect(filters[2].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
@@ -820,10 +822,11 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(filters[3].toBlock).toBe(1100);
   });
 
-  it('retries a failed context graph discovery lane on the next tick', async () => {
+  it('backs off a failed context graph discovery lane and retries the same range later', async () => {
     const filters: EventFilter[] = [];
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     let calls = 0;
+    let now = 0;
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
@@ -842,15 +845,17 @@ describe('ChainEventPoller lane runner and cursors', () => {
       publishHandler: makeHandler(),
       intervalMs: 20,
       cursorPersistence: cursor,
-      clock: () => 0,
+      clock: () => now,
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await poller.start();
-    await new Promise((r) => setTimeout(r, 80));
-    await poller.stop();
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 20;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 60_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
 
-    expect(filters.length).toBeGreaterThanOrEqual(2);
+    expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[1].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[0].fromBlock).toBe(1);

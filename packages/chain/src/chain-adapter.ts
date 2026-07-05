@@ -371,6 +371,14 @@ export interface ContextGraphChainScanOptions {
    * public SDK list-all calls remain side-effect free by default.
    */
   seedIncrementalWatermark?: boolean;
+  /**
+   * Daemon-oriented mode: scan only a bounded live-tail window near the current
+   * head when no incremental watermark exists. Public list-all calls should
+   * omit this so they retain full historical semantics.
+   */
+  liveTailOnly?: boolean;
+  /** Number of recent blocks to scan when `liveTailOnly` is set. */
+  liveTailLookbackBlocks?: number;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

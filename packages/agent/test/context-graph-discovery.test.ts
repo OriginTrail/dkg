@@ -2354,8 +2354,18 @@ describe('discoverContextGraphsFromChain', () => {
     expect(await agent.discoverContextGraphsFromChain()).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({
+      liveTailOnly: true,
+      liveTailLookbackBlocks: 123,
+      seedIncrementalWatermark: true,
+    })).toBe(0);
 
-    expect(calls).toEqual([undefined, { incremental: true }, { seedIncrementalWatermark: true }]);
+    expect(calls).toEqual([
+      undefined,
+      { incremental: true },
+      { seedIncrementalWatermark: true },
+      { seedIncrementalWatermark: true, liveTailOnly: true, liveTailLookbackBlocks: 123 },
+    ]);
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {

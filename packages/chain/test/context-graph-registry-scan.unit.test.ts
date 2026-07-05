@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
-import { CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from '../src/evm-adapter-base.js';
+import {
+  CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS,
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  CG_REGISTRY_REORG_BUFFER_BLOCKS,
+} from '../src/evm-adapter-base.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -250,6 +254,32 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
       [4_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 4_000],
     ]);
+  });
+
+  it('can seed the incremental watermark from a bounded live-tail scan without deploy-block probing', async () => {
+    const registry = makeRegistry();
+    const head = 20_000;
+    const { adapter, provider } = makeAdapter(registry, head);
+    provider.getCode = seam(async () => {
+      throw new Error('eth_getCode should not be called for daemon live-tail seeding');
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await adapter.listContextGraphsFromChain(undefined, {
+      liveTailOnly: true,
+      liveTailLookbackBlocks: CG_REGISTRY_LIVE_TAIL_LOOKBACK_BLOCKS,
+      seedIncrementalWatermark: true,
+    });
+
+    expect(provider.getCode.calls).toEqual([]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [11_001, 13_000],
+      [13_001, 15_000],
+      [15_001, 17_000],
+      [17_001, 19_000],
+      [19_001, 20_000],
+    ]);
+    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(head + 1);
   });
 
   it('reports no registry scan watermark after preflight cache invalidation', async () => {

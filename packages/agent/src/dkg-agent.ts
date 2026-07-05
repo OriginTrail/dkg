@@ -463,6 +463,8 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export interface DiscoverContextGraphsFromChainOptions {
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
+  liveTailOnly?: boolean;
+  liveTailLookbackBlocks?: number;
   throwOnChainScanFailure?: boolean;
 }
 
@@ -1106,11 +1108,16 @@ export class DKGAgent extends DKGAgentBase {
     let partialChainScan = false;
     let partialChainScanError: unknown;
     try {
-      const scanOptions = options.incremental
-        ? { incremental: true }
-        : options.seedIncrementalWatermark
-          ? { seedIncrementalWatermark: true }
-          : undefined;
+      const scanOptions = options.incremental || options.seedIncrementalWatermark || options.liveTailOnly
+        ? {
+            ...(options.incremental ? { incremental: true } : {}),
+            ...(options.seedIncrementalWatermark ? { seedIncrementalWatermark: true } : {}),
+            ...(options.liveTailOnly ? { liveTailOnly: true } : {}),
+            ...(options.liveTailLookbackBlocks !== undefined
+              ? { liveTailLookbackBlocks: options.liveTailLookbackBlocks }
+              : {}),
+          }
+        : undefined;
       onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

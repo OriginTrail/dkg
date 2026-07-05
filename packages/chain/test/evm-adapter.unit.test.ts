@@ -1117,16 +1117,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
-    // ethers v6 `Contract.on(...)` is async — providers that reject
-    // filter installation (e.g. HTTP-only endpoints, mocked providers)
-    // must NOT bubble as unhandled rejections, and the listener-started
-    // flag must NOT be flipped if subscription failed (so a future
-    // retry remains possible).
+  it('startHubRotationListener swallows optional poll setup failures without unhandled-rejection or throw', async () => {
+    // Hub rotation detection is best-effort. A mocked or unsupported Hub poll
+    // surface must not bubble as an unhandled rejection, and the listener-started
+    // flag must not flip if setup failed so a future retry remains possible.
     const a = new EVMChainAdapter(minimalConfig());
     const fakeHub = {
       on: async (_event: string, _cb: (...args: unknown[]) => void) => {
-        throw new Error('provider does not support filter subscriptions');
+        throw new Error('legacy subscription seam should not be reached');
       },
     };
     (a as any).contracts.hub = fakeHub;
@@ -1184,6 +1182,91 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       .resolves.toBe(123);
     expect(primaryProvider.getBlockNumber.calls).toEqual([]);
     expect(backupProvider.getBlockNumber.calls).toEqual([[]]);
+  });
+
+  it('startHubRotationListener polls Hub rotation topics without ethers subscriptions', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async (_filter: any) => [{
+        topics: changed.topics,
+        data: changed.data,
+      }]),
+      destroy: recorder(() => undefined),
+    };
+    const on = recorder(async () => {
+      throw new Error('ethers subscription should not be installed');
+    });
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001', on };
+    a.contracts.contextGraphs = { stale: true };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.hubRotationListenerStarted = false;
+    a.initialized = true;
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    a.destroy();
+
+    expect(on.calls).toEqual([]);
+    expect(provider.getLogs.calls).toHaveLength(1);
+    expect(provider.getLogs.calls[0][0]).toMatchObject({
+      address: '0x0000000000000000000000000000000000000001',
+      fromBlock: 950,
+      toBlock: 1_000,
+    });
+    expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
+      iface.getEvent('ContractChanged')!.topicHash,
+      iface.getEvent('NewContract')!.topicHash,
+      iface.getEvent('AssetStorageChanged')!.topicHash,
+      iface.getEvent('NewAssetStorage')!.topicHash,
+    ]);
+    expect(a.contracts.contextGraphs).toEqual({ stale: true });
+    expect(a.cachedKav10Address).toBeUndefined();
+    expect(a.initialized).toBe(false);
+    expect(a.hubRotationListenerStarted).toBe(false);
+  });
+
+  it('pollHubRotationEvents clamps the range when failover observes a lower head', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 900),
+      getLogs: recorder(async (_filter: any) => []),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://lagging.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = { interface: iface, target: '0x0000000000000000000000000000000000000001' };
+    a.hubRotationLastScannedBlock = 1_000;
+
+    await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();
+
+    expect(provider.getLogs.calls).toHaveLength(1);
+    expect(provider.getLogs.calls[0][0]).toMatchObject({
+      fromBlock: 850,
+      toBlock: 900,
+    });
+    expect(a.hubRotationLastScannedBlock).toBe(900);
   });
 
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
