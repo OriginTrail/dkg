@@ -3167,7 +3167,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveDashboardSseSession(req);
+        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession);
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",

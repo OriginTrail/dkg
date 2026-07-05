@@ -16,10 +16,13 @@ import {
 import { createDashboardSessionAuthSource } from '../src/daemon/dashboard-session-auth-source.js';
 import {
   DASHBOARD_SESSION_COOKIE,
-  getDashboardSessionCookie,
 } from '../src/daemon/dashboard-session-cookie.js';
 import { resolveDashboardSseSession } from '../src/daemon/dashboard-sse-session.js';
-import { DashboardSessionStore } from '../src/daemon/dashboard-session-store.js';
+import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
+import {
+  DashboardSessionStore,
+  type AuthenticatedDashboardSession,
+} from '../src/daemon/dashboard-session-store.js';
 
 // ---------------------------------------------------------------------------
 // Unit tests for pure functions
@@ -296,10 +299,12 @@ describe('httpAuthGuard', () => {
   let baseUrl: string;
   let corsOrigin: string | null;
   let authSources: RequestAuthSource[] | undefined;
+  let authenticateDashboardSessionForSse: (req: IncomingMessage) => AuthenticatedDashboardSession | null;
 
   beforeEach(async () => {
     corsOrigin = null;
     authSources = undefined;
+    authenticateDashboardSessionForSse = () => null;
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       if (!(await httpAuthGuard(req, res, true, validTokens, corsOrigin, {
         resolvePrincipal: () => principal,
@@ -311,7 +316,7 @@ describe('httpAuthGuard', () => {
         ok: true,
         requestAuth: getRequestAuthContext(req) ?? null,
         dashboardSseSession: url.pathname === '/api/events'
-          ? resolveDashboardSseSession(req) ?? null
+          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
           : null,
       }));
     });
@@ -506,9 +511,14 @@ describe('httpAuthGuard', () => {
   it('passes dashboard-cookie auth metadata to the /api/events route for SSE enforcement', async () => {
     const store = new DashboardSessionStore();
     const created = store.createLoginSession(VALID_TOKEN, 'credential-fingerprint-1');
+    authenticateDashboardSessionForSse = (req) => authenticateDashboardSessionRequest(req, store, {
+      dashboardLogin: {
+        isCredentialFingerprintCurrent: () => true,
+      },
+    });
     authSources = [
       createDashboardSessionAuthSource({
-        authenticate: (req) => store.authenticateSessionId(getDashboardSessionCookie(req)),
+        authenticate: authenticateDashboardSessionForSse,
         resolvePrincipal: () => principal,
         verifyCsrf: () => true,
       }),
@@ -538,6 +548,35 @@ describe('httpAuthGuard', () => {
       compatToken: VALID_TOKEN,
       credentialFingerprint: 'credential-fingerprint-1',
     });
+  });
+
+  it('rejects stale password-login dashboard sessions before opening /api/events', async () => {
+    const store = new DashboardSessionStore();
+    const created = store.createLoginSession(VALID_TOKEN, 'credential-fingerprint-1');
+    const onSessionRevoked = vi.fn();
+    authenticateDashboardSessionForSse = (req) => authenticateDashboardSessionRequest(req, store, {
+      dashboardLogin: {
+        isCredentialFingerprintCurrent: () => false,
+      },
+      onSessionRevoked,
+    });
+    authSources = [
+      createDashboardSessionAuthSource({
+        authenticate: authenticateDashboardSessionForSse,
+        resolvePrincipal: () => principal,
+        verifyCsrf: () => true,
+      }),
+    ];
+
+    const res = await fetch(`${baseUrl}/api/events`, {
+      headers: {
+        Cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
+      },
+    });
+
+    expect(res.status).toBe(401);
+    expect(onSessionRevoked).toHaveBeenCalledWith(created.sessionId);
+    expect(store.authenticateSessionId(created.sessionId)).toBeNull();
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {
