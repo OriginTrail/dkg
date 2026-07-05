@@ -77,4 +77,50 @@ describe('createSseHub', () => {
     expect(hub.size()).toBe(0);
     expect(res.end).toHaveBeenCalledTimes(1);
   });
+
+  it('closes password-login streams when their credential fingerprint is stale', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    let credentialCurrent = true;
+    const hub = createSseHub({
+      heartbeatMs: 100,
+      isDashboardSessionCredentialFingerprintCurrent: () => credentialCurrent,
+    });
+    const res = fakeResponse();
+
+    hub.add(res, {
+      sessionId: 'session-1',
+      compatToken: 'token-1',
+      credentialFingerprint: 'credential-a',
+      expiresAt: 10_000,
+    });
+    expect(hub.size()).toBe(1);
+
+    credentialCurrent = false;
+    vi.advanceTimersByTime(100);
+
+    expect(hub.size()).toBe(0);
+    expect(res.end).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not broadcast to stale password-login streams', () => {
+    let credentialCurrent = true;
+    const hub = createSseHub({
+      isDashboardSessionCredentialFingerprintCurrent: () => credentialCurrent,
+    });
+    const res = fakeResponse();
+
+    hub.add(res, {
+      sessionId: 'session-1',
+      compatToken: 'token-1',
+      credentialFingerprint: 'credential-a',
+      expiresAt: Date.now() + 10_000,
+    });
+    credentialCurrent = false;
+    hub.broadcast('memory_graph_changed', { contextGraphId: 'cg-1' });
+
+    expect(hub.size()).toBe(0);
+    expect(res.write).not.toHaveBeenCalled();
+    expect(res.end).toHaveBeenCalledTimes(1);
+  });
 });

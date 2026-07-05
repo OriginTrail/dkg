@@ -543,7 +543,7 @@ describe('dashboard browser sessions', () => {
         source: 'dashboard-session',
         internalCredentialToken: VALID_TOKEN,
         principal: { kind: 'node-admin', agentAddress: DEFAULT_AGENT_ADDRESS },
-        dashboardSession: { source: 'login' },
+        dashboardSession: { source: 'login', credentialFingerprint: 'credential-a' },
       },
     });
   });
@@ -568,6 +568,53 @@ describe('dashboard browser sessions', () => {
     expect(exchange.headers.get('set-cookie')).toBeNull();
     await expect(exchange.json()).resolves.toMatchObject({
       error: 'Invalid dashboard username or password',
+    });
+  });
+
+  it.each([
+    ['missing' as const, 'Dashboard credentials are not configured'],
+    ['invalid' as const, 'Dashboard credentials are unavailable'],
+  ])('reports %s dashboard credentials without setting a cookie', async (reason, message) => {
+    const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(503);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    const body = await exchange.json() as { error: string };
+    expect(body.error).toContain(message);
+    expect(body.error).toContain('reset-password');
+  });
+
+  it('does not set a cookie when password login has no node-admin backing token', async () => {
+    const verifyCredentials = vi.fn(async () => ({ ok: true as const, credentialFingerprint: 'credential-a' }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => undefined,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(503);
+    expect(exchange.headers.get('set-cookie')).toBeNull();
+    await expect(exchange.json()).resolves.toMatchObject({
+      error: 'Dashboard login is unavailable until an API token is configured',
     });
   });
 

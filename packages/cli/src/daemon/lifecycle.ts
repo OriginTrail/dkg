@@ -2561,11 +2561,14 @@ export async function runDaemonInner(
 
   const authEnabled = config.auth?.enabled !== false;
   const validTokens = await loadTokens(config.auth);
+  const isDashboardCredentialFingerprintCurrent = (credentialFingerprint: string) =>
+    readDashboardCredentialFingerprintSync() === credentialFingerprint;
   const sseHub = createSseHub({
     isDashboardSessionTokenValid: (token) => {
       reconcileValidTokens(validTokens);
       return validTokens.has(token);
     },
+    isDashboardSessionCredentialFingerprintCurrent: isDashboardCredentialFingerprintCurrent,
   });
   const closeDashboardSessionSseClients = (sessionId: string) => sseHub.closeSession(sessionId);
   const sseBroadcast = (event: string, payload: Record<string, unknown>) => sseHub.broadcast(event, payload);
@@ -2905,8 +2908,6 @@ export async function runDaemonInner(
     resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
     refreshValidTokens: () => reconcileValidTokens(validTokens),
   });
-  const isDashboardCredentialFingerprintCurrent = (credentialFingerprint: string) =>
-    readDashboardCredentialFingerprintSync() === credentialFingerprint;
   const resolveDashboardPrincipal = (token: string) => {
     const agentAddress = agent.resolveAgentAddress(token);
     return {

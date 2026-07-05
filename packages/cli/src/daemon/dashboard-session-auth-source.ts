@@ -82,6 +82,18 @@ export function createDashboardSessionAuthSource(
         };
       }
       const principal = options.resolvePrincipal(session.compatToken);
+      const dashboardSession = session.source === "login"
+        ? {
+            sessionId: session.sessionId,
+            source: "login" as const,
+            expiresAt: session.expiresAt,
+            credentialFingerprint: session.credentialFingerprint,
+          }
+        : {
+            sessionId: session.sessionId,
+            source: session.source,
+            expiresAt: session.expiresAt,
+          };
 
       return {
         ok: true,
@@ -94,11 +106,7 @@ export function createDashboardSessionAuthSource(
             required: authorization.csrfRequired,
             validated: authorization.csrfValidated,
           },
-          dashboardSession: {
-            sessionId: session.sessionId,
-            source: session.source,
-            expiresAt: session.expiresAt,
-          },
+          dashboardSession,
         },
       };
     },

@@ -44,11 +44,18 @@ export type RequestAuthContext =
   | (RequestAuthBaseContext & {
       source: 'dashboard-session';
       internalCredentialToken: string;
-      dashboardSession: {
-        sessionId: string;
-        source: 'loopback' | 'exchange' | 'login';
-        expiresAt: number;
-      };
+      dashboardSession:
+        | {
+            sessionId: string;
+            source: 'loopback' | 'exchange';
+            expiresAt: number;
+          }
+        | {
+            sessionId: string;
+            source: 'login';
+            expiresAt: number;
+            credentialFingerprint: string;
+          };
     });
 
 const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
