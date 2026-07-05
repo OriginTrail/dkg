@@ -91,10 +91,12 @@ const makeDeps = (over: Partial<ApproveBatchDeps> = {}): ApproveBatchDeps => ({
   signerKindForAccount: vi.fn(async () => 'daemon' as const),
   probePca: vi.fn(async () => ({})),
   describePcaError: vi.fn(() => null),
-  describeWalletPcaRevert: vi.fn(() => null),
   onApproved: vi.fn(),
   ...over,
 });
+
+// Drain all pending microtasks + one macrotask so the runner advances to its next await.
+const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
 async function runBatch(
   inputOver: Partial<ApproveBatchInput>,
@@ -146,21 +148,52 @@ describe('runApproveBatch — sequential loop + taxonomy', () => {
     expect(signIdx).toBeGreaterThan(startIdx); // planning-gated, strictly after BATCH_START
   });
 
-  it('happy path: registered→approved, unconfirmed(200)→submitted (#9), onApproved after BATCH_DONE', async () => {
-    const registerAgent = vi.fn()
-      .mockResolvedValueOnce({ registered: true, txHash: '0x1' })
-      .mockResolvedValueOnce({ registered: false, txHash: '0x2' });
-    const { state, counts, actions, deps } = await runBatch({}, { registerAgent: registerAgent as any });
+  it('happy path + STRICT ordering: the 2nd write does not START until the 1st RESOLVES; BATCH_DONE strictly before onApproved; registered→approved / unconfirmed→submitted (#9)', async () => {
+    // Observe ordering directly (not via presence/arg-order, which a concurrent-then-await
+    // regression would still satisfy): controlled register promises + a shared event log.
+    const events: string[] = [];
+    const gate: Record<string, { resolve: (v: unknown) => void }> = {};
+    const gated = (addr: string) => new Promise<unknown>((r) => { gate[addr] = { resolve: r }; });
+    const pending: Record<string, Promise<unknown>> = { [A]: gated(A), [B]: gated(B) };
+    const registerAgent = vi.fn(async (_acct: string, addr: string) => {
+      events.push(`start:${addr}`);
+      const res = await pending[addr];
+      events.push(`resolve:${addr}`);
+      return res;
+    });
+    let state = { ...initialApproveBatchState };
+    const dispatch = (a: any) => {
+      if (a.type === 'BATCH_DONE') events.push('BATCH_DONE');
+      state = approveBatchReducer(state, a);
+    };
+    const onApproved = vi.fn(() => events.push('onApproved'));
+    const deps = makeDeps({ registerAgent: registerAgent as any, onApproved });
+    const input: ApproveBatchInput = {
+      addresses: [A, B], accountId: '7', mode: 'sponsor', targetWalletManaged: false, signableOwners: [],
+    };
+    const p = runApproveBatch(input, deps, dispatch, () => false);
+
+    // A's write started; B's must NOT have — proves the loop awaits each row before the next.
+    await tick();
+    expect(events).toEqual([`start:${A}`]);
+    expect(registerAgent).toHaveBeenCalledTimes(1);
+
+    // Only once A RESOLVES (registered:true → approved) does B start.
+    gate[A].resolve({ registered: true, txHash: '0x1' });
+    await tick();
+    expect(events).toEqual([`start:${A}`, `resolve:${A}`, `start:${B}`]);
+
+    // B resolves unconfirmed (200 → submitted, #9).
+    gate[B].resolve({ registered: false, txHash: '0x2' });
+    await p;
+
     expect(state.rows[A].status).toBe('approved');
     expect(state.rows[B].status).toBe('submitted');
-    expect(counts).toMatchObject({ confirmed: 1, submitted: 1 });
+    expect(selectCounts(state)).toMatchObject({ confirmed: 1, submitted: 1 });
     expect(state.done).toBe(true);
-    // onApproved fires AFTER BATCH_DONE
-    const doneIdx = actions.findIndex((a) => a.type === 'BATCH_DONE');
-    expect(doneIdx).toBeGreaterThanOrEqual(0);
-    expect(deps.onApproved).toHaveBeenCalledTimes(1);
-    // sequential order preserved
-    expect(registerAgent.mock.calls.map((c) => c[1])).toEqual([A, B]);
+    // Finalization ordering: BATCH_DONE is dispatched BEFORE onApproved fires.
+    expect(events).toEqual([`start:${A}`, `resolve:${A}`, `start:${B}`, `resolve:${B}`, 'BATCH_DONE', 'onApproved']);
+    expect(onApproved).toHaveBeenCalledTimes(1);
   });
 
   it('cooperative stop: rows after the stop point become error/stopped; batch still finalizes', async () => {

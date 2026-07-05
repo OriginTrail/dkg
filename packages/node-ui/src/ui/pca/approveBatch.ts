@@ -318,7 +318,8 @@ export interface ApproveBatchDeps {
   signerKindForAccount: (id?: string) => Promise<'daemon' | 'wallet' | undefined>;
   probePca: (accountId: string, address: string) => Promise<{ probedKey?: PcaProbedKey }>;
   describePcaError: (err: unknown, opts: { accountId?: string }) => PcaErrorInfo | null;
-  describeWalletPcaRevert: (err: unknown, accountId: string) => PcaErrorInfo | null;
+  // `describeWalletPcaRevert` is NOT a dep — it is defined in this module (see above), so
+  // the runner calls it directly rather than having the modal pass our own export back in.
   onApproved?: () => void;
 }
 
@@ -543,7 +544,7 @@ export async function runApproveBatch(
         });
         break;
       }
-      const info = deps.describePcaError(err, { accountId }) ?? deps.describeWalletPcaRevert(err, accountId);
+      const info = deps.describePcaError(err, { accountId }) ?? describeWalletPcaRevert(err, accountId);
       if (info?.code === 'AgentCapReached') {
         // U1 — mark the current row AND every NOT-YET-processed row 'cap' before the
         // break, else the later rows would stay stuck on 'pending' ("approving…").
