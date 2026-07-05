@@ -762,10 +762,18 @@ async function handleNodeUIRequestCore(
 
   // --- Static UI files ---
 
-  if (path === '/ui' || path.startsWith('/ui/')) {
-    return serveStatic(res, staticDir, path);
-  }
+  if (await handleNodeUIStaticRequest(res, url, staticDir)) return true;
 
+  return false;
+}
+
+export async function handleNodeUIStaticRequest(
+  res: ServerResponse,
+  url: URL,
+  staticDir: string,
+): Promise<boolean> {
+  const path = url.pathname;
+  if (path === '/ui' || path.startsWith('/ui/')) return serveStatic(res, staticDir, path);
   return false;
 }
 

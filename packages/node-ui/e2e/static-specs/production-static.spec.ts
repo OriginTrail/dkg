@@ -4,22 +4,13 @@ import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { handleNodeUIRequest } from '../../src/api.js';
+import { handleNodeUIStaticRequest } from '../../src/api.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '../..');
 const staticDir = resolve(packageRoot, 'dist-ui');
 
-const db = {
-  getLatestSnapshot: () => ({}),
-  getSnapshotHistory: () => [],
-  getOperations: () => [],
-  getErrors: () => [],
-  getMetrics: () => [],
-  getErrorHotspots: () => [],
-} as any;
-
-let server: Server;
+let server: Server | undefined;
 let baseUrl: string;
 
 test.beforeAll(async () => {
@@ -37,7 +28,7 @@ test.beforeAll(async () => {
       return;
     }
     try {
-      const handled = await handleNodeUIRequest(req, res, url, db, staticDir);
+      const handled = await handleNodeUIStaticRequest(res, url, staticDir);
       if (!handled && !res.headersSent) {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not Found' }));
@@ -57,7 +48,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  if (!server) return;
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  server = undefined;
 });
 
 test('serves the production static app shell under CSP without legacy token bootstrap', async ({ page }) => {

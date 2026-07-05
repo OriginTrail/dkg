@@ -7,6 +7,15 @@ interface DashboardLoginAttempt {
   lockedUntil?: number;
 }
 
+export type DashboardLoginAttemptReservation =
+  | { ok: false; retryAfterMs: number }
+  | {
+      ok: true;
+      fail: () => void;
+      release: () => void;
+      succeed: () => void;
+    };
+
 export class DashboardLoginAttemptLimiter {
   private attempts = new Map<string, DashboardLoginAttempt>();
 
@@ -42,6 +51,23 @@ export class DashboardLoginAttemptLimiter {
     }
     this.attempts.set(key, attempt);
     return { ok: true };
+  }
+
+  reserveAttempt(key: string): DashboardLoginAttemptReservation {
+    const reserved = this.reserve(key);
+    if (!reserved.ok) return reserved;
+    let finalized = false;
+    const finalize = (fn: () => void): void => {
+      if (finalized) return;
+      finalized = true;
+      fn();
+    };
+    return {
+      ok: true,
+      fail: () => finalize(() => this.completeFailure(key)),
+      release: () => finalize(() => this.releaseReservation(key)),
+      succeed: () => finalize(() => this.recordSuccess(key)),
+    };
   }
 
   check(key: string): { ok: true } | { ok: false; retryAfterMs: number } {

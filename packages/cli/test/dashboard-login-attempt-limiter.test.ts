@@ -29,4 +29,22 @@ describe('DashboardLoginAttemptLimiter', () => {
     expect(limiter.reserve('127.0.0.1:active-d')).toEqual({ ok: false, retryAfterMs: 60_000 });
     expect((limiter as any).attempts.size).toBe(3);
   });
+
+  it('finalizes a reserved attempt only once', () => {
+    const limiter = new DashboardLoginAttemptLimiter({ maxFailures: 2 });
+    const reservation = limiter.reserveAttempt('127.0.0.1');
+    expect(reservation.ok).toBe(true);
+    if (!reservation.ok) throw new Error('reservation should be accepted');
+
+    reservation.fail();
+    reservation.release();
+    reservation.succeed();
+
+    const second = limiter.reserveAttempt('127.0.0.1');
+    expect(second.ok).toBe(true);
+    if (second.ok) second.fail();
+
+    const locked = limiter.reserveAttempt('127.0.0.1');
+    expect(locked).toMatchObject({ ok: false });
+  });
 });

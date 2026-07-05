@@ -406,7 +406,6 @@ export async function handleRequest(
     admission,
     url,
     path,
-    requestIdentity,
     requestAuth,
     requestToken,
     requestAgentAddress,

@@ -65,10 +65,9 @@ export async function handleDashboardLoginExchange(
     return;
   }
 
-  const attemptKey = dashboardLoginAttemptKey(req);
-  const limiterState = options.dashboardLogin.attemptLimiter?.reserve(attemptKey);
-  if (limiterState && !limiterState.ok) {
-    res.setHeader("Retry-After", String(Math.max(1, Math.ceil(limiterState.retryAfterMs / 1000))));
+  const reservation = options.dashboardLogin.attemptLimiter?.reserveAttempt(dashboardLoginAttemptKey(req));
+  if (reservation && !reservation.ok) {
+    res.setHeader("Retry-After", String(Math.max(1, Math.ceil(reservation.retryAfterMs / 1000))));
     jsonResponse(res, 429, { error: "Too many dashboard sign-in attempts. Try again later." }, options.corsOrigin);
     return;
   }
@@ -77,30 +76,30 @@ export async function handleDashboardLoginExchange(
   try {
     verified = await options.dashboardLogin.verifyCredentials(username, password);
   } catch (err) {
-    options.dashboardLogin.attemptLimiter?.releaseReservation(attemptKey);
+    reservation?.release();
     throw err;
   }
   if (!verified.ok) {
     if (verified.reason === "missing") {
-      options.dashboardLogin.attemptLimiter?.releaseReservation(attemptKey);
+      reservation?.release();
       jsonResponse(res, 503, {
         error: "Dashboard credentials are not configured. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
       }, options.corsOrigin);
       return;
     }
     if (verified.reason === "invalid") {
-      options.dashboardLogin.attemptLimiter?.releaseReservation(attemptKey);
+      reservation?.release();
       jsonResponse(res, 503, {
         error: "Dashboard credentials are unavailable. Run dkg auth dashboard reset-password on the node host using this daemon's DKG_HOME.",
       }, options.corsOrigin);
       return;
     }
-    options.dashboardLogin.attemptLimiter?.completeFailure(attemptKey);
+    reservation?.fail();
     jsonResponse(res, 401, { error: "Invalid dashboard username or password" }, options.corsOrigin);
     return;
   }
 
-  options.dashboardLogin.attemptLimiter?.recordSuccess(attemptKey);
+  reservation?.succeed();
   const compatToken = options.dashboardLogin.selectCompatToken();
   if (!verifyToken(compatToken, options.validTokens)) {
     jsonResponse(res, 503, { error: "Dashboard login is unavailable until an API token is configured" }, options.corsOrigin);
