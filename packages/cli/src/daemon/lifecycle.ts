@@ -145,6 +145,7 @@ import {
   loadTokens,
   httpAuthGuard,
   reconcileValidTokens,
+  type RequestAuthContext,
 } from '../auth.js';
 import { resolveDashboardSseSession } from './dashboard-sse-session.js';
 import {
@@ -3121,7 +3122,10 @@ export async function runDaemonInner(
         if (handledSession) return;
       }
 
-      // Auth guard — rejects with 401 if token is invalid/missing
+      // Auth guard rejects invalid/missing credentials. Capture the accepted
+      // auth context explicitly so route dispatch and SSE do not depend on the
+      // legacy request-symbol compatibility handoff.
+      let requestAuthContext: RequestAuthContext | undefined;
       const authAllowed = await httpAuthGuard(
         req,
         res,
@@ -3131,6 +3135,9 @@ export async function runDaemonInner(
         {
           resolvePrincipal: resolveDashboardPrincipal,
           authSources: [dashboardSessionAuthSource],
+          onRequestAuth: (context) => {
+            requestAuthContext = context;
+          },
         },
       );
       if (!authAllowed) return;
@@ -3162,7 +3169,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession);
+        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession, requestAuthContext);
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3277,6 +3284,7 @@ export async function runDaemonInner(
         admissionStats,
         emitMemoryGraphChanged,
         emitNotification,
+        requestAuthContext,
       );
     } catch (err: any) {
       // Single top-level error→HTTP mapping (in http-utils.ts

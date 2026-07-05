@@ -153,12 +153,16 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          credentialToken: VALID_TOKEN,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -184,12 +188,16 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          credentialToken: VALID_TOKEN,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -214,12 +222,16 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          credentialToken: VALID_TOKEN,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -238,6 +250,34 @@ describe('resolveRequestAuthDecision', () => {
 
     expect(decision).toBeNull();
     expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+
+  it('validates auth-source credential tokens before accepting the source decision', () => {
+    const accept = vi.fn(() => ({
+      ok: true as const,
+      credentialToken: 'stale-dashboard-token',
+      context: {
+        source: 'dashboard-session' as const,
+        internalCredentialToken: 'stale-dashboard-token',
+        principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+        csrf: { required: false, validated: false },
+      },
+    }));
+    const resolve = vi.fn(() => ({
+      ok: true as const,
+      credentialToken: 'stale-dashboard-token',
+      accept,
+    }));
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { cookie: 'dkg_ui_session=present' } }),
+      validTokens,
+      { authSources: [{ resolve }] },
+    );
+
+    expect(decision).toBeNull();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(accept).not.toHaveBeenCalled();
   });
 });
 
@@ -268,6 +308,32 @@ describe('resolveRouteRequestIdentity', () => {
     expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
       credentialToken: 'agent-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
+      requestAuth: { source: 'dashboard-session' },
+    });
+  });
+
+  it('prefers an explicit auth context over the legacy request-symbol context', () => {
+    const req = { headers: { authorization: 'Bearer agent-token' } } as IncomingMessage;
+    setRequestAuthContext(req, {
+      source: 'authorization-header',
+      token: 'legacy-token',
+      principal: { kind: 'node-admin', agentAddress: 'did:dkg:agent:legacy' },
+      csrf: { required: false, validated: false },
+    });
+
+    expect(resolveRouteRequestIdentity(req, agent, {
+      source: 'dashboard-session',
+      internalCredentialToken: 'explicit-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:explicit' },
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: 'session-explicit',
+        source: 'login',
+        expiresAt: Date.now() + 60_000,
+      },
+    })).toMatchObject({
+      credentialToken: 'explicit-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:explicit' },
       requestAuth: { source: 'dashboard-session' },
     });
   });
@@ -364,17 +430,21 @@ describe('httpAuthGuard', () => {
     authSources = undefined;
     authenticateDashboardSessionForSse = () => null;
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+      let requestAuthContext: RequestAuthContext | undefined;
       if (!(await httpAuthGuard(req, res, true, validTokens, corsOrigin, {
         resolvePrincipal: () => principal,
         authSources,
+        onRequestAuth: (context) => {
+          requestAuthContext = context;
+        },
       }))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
       res.end(JSON.stringify({
         ok: true,
-        requestAuth: getRequestAuthContext(req) ?? null,
+        requestAuth: requestAuthContext ?? null,
         dashboardSseSession: url.pathname === '/api/events'
-          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
+          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse, requestAuthContext) ?? null
           : null,
       }));
     });

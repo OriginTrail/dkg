@@ -22,6 +22,7 @@ export type RequestAuthPrincipal = {
 export interface HttpAuthGuardOptions {
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   authSources?: RequestAuthSource[];
+  onRequestAuth?: (context: RequestAuthContext) => void;
 }
 
 interface RequestAuthBaseContext {
@@ -819,12 +820,19 @@ export type RequestAuthDecision =
   | { ok: true; context?: RequestAuthContext; credentialToken: string }
   | { ok: false; status: 403; error: string; code?: string };
 
+export type RequestAuthSourceResolution =
+  | {
+      ok: true;
+      credentialToken: string;
+      accept: () => RequestAuthDecision;
+    }
+  | { ok: false; status: 403; error: string; code?: string };
+
 export interface RequestAuthSource {
   resolve: (
     req: IncomingMessage,
-    validTokens: Set<string>,
     corsOrigin?: string | null,
-  ) => RequestAuthDecision | null;
+  ) => RequestAuthSourceResolution | null;
 }
 
 function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal | undefined {
@@ -882,8 +890,11 @@ export function resolveRequestAuthDecision(
   if (explicitAuthAttempt) return null;
 
   for (const source of options?.authSources ?? []) {
-    const decision = source.resolve(req, validTokens, corsOrigin);
-    if (decision) return decision;
+    const sourceResolution = source.resolve(req, corsOrigin);
+    if (!sourceResolution) continue;
+    if (!sourceResolution.ok) return sourceResolution;
+    if (!verifyToken(sourceResolution.credentialToken, validTokens)) return null;
+    return sourceResolution.accept();
   }
 
   return null;
@@ -975,7 +986,10 @@ export function httpAuthGuard(
   }
 
   if (authDecision?.ok === true) {
-    if (authDecision.context) setRequestAuthContext(req, authDecision.context);
+    if (authDecision.context) {
+      options?.onRequestAuth?.(authDecision.context);
+      setRequestAuthContext(req, authDecision.context);
+    }
     const acceptedCredentialToken = authDecision.credentialToken;
 
     const now = Date.now();
