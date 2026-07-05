@@ -36,7 +36,7 @@ export interface EVMAdapterBaseConfig {
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
    * treated as "use default" and intentionally NOT supported as a
-   * "disable periodic refresh" mode: even with the Hub event listener
+   * "disable periodic refresh" mode: even with the Hub rotation poller
    * and the `Only Contracts in Hub` retry wrapper, a missed event on
    * a read-only path (e.g. `getActiveProofPeriodStatus`,
    * `getNodeChallenge`) would leave the adapter pinned to a stale

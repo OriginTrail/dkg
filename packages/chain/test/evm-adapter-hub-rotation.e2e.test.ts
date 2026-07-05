@@ -5,7 +5,7 @@
  * stale-address bug that bricked `RandomSampling` writes from running
  * daemons whenever the Hub rotated to a new RS deployment. The fix
  * lives in `evm-adapter.ts` (`HubResolutionCache` for RS+RSS, plus a
- * Hub event listener and a `withHubStaleRetry` wrapper); the unit
+ * low-cadence Hub rotation poller and a `withHubStaleRetry` wrapper); the unit
  * tests in `hub-resolution-cache.unit.test.ts` cover the cache
  * primitive in isolation. Here we drive a **real** Hardhat node with
  * a **real** `Hub.setContractAddress(...)` rotation and assert the
@@ -14,9 +14,8 @@
  *
  *   1. TTL refresh    — cached address is replaced after `ttlMs` elapses
  *                       and the next adapter call re-resolves from Hub.
- *   2. Event listener — adapter's Hub contract/storage rotation
- *                       subscriptions invalidate the cache as soon as
- *                       the rotation is mined.
+ *   2. Hub poller     — adapter's Hub contract/storage rotation scan
+ *                       invalidates the cache after the rotation is mined.
  *   3. Self-heal      — `withHubStaleRetry()` catches the exact revert
  *                       wording the prover sees in the wild
  *                       (`UnauthorizedAccess(Only Contracts in Hub)`),
@@ -136,22 +135,27 @@ async function waitFor(
   return false;
 }
 
+/** Drive the adapter's bound Hub rotation poller once. */
+async function pollHubRotations(adapter: EVMChainAdapter): Promise<void> {
+  await (adapter as any).hubRotationPoller.pollOnce();
+}
+
 /**
- * Let the adapter's Hub rotation listener consume any historical
+ * Let the adapter's Hub rotation poller consume any historical
  * `ContractChanged` / `NewContract` events that a previous test in
  * the same Hardhat session may have left behind. ethers v6 subscribes
  * its polling filter with fromBlock=latest, but in practice the
  * computed `latest` can include the most-recent rotation tx — so a
- * brand-new adapter can fire its first listener callback against an
+ * brand-new adapter can fire its first poller callback against an
  * event it never directly caused.
  *
  * This mirrors production behaviour: a daemon that boots immediately
- * after a Hub rotation will catch the rotation it didn't subscribe
+ * after a Hub rotation will catch the rotation it didn't observe
  * to. The "drain" step here just ensures the test snapshots are
  * taken AFTER that catch-up, so steady-state assertions hold.
  */
 async function drainHistoricalRotationEvents(adapter: EVMChainAdapter): Promise<void> {
-  await new Promise((r) => setTimeout(r, 1_000));
+  await pollHubRotations(adapter);
   if (!(adapter as any).initialized) {
     await (adapter as any).init();
   }
@@ -182,9 +186,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       expect(cachedBefore).not.toBeNull();
       const addrA: string = await cachedBefore!.rs.getAddress();
 
-      // Isolate the TTL path from the event-listener path so this test
-      // doesn't trivially pass via event-driven invalidation.
-      (adapter as any).contracts.hub.removeAllListeners();
+      // Isolate the TTL path from the Hub poller path by not driving the
+      // poller during this test; production cadence is far longer than 300 ms.
 
       const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
       const replacementAddr = freshAddress();
@@ -192,7 +195,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       try {
         await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', replacementAddr);
 
-        // Sanity: with the listener removed, immediate inspection still
+        // Sanity: without driving the Hub poller, immediate inspection still
         // shows the stale cached address — TTL hasn't fired yet.
         const peeked = (adapter as any).randomSamplingPairCache.peek() as
           | { rs: Contract; rss: Contract }
@@ -216,10 +219,10 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'Hub event listener: rotating RandomSamplingStorage ALSO invalidates the pair cache (coupled refresh)',
+    'Hub rotation poller: rotating RandomSamplingStorage ALSO invalidates the pair cache (coupled refresh)',
     async () => {
       // RS and RSS are deliberately treated as a coupled unit because
-      // RS.initialize() snapshots its RSS address. If the listener
+      // RS.initialize() snapshots its RSS address. If the poller
       // only invalidated on a name match, a single-side rotation
       // (rare but possible) could leave the adapter holding a mixed
       // pair — the exact bug Codex flagged on round 1. This test
@@ -238,12 +241,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       try {
         await rotateHubContract(ctx.hubAddress, deployer, 'RandomSamplingStorage', replacementAddr);
 
-        const invalidated = await waitFor(
-          () => (adapter as any).randomSamplingPairCache.peek() === null,
-          15_000,
-          100,
-        );
-        expect(invalidated).toBe(true);
+        await pollHubRotations(adapter);
+        expect((adapter as any).randomSamplingPairCache.peek()).toBeNull();
       } finally {
         await rotateHubContract(ctx.hubAddress, deployer, 'RandomSamplingStorage', realRssAddr);
       }
@@ -252,7 +251,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'Hub event listener: invalidation also flips isRandomSamplingReady() to false until next getRandomSampling()',
+    'Hub rotation poller: invalidation also flips isRandomSamplingReady() to false until next getRandomSampling()',
     async () => {
       // Codex N15 — invalidating only the pair cache without dropping
       // the side-channel `this.contracts.randomSampling[Storage]` handles
@@ -275,12 +274,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       try {
         await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', replacementAddr);
 
-        const becameNotReady = await waitFor(
-          () => adapter.isRandomSamplingReady() === false,
-          15_000,
-          100,
-        );
-        expect(becameNotReady).toBe(true);
+        await pollHubRotations(adapter);
+        expect(adapter.isRandomSamplingReady()).toBe(false);
 
         await (adapter as any).getRandomSampling();
         expect(adapter.isRandomSamplingReady()).toBe(true);
@@ -292,15 +287,15 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'Hub event listener: ContractChanged invalidates the RandomSampling cache',
+    'Hub rotation poller: ContractChanged invalidates the RandomSampling cache',
     async () => {
       // High TTL (10 min) far exceeds the test's lifetime, so the only
       // path that can plausibly re-resolve within this test window is
-      // the event listener installed in init().
+      // the Hub rotation poller driven by the test.
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
 
-      // Drop the JsonRpcProvider polling interval (default 4 s) before
-      // the listener is attached so this test resolves quickly.
+      // Keep the adapter provider fast for direct reads; Hub invalidation is
+      // driven explicitly through the adapter-owned poller.
       (adapter as any).provider.pollingInterval = 250;
 
       await adapter.getActiveProofPeriodStatus!();
@@ -315,14 +310,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       try {
         await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', replacementAddr);
 
-        // The listener should observe `ContractChanged('RandomSampling', ...)`
-        // within a few polling cycles and call `cache.invalidate()`.
-        const invalidated = await waitFor(
-          () => (adapter as any).randomSamplingPairCache.peek() === null,
-          15_000,
-          100,
-        );
-        expect(invalidated).toBe(true);
+        await pollHubRotations(adapter);
+        expect((adapter as any).randomSamplingPairCache.peek()).toBeNull();
 
         // Next get() resolves from the live Hub and reflects the new addr.
         const { rs } = await (adapter as any).getRandomSampling();
@@ -426,12 +415,8 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       const tempAddr = freshAddress();
       await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', tempAddr);
 
-      // Wait for invalidation (event listener path; TTL also covers it).
-      const invalidatedFirst = await waitFor(
-        () => (adapter as any).randomSamplingPairCache.peek() === null,
-        15_000,
-      );
-      expect(invalidatedFirst).toBe(true);
+      await pollHubRotations(adapter);
+      expect((adapter as any).randomSamplingPairCache.peek()).toBeNull();
 
       // Restore the real RS and let the adapter rediscover it.
       await rotateHubContract(ctx.hubAddress, deployer, 'RandomSampling', realRsAddr);
@@ -470,16 +455,16 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   // that backs `pcaWrite` and any future write-side caller. The
   // contract under test is `Identity` — it's always deployed, always
   // boot-bound, and listed in `BOUND_CONTRACT_INVALIDATORS`; the
-  // listener should treat it identically to any other entry in the
+  // poller should treat it identically to any other entry in the
   // map.
   // ===================================================================
 
   it(
-    'event listener (generic): rotating Identity preserves live handle and re-arms init()',
+    'Hub rotation poller (generic): rotating Identity preserves live handle and re-arms init()',
     async () => {
-      // High TTL — only the event listener can flip the field within
+      // High TTL — only the Hub rotation poller can flip the field within
       // the test window. (RS cache has its own TTL; the generic path
-      // doesn't use one — only event/listener + write-side retry.)
+      // doesn't use one — only poller + write-side retry.)
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       (adapter as any).provider.pollingInterval = 250;
 
@@ -494,16 +479,9 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       try {
         await rotateHubContract(ctx.hubAddress, deployer, 'Identity', replacementAddr);
 
-        // Listener keeps the field usable for in-flight calls and flips
-        // `initialized` so the next public entry re-resolves from Hub.
-        const observed = await waitFor(
-          () =>
-            (adapter as any).contracts.identity === identityBefore &&
-            (adapter as any).initialized === false,
-          15_000,
-          100,
-        );
-        expect(observed).toBe(true);
+        await pollHubRotations(adapter);
+        expect((adapter as any).contracts.identity).toBe(identityBefore);
+        expect((adapter as any).initialized).toBe(false);
 
         // Next init() re-resolves from the live Hub and binds the new address.
         await (adapter as any).init();
@@ -520,7 +498,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'event listener (generic): boot-bound rotation clears publish preflight cache before TTL',
+    'Hub rotation poller (generic): boot-bound rotation clears publish preflight cache before TTL',
     async () => {
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       (adapter as any).provider.pollingInterval = 250;
@@ -543,16 +521,11 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
         // is what getKnowledgeAssetsLifecycleAddress() resolves. Rotate that key.
         await rotateHubContract(ctx.hubAddress, deployer, 'KnowledgeAssetsLifecycle', replacementAddr);
 
-        const observed = await waitFor(
-          () =>
-            (adapter as any).contracts.knowledgeAssetsLifecycle === kav10HandleBefore &&
-            (adapter as any).cachedKav10Address === undefined &&
-            (adapter as any).cachedMinRequiredSignatures === undefined &&
-            (adapter as any).initialized === false,
-          15_000,
-          100,
-        );
-        expect(observed).toBe(true);
+        await pollHubRotations(adapter);
+        expect((adapter as any).contracts.knowledgeAssetsLifecycle).toBe(kav10HandleBefore);
+        expect((adapter as any).cachedKav10Address).toBeUndefined();
+        expect((adapter as any).cachedMinRequiredSignatures).toBeUndefined();
+        expect((adapter as any).initialized).toBe(false);
 
         const kav10After = await adapter.getKnowledgeAssetsLifecycleAddress();
         expect(kav10After.toLowerCase()).toBe(replacementAddr.toLowerCase());
@@ -564,7 +537,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'event listener (asset storage): rotating ContextGraphStorage preserves live handle and re-arms init()',
+    'Hub rotation poller (asset storage): rotating ContextGraphStorage preserves live handle and re-arms init()',
     async () => {
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       (adapter as any).provider.pollingInterval = 250;
@@ -593,14 +566,9 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
           replacementAddr,
         );
 
-        const observed = await waitFor(
-          () =>
-            (adapter as any).contracts.contextGraphStorage === storageBefore &&
-            (adapter as any).initialized === false,
-          15_000,
-          100,
-        );
-        expect(observed).toBe(true);
+        await pollHubRotations(adapter);
+        expect((adapter as any).contracts.contextGraphStorage).toBe(storageBefore);
+        expect((adapter as any).initialized).toBe(false);
 
         await (adapter as any).init();
         const storageAfter: Contract = (adapter as any).contracts.contextGraphStorage;
@@ -621,7 +589,7 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
   );
 
   it(
-    'event listener (generic): rotating an unknown contract name is ignored — no fields touched',
+    'Hub rotation poller (generic): rotating an unknown contract name is ignored — no fields touched',
     async () => {
       const adapter = makeAdapter(ctx.rpcUrl, ctx.hubAddress, 600_000);
       (adapter as any).provider.pollingInterval = 250;
@@ -636,13 +604,12 @@ describe('EVMChainAdapter — Hub rotation self-refresh (E2E)', () => {
       const deployer = new Wallet(HARDHAT_KEYS.DEPLOYER, ctx.provider);
       // Use a name NOT in BOUND_CONTRACT_INVALIDATORS. Hub.setContractAddress
       // accepts arbitrary strings and emits `NewContract` for first
-      // registrations — exactly the noise we need to confirm the listener
+      // registrations — exactly the noise we need to confirm the poller
       // safely allowlists.
       const unknownName = `RC12TestUnknown-${Date.now()}`;
       await rotateHubContract(ctx.hubAddress, deployer, unknownName, freshAddress());
 
-      // Give the listener multiple polling cycles to mis-fire if it would.
-      await new Promise((r) => setTimeout(r, 1_500));
+      await pollHubRotations(adapter);
 
       expect((adapter as any).contracts.identity).toBe(identityBefore);
       expect((adapter as any).initialized).toBe(true);

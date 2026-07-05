@@ -1142,7 +1142,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
-  it('startHubRotationListener skips optional listener setup when primary static validation fails but backup reads still work', async () => {
+  it('startHubRotationListener skips optional poller setup when primary static validation fails but backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
@@ -1164,7 +1164,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       getBlockNumber: recorder(async () => 123),
     };
     const on = recorder(async () => {
-      throw new Error('listener subscription should be skipped');
+      throw new Error('poller setup should be skipped');
     });
 
     a.primaryProvider = primaryProvider;
@@ -1184,7 +1184,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(backupProvider.getBlockNumber.calls).toEqual([[]]);
   });
 
-  it('pollHubRotationEvents scans Hub rotation topics without ethers subscriptions', async () => {
+  it('HubRotationPoller pollOnce scans Hub rotation topics without ethers subscriptions', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
@@ -1196,13 +1196,18 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'ContextGraphs',
       '0x00000000000000000000000000000000000000c1',
     ]);
+    let head = 1_000;
+    let includeRotationLog = false;
     const provider = {
-      getBlockNumber: recorder(async () => 1_000),
-      getLogs: recorder(async (_filter: any) => [{
-        blockNumber: 1_000,
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (_filter: any) => includeRotationLog ? [{
+        blockNumber: 1_001,
+        blockHash: '0x' + '30'.repeat(32),
+        transactionHash: '0x' + '31'.repeat(32),
+        index: 0,
         topics: changed.topics,
         data: changed.data,
-      }]),
+      }] : []),
       destroy: recorder(() => undefined),
     };
     const on = recorder(async () => {
@@ -1222,17 +1227,20 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.hubRotationListenerStarted = false;
     a.initialized = true;
 
-    await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    includeRotationLog = true;
+    head = 1_001;
+    await expect(a.hubRotationPoller.pollOnce()).resolves.toBeUndefined();
     a.destroy();
 
     expect(on.calls).toEqual([]);
-    expect(provider.getLogs.calls).toHaveLength(1);
-    expect(provider.getLogs.calls[0][0]).toMatchObject({
+    expect(provider.getLogs.calls).toHaveLength(2);
+    expect(provider.getLogs.calls[1][0]).toMatchObject({
       address: '0x0000000000000000000000000000000000000001',
-      fromBlock: 950,
-      toBlock: 1_000,
+      fromBlock: 951,
+      toBlock: 1_001,
     });
-    expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
+    expect(provider.getLogs.calls[1][0].topics[0]).toEqual([
       iface.getEvent('ContractChanged')!.topicHash,
       iface.getEvent('NewContract')!.topicHash,
       iface.getEvent('AssetStorageChanged')!.topicHash,
@@ -1262,12 +1270,28 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       '0x00000000000000000000000000000000000000c1',
     ]);
     let head = 1_000;
+    const historicalLogs = [
+      {
+        blockNumber: 1_000,
+        blockHash: '0x' + '10'.repeat(32),
+        transactionHash: '0x' + '11'.repeat(32),
+        index: 0,
+        topics: oldRandomSampling.topics,
+        data: oldRandomSampling.data,
+      },
+      {
+        blockNumber: 1_001,
+        blockHash: '0x' + '12'.repeat(32),
+        transactionHash: '0x' + '13'.repeat(32),
+        index: 0,
+        topics: changed.topics,
+        data: changed.data,
+      },
+    ];
     const provider = {
       getBlockNumber: recorder(async () => head),
-      getLogs: recorder(async (_filter: any) => [
-        { blockNumber: 1_000, topics: oldRandomSampling.topics, data: oldRandomSampling.data },
-        { blockNumber: 1_001, topics: changed.topics, data: changed.data },
-      ]),
+      getLogs: recorder(async (filter: any) =>
+        historicalLogs.filter((log) => log.blockNumber >= filter.fromBlock && log.blockNumber <= filter.toBlock)),
       destroy: recorder(() => undefined),
     };
     const on = recorder(async () => {
@@ -1293,7 +1317,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(on.calls).toEqual([]);
       expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
+        fromBlock: 950,
+        toBlock: 1_000,
+      });
       expect(a.contracts.contextGraphs).toEqual({ fresh: true });
       expect(a.contracts.randomSampling).toEqual({ fresh: 'rs' });
       expect(a.initialized).toBe(true);
@@ -1301,8 +1329,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       head = 1_001;
       await vi.advanceTimersByTimeAsync(5 * 60_000);
 
-      expect(provider.getLogs.calls).toHaveLength(1);
-      expect(provider.getLogs.calls[0][0]).toMatchObject({
+      expect(provider.getLogs.calls).toHaveLength(2);
+      expect(provider.getLogs.calls[1][0]).toMatchObject({
         fromBlock: 951,
         toBlock: 1_001,
       });
@@ -1314,6 +1342,77 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       a.destroy();
       vi.useRealTimers();
     }
+  });
+
+  it('HubRotationPoller applies replacement logs inside the reorg buffer', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const oldRotation = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'UntrackedAtStartup',
+      '0x00000000000000000000000000000000000000b1',
+    ]);
+    const replacement = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    let head = 1_000;
+    const logs = [
+      {
+        blockNumber: 1_000,
+        blockHash: '0x' + '20'.repeat(32),
+        transactionHash: '0x' + '21'.repeat(32),
+        index: 0,
+        topics: oldRotation.topics,
+        data: oldRotation.data,
+      },
+    ];
+    const provider = {
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (filter: any) =>
+        logs.filter((log) => log.blockNumber >= filter.fromBlock && log.blockNumber <= filter.toBlock)),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    a.contracts.contextGraphs = { fresh: true };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.initialized = true;
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    expect(a.cachedKav10Address).toBeDefined();
+    expect(a.initialized).toBe(true);
+
+    logs.splice(0, logs.length, {
+      blockNumber: 1_000,
+      blockHash: '0x' + '22'.repeat(32),
+      transactionHash: '0x' + '23'.repeat(32),
+      index: 0,
+      topics: replacement.topics,
+      data: replacement.data,
+    });
+    head = 1_001;
+    await expect(a.hubRotationPoller.pollOnce()).resolves.toBeUndefined();
+    a.destroy();
+
+    expect(provider.getLogs.calls).toHaveLength(2);
+    expect(provider.getLogs.calls[1][0]).toMatchObject({
+      fromBlock: 951,
+      toBlock: 1_001,
+    });
+    expect(a.contracts.contextGraphs).toEqual({ fresh: true });
+    expect(a.cachedKav10Address).toBeUndefined();
+    expect(a.initialized).toBe(false);
   });
 
   it('destroy clears the Hub rotation poll interval', async () => {
@@ -1343,13 +1442,13 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(1);
 
       a.destroy();
       await vi.advanceTimersByTimeAsync(5 * 60_000);
 
       expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(1);
       expect(provider.destroy.calls).toHaveLength(1);
       expect(a.hubRotationListenerStarted).toBe(false);
     } finally {
@@ -1358,7 +1457,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
-  it('pollHubRotationEvents clamps the range when failover observes a lower head', async () => {
+  it('HubRotationPoller pollOnce clamps the range when failover observes a lower head', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
@@ -1366,8 +1465,9 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event NewAssetStorage(string contractName, address newContractAddress)',
       'event AssetStorageChanged(string contractName, address newContractAddress)',
     ]);
+    let head = 1_000;
     const provider = {
-      getBlockNumber: recorder(async () => 900),
+      getBlockNumber: recorder(async () => head),
       getLogs: recorder(async (_filter: any) => []),
       destroy: recorder(() => undefined),
     };
@@ -1379,12 +1479,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
-    a.hubRotationPoller.lastScannedBlock = 1_000;
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    head = 900;
 
-    await expect(a.pollHubRotationEvents()).resolves.toBeUndefined();
+    await expect(a.hubRotationPoller.pollOnce()).resolves.toBeUndefined();
+    a.destroy();
 
-    expect(provider.getLogs.calls).toHaveLength(1);
-    expect(provider.getLogs.calls[0][0]).toMatchObject({
+    expect(provider.getLogs.calls).toHaveLength(2);
+    expect(provider.getLogs.calls[1][0]).toMatchObject({
       fromBlock: 850,
       toBlock: 900,
     });
