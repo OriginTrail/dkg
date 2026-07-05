@@ -599,10 +599,27 @@ export function mergePreferredRelays(input: {
   };
 }
 
-export function chainDiscoveryScanOptions(input: { watermarkSeeded: boolean }):
+export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+
+export function chainDiscoveryScanOptions(input: {
+  watermarkSeeded: boolean;
+  run?: number;
+  fullScanEvery?: number;
+}):
   | { incremental: true }
   | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
-  return input.watermarkSeeded
+  const configuredFullScanEvery = input.fullScanEvery;
+  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
+  if (
+    typeof configuredFullScanEvery === 'number' &&
+    Number.isFinite(configuredFullScanEvery) &&
+    configuredFullScanEvery > 0
+  ) {
+    fullScanEvery = Math.floor(configuredFullScanEvery);
+  }
+  const run = input.run ?? 0;
+  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  return input.watermarkSeeded && !periodicFullResync
     ? { incremental: true }
     : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
 }
@@ -1911,10 +1928,13 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
+  let chainScanRuns = 0;
   const runChainDiscoveryScan = async () => {
     try {
+      const run = chainScanRuns++;
       const found = await agent.discoverContextGraphsFromChain(
         chainDiscoveryScanOptions({
+          run,
           watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
         }),
       );
