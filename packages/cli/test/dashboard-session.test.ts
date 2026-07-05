@@ -505,6 +505,10 @@ describe('dashboard browser sessions', () => {
     expect(exchange.status).toBe(200);
     const setCookie = exchange.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('dkg_ui_session=');
+    expect(setCookie).toContain('HttpOnly');
+    expect(setCookie).toContain('SameSite=Strict');
+    expect(setCookie).toContain('Path=/');
+    expect(setCookie.toLowerCase()).not.toContain('domain=');
     const body = await exchange.json() as { authenticated: boolean; source: string; csrfToken: string };
     expect(body).toMatchObject({ authenticated: true, source: 'login' });
     expect(body.csrfToken).toEqual(expect.any(String));
