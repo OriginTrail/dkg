@@ -13,7 +13,7 @@ import {
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and the PCA client from its extracted module.
 export { authHeaders, HttpError } from './http.js';
-export * from './api/pca.js';
+export * from './pca-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;

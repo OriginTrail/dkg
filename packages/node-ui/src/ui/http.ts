@@ -1,6 +1,6 @@
 // Shared HTTP transport for the node-UI API client.
 //
-// Lifted out of api.ts (#1345) so the PCA client (./api/pca.ts) and the rest of
+// Lifted out of api.ts (#1345) so the PCA client (./pca-api.ts) and the rest of
 // api.ts share one same-origin, bearer-authed, HttpError-shaped fetch layer
 // instead of re-declaring it. Pure relocation — no behavior change.
 

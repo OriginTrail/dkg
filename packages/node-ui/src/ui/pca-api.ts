@@ -1,9 +1,15 @@
 // Publisher Conviction Accounts (PCA) — daemon `/api/pca/*` client.
 //
 // Extracted from api.ts (#1345). Behavior is unchanged; api.ts re-exports this
-// module (`export * from './api/pca.js'`) so every existing `../api.js` import
-// keeps resolving. Transport comes from the shared ../http.ts.
-import { HttpError, getJson, post, delJson } from '../http.js';
+// module (`export * from './pca-api.js'`) so every existing `../api.js` import
+// keeps resolving. Transport comes from the shared ./http.ts.
+//
+// NOTE: a sibling file (`pca-api.ts`), not `api/pca.ts` — a `src/ui/api/`
+// directory would collide with the sibling `api.ts` file and the vite dev
+// server can't serve `/ui/api/pca.ts` past that collision (empty MIME → the app
+// fails to mount). The production rollup build hides it, but `dev:ui` / the e2e
+// lane do not.
+import { HttpError, getJson, post, delJson } from './http.js';
 
 // --- Publisher Conviction Accounts (PCA) ----------------------------------
 //
