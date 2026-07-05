@@ -44,8 +44,8 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * the corresponding boot-bound field on `EVMChainAdapter.contracts`.
  *
  * Used by:
- *   1. `startHubRotationListener` — when a Hub rotation event fires
- *      for `name`, the listener checks this allowlist, marks the
+ *   1. `startHubRotationListener` — when the Hub rotation poller sees
+ *      `name`, it checks this allowlist, marks the
  *      adapter uninitialised, and leaves the existing handle intact so
  *      in-flight calls that already passed `init()` don't observe a
  *      transient `undefined`.
@@ -498,8 +498,8 @@ export class EVMChainAdapterBase {
    * has a defensive guard against. Resolving both names atomically
    * inside one cache eliminates that race.
    *
-   * See `HubResolutionCache` for the semantics; the listener
-   * installed in `init()` invalidates this cache on
+   * See `HubResolutionCache` for the semantics; the poller
+   * started in `init()` invalidates this cache on
    * `Hub.ContractChanged` / `Hub.NewContract` for **either** name,
    * and `withHubStaleRetry()` invalidates it when a write surfaces
    * `UnauthorizedAccess(Only Contracts in Hub)`.
@@ -2009,7 +2009,7 @@ export class EVMChainAdapterBase {
    * address fails loudly instead of reconciling from empty logs.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
-    // Re-resolve contract handles first. The Hub-rotation listener flips
+    // Re-resolve contract handles first. The Hub rotation poller flips
     // `initialized` to false but leaves the old bindings in place, so without
     // this a long-lived adapter keeps querying the PRE-rotation
     // DKGKnowledgeAssets after the 10.0.4 redeploy this getter exists for.
@@ -3029,9 +3029,8 @@ export class EVMChainAdapterBase {
    * Used at write-side call sites that touch any of the redeployable
    * V10 contracts (PCA NFT, ContextGraphs, KnowledgeCollection, etc.)
    * so the FIRST write after a Hub rotation self-heals even when the
-   * event listener never fired (HTTP-only RPC endpoints, dropped
-   * subscriptions, rate-limited filter installs — all of which we
-   * see in the wild on public Base Sepolia / Gnosis Chain RPCs).
+   * low-cadence Hub poller has not observed the rotation yet, or when
+   * the RPC endpoint cannot serve log scans.
    *
    * Idempotency note: the wrapped closure MUST be safe to call twice.
    * That holds for our write paths because the on-chain side either
@@ -3085,7 +3084,7 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Subscribe to Hub rotation events and invalidate the local cache for any
+   * Poll Hub rotation events and invalidate the local cache for any
    * Hub-rotated contract.
    *
    * Two invalidation paths, dispatched by name:
@@ -3144,12 +3143,6 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async pollHubRotationEvents(): Promise<void> {
-    const hub = this.contracts.hub;
-    if (!hub) return;
-    await this.hubRotationPoller.poll(hub, await contractAddress(hub));
-  }
-
   protected applyHubRotationEventName(name: string): void {
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
@@ -3170,8 +3163,8 @@ export class EVMChainAdapterBase {
    *
    * Used by `withHubStaleRetry` on the write-side self-heal path when
    * a Hub-rotated contract surfaces `UnauthorizedAccess(Only Contracts
-   * in Hub)`: the listener may have missed the rotation event (HTTP-only
-   * RPC, dropped subscription, etc.) so the failing operation can't tell
+   * in Hub)`: the poller may not have observed the rotation yet (HTTP-only
+   * RPC, log-scan failure, etc.) so the failing operation can't tell
    * which specific name was rotated. Resetting everything is the safest
    * fallback — the next `await this.init()` re-resolves all 15+ bindings
    * in a single pass (still under a second on a healthy RPC) and the

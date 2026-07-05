@@ -218,7 +218,7 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
   });
 
   it('re-resolves the DKGKnowledgeAssets handle after a Hub rotation rather than querying the stale pre-rotation contract (#1082 review)', async () => {
-    // Long-lived adapter after the 10.0.4 redeploy: the rotation listener has
+    // Long-lived adapter after the 10.0.4 redeploy: the rotation poller has
     // set `initialized = false` but the cached binding still points at the OLD
     // contract. The getter must `await this.init()` to re-resolve before
     // reading, or it answers from the pre-rotation DKGKnowledgeAssets.
