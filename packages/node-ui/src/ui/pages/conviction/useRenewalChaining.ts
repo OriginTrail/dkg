@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { listPcaAgents } from '../api.js';
-import { useTabsStore } from '../stores/tabs.js';
+import { listPcaAgents } from '../../api.js';
+import { useTabsStore } from '../../stores/tabs.js';
 
 export interface RenewApproveState {
   newAccountId: string;

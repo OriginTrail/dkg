@@ -1,7 +1,7 @@
 import React from 'react';
 import type { PcaSnapshot } from '../../api.js';
 import { formatRelativeExpiry } from '../../components/Pca/index.js';
-import { useRenewalChaining } from '../../pca/useRenewalChaining.js';
+import { useRenewalChaining } from './useRenewalChaining.js';
 import type { PcaHealthState } from '../../pca/health.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
