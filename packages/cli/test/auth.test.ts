@@ -12,6 +12,7 @@ import {
   setRequestAuthContext,
   loadTokens,
   resolveRequestAuthDecision,
+  type RequestAuthContext,
   type RequestAuthSource,
 } from '../src/auth.js';
 import { createDashboardSessionAuthSource } from '../src/daemon/dashboard-session-auth-source.js';
@@ -606,6 +607,25 @@ describe('httpAuthGuard', () => {
     }));
 
     expect(dashboardSession).toBeUndefined();
+  });
+
+  it('keeps the plugin-facing dashboard login auth context shape backward compatible', () => {
+    const legacyLoginContext: RequestAuthContext = {
+      source: 'dashboard-session',
+      internalCredentialToken: VALID_TOKEN,
+      principal,
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: 'session-1',
+        source: 'login',
+        expiresAt: Date.now() + 60_000,
+      },
+    };
+
+    const req = {} as IncomingMessage;
+    setRequestAuthContext(req, legacyLoginContext);
+
+    expect(getRequestAuthContext(req)).toBe(legacyLoginContext);
   });
 
   it('allows protected endpoint with raw token (no Bearer prefix)', async () => {

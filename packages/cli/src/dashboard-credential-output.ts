@@ -58,8 +58,9 @@ export function printDashboardCredentialsRepairWarningForSetup(
 
 export function printDashboardCredentialsCreatedForInit(result: DashboardCredentialCreatedOutput): void {
   printDashboardCredentialSecretBlock(result, {
-    heading: "\nDashboard login created:",
+    heading: "Dashboard login created:",
     pathLabel: "Credential file:",
+    blankLineBeforeHeading: true,
     indent: "  ",
   });
 }
@@ -67,7 +68,8 @@ export function printDashboardCredentialsCreatedForInit(result: DashboardCredent
 export function printDashboardPasswordReset(result: DashboardCredentialCreatedOutput): void {
   printDashboardCredentialSecretBlock(result, {
     heading: "Dashboard password reset.",
-    pathLabel: "\nCredential file saved to",
+    pathLabel: "Credential file saved to",
+    blankLineBeforePath: true,
   });
   console.log("Existing password-login dashboard sessions will be invalidated on their next request.");
 }
@@ -79,12 +81,16 @@ function printDashboardCredentialSecretBlock(
     pathLabel: string;
     prefix?: string;
     indent?: string;
+    blankLineBeforeHeading?: boolean;
+    blankLineBeforePath?: boolean;
   },
 ): void {
   const indent = options.indent ?? "";
+  if (options.blankLineBeforeHeading) console.log("");
   console.log(withPrefix(options.prefix, options.heading));
   console.log(`${indent}Username: ${result.username}`);
   console.log(`${indent}Password: ${result.password}`);
+  if (options.blankLineBeforePath) console.log("");
   console.log(`${indent}${options.pathLabel} ${result.path}`);
   printDashboardCredentialSecretWarning(indent);
 }

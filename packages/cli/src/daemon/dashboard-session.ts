@@ -7,6 +7,7 @@ import {
 } from "./dashboard-session-cookie.js";
 import { authorizeDashboardSessionRequest, verifyDashboardCsrf } from "./dashboard-session-auth-source.js";
 import { hasTrustedDashboardOrigin, isLoopbackRequest } from "./dashboard-session-policy.js";
+import { dashboardSessionResponse } from "./dashboard-session-response.js";
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -86,7 +87,7 @@ export async function handleDashboardSessionRequest(
       jsonResponse(res, 200, { authenticated: false }, options.corsOrigin);
       return true;
     }
-    jsonResponse(res, 200, sessionResponse(session), options.corsOrigin);
+    jsonResponse(res, 200, dashboardSessionResponse(session), options.corsOrigin);
     return true;
   }
 
@@ -116,7 +117,7 @@ export async function handleDashboardSessionRequest(
     }
     const created = store.create(token!, "loopback");
     setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
-    jsonResponse(res, 200, sessionResponse({
+    jsonResponse(res, 200, dashboardSessionResponse({
       csrfToken: created.record.csrfToken,
       source: created.record.source,
       expiresAt: created.record.expiresAt,
@@ -159,7 +160,7 @@ export async function handleDashboardSessionRequest(
     }
     const created = store.create(token!, "exchange");
     setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
-    jsonResponse(res, 200, sessionResponse({
+    jsonResponse(res, 200, dashboardSessionResponse({
       csrfToken: created.record.csrfToken,
       source: created.record.source,
       expiresAt: created.record.expiresAt,
@@ -193,15 +194,6 @@ export async function handleDashboardSessionRequest(
 
   jsonResponse(res, 404, { error: "Unknown dashboard session route" }, options.corsOrigin);
   return true;
-}
-
-function sessionResponse(session: Pick<AuthenticatedDashboardSession, "csrfToken" | "source" | "expiresAt">) {
-  return {
-    authenticated: true,
-    source: session.source,
-    csrfToken: session.csrfToken,
-    expiresAt: session.expiresAt,
-  };
 }
 
 function hasJsonContentType(req: IncomingMessage): boolean {

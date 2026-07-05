@@ -44,21 +44,13 @@ export type RequestAuthContext =
   | (RequestAuthBaseContext & {
       source: 'dashboard-session';
       internalCredentialToken: string;
-      dashboardSession: RequestAuthDashboardSessionContext;
+      dashboardSession: {
+        sessionId: string;
+        source: 'loopback' | 'exchange' | 'login';
+        expiresAt: number;
+        credentialFingerprint?: string;
+      };
     });
-
-export type RequestAuthDashboardSessionContext =
-  | {
-      sessionId: string;
-      source: 'loopback' | 'exchange';
-      expiresAt: number;
-    }
-  | {
-      sessionId: string;
-      source: 'login';
-      expiresAt: number;
-      credentialFingerprint: string;
-    };
 
 const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
 

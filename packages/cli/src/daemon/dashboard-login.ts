@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { extractBearerToken, verifyToken } from "../auth.js";
 import { jsonResponse } from "./http-utils.js";
 import { getDashboardSessionCookie, setDashboardSessionCookie } from "./dashboard-session-cookie.js";
+import { dashboardSessionResponse } from "./dashboard-session-response.js";
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -271,12 +272,7 @@ export async function handleDashboardLoginExchange(
     Date.now(),
   );
   setDashboardSessionCookie(req, res, created.sessionId, options.corsOrigin);
-  jsonResponse(res, 200, {
-    authenticated: true,
-    source: created.record.source,
-    csrfToken: created.record.csrfToken,
-    expiresAt: created.record.expiresAt,
-  }, options.corsOrigin);
+  jsonResponse(res, 200, dashboardSessionResponse(created.record), options.corsOrigin);
 }
 
 export type DashboardSessionExchangeRequest =
