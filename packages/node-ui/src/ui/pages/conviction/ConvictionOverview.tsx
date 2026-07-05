@@ -13,6 +13,7 @@ import { PcaAccountCard, type PcaAccountOwnerMode } from './PcaAccountCard.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
+import { eqAddress as eq } from '../../pca/address.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -22,8 +23,6 @@ type OverviewAccount = ResolvedPcaAccount & {
   connectedWallet: string | null;
   walletWrongNetwork: boolean;
 };
-
-const eq = (a?: string | null, b?: string | null) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 function ownerModeFor(owner: string | undefined, primaryWallet: string | undefined, connectedWallet: string | null): PcaAccountOwnerMode {
   if (!owner) return 'unknown';

@@ -12,6 +12,7 @@ import {
   walletOwnerActionSubmitter,
   type WalletOwnerActionSubmitterDeps,
 } from '../web3/walletOwnerActionSubmitter.js';
+import { eqAddress as eq } from './address.js';
 
 /**
  * OWNER-ACTION SEAM.
@@ -97,10 +98,6 @@ export interface OwnerActionSubmitterArgs {
 }
 
 export type OwnerActionSubmitterKind = 'daemon' | 'wallet' | 'read-only';
-
-function eq(a?: string | null, b?: string | null): boolean {
-  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
-}
 
 function walletUnavailableReason(): string | null {
   const walletState = useWalletStore.getState();

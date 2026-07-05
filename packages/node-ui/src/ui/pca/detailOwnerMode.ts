@@ -6,8 +6,12 @@
  * under #1375.
  */
 
-/** Case-insensitive address equality. */
-export const eqAddress = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+import { eqAddress } from './address.js';
+
+/** Re-exported so the detail view and its extracted section components import address
+ *  equality alongside the owner-mode resolver from one module. The single shared
+ *  implementation lives in `./address.js`. */
+export { eqAddress };
 
 export type DetailOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
 

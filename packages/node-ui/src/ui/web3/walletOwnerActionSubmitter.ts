@@ -34,6 +34,7 @@ import type { Eip1193Provider } from './eip6963.js';
 import { extractAccountId, publishingConvictionNftAbi } from './pcaContract.js';
 import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError } from './walletTxError.js';
 import type { OwnerActionSubmitter } from '../pca/ownerActions.js';
+import { eqAddress } from '../pca/address.js';
 
 const MAX_UINT72 = (1n << 72n) - 1n;
 const MAX_UINT96 = (1n << 96n) - 1n;
@@ -102,10 +103,6 @@ export class WalletOwnerActionAbortError extends WalletOwnerActionSubmitterError
 
 function currentState(deps: WalletOwnerActionSubmitterDeps): WalletRuntimeState {
   return deps.getWalletState?.() ?? useWalletStore.getState();
-}
-
-function eqAddress(a?: string | null, b?: string | null): boolean {
-  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
 }
 
 function normalizeAddress(value: string, field: string): Address {

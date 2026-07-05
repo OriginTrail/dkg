@@ -1,5 +1,6 @@
 import { pcaAgentAccount, fetchPca } from '../api.js';
 import { isPcaDead, hasPcaBudget } from './pca-primitives.js';
+import { eqAddress as eq } from './address.js';
 
 // Pre-flight wallet-binding probe — READ-ONLY.
 //
@@ -12,8 +13,6 @@ import { isPcaDead, hasPcaBudget } from './pca-primitives.js';
 // EXPIRED/insolvent one doesn't (the agent mapping persists but publishing falls to direct cost),
 // so it must NOT be skipped as free. A probe that can't be read is INCONCLUSIVE — never
 // asserted as unbound/ownable/covered (it must not drive a destructive deregister or a false claim).
-
-const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 export type SignableOwnerKind = 'daemon' | 'wallet';
 export type SignableOwner =

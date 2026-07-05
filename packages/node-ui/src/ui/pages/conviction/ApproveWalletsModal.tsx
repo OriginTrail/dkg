@@ -25,10 +25,9 @@ import {
   CopyButton,
 } from '../../components/Pca/index.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { eqAddress as sameAddress } from '../../pca/address.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const sameAddress = (a?: string | null, b?: string | null) =>
-  !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 /**
  * Approve publishing wallets (self · sponsor). Self prefills this node's operational
