@@ -11,14 +11,14 @@ export interface HubRotationPollerConfig {
   readProvider: HubRotationReadProvider;
   intervalMs: number;
   reorgBufferBlocks: number;
-  onContractName: (name: unknown) => void;
+  onContractName: (name: string) => void;
 }
 
 export class HubRotationPoller {
   private readonly readProvider: HubRotationReadProvider;
   private readonly intervalMs: number;
   private readonly reorgBufferBlocks: number;
-  private readonly onContractName: (name: unknown) => void;
+  private readonly onContractName: (name: string) => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> | null = null;
   private lastScannedBlock: number | undefined;
@@ -38,7 +38,7 @@ export class HubRotationPoller {
   async start(hub: Contract): Promise<void> {
     if (this.started) return;
 
-    await this.poll(hub);
+    await this.seed(hub);
     this.timer = setInterval(() => {
       if (this.inFlight) return;
       this.inFlight = this.poll(hub)
@@ -61,13 +61,14 @@ export class HubRotationPoller {
     const topics = this.eventTopics(hub);
     if (topics.length === 0) return;
 
+    const previousLastScannedBlock = this.lastScannedBlock;
     const head = await this.readProvider(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
     );
-    const candidateFromBlock = this.lastScannedBlock == null
+    const candidateFromBlock = previousLastScannedBlock == null
       ? head - this.reorgBufferBlocks
-      : this.lastScannedBlock + 1 - this.reorgBufferBlocks;
+      : previousLastScannedBlock + 1 - this.reorgBufferBlocks;
     const recentFromBlock = head - this.reorgBufferBlocks;
     const fromBlock = Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
     const hubAddress = await this.contractAddress(hub);
@@ -83,16 +84,34 @@ export class HubRotationPoller {
     );
 
     for (const log of logs) {
-      try {
-        const parsed = hub.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (!parsed) continue;
-        this.onContractName(parsed.args?.contractName ?? parsed.args?.[0]);
-      } catch {
-        // Ignore malformed/unexpected Hub logs. The topic filter should already
-        // constrain these, but a parse miss must not wedge the poll cursor.
-      }
+      if (previousLastScannedBlock != null && log.blockNumber <= previousLastScannedBlock) continue;
+      const contractName = this.contractNameFromLog(hub, log);
+      if (contractName) this.onContractName(contractName);
     }
-    this.lastScannedBlock = head;
+    this.lastScannedBlock = previousLastScannedBlock == null
+      ? head
+      : Math.max(previousLastScannedBlock, head);
+  }
+
+  private async seed(hub: Contract): Promise<void> {
+    const topics = this.eventTopics(hub);
+    if (topics.length === 0) return;
+    this.lastScannedBlock = await this.readProvider(
+      'Hub rotation seed getBlockNumber',
+      (provider) => provider.getBlockNumber(),
+    );
+  }
+
+  private contractNameFromLog(hub: Contract, log: ethers.Log): string | undefined {
+    try {
+      const parsed = hub.interface.parseLog({ topics: [...log.topics], data: log.data });
+      const contractName = parsed?.args?.contractName ?? parsed?.args?.[0];
+      return typeof contractName === 'string' ? contractName : undefined;
+    } catch {
+      // Ignore malformed/unexpected Hub logs. The topic filter should already
+      // constrain these, but a parse miss must not wedge the poll cursor.
+      return undefined;
+    }
   }
 
   private eventTopics(hub: Contract): string[] {
