@@ -485,6 +485,5 @@ function isStaleDashboardLoginSession(
 ): boolean {
   if (!session || session.source !== "login") return false;
   if (!options.dashboardLogin?.isCredentialFingerprintCurrent) return false;
-  return !session.credentialFingerprint ||
-    !options.dashboardLogin.isCredentialFingerprintCurrent(session.credentialFingerprint);
+  return !options.dashboardLogin.isCredentialFingerprintCurrent(session.credentialFingerprint);
 }

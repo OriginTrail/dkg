@@ -709,7 +709,7 @@ export async function runHermesSetup(
   // one they chose. Gating on `config.json` alone (the pre-#960 behavior) misses
   // the YAML-only install.
   const dkgConfigHome = resolveDkgConfigHome({ startDir: __dirname });
-  const dashboardCredentialHome = dkgDir(setupOptions.daemonUrl);
+  const dashboardCredentialHome = shouldStart ? dkgConfigHome : dkgDir(setupOptions.daemonUrl);
   const dkgConfigExists =
     existsSync(join(dkgConfigHome, 'config.json')) ||
     existsSync(join(dkgConfigHome, 'config.yaml'));

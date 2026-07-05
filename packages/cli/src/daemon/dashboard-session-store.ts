@@ -6,7 +6,7 @@ export type DashboardSessionSource = "loopback" | "exchange" | "login";
 export type NonLoginDashboardSessionSource = Exclude<DashboardSessionSource, "login">;
 
 export type DashboardSessionRecord =
-  | DashboardSessionBaseRecord<"loopback" | "exchange">
+  | DashboardSessionBaseRecord<NonLoginDashboardSessionSource>
   | (DashboardSessionBaseRecord<"login"> & { credentialFingerprint: string });
 
 interface DashboardSessionBaseRecord<TSource extends DashboardSessionSource> {
@@ -18,12 +18,15 @@ interface DashboardSessionBaseRecord<TSource extends DashboardSessionSource> {
   lastUsedAt: number;
 }
 
-export interface AuthenticatedDashboardSession {
+export type AuthenticatedDashboardSession =
+  | AuthenticatedDashboardSessionBase<NonLoginDashboardSessionSource>
+  | (AuthenticatedDashboardSessionBase<"login"> & { credentialFingerprint: string });
+
+interface AuthenticatedDashboardSessionBase<TSource extends DashboardSessionSource> {
   sessionId: string;
   compatToken: string;
   csrfToken: string;
-  source: DashboardSessionSource;
-  credentialFingerprint?: string;
+  source: TSource;
   issuedAt: number;
   expiresAt: number;
 }
@@ -39,7 +42,16 @@ export class DashboardSessionStore {
     sessionId: string;
     record: DashboardSessionRecord;
   } {
-    return this.createRecord(compatToken, source, now);
+    this.prune(now);
+    const record: DashboardSessionRecord = {
+      compatToken,
+      csrfToken: randomBytes(32).toString("base64url"),
+      source,
+      issuedAt: now,
+      expiresAt: now + DASHBOARD_SESSION_TTL_MS,
+      lastUsedAt: now,
+    };
+    return this.storeRecord(record);
   }
 
   createLoginSession(
@@ -50,31 +62,17 @@ export class DashboardSessionStore {
     sessionId: string;
     record: DashboardSessionRecord;
   } {
-    return this.createRecord(compatToken, "login", now, { credentialFingerprint });
-  }
-
-  private createRecord(
-    compatToken: string,
-    source: DashboardSessionSource,
-    now: number,
-    options: { credentialFingerprint?: string } = {},
-  ): {
-    sessionId: string;
-    record: DashboardSessionRecord;
-  } {
     this.prune(now);
-    const sessionId = randomBytes(32).toString("base64url");
-    const record = {
+    const record: DashboardSessionRecord = {
       compatToken,
       csrfToken: randomBytes(32).toString("base64url"),
-      source,
-      ...(source === "login" ? { credentialFingerprint: options.credentialFingerprint } : {}),
+      source: "login",
+      credentialFingerprint,
       issuedAt: now,
       expiresAt: now + DASHBOARD_SESSION_TTL_MS,
       lastUsedAt: now,
-    } as DashboardSessionRecord;
-    this.sessions.set(hashSessionId(sessionId), record);
-    return { sessionId, record };
+    };
+    return this.storeRecord(record);
   }
 
   authenticateSessionId(sessionId: string | null | undefined, now = Date.now()): AuthenticatedDashboardSession | null {
@@ -83,20 +81,38 @@ export class DashboardSessionStore {
     const record = this.sessions.get(hashSessionId(sessionId));
     if (!record || record.expiresAt <= now) return null;
     record.lastUsedAt = now;
-    return {
+    const authenticated = {
       sessionId,
       compatToken: record.compatToken,
       csrfToken: record.csrfToken,
-      source: record.source,
-      ...(record.source === "login" ? { credentialFingerprint: record.credentialFingerprint } : {}),
       issuedAt: record.issuedAt,
       expiresAt: record.expiresAt,
+    };
+    if (record.source === "login") {
+      return {
+        ...authenticated,
+        source: "login",
+        credentialFingerprint: record.credentialFingerprint,
+      };
+    }
+    return {
+      ...authenticated,
+      source: record.source,
     };
   }
 
   revoke(sessionId: string | null | undefined): void {
     if (!sessionId) return;
     this.sessions.delete(hashSessionId(sessionId));
+  }
+
+  private storeRecord(record: DashboardSessionRecord): {
+    sessionId: string;
+    record: DashboardSessionRecord;
+  } {
+    const sessionId = randomBytes(32).toString("base64url");
+    this.sessions.set(hashSessionId(sessionId), record);
+    return { sessionId, record };
   }
 
   private prune(now: number): void {

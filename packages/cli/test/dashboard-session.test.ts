@@ -4,6 +4,7 @@ import {
   DASHBOARD_SESSION_COOKIE,
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
+  authenticateDashboardSessionRequest,
   createDashboardSessionAuthSource,
   getDashboardSessionCookie,
   handleDashboardSessionRequest,
@@ -166,20 +167,10 @@ async function startServer(options: {
     publisher: { getIdentityId: () => 1n },
   };
   const dashboardAuthSource = createDashboardSessionAuthSource({
-    authenticate: (request) => {
-      const session = sessions.authenticateSessionId(getDashboardSessionCookie(request));
-      if (
-        session?.source === 'login' &&
-        options.dashboardLogin?.isCredentialFingerprintCurrent &&
-        (!session.credentialFingerprint ||
-          !options.dashboardLogin.isCredentialFingerprintCurrent(session.credentialFingerprint))
-      ) {
-        sessions.revoke(session.sessionId);
-        options.onSessionRevoked?.(session.sessionId);
-        return null;
-      }
-      return session;
-    },
+    authenticate: (request) => authenticateDashboardSessionRequest(request, sessions, {
+      ...(options.dashboardLogin ? { dashboardLogin: options.dashboardLogin } : {}),
+      ...(options.onSessionRevoked ? { onSessionRevoked: options.onSessionRevoked } : {}),
+    }),
     resolvePrincipal,
     verifyCsrf: (request, session) => verifyDashboardCsrf(request, session),
   });
@@ -684,7 +675,7 @@ describe('dashboard browser sessions', () => {
     expect(locked?.headers.get('retry-after')).toBe('60');
   });
 
-  it('invalidates password-login sessions after the credential file fingerprint changes', async () => {
+  it('invalidates password-login session status after the credential file fingerprint changes', async () => {
     let currentFingerprint = 'credential-a';
     const onSessionRevoked = vi.fn();
     const started = await startServer({
@@ -712,9 +703,40 @@ describe('dashboard browser sessions', () => {
     expect(status.status).toBe(200);
     await expect(status.json()).resolves.toMatchObject({ authenticated: false });
     expect(onSessionRevoked).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects stale password-login sessions on protected APIs before status is checked', async () => {
+    let currentFingerprint = 'credential-a';
+    const onSessionRevoked = vi.fn();
+    const started = await startServer({
+      onSessionRevoked,
+      dashboardLogin: {
+        verifyCredentials: async () => ({ ok: true as const, credentialFingerprint: currentFingerprint }),
+        selectCompatToken: () => VALID_TOKEN,
+        isCredentialFingerprintCurrent: (fingerprint) => fingerprint === currentFingerprint,
+      },
+    });
+    server = started.server;
+
+    const exchange = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'node-admin', password: 'secret-password' }),
+    });
+    expect(exchange.status).toBe(200);
+    const cookie = cookieFrom(exchange);
+    currentFingerprint = 'credential-b';
 
     const protectedRes = await fetch(`${started.baseUrl}/api/protected`, { headers: { Cookie: cookie } });
     expect(protectedRes.status).toBe(401);
+    expect(onSessionRevoked).toHaveBeenCalledTimes(1);
+
+    const status = await fetch(`${started.baseUrl}/api/dashboard/session/status`, {
+      headers: { Cookie: cookie },
+    });
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({ authenticated: false });
+    expect(onSessionRevoked).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid bearer-token dashboard exchange attempts without setting a cookie', async () => {
