@@ -48,7 +48,6 @@ export type RequestAuthContext =
         sessionId: string;
         source: 'loopback' | 'exchange' | 'login';
         expiresAt: number;
-        credentialFingerprint?: string;
       };
     });
 

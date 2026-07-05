@@ -97,7 +97,6 @@ export function createDashboardSessionAuthSource(
             sessionId: session.sessionId,
             source: session.source,
             expiresAt: session.expiresAt,
-            ...(session.source === "login" ? { credentialFingerprint: session.credentialFingerprint } : {}),
           },
         },
       };

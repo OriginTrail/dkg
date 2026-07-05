@@ -544,6 +544,7 @@ describe('httpAuthGuard', () => {
         expiresAt: created.record.expiresAt,
       },
     });
+    expect(body.requestAuth.dashboardSession).not.toHaveProperty('credentialFingerprint');
     expect(body.dashboardSseSession).toMatchObject({
       sessionId: created.sessionId,
       expiresAt: created.record.expiresAt,
