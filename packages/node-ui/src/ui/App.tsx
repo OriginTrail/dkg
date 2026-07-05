@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -243,16 +243,17 @@ function ContextGraphPrimerRoute() {
   return <Navigate to="/" replace />;
 }
 
+function ProtectedDashboardRoutes() {
+  return (
+    <DashboardSessionGate>
+      <Outlet />
+    </DashboardSessionGate>
+  );
+}
+
 export function App() {
   return (
     <Routes>
-      <Route path="/network" element={
-        <DashboardSessionGate>
-          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-            <NetworkDebugPage />
-          </React.Suspense>
-        </DashboardSessionGate>
-      } />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />
@@ -261,7 +262,14 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
-      <Route path="*" element={<DashboardSessionGate><AppShell /></DashboardSessionGate>} />
+      <Route element={<ProtectedDashboardRoutes />}>
+        <Route path="/network" element={
+          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+            <NetworkDebugPage />
+          </React.Suspense>
+        } />
+        <Route path="*" element={<AppShell />} />
+      </Route>
     </Routes>
   );
 }

@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, getRequestAuthContext, extractBearerToken } from '../auth.js';
+import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -331,6 +331,7 @@ import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
+import { resolveRouteRequestIdentity } from './route-request-identity.js';
 
 
 export async function handleRequest(
@@ -370,19 +371,10 @@ export async function handleRequest(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  // Use the auth-guard's resolved principal as the canonical route identity.
-  // requestToken remains as a compatibility credential for routes that still need
-  // token-backed self-calls or node-admin checks.
-  const requestAuth = getRequestAuthContext(req);
-  const credentialToken = requestAuth?.source === "dashboard-session"
-    ? requestAuth.internalCredentialToken
-    : requestAuth?.token ?? extractBearerToken(req.headers.authorization);
-  const requestPrincipal = requestAuth?.principal ?? {
-    kind: credentialToken && agent.resolveAgentByToken(credentialToken) ? "agent" as const : "node-admin" as const,
-    agentAddress: agent.resolveAgentAddress(credentialToken),
-  };
-  const requestToken = credentialToken;
-  const requestAgentAddress = requestPrincipal.agentAddress;
+  const requestIdentity = resolveRouteRequestIdentity(req, agent);
+  const requestAuth = requestIdentity.requestAuth;
+  const requestToken = requestIdentity.credentialToken;
+  const requestAgentAddress = requestIdentity.principal.agentAddress;
 
   const ctx: RequestContext = {
     req,
@@ -414,6 +406,7 @@ export async function handleRequest(
     admission,
     url,
     path,
+    requestIdentity,
     requestAuth,
     requestToken,
     requestAgentAddress,

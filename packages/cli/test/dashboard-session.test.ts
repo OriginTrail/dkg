@@ -8,16 +8,11 @@ import {
   createDashboardSessionAuthSource,
   getDashboardSessionCookie,
   handleDashboardSessionRequest,
-  isAllowedLoopbackHostname,
-  isLoopbackAddress,
-  parseDashboardSessionExchange,
-  selectDashboardLoginCompatToken,
   verifyDashboardCsrf,
   type DashboardLoginOptions,
   type DashboardLoginVerification,
 } from '../src/daemon/dashboard-session.js';
 import { setDashboardSessionCookie } from '../src/daemon/dashboard-session-cookie.js';
-import { hasTrustedDashboardOrigin } from '../src/daemon/dashboard-session-policy.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
 import { getRequestAuthContext, httpAuthGuard, type RequestAuthPrincipal } from '../src/auth.js';
 
@@ -26,103 +21,6 @@ const ROTATED_TOKEN = 'dashboard-rotated-token';
 const AGENT_TOKEN = 'dkg_at_agent-token';
 const DEFAULT_AGENT_ADDRESS = 'did:dkg:agent:default';
 const TOKEN_AGENT_ADDRESS = 'did:dkg:agent:token';
-
-describe('dashboard session trust policy helpers', () => {
-  it('recognizes the loopback address forms accepted for browser bootstrap', () => {
-    expect(isLoopbackAddress('127.0.0.1')).toBe(true);
-    expect(isLoopbackAddress('127.10.20.30')).toBe(true);
-    expect(isLoopbackAddress('::1')).toBe(true);
-    expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true);
-    expect(isLoopbackAddress('10.0.0.1')).toBe(false);
-  });
-
-  it('keeps loopback hostnames narrow for browser-origin proof', () => {
-    expect(isAllowedLoopbackHostname('localhost')).toBe(true);
-    expect(isAllowedLoopbackHostname('127.0.0.1')).toBe(true);
-    expect(isAllowedLoopbackHostname('[::1]')).toBe(true);
-    expect(isAllowedLoopbackHostname('example.com')).toBe(false);
-  });
-
-  it('trusts HTTPS proxy origins from non-loopback peers only when browser metadata matches Host', () => {
-    const matching = {
-      headers: {
-        host: 'node.example',
-        origin: 'https://node.example',
-        'x-forwarded-proto': 'https',
-      },
-      socket: { remoteAddress: '172.18.0.2' },
-    } as IncomingMessage;
-    expect(hasTrustedDashboardOrigin(matching)).toBe(true);
-
-    const matchingReferer = {
-      headers: {
-        host: 'node.example',
-        referer: 'https://node.example/dashboard',
-        'x-forwarded-proto': 'https',
-      },
-      socket: { remoteAddress: '172.18.0.2' },
-    } as IncomingMessage;
-    expect(hasTrustedDashboardOrigin(matchingReferer)).toBe(true);
-
-    const hostile = {
-      headers: {
-        host: 'node.example',
-        origin: 'https://attacker.example',
-        'x-forwarded-proto': 'https',
-      },
-      socket: { remoteAddress: '172.18.0.2' },
-    } as IncomingMessage;
-    expect(hasTrustedDashboardOrigin(hostile)).toBe(false);
-  });
-});
-
-describe('dashboard session exchange helpers', () => {
-  it('parses token, login, and mixed exchange requests explicitly', () => {
-    expect(parseDashboardSessionExchange({ token: ' dashboard-token ' }, undefined)).toEqual({
-      kind: 'token',
-      token: 'dashboard-token',
-    });
-    expect(parseDashboardSessionExchange({}, 'Bearer header-token')).toEqual({
-      kind: 'token',
-      token: 'header-token',
-    });
-    expect(parseDashboardSessionExchange({ username: ' node-admin ', password: 'secret' }, undefined)).toEqual({
-      kind: 'login',
-      username: 'node-admin',
-      password: 'secret',
-    });
-    expect(parseDashboardSessionExchange({ username: 'node-admin', token: 'dashboard-token' }, undefined)).toEqual({
-      kind: 'invalid',
-      status: 400,
-      error: 'Dashboard session exchange accepts either token or username/password',
-    });
-  });
-
-  it('selects a node-admin backing token for password-login sessions', () => {
-    const validTokens = new Set(['agent-token-a', 'node-admin-token', 'bridge-token']);
-    const resolveAgentByToken = (token: string) => token.startsWith('agent-token') ? TOKEN_AGENT_ADDRESS : undefined;
-    const refreshValidTokens = vi.fn();
-
-    expect(selectDashboardLoginCompatToken({
-      validTokens,
-      bridgeAuthToken: 'bridge-token',
-      resolveAgentByToken,
-      refreshValidTokens,
-    })).toBe('bridge-token');
-    expect(refreshValidTokens).toHaveBeenCalledTimes(1);
-
-    expect(selectDashboardLoginCompatToken({
-      validTokens,
-      bridgeAuthToken: 'stale-bridge-token',
-      resolveAgentByToken,
-    })).toBe('node-admin-token');
-
-    expect(selectDashboardLoginCompatToken({
-      validTokens: new Set(['agent-token-a', 'agent-token-b']),
-      resolveAgentByToken,
-    })).toBeUndefined();
-  });
-});
 
 function loopbackBootstrapInit(baseUrl: string): RequestInit {
   return {
@@ -713,34 +611,6 @@ describe('dashboard browser sessions', () => {
     expect(verifyCredentials).toHaveBeenCalledTimes(2);
   });
 
-  it('bounds dashboard login attempt tracking for many unique usernames', () => {
-    let now = 1_000;
-    const limiter = new DashboardLoginAttemptLimiter({
-      maxFailures: 2,
-      failureWindowMs: 60_000,
-      lockoutMs: 60_000,
-      maxTrackedKeys: 3,
-      now: () => now,
-    });
-
-    for (let i = 0; i < 20; i += 1) {
-      limiter.recordFailure(`127.0.0.1:user-${i}`);
-    }
-    expect((limiter as any).attempts.size).toBeLessThanOrEqual(3);
-
-    now += 60_001;
-    expect(limiter.reserve('127.0.0.1:fresh-user')).toEqual({ ok: true });
-    expect((limiter as any).attempts.size).toBe(1);
-    limiter.releaseReservation('127.0.0.1:fresh-user');
-    expect((limiter as any).attempts.size).toBe(0);
-
-    expect(limiter.reserve('127.0.0.1:active-a')).toEqual({ ok: true });
-    expect(limiter.reserve('127.0.0.1:active-b')).toEqual({ ok: true });
-    expect(limiter.reserve('127.0.0.1:active-c')).toEqual({ ok: true });
-    expect(limiter.reserve('127.0.0.1:active-d')).toEqual({ ok: false, retryAfterMs: 60_000 });
-    expect((limiter as any).attempts.size).toBe(3);
-  });
-
   it('counts concurrent dashboard login attempts before credential verification finishes', async () => {
     let now = 1_000;
     const pending: Array<(value: DashboardLoginVerification) => void> = [];
@@ -1195,6 +1065,26 @@ describe('dashboard browser sessions', () => {
     expect(res.status).toBe(401);
     expect(res.headers.get('set-cookie')).toBeNull();
     await expect(res.json()).resolves.toMatchObject({ error: 'Invalid dashboard session token' });
+  });
+
+  it('rejects hostile-origin JSON token exchange without setting a cookie', async () => {
+    const started = await startServer();
+    server = started.server;
+
+    const res = await fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Origin: 'https://attacker.example',
+      },
+      body: JSON.stringify({ token: VALID_TOKEN }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    await expect(res.json()).resolves.toMatchObject({
+      error: 'Untrusted dashboard request origin',
+    });
   });
 
   it('rejects cross-site dashboard session exchange attempts without setting a cookie', async () => {

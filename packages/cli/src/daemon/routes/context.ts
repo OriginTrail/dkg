@@ -24,6 +24,7 @@ import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
 import type { RequestAuthContext } from '../../auth.js';
+import type { RouteRequestIdentity } from '../route-request-identity.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -95,6 +96,9 @@ export interface RequestContext {
   // here keeps every group on the same fast path.
   url: URL;
   path: string;
+  // Canonical identity resolved once at the auth/router boundary. Compatibility
+  // aliases below are derived from this for existing route/plugin consumers.
+  requestIdentity: RouteRequestIdentity;
   requestAuth?: RequestAuthContext;
   // Compatibility aliases for route modules that still need token-backed
   // self-calls or node-admin checks. New code should prefer `requestAuth`.
