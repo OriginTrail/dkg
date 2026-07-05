@@ -200,11 +200,11 @@ export interface McpSetupActionDeps {
    */
   resolveDkgConfigHome: typeof import('@origintrail-official/dkg-core').resolveDkgConfigHome;
   /**
-   * Create dashboard username/password credentials when missing. CLI-owned
-   * setup flows inject this hook so generated passwords are printed only from
-   * explicit terminal setup/reset commands, never from daemon/UI paths.
+   * Optional setup lifecycle hook invoked after DKG node config bootstrap and
+   * before wallet creation / daemon start. CLI setup entry points use this for
+   * terminal-owned side effects; daemon/UI setup paths omit it.
    */
-  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
   /**
    * F31: per-client interactive confirm hook. Defaulted to the
    * production readline-based implementation. Injectable so tests
@@ -1891,16 +1891,13 @@ export async function mcpSetupAction(
     }
   }
 
-  // Ensure dashboard login credentials exist before wallet creation / daemon
-  // start. Existing credentials are authoritative: the injected helper prints a
-  // generated password only for first creation and logs configured state on
-  // reruns. Best-effort so MCP setup remains recoverable via reset-password.
-  if (!dryRun && deps.ensureDashboardCredentials) {
+  // Run CLI-owned setup side effects before wallet creation / daemon start.
+  // Best-effort so MCP setup remains recoverable if an optional hook fails.
+  if (!dryRun && deps.afterConfigBootstrap) {
     try {
-      await deps.ensureDashboardCredentials(dkgDirPath);
+      await deps.afterConfigBootstrap(dkgDirPath);
     } catch (err: any) {
-      console.warn(`[setup] Could not create dashboard login credentials (${err?.message ?? String(err)}).`);
-      console.warn(`[setup] Run "dkg auth dashboard reset-password" with DKG_HOME=${dkgDirPath} after setup to create or repair them.`);
+      console.warn(`[setup] Post-config setup hook failed (${err?.message ?? String(err)}); continuing.`);
     }
   }
 

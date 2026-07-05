@@ -663,10 +663,11 @@ function rewriteActiveProviderLine(raw: string, newProvider: string): string | n
  */
 export interface RunHermesSetupDeps {
   /**
-   * Create dashboard username/password credentials when missing. Injected only
-   * by CLI setup entry points so daemon/UI-driven adapter setup stays silent.
+   * Optional setup lifecycle hook invoked after DKG node config bootstrap and
+   * before wallet creation / daemon start. CLI setup entry points use this for
+   * CLI-owned side effects while daemon/UI-driven adapter setup omits it.
    */
-  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+  afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
   /**
    * Eagerly create the node's operational wallets (generate-if-absent) after
    * the config bootstrap and before the daemon starts, so faucet funding and
@@ -756,15 +757,14 @@ export async function runHermesSetup(
     console.log('[hermes-setup] [dry-run] Would bootstrap ~/.dkg/config.json if missing');
   }
 
-  // Ensure dashboard login credentials exist after node config bootstrap and
-  // before wallets / daemon startup. Best-effort; reset-password can repair an
-  // invalid credential file after setup without marking this integration
-  // degraded.
-  if (!dryRun && deps.ensureDashboardCredentials) {
+  // Run CLI-owned setup side effects after node config bootstrap and before
+  // wallets / daemon startup. Best-effort so adapter setup remains recoverable
+  // and daemon/UI-driven setup can omit terminal-only side effects entirely.
+  if (!dryRun && deps.afterConfigBootstrap) {
     try {
-      await deps.ensureDashboardCredentials(dashboardCredentialHome);
+      await deps.afterConfigBootstrap(dashboardCredentialHome);
     } catch (err: any) {
-      console.warn(`[hermes-setup] Could not create dashboard login credentials (${err?.message ?? String(err)}); run "dkg auth dashboard reset-password" with DKG_HOME=${dashboardCredentialHome} after setup to create or repair them.`);
+      console.warn(`[hermes-setup] Post-config setup hook failed (${err?.message ?? String(err)}); continuing.`);
     }
   }
 

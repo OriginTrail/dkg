@@ -82,10 +82,10 @@ describe('hermesSetupAction', () => {
     // dashboard credentials can be created by explicit CLI setup flows.
     const [, runDeps] = runSetupArgs[0] as [unknown, {
       loadOpWallets?: unknown;
-      ensureDashboardCredentials?: unknown;
+      afterConfigBootstrap?: unknown;
     }];
     expect(typeof runDeps?.loadOpWallets).toBe('function');
-    expect(typeof runDeps?.ensureDashboardCredentials).toBe('function');
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
   });
 
   it('#1439: injected dashboard credential hook creates credentials through the setup helper', async () => {
@@ -99,16 +99,16 @@ describe('hermesSetupAction', () => {
     );
 
     const [, runDeps] = runSetupArgs[0] as [unknown, {
-      ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
+      afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
     }];
-    expect(typeof runDeps?.ensureDashboardCredentials).toBe('function');
+    expect(typeof runDeps?.afterConfigBootstrap).toBe('function');
 
     const dkgHome = await mkdtemp(join(tmpdir(), 'dkg-hermes-dashboard-hook-'));
     const logCalls: unknown[][] = [];
     const originalLog = console.log;
     console.log = (...args: unknown[]) => { logCalls.push(args); };
     try {
-      await runDeps.ensureDashboardCredentials!(dkgHome);
+      await runDeps.afterConfigBootstrap!(dkgHome);
       const credentialPath = dashboardCredentialsPath(dkgHome);
       const logs = logCalls.map((args) => args.join(' ')).join('\n');
       const password = logs.match(/Password: ([^\n]+)/)?.[1]?.trim();

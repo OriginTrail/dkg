@@ -189,7 +189,7 @@ mcpCmd
       process.exit(1);
     }
     const { mcpSetupAction } = await import('../mcp-setup.js');
-    const { ensureDashboardCredentialsForSetup } = await import('../dashboard-credential-setup.js');
+    const { ensureDashboardCredentialsForSetupBestEffort } = await import('../dashboard-credential-setup.js');
     try {
       await mcpSetupAction(opts, {
         loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
@@ -211,8 +211,8 @@ mcpCmd
         fundWalletsBestEffort: coreExports.fundWalletsBestEffort,
         findDkgMonorepoRoot: coreExports.findDkgMonorepoRoot,
         resolveDkgConfigHome: coreExports.resolveDkgConfigHome,
-        ensureDashboardCredentials: (dkgHome: string) =>
-          ensureDashboardCredentialsForSetup(dkgHome),
+        afterConfigBootstrap: (dkgHome: string) =>
+          ensureDashboardCredentialsForSetupBestEffort(dkgHome),
       });
       await applyStoreFlagsToConfig({
         storeFlag: opts.store,

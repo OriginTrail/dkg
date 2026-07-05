@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { verifyToken } from "../auth.js";
+import { setRequestAuthDashboardSession, verifyToken } from "../auth.js";
 import type { RequestAuthDecision, RequestAuthPrincipal, RequestAuthSource } from "../auth.js";
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import { hasTrustedDashboardOrigin, isUnsafeHttpMethod } from "./dashboard-session-policy.js";
@@ -82,6 +82,12 @@ export function createDashboardSessionAuthSource(
         };
       }
       const principal = options.resolvePrincipal(session.compatToken);
+      setRequestAuthDashboardSession(req, {
+        sessionId: session.sessionId,
+        expiresAt: session.expiresAt,
+        compatToken: session.compatToken,
+        ...(session.source === "login" ? { credentialFingerprint: session.credentialFingerprint } : {}),
+      });
       return {
         ok: true,
         credentialToken: session.compatToken,

@@ -3,6 +3,12 @@ import {
   ensureDashboardCredentials,
 } from './daemon/dashboard-credentials.js';
 import { readPersistedDkgConfig } from './config.js';
+import {
+  printDashboardCredentialsConfiguredForSetup,
+  printDashboardCredentialsCreatedForSetup,
+  printDashboardCredentialsRepairWarningForSetup,
+  printDashboardCredentialsSkippedForSetup,
+} from './dashboard-credential-output.js';
 
 export interface DashboardCredentialSetupOptions {
   prefix?: string;
@@ -15,23 +21,30 @@ export async function ensureDashboardCredentialsForSetup(
   const prefix = options.prefix ?? '[setup]';
   const credentialPath = dashboardCredentialsPath(dkgHome);
   if (isDashboardAuthExplicitlyDisabled(dkgHome)) {
-    console.log(`${prefix} Dashboard login: skipped (API authentication disabled in ${dkgHome})`);
+    printDashboardCredentialsSkippedForSetup(dkgHome, { prefix });
     return;
   }
   const result = await ensureDashboardCredentials({
     path: credentialPath,
   });
   if (result.created) {
-    console.log(`${prefix} Dashboard login created:`);
-    console.log(`  Username: ${result.username}`);
-    console.log(`  Password: ${result.password}`);
-    console.log(`  Credential file: ${result.path}`);
-    console.log('  Save this password securely. It will not be shown again.');
-    console.log('  Treat this terminal output as secret-bearing.');
+    printDashboardCredentialsCreatedForSetup(result, { prefix });
     return;
   }
 
-  console.log(`${prefix} Dashboard login: configured (${result.username}) (${result.path})`);
+  printDashboardCredentialsConfiguredForSetup(result, { prefix });
+}
+
+export async function ensureDashboardCredentialsForSetupBestEffort(
+  dkgHome: string,
+  options: DashboardCredentialSetupOptions = {},
+): Promise<void> {
+  const prefix = options.prefix ?? '[setup]';
+  try {
+    await ensureDashboardCredentialsForSetup(dkgHome, { prefix });
+  } catch (err) {
+    printDashboardCredentialsRepairWarningForSetup(dkgHome, err, { prefix });
+  }
 }
 
 function isDashboardAuthExplicitlyDisabled(dkgHome: string): boolean {

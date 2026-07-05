@@ -52,6 +52,14 @@ export type RequestAuthContext =
     });
 
 const REQUEST_AUTH_CONTEXT = Symbol('dkg.requestAuthContext');
+const REQUEST_AUTH_DASHBOARD_SESSION = Symbol('dkg.requestAuthDashboardSession');
+
+export interface RequestAuthDashboardSession {
+  sessionId: string;
+  expiresAt: number;
+  compatToken: string;
+  credentialFingerprint?: string;
+}
 
 export function setRequestAuthContext(req: IncomingMessage, context: RequestAuthContext): void {
   (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT] = context;
@@ -59,6 +67,21 @@ export function setRequestAuthContext(req: IncomingMessage, context: RequestAuth
 
 export function getRequestAuthContext(req: IncomingMessage): RequestAuthContext | undefined {
   return (req as IncomingMessage & { [REQUEST_AUTH_CONTEXT]?: RequestAuthContext })[REQUEST_AUTH_CONTEXT];
+}
+
+export function setRequestAuthDashboardSession(
+  req: IncomingMessage,
+  session: RequestAuthDashboardSession,
+): void {
+  (req as IncomingMessage & {
+    [REQUEST_AUTH_DASHBOARD_SESSION]?: RequestAuthDashboardSession;
+  })[REQUEST_AUTH_DASHBOARD_SESSION] = session;
+}
+
+export function getRequestAuthDashboardSession(req: IncomingMessage): RequestAuthDashboardSession | undefined {
+  return (req as IncomingMessage & {
+    [REQUEST_AUTH_DASHBOARD_SESSION]?: RequestAuthDashboardSession;
+  })[REQUEST_AUTH_DASHBOARD_SESSION];
 }
 
 // ---------------------------------------------------------------------------

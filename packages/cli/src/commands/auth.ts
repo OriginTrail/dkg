@@ -29,6 +29,7 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
+import { printDashboardPasswordReset } from '../dashboard-credential-output.js';
 import { ApiClient } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -178,12 +179,6 @@ dashboardAuthCmd
   .action(async (opts: { username?: string }) => {
     const { resetDashboardPassword } = await import('../daemon/dashboard-credentials.js');
     const result = await resetDashboardPassword(opts.username ? { username: opts.username } : {});
-    console.log('Dashboard password reset.');
-    console.log(`Username: ${result.username}`);
-    console.log(`Password: ${result.password}`);
-    console.log(`\nCredential file saved to ${result.path}`);
-    console.log('Save this password securely. It will not be shown again.');
-    console.log('Treat this terminal output as secret-bearing.');
-    console.log('Existing password-login dashboard sessions will be invalidated on their next request.');
+    printDashboardPasswordReset(result);
   });
 }

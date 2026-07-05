@@ -141,7 +141,13 @@ import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, getRequestAuthContext, reconcileValidTokens } from '../auth.js';
+import {
+  loadTokens,
+  httpAuthGuard,
+  getRequestAuthContext,
+  getRequestAuthDashboardSession,
+  reconcileValidTokens,
+} from '../auth.js';
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
@@ -3164,17 +3170,17 @@ export async function runDaemonInner(
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
         const requestAuth = getRequestAuthContext(req);
         const activeDashboardSession = requestAuth?.source === "dashboard-session"
-          ? authenticateDashboardSession(req)
-          : null;
+          ? getRequestAuthDashboardSession(req)
+          : undefined;
         const dashboardSession =
           requestAuth?.source === "dashboard-session" &&
-          activeDashboardSession &&
+          !!activeDashboardSession &&
           activeDashboardSession.sessionId === requestAuth.dashboardSession.sessionId
             ? {
                 sessionId: activeDashboardSession.sessionId,
                 expiresAt: activeDashboardSession.expiresAt,
-                compatToken: requestAuth.internalCredentialToken,
-                ...(activeDashboardSession.source === "login"
+                compatToken: activeDashboardSession.compatToken,
+                ...(activeDashboardSession.credentialFingerprint
                   ? { credentialFingerprint: activeDashboardSession.credentialFingerprint }
                   : {}),
               }
