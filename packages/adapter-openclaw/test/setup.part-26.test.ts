@@ -512,6 +512,21 @@ describe('runSetup Step 5 — faucet funding', () => {
     }
   });
 
+  it('#1451: honors deprecated ensureDashboardCredentials hook as a runtime fallback', async () => {
+    const env = setupFaucetEnv();
+    try {
+      const ensureDashboardCredentials = vi.fn(async () => {});
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false },
+        { ensureDashboardCredentials },
+      );
+      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(env.dkgHome);
+    } finally {
+      env.restore();
+    }
+  });
+
   it('#1443: a failing post-config setup hook is best-effort', async () => {
     const env = setupFaucetEnv();
     try {

@@ -19,11 +19,12 @@ export function printDashboardCredentialsCreatedForSetup(
   result: DashboardCredentialCreatedOutput,
   options: DashboardCredentialOutputOptions = {},
 ): void {
-  console.log(withPrefix(options.prefix, "Dashboard login created:"));
-  console.log(`  Username: ${result.username}`);
-  console.log(`  Password: ${result.password}`);
-  console.log(`  Credential file: ${result.path}`);
-  printDashboardCredentialSecretWarning("  ");
+  printDashboardCredentialSecretBlock(result, {
+    heading: "Dashboard login created:",
+    pathLabel: "Credential file:",
+    prefix: options.prefix,
+    indent: "  ",
+  });
 }
 
 export function printDashboardCredentialsConfiguredForSetup(
@@ -56,20 +57,36 @@ export function printDashboardCredentialsRepairWarningForSetup(
 }
 
 export function printDashboardCredentialsCreatedForInit(result: DashboardCredentialCreatedOutput): void {
-  console.log("\nDashboard login created:");
-  console.log(`  Username: ${result.username}`);
-  console.log(`  Password: ${result.password}`);
-  console.log(`  Credential file: ${result.path}`);
-  printDashboardCredentialSecretWarning("  ");
+  printDashboardCredentialSecretBlock(result, {
+    heading: "\nDashboard login created:",
+    pathLabel: "Credential file:",
+    indent: "  ",
+  });
 }
 
 export function printDashboardPasswordReset(result: DashboardCredentialCreatedOutput): void {
-  console.log("Dashboard password reset.");
-  console.log(`Username: ${result.username}`);
-  console.log(`Password: ${result.password}`);
-  console.log(`\nCredential file saved to ${result.path}`);
-  printDashboardCredentialSecretWarning();
+  printDashboardCredentialSecretBlock(result, {
+    heading: "Dashboard password reset.",
+    pathLabel: "\nCredential file saved to",
+  });
   console.log("Existing password-login dashboard sessions will be invalidated on their next request.");
+}
+
+function printDashboardCredentialSecretBlock(
+  result: DashboardCredentialCreatedOutput,
+  options: {
+    heading: string;
+    pathLabel: string;
+    prefix?: string;
+    indent?: string;
+  },
+): void {
+  const indent = options.indent ?? "";
+  console.log(withPrefix(options.prefix, options.heading));
+  console.log(`${indent}Username: ${result.username}`);
+  console.log(`${indent}Password: ${result.password}`);
+  console.log(`${indent}${options.pathLabel} ${result.path}`);
+  printDashboardCredentialSecretWarning(indent);
 }
 
 function printDashboardCredentialSecretWarning(indent = ""): void {

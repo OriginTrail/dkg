@@ -151,6 +151,34 @@ describe('Hermes profile setup helpers', () => {
     }
   });
 
+  it('#1451: honors deprecated ensureDashboardCredentials hook as a runtime fallback', async () => {
+    const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-legacy-hook-'));
+    vi.stubGlobal('fetch', async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const oldDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = dkgHome;
+    try {
+      const ensureDashboardCredentials = vi.fn(async () => {});
+
+      await runSetup(
+        { hermesHome, verify: false, start: false, fund: false },
+        { ensureDashboardCredentials },
+      );
+      expect(ensureDashboardCredentials).toHaveBeenCalledTimes(1);
+      expect(ensureDashboardCredentials.mock.calls[0][0]).toBe(dkgHome);
+    } finally {
+      if (oldDkgHome === undefined) delete process.env.DKG_HOME;
+      else process.env.DKG_HOME = oldDkgHome;
+      rmSync(hermesHome, { recursive: true, force: true });
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('#1439: creates dashboard credentials in the config DKG home when setup starts the daemon', async () => {
     const hermesHome = mkdtempSync(join(tmpdir(), 'hermes-profile-'));
     const configDkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-config-'));

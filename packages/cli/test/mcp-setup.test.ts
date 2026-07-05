@@ -475,6 +475,19 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect(warnings).toContain('Post-config setup hook failed');
   });
 
+  it('honors deprecated ensureDashboardCredentials hook as a runtime fallback', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const ensureDashboardCredentials = recorder(async (_dkgHome: string) => {});
+    const deps = makeDeps({
+      afterConfigBootstrap: undefined,
+      ensureDashboardCredentials,
+    });
+
+    await mcpSetupAction({ fund: false, verify: false }, deps);
+
+    expect((ensureDashboardCredentials as any).calls).toEqual([[join(tmpHome, '.dkg')]]);
+  });
+
   it('#1306: a failing loadOpWallets is best-effort — setup continues', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps({

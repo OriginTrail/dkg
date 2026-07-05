@@ -202,9 +202,16 @@ export interface McpSetupActionDeps {
   /**
    * Optional setup lifecycle hook invoked after DKG node config bootstrap and
    * before wallet creation / daemon start. CLI setup entry points use this for
-   * terminal-owned side effects; daemon/UI setup paths omit it.
+   * terminal-owned best-effort side effects; daemon/UI setup paths omit it.
+   * Required setup work should stay explicit instead of being hidden behind
+   * this optional hook.
    */
   afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
+  /**
+   * @deprecated Use `afterConfigBootstrap`. Kept as a runtime fallback for
+   * programmatic callers that still pass the previous dependency name.
+   */
+  ensureDashboardCredentials?: (dkgHome: string) => Promise<unknown>;
   /**
    * F31: per-client interactive confirm hook. Defaulted to the
    * production readline-based implementation. Injectable so tests
@@ -1893,9 +1900,10 @@ export async function mcpSetupAction(
 
   // Run CLI-owned setup side effects before wallet creation / daemon start.
   // Best-effort so MCP setup remains recoverable if an optional hook fails.
-  if (!dryRun && deps.afterConfigBootstrap) {
+  const afterConfigBootstrap = deps.afterConfigBootstrap ?? deps.ensureDashboardCredentials;
+  if (!dryRun && afterConfigBootstrap) {
     try {
-      await deps.afterConfigBootstrap(dkgDirPath);
+      await afterConfigBootstrap(dkgDirPath);
     } catch (err: any) {
       console.warn(`[setup] Post-config setup hook failed (${err?.message ?? String(err)}); continuing.`);
     }

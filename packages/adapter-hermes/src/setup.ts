@@ -661,13 +661,23 @@ function rewriteActiveProviderLine(raw: string, newProvider: string): string | n
  * request so the adapter stays free of a `@origintrail-official/dkg-agent`
  * dependency: the cli layer (which has dkg-agent) provides `loadOpWallets`.
  */
+type PostConfigSetupHook = (dkgHome: string) => Promise<unknown>;
+
 export interface RunHermesSetupDeps {
   /**
    * Optional setup lifecycle hook invoked after DKG node config bootstrap and
    * before wallet creation / daemon start. CLI setup entry points use this for
-   * CLI-owned side effects while daemon/UI-driven adapter setup omits it.
+   * CLI-owned best-effort side effects while daemon/UI-driven adapter setup
+   * omits it. Required setup work should stay explicit instead of being hidden
+   * behind this optional hook.
    */
-  afterConfigBootstrap?: (dkgHome: string) => Promise<unknown>;
+  afterConfigBootstrap?: PostConfigSetupHook;
+  /**
+   * @deprecated Use `afterConfigBootstrap`. Kept as a runtime fallback so
+   * JavaScript callers on the previous dependency shape do not silently lose
+   * dashboard credential provisioning.
+   */
+  ensureDashboardCredentials?: PostConfigSetupHook;
   /**
    * Eagerly create the node's operational wallets (generate-if-absent) after
    * the config bootstrap and before the daemon starts, so faucet funding and
@@ -760,9 +770,10 @@ export async function runHermesSetup(
   // Run CLI-owned setup side effects after node config bootstrap and before
   // wallets / daemon startup. Best-effort so adapter setup remains recoverable
   // and daemon/UI-driven setup can omit terminal-only side effects entirely.
-  if (!dryRun && deps.afterConfigBootstrap) {
+  const afterConfigBootstrap = deps.afterConfigBootstrap ?? deps.ensureDashboardCredentials;
+  if (!dryRun && afterConfigBootstrap) {
     try {
-      await deps.afterConfigBootstrap(dashboardCredentialHome);
+      await afterConfigBootstrap(dashboardCredentialHome);
     } catch (err: any) {
       console.warn(`[hermes-setup] Post-config setup hook failed (${err?.message ?? String(err)}); continuing.`);
     }

@@ -13,6 +13,13 @@ import {
   resolveRequestAuthDecision,
   type RequestAuthSource,
 } from '../src/auth.js';
+import { createDashboardSessionAuthSource } from '../src/daemon/dashboard-session-auth-source.js';
+import {
+  DASHBOARD_SESSION_COOKIE,
+  getDashboardSessionCookie,
+} from '../src/daemon/dashboard-session-cookie.js';
+import { resolveDashboardSseSession } from '../src/daemon/dashboard-sse-session.js';
+import { DashboardSessionStore } from '../src/daemon/dashboard-session-store.js';
 
 // ---------------------------------------------------------------------------
 // Unit tests for pure functions
@@ -299,7 +306,14 @@ describe('httpAuthGuard', () => {
         authSources,
       }))) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, requestAuth: getRequestAuthContext(req) ?? null }));
+      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      res.end(JSON.stringify({
+        ok: true,
+        requestAuth: getRequestAuthContext(req) ?? null,
+        dashboardSseSession: url.pathname === '/api/events'
+          ? resolveDashboardSseSession(req) ?? null
+          : null,
+      }));
     });
 
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -485,6 +499,44 @@ describe('httpAuthGuard', () => {
       token: VALID_TOKEN,
       principal,
       csrf: { required: false, validated: false },
+    });
+    expect(body.dashboardSseSession).toBeNull();
+  });
+
+  it('passes dashboard-cookie auth metadata to the /api/events route for SSE enforcement', async () => {
+    const store = new DashboardSessionStore();
+    const created = store.createLoginSession(VALID_TOKEN, 'credential-fingerprint-1');
+    authSources = [
+      createDashboardSessionAuthSource({
+        authenticate: (req) => store.authenticateSessionId(getDashboardSessionCookie(req)),
+        resolvePrincipal: () => principal,
+        verifyCsrf: () => true,
+      }),
+    ];
+
+    const res = await fetch(`${baseUrl}/api/events`, {
+      headers: {
+        Cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requestAuth).toMatchObject({
+      source: 'dashboard-session',
+      principal,
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: created.sessionId,
+        source: 'login',
+        expiresAt: created.record.expiresAt,
+      },
+    });
+    expect(body.dashboardSseSession).toMatchObject({
+      sessionId: created.sessionId,
+      expiresAt: created.record.expiresAt,
+      compatToken: VALID_TOKEN,
+      credentialFingerprint: 'credential-fingerprint-1',
     });
   });
 

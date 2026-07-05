@@ -144,10 +144,9 @@ import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '
 import {
   loadTokens,
   httpAuthGuard,
-  getRequestAuthContext,
-  getRequestAuthDashboardSession,
   reconcileValidTokens,
 } from '../auth.js';
+import { resolveDashboardSseSession } from './dashboard-sse-session.js';
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
@@ -3168,23 +3167,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const requestAuth = getRequestAuthContext(req);
-        const activeDashboardSession = requestAuth?.source === "dashboard-session"
-          ? getRequestAuthDashboardSession(req)
-          : undefined;
-        const dashboardSession =
-          requestAuth?.source === "dashboard-session" &&
-          !!activeDashboardSession &&
-          activeDashboardSession.sessionId === requestAuth.dashboardSession.sessionId
-            ? {
-                sessionId: activeDashboardSession.sessionId,
-                expiresAt: activeDashboardSession.expiresAt,
-                compatToken: activeDashboardSession.compatToken,
-                ...(activeDashboardSession.credentialFingerprint
-                  ? { credentialFingerprint: activeDashboardSession.credentialFingerprint }
-                  : {}),
-              }
-            : undefined;
+        const dashboardSession = resolveDashboardSseSession(req);
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
