@@ -155,9 +155,12 @@ export class HubRotationPoller {
       'NewContract',
       'AssetStorageChanged',
       'NewAssetStorage',
-    ].flatMap((eventName) => {
+    ].map((eventName) => {
       const event = hub.interface.getEvent(eventName);
-      return event?.topicHash ? [event.topicHash] : [];
+      if (!event?.topicHash) {
+        throw new Error(`Hub ABI is missing required rotation event ${eventName}`);
+      }
+      return event.topicHash;
     });
   }
 

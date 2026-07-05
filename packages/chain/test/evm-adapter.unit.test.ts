@@ -1158,6 +1158,34 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
+  it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => []),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    a.hubRotationListenerStarted = false;
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationListenerStarted).toBe(false);
+  });
+
   it('startHubRotationListener skips optional poller setup when primary static validation fails but backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
