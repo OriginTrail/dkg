@@ -631,6 +631,38 @@ describe('dashboard browser sessions', () => {
     expect(verifyCredentials).toHaveBeenCalledTimes(2);
   });
 
+  it('rate-limits varied dashboard usernames from the same remote address', async () => {
+    let now = 1_000;
+    const verifyCredentials = vi.fn(async () => ({ ok: false as const, reason: 'mismatch' as const }));
+    const started = await startServer({
+      dashboardLogin: {
+        verifyCredentials,
+        selectCompatToken: () => VALID_TOKEN,
+        attemptLimiter: new DashboardLoginAttemptLimiter({
+          maxFailures: 2,
+          failureWindowMs: 60_000,
+          lockoutMs: 60_000,
+          now: () => now,
+        }),
+      },
+    });
+    server = started.server;
+    const request = (username: string) => fetch(`${started.baseUrl}/api/dashboard/session/exchange`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password: 'wrong-password' }),
+    });
+
+    expect((await request('alice')).status).toBe(401);
+    now += 1_000;
+    expect((await request('bob')).status).toBe(401);
+    now += 1_000;
+    const locked = await request('carol');
+    expect(locked.status).toBe(429);
+    expect(locked.headers.get('retry-after')).toBe('59');
+    expect(verifyCredentials).toHaveBeenCalledTimes(2);
+  });
+
   it('bounds dashboard login attempt tracking for many unique usernames', () => {
     let now = 1_000;
     const limiter = new DashboardLoginAttemptLimiter({

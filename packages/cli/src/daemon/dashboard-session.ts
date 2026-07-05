@@ -80,8 +80,6 @@ interface DashboardLoginAttempt {
   lockedUntil?: number;
 }
 
-const DASHBOARD_LOGIN_ATTEMPT_USERNAME_KEY_CHARS = 128;
-
 export class DashboardLoginAttemptLimiter {
   private attempts = new Map<string, DashboardLoginAttempt>();
 
@@ -387,7 +385,7 @@ async function handleDashboardLoginExchange(
     return;
   }
 
-  const attemptKey = dashboardLoginAttemptKey(req, username);
+  const attemptKey = dashboardLoginAttemptKey(req);
   const limiterState = options.dashboardLogin.attemptLimiter?.reserve(attemptKey);
   if (limiterState && !limiterState.ok) {
     res.setHeader("Retry-After", String(Math.max(1, Math.ceil(limiterState.retryAfterMs / 1000))));
@@ -505,12 +503,8 @@ export function parseDashboardSessionExchange(
   return { kind: "token", token: bodyToken || bearerToken };
 }
 
-function dashboardLoginAttemptKey(req: IncomingMessage, username: string): string {
-  return `${req.socket.remoteAddress ?? "unknown"}:${normalizeDashboardLoginAttemptUsername(username)}`;
-}
-
-function normalizeDashboardLoginAttemptUsername(username: string): string {
-  return username.trim().toLowerCase().slice(0, DASHBOARD_LOGIN_ATTEMPT_USERNAME_KEY_CHARS);
+function dashboardLoginAttemptKey(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
 }
 
 function isStaleDashboardLoginSession(

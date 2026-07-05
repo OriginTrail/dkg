@@ -177,10 +177,10 @@ export async function verifyDashboardCredentials(
   }
   if (!credentialFile) return { ok: false, reason: "missing" };
   const { record, fingerprint } = credentialFile;
-  if (normalizedUsername !== record.username) return { ok: false, reason: "mismatch" };
   const stored = Buffer.from(record.password.hash, "base64url");
   let supplied: Buffer;
   try {
+    // Keep username mismatches on the same memory-hard path as password mismatches.
     supplied = await scrypt(password, record.password.salt, record.password.keyLength, {
       N: record.password.N,
       r: record.password.r,
@@ -190,6 +190,7 @@ export async function verifyDashboardCredentials(
   } catch {
     return { ok: false, reason: "invalid" };
   }
+  if (normalizedUsername !== record.username) return { ok: false, reason: "mismatch" };
   if (stored.length !== supplied.length || !timingSafeEqual(stored, supplied)) {
     return { ok: false, reason: "mismatch" };
   }
