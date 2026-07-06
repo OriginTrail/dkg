@@ -77,11 +77,13 @@ export type ReadPolicy =
   | 'watchdogWideLogScan'
   | 'failOpenFundingRead';
 
-/** Per-read options: a named timeout policy + an optional failover classifier
- *  override (a read whose error shape carries domain meaning). */
+/** Per-read options: timeout/failover behavior plus an explicit low-cardinality
+ *  telemetry consumer key for `eth_call` attribution. `label` remains a human
+ *  failover/span label and is not implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
+  rpcUsageConsumer?: string;
 }
 
 /**
@@ -197,15 +199,13 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return withRpcUsageConsumer(
+    const run = () => this.runAcrossProviders(
       label,
-      () => this.runAcrossProviders(
-        label,
-        fn,
-        opts?.isRetryable ?? isRetryableRpcError,
-        opts?.policy ?? 'pointRead',
-      ),
+      fn,
+      opts?.isRetryable ?? isRetryableRpcError,
+      opts?.policy ?? 'pointRead',
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   /**
@@ -228,34 +228,32 @@ export class RpcFailoverClient {
     // `chain.eth_call` span + RPC metric spanning the whole failover sequence.
     // `dkg.read=label` (e.g. 'token.allowance') rides the SPAN only — kept OFF
     // the metric so its label set stays low-cardinality.
-    return withRpcUsageConsumer(
-      label,
-      () => withSpan(
-        'chain.eth_call',
-        async () => {
-          const metrics = getMetrics();
-          const startedAt = Date.now();
-          try {
-            const out = await this.runAcrossProviders(
-              label,
-              (p) => fn(this.rebindContract(contract, p)),
-              opts?.isRetryable ?? isContractViewRetryable,
-              opts?.policy ?? 'pointRead',
-            );
-            this.recordRpcOutcome('eth_call', 'ok');
-            return out;
-          } catch (err) {
-            this.recordRpcOutcome('eth_call', this.rpcOutcome(err), { retryable: isRetryableRpcError(err) });
-            throw err;
-          } finally {
-            metrics.chainRpcDuration.record(Date.now() - startedAt, {
-              rpc_method: 'eth_call', chain_id: chainId,
-            });
-          }
-        },
-        { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
-      ),
+    const run = () => withSpan(
+      'chain.eth_call',
+      async () => {
+        const metrics = getMetrics();
+        const startedAt = Date.now();
+        try {
+          const out = await this.runAcrossProviders(
+            label,
+            (p) => fn(this.rebindContract(contract, p)),
+            opts?.isRetryable ?? isContractViewRetryable,
+            opts?.policy ?? 'pointRead',
+          );
+          this.recordRpcOutcome('eth_call', 'ok');
+          return out;
+        } catch (err) {
+          this.recordRpcOutcome('eth_call', this.rpcOutcome(err), { retryable: isRetryableRpcError(err) });
+          throw err;
+        } finally {
+          metrics.chainRpcDuration.record(Date.now() - startedAt, {
+            rpc_method: 'eth_call', chain_id: chainId,
+          });
+        }
+      },
+      { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   // --- write transport (called by the adapter's tx-orchestration; this layer

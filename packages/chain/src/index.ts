@@ -4,7 +4,15 @@ export * from './chain-adapter.js';
 // daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
 // package-internal (imported via ./rpc-usage.js) so the transport accounting
 // implementation can change without a public-API break.
-export { emptyRpcUsageWindow, mergeRpcUsageWindows, rpcUsageWindowTotal, type RpcUsageDrainable, type RpcUsageWindow } from './rpc-usage.js';
+export {
+  emptyRpcUsageWindow,
+  mergeRpcUsageWindows,
+  normalizeRpcUsageWindow,
+  rpcUsageWindowTotal,
+  type RpcUsageDrainable,
+  type RpcUsageWindow,
+  type RpcUsageWindowInput,
+} from './rpc-usage.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export {
   EVMChainAdapter,

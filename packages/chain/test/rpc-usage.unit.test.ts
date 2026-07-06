@@ -22,6 +22,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
   boundedRpcMethodLabel,
   mergeRpcUsageWindows,
+  normalizeRpcUsageWindow,
   normalizeRpcUsageConsumer,
   rpcUsageWindowTotal,
   RpcUsageTracker,
@@ -368,6 +369,11 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       ethCallByConsumer: {},
       lifetimeTotal: 2,
     });
+    expect(normalizeRpcUsageWindow(legacy)).toEqual({
+      byMethod: { eth_call: 2 },
+      ethCallByConsumer: {},
+      lifetimeTotal: 2,
+    });
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
     expect(mergeRpcUsageWindows()).toEqual(empty);
   });
@@ -465,6 +471,34 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.eth_call']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('uses an explicit rpcUsageConsumer key independent of the human read label', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_call'] });
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [primary.url, backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(
+      a.readProvider(
+        'human label with spaces can change',
+        (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']),
+        { rpcUsageConsumer: 'unit.eth_call.stable' },
+      ),
+    ).resolves.toBeDefined();
+
+    const usage = a.drainRpcUsage();
+    const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
+    expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
+    expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer['unit.eth_call.stable']).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer.human_label_with_spaces_can_change).toBeUndefined();
   }, 30_000);
 
   it('attributes same-endpoint eth_call retry attempts to the readProvider label', async () => {

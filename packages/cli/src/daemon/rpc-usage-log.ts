@@ -12,7 +12,12 @@
  *   rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=7 window_s=60 chain=base:8453
  */
 
-import { rpcUsageWindowTotal, type RpcUsageDrainable, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
+import {
+  normalizeRpcUsageWindow,
+  rpcUsageWindowTotal,
+  type RpcUsageDrainable,
+  type RpcUsageWindowInput,
+} from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
@@ -25,18 +30,20 @@ function safeToken(value: string, fallback: string): string {
  * nothing rather than a stream of zeros).
  */
 export function formatRpcUsageLines(
-  usage: RpcUsageWindow,
+  usage: RpcUsageWindowInput,
   windowSeconds: number,
   chainId?: string,
 ): string[] {
-  if (!usage || rpcUsageWindowTotal(usage) <= 0) return [];
+  if (!usage) return [];
+  const normalized = normalizeRpcUsageWindow(usage);
+  if (rpcUsageWindowTotal(normalized) <= 0) return [];
   const chain = chainId ? ` chain=${safeToken(chainId, 'unknown')}` : '';
   const lines: string[] = [];
-  for (const [method, count] of Object.entries(usage.byMethod)) {
+  for (const [method, count] of Object.entries(normalized.byMethod)) {
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
-  for (const [consumer, count] of Object.entries(usage.ethCallByConsumer ?? {})) {
+  for (const [consumer, count] of Object.entries(normalized.ethCallByConsumer)) {
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(
       `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
@@ -64,7 +71,7 @@ export function emitRpcUsage(
 ): number {
   try {
     const usage = source?.drainRpcUsage?.();
-    if (!usage || rpcUsageWindowTotal(usage) <= 0) return 0;
+    if (!usage) return 0;
     const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
     for (const line of lines) emit(line);
     return lines.length;

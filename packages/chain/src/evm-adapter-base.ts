@@ -951,7 +951,9 @@ export class EVMChainAdapterBase {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args));
+    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
+      rpcUsageConsumer: label,
+    });
   }
 
   /**
@@ -966,7 +968,10 @@ export class EVMChainAdapterBase {
     fn: (c: Contract) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, fn, opts);
+    return this.rpcFailover.readContract(label, contract, fn, {
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
+    });
   }
 
   /**
@@ -981,7 +986,10 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, opts);
+    return this.rpcFailover.read(label, fn, {
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
+    });
   }
 
   /**

@@ -94,6 +94,27 @@ export function emptyRpcUsageWindow(): RpcUsageWindow {
 }
 
 /**
+ * Compatibility input accepted at merge/format/drain boundaries. Chain-owned
+ * producers return a concrete {@link RpcUsageWindow}; this loose shape exists
+ * only so pre-attribution drain sources do not break aggregate `rpc_usage`
+ * logging while rolling through a mixed-version process boundary.
+ */
+export type RpcUsageWindowInput = {
+  byMethod: Record<string, number>;
+  ethCallByConsumer?: Record<string, number>;
+  lifetimeTotal: number;
+};
+
+/** Normalize a legacy/loose input into the concrete telemetry model. */
+export function normalizeRpcUsageWindow(window: RpcUsageWindowInput): RpcUsageWindow {
+  return {
+    byMethod: window.byMethod,
+    ethCallByConsumer: window.ethCallByConsumer ?? {},
+    lifetimeTotal: window.lifetimeTotal,
+  };
+}
+
+/**
  * THE drain contract — one name for one concept, wherever a usage window can
  * be drained from: an agent (delegates to its adapter), a publisher runtime
  * (merges its per-wallet adapters), or the daemon's composite source. Deltas
@@ -116,16 +137,17 @@ export interface RpcUsageDrainable {
  * always a concrete window — empty when there is nothing to merge.
  */
 export function mergeRpcUsageWindows(
-  ...windows: Array<RpcUsageWindow | undefined>
+  ...windows: Array<RpcUsageWindowInput | undefined>
 ): RpcUsageWindow {
-  const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
+  const defined = windows.filter((w): w is RpcUsageWindowInput => w !== undefined);
   if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
   const ethCallByConsumer: Record<string, number> = {};
   let lifetimeTotal = 0;
-  for (const w of defined) {
+  for (const input of defined) {
+    const w = normalizeRpcUsageWindow(input);
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
-    for (const [consumer, c] of Object.entries(w.ethCallByConsumer ?? {})) {
+    for (const [consumer, c] of Object.entries(w.ethCallByConsumer)) {
       ethCallByConsumer[consumer] = (ethCallByConsumer[consumer] ?? 0) + c;
     }
     lifetimeTotal += w.lifetimeTotal;
@@ -148,11 +170,10 @@ export interface RpcUsageWindow {
    * the billing-exact aggregate count and existing dashboards should continue
    * to use it. The consumer map is emitted as separate daemon log lines so it
    * cannot double-count aggregate `rpc_usage` queries. Empty map means no
-   * attributed `eth_call`s in the current drain window. Optional at the public
-   * drain boundary for compatibility with pre-attribution drain sources; local
-   * chain helpers return a normalized concrete map.
+   * attributed `eth_call`s in the current drain window. Legacy missing-field
+   * compatibility is isolated in {@link normalizeRpcUsageWindow}.
    */
-  ethCallByConsumer?: Record<string, number>;
+  ethCallByConsumer: Record<string, number>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
 }
@@ -162,7 +183,7 @@ export interface RpcUsageWindow {
  * window model deliberately stores no separate total, so an inconsistent
  * {byMethod, total} pair is unrepresentable.
  */
-export function rpcUsageWindowTotal(window: RpcUsageWindow): number {
+export function rpcUsageWindowTotal(window: Pick<RpcUsageWindow, 'byMethod'>): number {
   let total = 0;
   for (const count of Object.values(window.byMethod)) total += count;
   return total;
