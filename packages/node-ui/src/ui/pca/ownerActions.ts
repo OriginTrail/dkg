@@ -12,7 +12,7 @@ import {
   walletOwnerActionSubmitter,
   type WalletOwnerActionSubmitterDeps,
 } from '../web3/walletOwnerActionSubmitter.js';
-import { resolvePcaOwnerAccess, type PcaOwnerAccess } from './ownerAccess.js';
+import { resolvePcaOwnerAccess, type PcaOwnerAccess, type PcaOwnerMode } from './ownerAccess.js';
 
 /**
  * OWNER-ACTION SEAM.
@@ -124,10 +124,19 @@ function walletUnavailableReason(): string | null {
 }
 
 /**
- * inv-17 owner-kind classification for the async manage path. Now a thin delegation to the
- * single model classifier — `resolvePcaOwnerAccess(...).submitterKind` (address-only; the
- * network gate is applied separately in the resolving path below). This is the last inv-17
- * copy, now living on the model.
+ * Derive the owner-action submitter KIND from the pure owner mode (T2 / #1468). The model owns
+ * only the owner STATE; the submitter vocabulary is derived here at the ownerActions boundary.
+ * inv-17 precedence already lives in `mode` (daemon-first + redundant guard); this is the
+ * address-only mode→kind projection: daemon→'daemon', wallet→'wallet', external/unknown→
+ * 'read-only' (the network gate is applied separately, never by reclassifying a wallet).
+ */
+export function submitterKindForOwnerMode(mode: PcaOwnerMode): OwnerActionSubmitterKind {
+  return mode === 'daemon' ? 'daemon' : mode === 'wallet' ? 'wallet' : 'read-only';
+}
+
+/**
+ * inv-17 owner-kind classification for the async manage path — the pure model mode projected to a
+ * submitter kind via `submitterKindForOwnerMode`.
  */
 export function resolveOwnerActionSubmitterKind({
   owner,
@@ -138,7 +147,7 @@ export function resolveOwnerActionSubmitterKind({
   primaryWallet?: string | null;
   connectedWallet?: string | null;
 }): OwnerActionSubmitterKind {
-  return resolvePcaOwnerAccess({ owner, primaryWallet, connectedWallet }).submitterKind;
+  return submitterKindForOwnerMode(resolvePcaOwnerAccess({ owner, primaryWallet, connectedWallet }).mode);
 }
 
 /**
@@ -237,12 +246,12 @@ function resolvedOwnerActionSubmitter(
   //    ownership at CALL time. A render-time-pinned wallet submitter could grant allowance and then
   //    revert NotAccountOwner on a stale owner/connected wallet; the resolving path re-fetches the
   //    owner (origin) and returns read-only FIRST when it no longer matches — no approve, no spend.
-  if (access.mode === 'unknown' || access.submitterKind === 'wallet') {
+  if (access.mode === 'unknown' || submitterKindForOwnerMode(access.mode) === 'wallet') {
     return resolvingOwnerActionSubmitter({ onWalletProgress });
   }
   // daemon (server-side, no browser approve) + read-only (never writes) pin ONCE — the resolve-
   // once win. create stays on the ownerKey path; settle stays daemon.
-  const resolved = ownerActionSubmitterForKind(access.submitterKind, { onProgress: onWalletProgress });
+  const resolved = ownerActionSubmitterForKind(submitterKindForOwnerMode(access.mode), { onProgress: onWalletProgress });
   return {
     create: resolvingCreate({ onWalletProgress }),
     registerAgent: resolved.registerAgent,

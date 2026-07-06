@@ -19,6 +19,19 @@ export type SignableOwner =
   | string
   | { address?: string | null; kind?: SignableOwnerKind };
 
+/**
+ * The candidate owner-signer set for a PCA owner action (T2 / #1468): the node's primary (daemon)
+ * wallet + the connected browser wallet, in daemon→wallet order. Both entries are always present
+ * (addresses may be null) — the binding probe / `normalizeSignableOwners` drops the null-address
+ * ones. Derived at this boundary rather than carried on the owner-access model.
+ */
+export function signableOwnersFor(primaryWallet?: string | null, connectedWallet?: string | null): SignableOwner[] {
+  return [
+    { address: primaryWallet, kind: 'daemon' },
+    { address: connectedWallet, kind: 'wallet' },
+  ];
+}
+
 function normalizeSignableOwners(input?: SignableOwner | SignableOwner[]): Array<{ address: string; kind: SignableOwnerKind }> {
   const items = Array.isArray(input) ? input : input != null ? [input] : [];
   return items.flatMap((item) => {

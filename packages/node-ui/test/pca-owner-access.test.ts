@@ -26,7 +26,7 @@ vi.mock('../src/ui/web3/walletOwnerActionSubmitter.js', () => ({
 }));
 
 const { resolvePcaOwnerAccess } = await import('../src/ui/pca/ownerAccess.js');
-const { resolveOwnerActionSubmitterKind } = await import('../src/ui/pca/ownerActions.js');
+const { resolveOwnerActionSubmitterKind, submitterKindForOwnerMode } = await import('../src/ui/pca/ownerActions.js');
 
 const HOT = `0x${'11'.repeat(20)}`; // this node's primary operational (daemon) wallet
 const HW = `0x${'22'.repeat(20)}`; // a connected browser wallet
@@ -36,7 +36,6 @@ describe('resolvePcaOwnerAccess — core classification', () => {
   it('daemon wins even when the primary wallet is ALSO the connected wallet (inv-17 ordering)', () => {
     const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT });
     expect(access.mode).toBe('daemon');
-    expect(access.submitterKind).toBe('daemon');
     expect(access.writesEnabled).toBe(true);
     expect(access.wrongNetwork).toBe(false);
     expect(access.ownerUnknownCause).toBeUndefined();
@@ -53,35 +52,30 @@ describe('resolvePcaOwnerAccess — core classification', () => {
   it('daemon wins when owner == primary even if a DIFFERENT wallet is connected', () => {
     const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('daemon');
-    expect(access.submitterKind).toBe('daemon');
   });
 
   it('connected owner != primary → wallet-managed', () => {
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('wallet');
-    expect(access.submitterKind).toBe('wallet');
     expect(access.writesEnabled).toBe(true);
   });
 
-  it('wrong-network wallet: mode STAYS wallet + submitterKind STAYS wallet (address-only), only writesEnabled flips', () => {
+  it('wrong-network wallet: mode STAYS wallet (address-only), only writesEnabled flips', () => {
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: true });
     expect(access.mode).toBe('wallet'); // network is NOT folded into classification
-    expect(access.submitterKind).toBe('wallet'); // matches address-only resolveOwnerActionSubmitterKind
     expect(access.wrongNetwork).toBe(true);
     expect(access.writesEnabled).toBe(false); // the network gate lives here, separately
   });
 
-  it('external (a wallet is connected but is not the owner) → read-only', () => {
+  it('external (a wallet is connected but is not the owner) → not enabled', () => {
     const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('external');
-    expect(access.submitterKind).toBe('read-only');
     expect(access.writesEnabled).toBe(false);
   });
 
-  it('external (no wallet connected) → read-only', () => {
+  it('external (no wallet connected) → not enabled', () => {
     const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: null });
     expect(access.mode).toBe('external');
-    expect(access.submitterKind).toBe('read-only');
     expect(access.writesEnabled).toBe(false);
   });
 
@@ -103,7 +97,6 @@ describe('resolvePcaOwnerAccess — the two distinct unknown causes', () => {
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('wallets-unreadable');
     expect(access.writesEnabled).toBe(false);
-    expect(access.submitterKind).toBe('read-only');
   });
 
   it('no-snapshot: a missing owner (no PCA snapshot) → unknown', () => {
@@ -111,7 +104,6 @@ describe('resolvePcaOwnerAccess — the two distinct unknown causes', () => {
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('no-snapshot');
     expect(access.writesEnabled).toBe(false);
-    expect(access.submitterKind).toBe('read-only');
   });
 
   it('empty-string owner is treated as no-snapshot', () => {
@@ -124,32 +116,6 @@ describe('resolvePcaOwnerAccess — the two distinct unknown causes', () => {
     const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, walletsUnknown: true });
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('wallets-unreadable');
-  });
-});
-
-describe('resolvePcaOwnerAccess — signableOwners shape', () => {
-  it('always both entries, daemon then wallet, in the ApproveWalletsModal order', () => {
-    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
-    expect(access.signableOwners).toEqual([
-      { address: HOT, kind: 'daemon' },
-      { address: HW, kind: 'wallet' },
-    ]);
-  });
-
-  it('keeps the wallet entry (with a null address) when no wallet is connected — normalizers drop it downstream', () => {
-    const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: null });
-    expect(access.signableOwners).toEqual([
-      { address: HOT, kind: 'daemon' },
-      { address: null, kind: 'wallet' },
-    ]);
-  });
-
-  it('is present on the unknown paths too', () => {
-    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW });
-    expect(access.signableOwners).toEqual([
-      { address: HOT, kind: 'daemon' },
-      { address: HW, kind: 'wallet' },
-    ]);
   });
 });
 
@@ -226,8 +192,8 @@ describe('call-site parity — the model reproduces every former owner-mode site
         expect(access.mode).toBe(ownerModeFor(s.owner, s.primary, s.connected));
       });
 
-      it('submitterKind == ownerActions.resolveOwnerActionSubmitterKind (address-only)', () => {
-        expect(access.submitterKind).toBe(
+      it('submitterKindForOwnerMode(mode) == ownerActions.resolveOwnerActionSubmitterKind (address-only)', () => {
+        expect(submitterKindForOwnerMode(access.mode)).toBe(
           resolveOwnerActionSubmitterKind({ owner: s.owner, primaryWallet: s.primary, connectedWallet: s.connected }),
         );
       });

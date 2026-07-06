@@ -24,13 +24,6 @@
  * `web3/walletOwnerActionSubmitter.ts`.
  */
 import { eqAddress } from './address.js';
-import type { SignableOwner, SignableOwnerKind } from './walletBinding.js';
-import type { OwnerActionSubmitterKind } from './ownerActions.js';
-
-// Re-exported (type-only) so consumers can take the whole owner-access vocabulary from the
-// model. The single definitions still live in walletBinding.ts / ownerActions.ts (shared,
-// not duplicated); the model does not move their logic.
-export type { SignableOwner, SignableOwnerKind, OwnerActionSubmitterKind };
 
 /** Address-only owner classification. `unknown` is the display carve-out for the two
  *  "can't classify" causes below; it is NOT part of inv-17 precedence. */
@@ -57,6 +50,11 @@ export interface PcaOwnerAccessInput {
   walletsUnknown?: boolean;
 }
 
+/**
+ * The pure owner STATE (T2 / #1468). Deliberately minimal — the submitter KIND is derived at the
+ * ownerActions boundary (`submitterKindForOwnerMode`) and the signer candidates at the walletBinding
+ * boundary (`signableOwnersFor`), so this model carries no owner-action vocabulary.
+ */
 export interface PcaOwnerAccess {
   /** Address-only classification (network never folded in). */
   mode: PcaOwnerMode;
@@ -65,16 +63,8 @@ export interface PcaOwnerAccess {
   wrongNetwork: boolean;
   /** Owner writes are enabled: daemon always; wallet only on the right network. */
   writesEnabled: boolean;
-  /** Which submitter the async owner-action seam routes to. Address-only, matching
-   *  `resolveOwnerActionSubmitterKind`: a wrong-network wallet is still `'wallet'` here
-   *  (the network block is applied separately, not by reclassifying to read-only). */
-  submitterKind: OwnerActionSubmitterKind;
   /** Present only when `mode === 'unknown'`; names which read is missing. */
   ownerUnknownCause?: PcaOwnerUnknownCause;
-  /** The candidate owner signers in daemon→wallet order (both entries always present so
-   *  addresses may be null; downstream normalizers drop the null-address entries). Matches
-   *  ApproveWalletsModal's `signableOwners` exactly. */
-  signableOwners: SignableOwner[];
 }
 
 /**
@@ -101,38 +91,19 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
     walletsUnknown = false,
   } = input;
 
-  const signableOwners: SignableOwner[] = [
-    { address: primaryWallet, kind: 'daemon' },
-    { address: connectedWallet, kind: 'wallet' },
-  ];
-
   // Unknown carve-outs (OUTSIDE inv-17 precedence), causes kept distinct. `walletsUnknown`
   // is checked FIRST to mirror the detail view, which gates on "couldn't read this node's
   // wallets" before it ever classifies the owner.
   if (walletsUnknown) {
-    return {
-      mode: 'unknown',
-      wrongNetwork: walletWrongNetwork,
-      writesEnabled: false,
-      submitterKind: 'read-only',
-      ownerUnknownCause: 'wallets-unreadable',
-      signableOwners,
-    };
+    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'wallets-unreadable' };
   }
   if (!owner) {
-    return {
-      mode: 'unknown',
-      wrongNetwork: walletWrongNetwork,
-      writesEnabled: false,
-      submitterKind: 'read-only',
-      ownerUnknownCause: 'no-snapshot',
-      signableOwners,
-    };
+    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'no-snapshot' };
   }
 
-  // inv-17 precedence — byte-for-byte from ownerActions.resolveOwnerActionSubmitterKind
-  // (`if (eq(owner, primaryWallet)) 'daemon'; if (connectedWallet && eq(owner,
-  // connectedWallet) && !eq(owner, primaryWallet)) 'wallet'; else …`) and detailOwnerMode.
+  // inv-17 precedence — byte-for-byte from detailOwnerMode / the async classifier
+  // (`if (eq(owner, primaryWallet)) 'daemon'; if (connectedWallet && eq(owner, connectedWallet) &&
+  // !eq(owner, primaryWallet)) 'wallet'; else 'external'`). Daemon-first + the redundant guard.
   let mode: PcaOwnerMode;
   if (eqAddress(owner, primaryWallet)) {
     mode = 'daemon';
@@ -144,10 +115,8 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
 
   const wrongNetwork = walletWrongNetwork;
   const writesEnabled = ownerModeWritesEnabled(mode, wrongNetwork);
-  const submitterKind: OwnerActionSubmitterKind =
-    mode === 'daemon' ? 'daemon' : mode === 'wallet' ? 'wallet' : 'read-only';
 
-  return { mode, wrongNetwork, writesEnabled, submitterKind, signableOwners };
+  return { mode, wrongNetwork, writesEnabled };
 }
 
 // The sync display hook `usePcaOwnerAccess` lives in `./usePcaOwnerAccess.ts` so THIS module

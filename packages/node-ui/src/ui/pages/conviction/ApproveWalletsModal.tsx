@@ -7,7 +7,7 @@ import {
 } from '../../api.js';
 import { useResolvedOwnerActionSubmitter, useResolvingOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
-import { resolveWalletBinding, planSelfCoverage } from '../../pca/walletBinding.js';
+import { resolveWalletBinding, planSelfCoverage, signableOwnersFor } from '../../pca/walletBinding.js';
 import {
   approveBatchReducer,
   initialApproveBatchState,
@@ -177,7 +177,7 @@ export function ApproveWalletsModal({
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
   const targetWalletManaged = access.mode === 'wallet' && access.writesEnabled;
-  const signableOwners = access.signableOwners;
+  const signableOwners = signableOwnersFor(ownerWallet, connectedWallet);
 
   const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {
     if (!id) return undefined;

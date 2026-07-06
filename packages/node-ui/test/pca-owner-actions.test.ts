@@ -50,6 +50,7 @@ const {
   OwnerActionUnavailableError,
   daemonOwnerActionSubmitter,
   resolveOwnerActionSubmitterKind,
+  submitterKindForOwnerMode,
   useResolvingOwnerActionSubmitter,
   useResolvedOwnerActionSubmitter,
 } = await import('../src/ui/pca/ownerActions.js');
@@ -249,6 +250,18 @@ describe('owner submitter resolver', () => {
   });
 });
 
+// T2 (#1468) — the mode→submitter-kind projection now lives at the ownerActions boundary (the
+// model carries only the owner STATE). daemon→'daemon', wallet→'wallet', external/unknown→
+// 'read-only' (network never folded — a wrong-network wallet is still 'wallet' here).
+describe('submitterKindForOwnerMode', () => {
+  it('maps every owner mode to its submitter kind', () => {
+    expect(submitterKindForOwnerMode('daemon')).toBe('daemon');
+    expect(submitterKindForOwnerMode('wallet')).toBe('wallet');
+    expect(submitterKindForOwnerMode('external')).toBe('read-only');
+    expect(submitterKindForOwnerMode('unknown')).toBe('read-only');
+  });
+});
+
 // Item 3 (#1375) — when the caller passes the display-resolved `access`, the submitter is
 // selected ONCE up-front and the manage writes submit DIRECTLY, with no per-write owner/wallet
 // re-fetch. (The absent-access path above is unchanged; the wallet submitter's per-prompt
@@ -273,7 +286,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
     mocks.walletSubmitter.topUp.mockResolvedValue({ addedTokens: '5' });
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
-    expect(access.submitterKind).toBe('wallet');
+    expect(access.mode).toBe('wallet');
 
     await expect(useResolvedOwnerActionSubmitter({ access }).topUp('7', '5'))
       .resolves.toEqual({ addedTokens: '5' });
@@ -290,7 +303,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     mocks.fetchPca.mockResolvedValue({ owner: EXTERNAL });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
-    expect(access.submitterKind).toBe('wallet'); // the stale render-time classification
+    expect(access.mode).toBe('wallet'); // the stale render-time classification
 
     await expect(useResolvedOwnerActionSubmitter({ access }).topUp('7', '5'))
       .rejects.toBeInstanceOf(ReadOnlyOwnerActionError);
