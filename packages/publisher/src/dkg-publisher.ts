@@ -6,6 +6,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
+import { tagPromoteStep } from './promote-step-tag.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
   assertTrustedCatalogTriplesAreGeneratedFloor,
@@ -5691,9 +5692,17 @@ export class DKGPublisher implements Publisher {
       confirmBeforeCommit?: (message: Uint8Array) => Promise<{ applied: boolean; rejected?: boolean }>;
     },
   ): Promise<{ promotedCount: number; gossipMessage?: Uint8Array; promotedAllRoots: boolean; shareOperationId?: string }> {
-    await this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName);
-    const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-    const swmGraphUri = await this.swmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    // #1464 (PR1, diagnostic) — every awaited op below runs BEFORE the
+    // `store.insert(swmQuads)` that actually lands the root in SWM. A masked
+    // rejection here (typically a sparql-http read hitting the 30s
+    // `AbortSignal.timeout` under load) is the leading hypothesis for the
+    // intermittent count-0. `tagPromoteStep` re-labels any such throw as
+    // "[promote:<step>] …" so CI/UI names the failing op — it does NOT retry,
+    // swallow, or change control flow, and the `store.insert` write itself is
+    // deliberately left untagged.
+    await tagPromoteStep('ensureSubGraphRegistered', () => this.ensureSubGraphRegistered(contextGraphId, opts?.subGraphName));
+    const graphUri = await tagPromoteStep('wmGraphUri', () => this.wmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName));
+    const swmGraphUri = await tagPromoteStep('swmGraphUri', () => this.swmGraphUri(contextGraphId, agentAddress, name, opts?.subGraphName));
 
     // #1116 (round 10) — the swmShareComplete marker MUST be maintained on EVERY
     // return path of assertionPromote, not just the success tail. A non-full share
@@ -5724,7 +5733,7 @@ export class DKGPublisher implements Publisher {
       }
     };
 
-    const assertionQuads = await this.assertionScopedQuads(graphUri);
+    const assertionQuads = await tagPromoteStep('assertionScopedQuads', () => this.assertionScopedQuads(graphUri));
     if (assertionQuads.length === 0) {
       // Issue #864 — when the assertion data graph is empty, distinguish two
       // failure modes so the caller (and ultimately the UI) gets an
@@ -5819,12 +5828,12 @@ export class DKGPublisher implements Publisher {
       (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
     );
 
-    await this.assertTrustedCatalogTriplesAllowed({
+    await tagPromoteStep('assertTrustedCatalogTriplesAllowed', () => this.assertTrustedCatalogTriplesAllowed({
       contextGraphId,
       trustedNonManifestCatalogTriples: opts?.trustedNonManifestCatalogTriples,
       onChainContextGraphId: opts?.onChainContextGraphId,
       allowLocalPrivateContextGraph: true,
-    });
+    }));
     const trustedGeneratedCatalogTriples = trustedCatalogTripleKeySet(
       opts?.trustedNonManifestCatalogTriples,
     );
@@ -5884,12 +5893,12 @@ export class DKGPublisher implements Publisher {
 
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, opts?.subGraphName);
     const ownershipKey = opts?.subGraphName ? `${contextGraphId}\0${opts.subGraphName}` : contextGraphId;
-    const swmOwners = await this.sharedMemoryOwnersForPromotion(
+    const swmOwners = await tagPromoteStep('sharedMemoryOwnersForPromotion', () => this.sharedMemoryOwnersForPromotion(
       contextGraphId,
       opts?.subGraphName,
       ownershipKey,
       rootEntities,
-    );
+    ));
     const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
 
     // Pre-encode gossip message and enforce size limit BEFORE any destructive
@@ -5910,7 +5919,7 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: 0,
       }));
       const timestampMs = Date.now();
-      const promoteKaNumber = await this.resolveKaNumber(contextGraphId, agentAddress, name, opts?.subGraphName);
+      const promoteKaNumber = await tagPromoteStep('resolveKaNumber', () => this.resolveKaNumber(contextGraphId, agentAddress, name, opts?.subGraphName));
       const encoded = encodeWorkspacePublishRequest({
         contextGraphId: contextGraphId,
         nquads: new TextEncoder().encode(nquadsStr),
@@ -5931,7 +5940,7 @@ export class DKGPublisher implements Publisher {
       // ("Sender Key encrypted workspace payload required for private
       // or agent-gated context graph"). Returns plaintext for public
       // CGs (resolver returns requiresEncryption=false).
-      const wrapped = await this.encodeWorkspaceGossipPayload(
+      const wrapped = await tagPromoteStep('encodeWorkspaceGossipPayload', () => this.encodeWorkspaceGossipPayload(
         contextGraphId,
         encoded,
         {
@@ -5941,9 +5950,12 @@ export class DKGPublisher implements Publisher {
           shareOperationId: operationId,
           timestampMs,
           subGraphName: opts.subGraphName,
-          publisherPeerId: opts.publisherPeerId,
+          // Non-null: guarded by the enclosing `if (opts?.publisherPeerId)`. The
+          // tagPromoteStep thunk runs synchronously in-tick, but TS widens the
+          // narrowing across the closure boundary.
+          publisherPeerId: opts.publisherPeerId!,
         },
-      );
+      ));
 
       if (wrapped.length > DKG_GOSSIP_MAX_MESSAGE_BYTES) {
         const hint = `Promote fewer entities per call.`;

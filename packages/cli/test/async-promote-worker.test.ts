@@ -87,6 +87,24 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  // #1464 — the publisher tags a promote error's message with a "[promote:<step>] " prefix so the
+  // failing step is NAMED. The step LABEL must never change the retry classification: the classifier
+  // strips the tag before substring-matching. Regression for the gate-caught collision where the
+  // step label "encodeWorkspaceGossipPayload" injected the "gossip" trigger token, flipping a
+  // transient error to non-retryable cap_exceeded. Fails without the tag-strip.
+  it('#1464 — strips the [promote:<step>] tag before classifying (label tokens do not change the verdict)', () => {
+    // A transient error tagged at the gossip-encode step (label contains "gossip") stays retryable.
+    expect(classifyPromoteError(new Error('[promote:encodeWorkspaceGossipPayload] rate limit exceeded — request timed out')))
+      .toEqual({ classification: 'transient', retryable: true });
+    // Identical to the same error untagged.
+    expect(classifyPromoteError(new Error('rate limit exceeded — request timed out')))
+      .toEqual({ classification: 'transient', retryable: true });
+    // A GENUINE gossip-cap error (token in the ORIGINAL message) still classifies cap_exceeded even
+    // when tagged — stripping removes only the injected prefix, never real tokens.
+    expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 10 MB)')))
+      .toEqual({ classification: 'cap_exceeded', retryable: false });
+  });
+
   it('classifies timeout errors as transient', () => {
     expect(classifyPromoteError(new Error('Operation timed out'))).toEqual({
       classification: 'transient',

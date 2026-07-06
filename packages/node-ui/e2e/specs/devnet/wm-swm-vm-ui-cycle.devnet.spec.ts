@@ -114,34 +114,28 @@ async function openImportModal(page: Page) {
   await importBtn.click();
 }
 
-/** A promote control on whichever layer-view surface renders (testid-agnostic). */
+// #1464 — pruned the dead `.or()` fallbacks: the list-*/mlv-* testids exist nowhere in the
+// codebase; only the widget surface renders. Keeping them made the readers surface-agnostic in
+// name only and muddied WHICH component actually rendered.
 function promoteControl(page: Page) {
-  return page
-    .getByTestId('widget-promote-all-btn')
-    .or(page.getByTestId('list-promote-all-btn'))
-    .or(page.getByTestId('mlv-promote-all-btn'));
+  return page.getByTestId('widget-promote-all-btn');
 }
 
-/** A publish control on whichever layer-view surface renders. */
 function publishControl(page: Page) {
-  return page
-    .getByTestId('widget-publish-vm-btn')
-    .or(page.getByTestId('list-publish-all-btn'))
-    .or(page.getByTestId('mlv-publish-all-btn'));
+  return page.getByTestId('widget-publish-vm-btn');
 }
 
-/** Any rendered promote/publish result container's combined text. */
-async function resultText(page: Page): Promise<string> {
-  const containers = page
-    .getByTestId('layer-action-result')
-    .or(page.getByTestId('list-action-result'))
-    .or(page.getByTestId('mlv-promote-result'));
-  const n = await containers.count();
-  let text = '';
-  for (let i = 0; i < n; i++) {
-    text += (await containers.nth(i).textContent()) ?? '';
-  }
-  return text;
+/** The SUCCESS banner text (empty if none). */
+async function successText(page: Page): Promise<string> {
+  const el = page.getByTestId('layer-action-result');
+  return (await el.count()) ? ((await el.first().textContent()) ?? '') : '';
+}
+
+/** #1464 — the ERROR banner text (empty if none), now on a DISTINCT testid from success so a
+ *  thrown promote can't be read as a successful result. */
+async function errorText(page: Page): Promise<string> {
+  const el = page.getByTestId('layer-action-error');
+  return (await el.count()) ? ((await el.first().textContent()) ?? '') : '';
 }
 
 test.describe('WM → SWM → VM via the UI', () => {
@@ -202,22 +196,38 @@ test.describe('WM → SWM → VM via the UI', () => {
     await expect(promote).toBeVisible({ timeout: 15_000 });
     await promote.click();
 
-    // UI contract: the result must NOT be the misleading "No triples were
-    // promoted" no-op that the blank-node DELETE bug produced. Wait for a
-    // result to render, then assert it isn't the no-op message.
+    // #1464 — POSITIVE success contract. The old guard only rejected the literal
+    // "No triples were promoted" no-op, which an "✕ Promote failed…" error banner PASSED —
+    // so a THROWN promote read as success and the redness surfaced later as a bare count-0,
+    // misdiagnosed as a silent migration gap. Now: wait for a terminal outcome, assert NO error
+    // banner is present (surfacing its now-server-tagged text so the throwing step is NAMED in CI),
+    // then assert the success banner rendered and isn't the no-op.
     await expect(async () => {
-      const text = await resultText(page);
-      expect(text.length, 'a promote result must render').toBeGreaterThan(0);
-      expect(text, 'promote must not report the no-op (the bug symptom)').not.toMatch(
+      const err = await errorText(page);
+      expect(err, `promote FAILED — error banner: "${err}"`).toBe('');
+      const ok = await successText(page);
+      expect(ok.length, 'a promote success banner must render').toBeGreaterThan(0);
+      expect(ok, 'promote must not report the no-op (the bug symptom)').not.toMatch(
         /No triples were promoted/i,
       );
     }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
 
-    // Migration contract (surface-independent): the assertion's content left
-    // WM (blank nodes included), landed in SWM (root + skolemized children),
-    // and the memoryLayer marker flipped to SWM.
+    // Migration contract: the assertion's content left WM (blank nodes included), landed in the
+    // count-visible SWM graph (root + skolemized children), and the marker flipped to SWM.
+    // #1464 — on persistent count-0, DISAMBIGUATE instead of failing on a bare 0: capture the
+    // WM-drain + marker so the failure classifies itself — WM intact/marker=WM ⇒ a pre-insert
+    // throw (root never written); WM drained/marker=SWM but count 0 ⇒ the root committed but is
+    // not enumerated by the count query (graph-set-index staleness or the bare-bucket exclusion).
     await expect(async () => {
-      expect(await countRootInSharedMemory(run.cgId!, run.rootUri!)).toBeGreaterThan(0);
+      const count = await countRootInSharedMemory(run.cgId!, run.rootUri!);
+      if (count > 0) return;
+      const wmBlankNodes = await countBlankNodeTriplesInGraph(run.cgId!, run.dataGraph!);
+      const marker = await readMemoryLayerMarker(run.cgId!, run.markerUri!);
+      expect(
+        count,
+        `root not in count-visible SWM. disambiguation → WM-blank-node-triples=${wmBlankNodes} (0=WM drained), ` +
+        `marker=${marker}: {WM,>0}⇒pre-insert throw (root never landed); {SWM,0}⇒committed-but-unenumerated/bare-bucket (see #1464 plan)`,
+      ).toBeGreaterThan(0);
     }).toPass({ timeout: 20_000, intervals: [500, 1000, 2000] });
 
     expect(
