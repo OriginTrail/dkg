@@ -36,6 +36,7 @@ import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -76,11 +77,13 @@ export type ReadPolicy =
   | 'watchdogWideLogScan'
   | 'failOpenFundingRead';
 
-/** Per-read options: a named timeout policy + an optional failover classifier
- *  override (a read whose error shape carries domain meaning). */
+/** Per-read options: timeout/failover behavior plus an explicit low-cardinality
+ *  telemetry consumer key for `eth_call` attribution. `label` remains a human
+ *  failover/span label and is not implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
+  rpcUsageConsumer?: string;
 }
 
 /**
@@ -196,12 +199,13 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.runAcrossProviders(
+    const run = () => this.runAcrossProviders(
       label,
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   /**
@@ -224,7 +228,7 @@ export class RpcFailoverClient {
     // `chain.eth_call` span + RPC metric spanning the whole failover sequence.
     // `dkg.read=label` (e.g. 'token.allowance') rides the SPAN only — kept OFF
     // the metric so its label set stays low-cardinality.
-    return withSpan(
+    const run = () => withSpan(
       'chain.eth_call',
       async () => {
         const metrics = getMetrics();
@@ -249,6 +253,7 @@ export class RpcFailoverClient {
       },
       { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   // --- write transport (called by the adapter's tx-orchestration; this layer
