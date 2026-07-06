@@ -3136,9 +3136,10 @@ export class EVMChainAdapterBase {
         this.contracts.hub,
         await contractAddress(this.contracts.hub),
       );
-    } catch {
-      /* provider doesn't support log polling — TTL refresh (RS)
-       * and `withHubStaleRetry` (writes) are the fallbacks */
+    } catch (err) {
+      console.warn(
+        `[chain] Hub rotation poller setup disabled: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 

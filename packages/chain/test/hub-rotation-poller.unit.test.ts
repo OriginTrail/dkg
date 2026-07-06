@@ -50,43 +50,77 @@ async function flushAsyncWork(turns = 8): Promise<void> {
 }
 
 describe('HubRotationPoller', () => {
-  it('does not block startup on bootstrap log IO and stop cancels the late bootstrap', async () => {
+  it('does not touch RPC during startup and stop cancels the scheduled poll', async () => {
     vi.useFakeTimers({ now: 0 });
-    let releaseSeed!: () => void;
-    let seedEntered!: () => void;
-    const seedGate = new Promise<void>((resolve) => { releaseSeed = resolve; });
-    const seedEnteredPromise = new Promise<void>((resolve) => { seedEntered = resolve; });
     const provider = {
       getBlockNumber: vi.fn(async () => 1_000),
-      getLogs: vi.fn(async () => {
-        seedEntered();
-        await seedGate;
-        return [];
-      }),
+      getLogs: vi.fn(async () => []),
     };
+    const onContractName = vi.fn();
     const poller = new HubRotationPoller({
       readProvider: async (_label, fn) => fn(provider as any),
       intervalMs: 30_000,
       reorgBufferBlocks: 50,
-      onContractName: vi.fn(),
+      onContractName,
     });
 
     try {
       await expect(poller.start(hubContract(), HUB_ADDRESS)).resolves.toBeUndefined();
       expect(poller.isStarted).toBe(true);
+      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getLogs).not.toHaveBeenCalled();
 
-      await seedEnteredPromise;
       poller.stop();
-      releaseSeed();
-      await Promise.resolve();
       await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
-      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getLogs).not.toHaveBeenCalled();
+      expect(onContractName).not.toHaveBeenCalled();
       expect(poller.isStarted).toBe(false);
     } finally {
       poller.stop();
       vi.useRealTimers();
+    }
+  });
+
+  it('ignores a delayed in-flight poll result after stop', async () => {
+    const iface = hubInterface();
+    const delayedLog = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '70');
+    let releasePoll!: () => void;
+    let pollEntered!: () => void;
+    const pollGate = new Promise<void>((resolve) => { releasePoll = resolve; });
+    const pollEnteredPromise = new Promise<void>((resolve) => { pollEntered = resolve; });
+    const provider = {
+      getBlockNumber: vi.fn(async () => 1_000),
+      getLogs: vi.fn(async () => {
+        pollEntered();
+        await pollGate;
+        return [delayedLog];
+      }),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      await poller.start(hubContract(iface), HUB_ADDRESS);
+      const pendingPoll = poller.pollOnce();
+      await pollEnteredPromise;
+
+      poller.stop();
+      releasePoll();
+      await pendingPoll;
+
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(onContractName).not.toHaveBeenCalled();
+      expect(poller.isStarted).toBe(false);
+    } finally {
+      poller.stop();
     }
   });
 
@@ -103,8 +137,8 @@ describe('HubRotationPoller', () => {
       getBlockNumber: vi.fn(async () => head),
       getLogs: vi.fn(async () => {
         getLogsCalls++;
-        if (getLogsCalls === 2) throw new Error('temporary getLogs failure');
-        if (getLogsCalls === 3) {
+        if (getLogsCalls === 1) throw new Error('temporary getLogs failure');
+        if (getLogsCalls === 2) {
           return [{
             blockNumber: 1_001,
             blockHash: '0x' + '51'.repeat(32),
@@ -135,30 +169,18 @@ describe('HubRotationPoller', () => {
 
       await vi.advanceTimersByTimeAsync(30_000);
       expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
-      expect(provider.getLogs).toHaveBeenCalledTimes(3);
+      expect(provider.getLogs).toHaveBeenCalledTimes(2);
     } finally {
       poller.stop();
       vi.useRealTimers();
     }
   });
 
-  it('coalesces concurrent starts while bootstrap is still in flight', async () => {
+  it('coalesces concurrent starts into a single scheduled poller', async () => {
     vi.useFakeTimers({ now: 0 });
-    let releaseSeed!: () => void;
-    let seedEntered!: () => void;
-    const seedGate = new Promise<void>((resolve) => { releaseSeed = resolve; });
-    const seedEnteredPromise = new Promise<void>((resolve) => { seedEntered = resolve; });
-    let getLogsCalls = 0;
     const provider = {
       getBlockNumber: vi.fn(async () => 1_000),
-      getLogs: vi.fn(async () => {
-        getLogsCalls++;
-        if (getLogsCalls === 1) {
-          seedEntered();
-          await seedGate;
-        }
-        return [];
-      }),
+      getLogs: vi.fn(async () => []),
     };
     const poller = new HubRotationPoller({
       readProvider: async (_label, fn) => fn(provider as any),
@@ -169,26 +191,23 @@ describe('HubRotationPoller', () => {
 
     try {
       const firstStart = poller.start(hubContract(), HUB_ADDRESS);
-      await seedEnteredPromise;
       const secondStart = poller.start(hubContract(), HUB_ADDRESS);
 
-      releaseSeed();
       await Promise.all([firstStart, secondStart]);
-      await flushAsyncWork();
 
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
-      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getLogs).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(2);
-      expect(provider.getLogs).toHaveBeenCalledTimes(2);
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
     } finally {
       poller.stop();
       vi.useRealTimers();
     }
   });
 
-  it('probes startup logs without dispatching and dispatches the first buffered poll', async () => {
+  it('defers startup log reads to the first buffered poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const iface = hubInterface();
     let head = 1_000;
@@ -213,10 +232,17 @@ describe('HubRotationPoller', () => {
       await flushAsyncWork();
 
       expect(onContractName).not.toHaveBeenCalled();
+      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getLogs).not.toHaveBeenCalled();
+
+      head = 1_001;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
       expect(provider.getLogs.mock.calls[0][0]).toMatchObject({
         address: HUB_ADDRESS,
-        fromBlock: 950,
-        toBlock: 1_000,
+        fromBlock: 951,
+        toBlock: 1_001,
       });
       expect(provider.getLogs.mock.calls[0][0].topics[0]).toEqual([
         iface.getEvent('ContractChanged')!.topicHash,
@@ -224,15 +250,6 @@ describe('HubRotationPoller', () => {
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
       ]);
-
-      head = 1_001;
-      await vi.advanceTimersByTimeAsync(30_000);
-
-      expect(provider.getLogs).toHaveBeenCalledTimes(2);
-      expect(provider.getLogs.mock.calls[1][0]).toMatchObject({
-        fromBlock: 951,
-        toBlock: 1_001,
-      });
       expect(onContractName.mock.calls.map((call) => call[0])).toEqual([
         'RandomSampling',
         'ContextGraphs',
@@ -263,8 +280,8 @@ describe('HubRotationPoller', () => {
 
     try {
       await poller.start(hubContract(iface), HUB_ADDRESS);
-      await flushAsyncWork();
-      expect(onContractName).not.toHaveBeenCalled();
+      await poller.pollOnce();
+      expect(onContractName).toHaveBeenCalledWith('UntrackedAtStartup');
 
       logs.splice(0, logs.length, rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_000, '22'));
       head = 1_001;
@@ -275,7 +292,7 @@ describe('HubRotationPoller', () => {
         fromBlock: 951,
         toBlock: 1_001,
       });
-      expect(onContractName).toHaveBeenCalledTimes(1);
+      expect(onContractName).toHaveBeenCalledTimes(2);
       expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
     } finally {
       poller.stop();
@@ -303,7 +320,7 @@ describe('HubRotationPoller', () => {
 
     try {
       await poller.start(hubContract(iface), HUB_ADDRESS);
-      await flushAsyncWork();
+      await poller.pollOnce();
 
       exposeReorgLog = true;
       head = 1_001;
@@ -339,7 +356,6 @@ describe('HubRotationPoller', () => {
 
     try {
       await poller.start(hubContract(iface), HUB_ADDRESS);
-      await flushAsyncWork();
 
       logs = [repeatedLog];
       head = 1_001;
@@ -371,7 +387,7 @@ describe('HubRotationPoller', () => {
 
     try {
       await poller.start(hubContract(iface), HUB_ADDRESS);
-      await flushAsyncWork();
+      await poller.pollOnce();
 
       head = 900;
       await poller.pollOnce();

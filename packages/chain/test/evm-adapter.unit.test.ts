@@ -1121,10 +1121,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener swallows optional poll setup failures without unhandled-rejection or throw', async () => {
-    // Hub rotation detection is best-effort. A mocked or unsupported Hub poll
-    // surface must not bubble as an unhandled rejection, and the listener-started
-    // flag must not flip if setup failed so a future retry remains possible.
+  it('startHubRotationListener validates Hub binding without touching RPC logs', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
@@ -1133,9 +1130,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event AssetStorageChanged(string contractName, address newContractAddress)',
     ]);
     const provider = {
-      getBlockNumber: recorder(async () => 1_000),
+      getBlockNumber: recorder(async () => {
+        throw new Error('startup should not read block number');
+      }),
       getLogs: recorder(async () => {
-        throw new Error('eth_getLogs unsupported');
+        throw new Error('startup should not read logs');
       }),
     };
     a.providers = [provider];
@@ -1146,19 +1145,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
-    let unhandled: unknown = null;
-    const onRejection = (reason: unknown) => { unhandled = reason; };
-    process.on('unhandledRejection', onRejection);
-    try {
-      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(unhandled).toBeNull();
-      expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(1);
-      expect(a.hubRotationPoller.isStarted).toBe(true);
-    } finally {
-      process.off('unhandledRejection', onRejection);
-    }
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(true);
   });
 
   it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {
@@ -1181,14 +1172,22 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       getAddress: async () => '0x0000000000000000000000000000000000000001',
     };
 
-    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+      ));
+    } finally {
+      warnSpy.mockRestore();
+    }
 
     expect(provider.getBlockNumber.calls).toEqual([]);
     expect(provider.getLogs.calls).toEqual([]);
     expect(a.hubRotationPoller.isStarted).toBe(false);
   });
 
-  it('startHubRotationListener skips optional poller setup when primary static validation fails but backup reads still work', async () => {
+  it('startHubRotationListener does not consume RPC budget while backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
@@ -1230,7 +1229,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
       .resolves.toBe(123);
     expect(primaryProvider.getBlockNumber.calls).toEqual([]);
-    expect(backupProvider.getBlockNumber.calls).toHaveLength(2);
+    expect(backupProvider.getBlockNumber.calls).toHaveLength(1);
   });
 
   it('startHubRotationListener wires Hub rotation names into adapter invalidation without subscriptions', async () => {
@@ -1285,13 +1284,13 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       a.destroy();
 
       expect(on.calls).toEqual([]);
-      expect(provider.getLogs.calls).toHaveLength(2);
-      expect(provider.getLogs.calls[1][0]).toMatchObject({
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
         address: '0x0000000000000000000000000000000000000001',
         fromBlock: 951,
         toBlock: 1_001,
       });
-      expect(provider.getLogs.calls[1][0].topics[0]).toEqual([
+      expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
         iface.getEvent('ContractChanged')!.topicHash,
         iface.getEvent('NewContract')!.topicHash,
         iface.getEvent('AssetStorageChanged')!.topicHash,
@@ -1333,14 +1332,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       await flushAsyncWork();
-      expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(0);
 
       a.destroy();
       await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(provider.getBlockNumber.calls).toHaveLength(1);
-      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(0);
       expect(provider.destroy.calls).toHaveLength(1);
       expect(a.hubRotationPoller.isStarted).toBe(false);
     } finally {

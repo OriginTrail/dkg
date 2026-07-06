@@ -853,6 +853,8 @@ describe('ChainEventPoller lane runner and cursors', () => {
     await (poller as unknown as { poll(): Promise<void> }).poll();
     now = 20;
     await (poller as unknown as { poll(): Promise<void> }).poll();
+    expect(filters).toHaveLength(1);
+
     now = 60_000;
     await (poller as unknown as { poll(): Promise<void> }).poll();
 
@@ -930,7 +932,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     ]);
   });
 
-  it('uses an explicit lane failure-backoff policy and caps repeated failures', async () => {
+  it('caps repeated lane failures at the internal max backoff', async () => {
     const filters: EventFilter[] = [];
     let calls = 0;
     let now = 0;
@@ -940,7 +942,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
         filters.push(f);
         calls++;
-        if (calls <= 3) throw new Error('rpc down');
+        if (calls <= 5) throw new Error('rpc down');
       },
     } as unknown as ChainAdapter;
     const lane: ChainEventPollerLaneSpec = {
@@ -949,7 +951,6 @@ describe('ChainEventPoller lane runner and cursors', () => {
       eventTypes: () => ['ContextGraphCreated'],
       requiresFullHistory: () => false,
       cadenceMs: 20,
-      failureBackoff: { initialMs: 10, maxMs: 25 },
       dispatch: async () => { /* sink */ },
     };
     const runner = new ChainEventLaneRunner({
@@ -961,20 +962,30 @@ describe('ChainEventPoller lane runner and cursors', () => {
     });
 
     await runner.poll();
-    now = 9;
+    now = 59_999;
     await runner.poll();
-    now = 10;
+    now = 60_000;
     await runner.poll();
-    now = 29;
+    now = 179_999;
     await runner.poll();
-    now = 30;
+    now = 180_000;
     await runner.poll();
-    now = 54;
+    now = 419_999;
     await runner.poll();
-    now = 55;
+    now = 420_000;
+    await runner.poll();
+    now = 719_999;
+    await runner.poll();
+    now = 720_000;
+    await runner.poll();
+    now = 1_019_999;
+    await runner.poll();
+    now = 1_020_000;
     await runner.poll();
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
       [1, 100],
       [1, 100],
       [1, 100],

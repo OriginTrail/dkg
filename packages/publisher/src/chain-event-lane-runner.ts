@@ -27,11 +27,6 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
-export interface ChainEventPollerFailureBackoffPolicy {
-  initialMs?: number;
-  maxMs?: number;
-}
-
 export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
   enabled(): boolean;
@@ -39,15 +34,9 @@ export interface ChainEventPollerLaneSpec {
   requiresFullHistory(): boolean;
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
-  failureBackoff?: ChainEventPollerFailureBackoffPolicy;
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
-}
-
-interface NormalizedFailureBackoffPolicy {
-  initialMs: number;
-  maxMs: number;
 }
 
 interface ChainEventPollerLaneRuntime {
@@ -57,7 +46,6 @@ interface ChainEventPollerLaneRuntime {
   requiresFullHistory: boolean;
   canUseLegacyAggregateCursor: boolean;
   liveSeedLookbackBlocks: number;
-  failureBackoff: NormalizedFailureBackoffPolicy;
 }
 
 interface ChainEventPollerLaneScanResult {
@@ -143,7 +131,6 @@ export class ChainEventLaneRunner {
         requiresFullHistory,
         canUseLegacyAggregateCursor: spec.canUseLegacyAggregateCursor?.() ?? !requiresFullHistory,
         liveSeedLookbackBlocks: this.liveSeedLookbackBlocks(spec),
-        failureBackoff: this.failureBackoffPolicy(spec),
       }];
     });
   }
@@ -153,18 +140,6 @@ export class ChainEventLaneRunner {
     return Number.isFinite(lookback) && lookback >= 0
       ? Math.floor(lookback)
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
-  }
-
-  private failureBackoffPolicy(spec: ChainEventPollerLaneSpec): NormalizedFailureBackoffPolicy {
-    const initialMs = this.scheduleDelayMs(
-      spec.failureBackoff?.initialMs,
-      Math.max(FAILURE_BACKOFF_INITIAL_MS, spec.cadenceMs),
-    );
-    const maxMs = Math.max(
-      initialMs,
-      this.scheduleDelayMs(spec.failureBackoff?.maxMs, FAILURE_BACKOFF_MAX_MS),
-    );
-    return { initialMs, maxMs };
   }
 
   private scheduleDelayMs(value: number | undefined, fallback: number): number {
@@ -328,8 +303,8 @@ export class ChainEventLaneRunner {
 
     const previous = state.failureBackoffMs;
     const next = previous == null
-      ? lane.failureBackoff.initialMs
-      : Math.min(previous * 2, lane.failureBackoff.maxMs);
+      ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)
+      : Math.min(previous * 2, FAILURE_BACKOFF_MAX_MS);
     state.failureBackoffMs = next;
     state.nextRunAtMs = outcome.now + next;
   }
