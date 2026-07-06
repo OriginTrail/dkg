@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildProjectOntologyTriples } from '../src/index.js';
+import { buildProjectOntologyTriples } from '../src/project-ontology.js';
 
 const RAW_IRI_OBJECT_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
 
 describe('buildProjectOntologyTriples', () => {
+  it('stays off the broad core barrel', async () => {
+    const rootCore = await import('../src/index.js');
+
+    expect(rootCore).not.toHaveProperty('buildProjectOntologyTriples');
+  });
+
   it('emits project ontology quads using /wm/write raw IRI object terms', () => {
     const contextGraphId = '0x00000000000000000000000000000000000000a1/dmaast-documentation';
 

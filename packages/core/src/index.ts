@@ -7,7 +7,6 @@ export { parseDotenvValue } from './dotenv.js';
 export * from './memory-model.js';
 export * from './trust.js';
 export * from './publisher-extension.js';
-export * from './project-ontology.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './event-bus.js';
