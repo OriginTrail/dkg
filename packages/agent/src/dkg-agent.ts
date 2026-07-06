@@ -85,7 +85,7 @@ import {
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -513,6 +513,26 @@ function normalizeContextGraphDiscoveryScan(
   }
 
   return { mode: 'listAll' };
+}
+
+function legacyChainListScanOptions(
+  options: DiscoverContextGraphsFromChainOptions,
+): ContextGraphChainScanOptions | undefined {
+  if (options.mode !== undefined) return undefined;
+  if (options.incremental === true) {
+    return {
+      incremental: true,
+      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+    };
+  }
+  if (options.seedIncrementalWatermark === true) {
+    return {
+      seedIncrementalWatermark: true,
+      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
+      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -1148,11 +1168,17 @@ export class DKGAgent extends DKGAgentBase {
   ): Promise<number> {
     const ctx = createOperationContext('system');
     const scanMode = normalizeContextGraphDiscoveryScan(options);
+    const legacyListOptions = legacyChainListScanOptions(options);
+    const useLegacyListFallback =
+      scanMode.mode !== 'listAll' &&
+      legacyListOptions !== undefined &&
+      !this.chain.scanContextGraphRegistryPages &&
+      !!this.chain.listContextGraphsFromChain;
     if (scanMode.mode === 'listAll' && !this.chain.listContextGraphsFromChain) {
       this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
       return 0;
     }
-    if (scanMode.mode !== 'listAll' && !this.chain.scanContextGraphRegistryPages) {
+    if (scanMode.mode !== 'listAll' && !this.chain.scanContextGraphRegistryPages && !useLegacyListFallback) {
       this.log.info(ctx, 'Chain adapter does not support scanContextGraphRegistryPages — skipping');
       return 0;
     }
@@ -1253,9 +1279,12 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
 
-    if (scanMode.mode === 'listAll') {
+    if (scanMode.mode === 'listAll' || useLegacyListFallback) {
       try {
-        onChainContextGraphs = await this.chain.listContextGraphsFromChain!();
+        onChainContextGraphs = await this.chain.listContextGraphsFromChain!(
+          undefined,
+          useLegacyListFallback ? legacyListOptions : undefined,
+        );
       } catch (err) {
         const partialResults = handleChainScanFailure(err);
         if (!partialResults) return 0;

@@ -2404,6 +2404,53 @@ describe('discoverContextGraphsFromChain', () => {
     ]);
   }, 15000);
 
+  it('falls back to legacy list scan options for adapters without the paged scanner', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const listCalls: unknown[] = [];
+    const entries: ContextGraphOnChain[] = [
+      {
+        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000010',
+        name: 'legacy-list-incremental',
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+      {
+        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000011',
+        name: 'legacy-list-seed',
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 200,
+        metadataRevealed: true,
+      },
+    ];
+    (chain as any).listContextGraphsFromChain = async (_fromBlock?: number, options?: unknown) => {
+      listCalls.push(options);
+      return [entries[listCalls.length - 1]];
+    };
+    (chain as any).scanContextGraphRegistryPages = undefined;
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain({
+      incremental: true,
+      pageBudget: 5,
+    })).toBe(1);
+    expect(await agent.discoverContextGraphsFromChain({
+      seedIncrementalWatermark: true,
+    })).toBe(1);
+
+    expect(listCalls).toEqual([
+      { incremental: true, pageBudget: 5 },
+      { seedIncrementalWatermark: true },
+    ]);
+    expect(agent.getSubscribedContextGraphs().has('legacy-list-incremental')).toBe(true);
+    expect(agent.getSubscribedContextGraphs().has('legacy-list-seed')).toBe(true);
+  }, 15000);
+
   it('applies cursor scan pages once and acknowledges after local discovery work', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000001';
@@ -2602,7 +2649,7 @@ describe('discoverContextGraphsFromChain', () => {
       await agent.start();
 
       await expect(agent.discoverContextGraphsFromChain({
-        mode: 'incremental',
+        mode: 'seedFull',
         throwOnChainScanFailure: true,
       })).rejects.toThrow('partial ContextGraphNameRegistry scan');
       expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental' })).toBe(0);
