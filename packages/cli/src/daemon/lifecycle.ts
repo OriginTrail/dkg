@@ -612,7 +612,8 @@ export function chainDiscoveryScanOptions(input: {
   pageBudget?: number;
 }):
   | { incremental: true; pageBudget: number }
-  | { seedIncrementalWatermark: true; resumeFromCursor: true; throwOnChainScanFailure: true; pageBudget: number } {
+  | { seedIncrementalWatermark: true; resumeFromCursor: true; throwOnChainScanFailure: true; pageBudget: number }
+  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
   if (
@@ -632,9 +633,49 @@ export function chainDiscoveryScanOptions(input: {
     : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
   const run = input.run ?? 0;
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  if (periodicFullResync) {
+    return { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+  }
   return input.watermarkSeeded && !periodicFullResync
     ? { incremental: true, pageBudget }
     : { seedIncrementalWatermark: true, resumeFromCursor: true, throwOnChainScanFailure: true, pageBudget };
+}
+
+export function createChainDiscoveryScanRunner(input: {
+  agent: {
+    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
+    discoverContextGraphsFromChain(
+      options: ReturnType<typeof chainDiscoveryScanOptions>,
+    ): Promise<number>;
+  };
+  log: (msg: string) => void;
+  pageBudget?: number;
+  fullScanEvery?: number;
+}): () => Promise<void> {
+  let runs = 0;
+  let inFlight = false;
+  return async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const run = runs++;
+      const found = await input.agent.discoverContextGraphsFromChain(
+        chainDiscoveryScanOptions({
+          run,
+          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
+          pageBudget: input.pageBudget,
+          fullScanEvery: input.fullScanEvery,
+        }),
+      );
+      if (found > 0) {
+        input.log(`Chain scan: discovered ${found} new context graph(s)`);
+      }
+    } catch {
+      /* non-critical */
+    } finally {
+      inFlight = false;
+    }
+  };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1948,28 +1989,11 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  let chainScanRuns = 0;
-  let chainScanInFlight = false;
-  const runChainDiscoveryScan = async () => {
-    if (chainScanInFlight) return;
-    chainScanInFlight = true;
-    try {
-      const run = chainScanRuns++;
-      const found = await agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-          pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-        }),
-      );
-      if (found > 0)
-        log(`Chain scan: discovered ${found} new context graph(s)`);
-    } catch {
-      /* non-critical */
-    } finally {
-      chainScanInFlight = false;
-    }
-  };
+  const runChainDiscoveryScan = createChainDiscoveryScanRunner({
+    agent,
+    log,
+    pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  });
   setTimeout(runChainDiscoveryScan, 15_000);
   const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();

@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { chainDiscoveryScanOptions } from '../src/daemon/lifecycle.js';
+import { describe, expect, it, vi } from 'vitest';
+import { chainDiscoveryScanOptions, createChainDiscoveryScanRunner } from '../src/daemon/lifecycle.js';
 
 describe('chainDiscoveryScanOptions', () => {
-  it('uses failure-throwing full-history watermark seeding before a seed exists', () => {
+  it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: false })).toEqual({
       seedIncrementalWatermark: true,
       resumeFromCursor: true,
@@ -23,16 +23,14 @@ describe('chainDiscoveryScanOptions', () => {
     })).toEqual({ incremental: true, pageBudget: 30 });
   });
 
-  it('keeps a periodic bounded recovery path after the watermark is seeded', () => {
+  it('keeps a periodic full-history recovery path after the watermark is seeded', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
       run: 48,
       fullScanEvery: 48,
     })).toEqual({
       seedIncrementalWatermark: true,
-      resumeFromCursor: true,
       throwOnChainScanFailure: true,
-      pageBudget: 30,
     });
   });
 
@@ -57,5 +55,37 @@ describe('chainDiscoveryScanOptions', () => {
       watermarkSeeded: true,
       pageBudget: 7.9,
     })).toEqual({ incremental: true, pageBudget: 7 });
+  });
+
+  it('serializes overlapping scheduled chain scans and resets after settle', async () => {
+    let resolveFirstScan: ((value: number) => void) | undefined;
+    const firstScan = new Promise<number>((resolve) => {
+      resolveFirstScan = resolve;
+    });
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(async () => firstScan),
+    };
+    const runner = createChainDiscoveryScanRunner({
+      agent,
+      log: vi.fn(),
+    });
+
+    const first = runner();
+    const overlapping = runner();
+    await Promise.resolve();
+
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(1);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
+    await overlapping;
+
+    resolveFirstScan?.(0);
+    await first;
+
+    agent.discoverContextGraphsFromChain.mockResolvedValue(0);
+    await runner();
+
+    expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
   });
 });

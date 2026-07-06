@@ -114,7 +114,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    return (await this.loadContextGraphRegistryScanWatermark(registryAddress)) != null;
+    return (await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)) != null;
   }
 
   async listContextGraphsFromChain(
@@ -142,8 +142,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           ? Math.floor(options?.pageBudget ?? 0)
           : undefined,
     };
-    const persistedWatermark = scanPlan.resumeFromWatermark
-      ? await this.loadContextGraphRegistryScanWatermark(registryAddress)
+    const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+      ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
       : undefined;
     const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
     const scan =
@@ -164,7 +164,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     );
     if (start > head) {
       if (scanPlan.seedAtEnd) {
-        await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
+        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
       }
       return [];
     }
@@ -220,7 +220,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         results.push(...pageResults);
         scannedAnyPage = true;
         if (scanPlan.persistProgress) {
-          await this.saveContextGraphRegistryScanWatermark(registryAddress, hi + 1);
+          await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
         }
         const scannedPages = Math.floor((hi - start) / pageSize) + 1;
         if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return results;
@@ -244,7 +244,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
 
     if (scanPlan.seedAtEnd) {
-      await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
+      await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
     }
 
     return results;

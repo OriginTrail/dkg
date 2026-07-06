@@ -187,7 +187,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(partial.scannedToBlock).toBe(1_999);
     expect(partial.failedFromBlock).toBe(2_000);
     expect(partial.failedToBlock).toBe(3_999);
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(2_000);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
 
     registry.queryFilter.reset();
     registry.queryFilter.setImpl(async () => []);
@@ -254,7 +254,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(partial.partialResults).toHaveLength(1);
     expect(partial.failedFromBlock).toBe(2_000);
     expect(partial.failedToBlock).toBe(2_100);
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(2_000);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_000);
   });
 
   it('preserves public list-all semantics unless the caller opts into incremental scans', async () => {
@@ -273,7 +273,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [0, 1_999],
       [2_000, 2_100],
     ]);
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBeUndefined();
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
   it('can seed the incremental watermark from an explicit successful full scan', async () => {
@@ -293,7 +293,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const seeded = await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
 
     expect(seeded.map((cg) => cg.blockNumber)).toEqual([historicalGraphBlock]);
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(head + 1);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(head + 1);
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
     provider.getCode = seam(async () => {
@@ -353,7 +353,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000, 2_000, 2_950]);
   });
 
-  it('continues periodic seeded daemon scans from the persisted cursor instead of restarting at deploy', async () => {
+  it('continues cursor-resumed daemon catch-up scans from the persisted cursor', async () => {
     const store = new MemoryRegistryScanCursorStore();
     await store.save({
       chainId: 'evm:31337',
@@ -384,7 +384,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.saves.map((s) => s.nextBlock)).toEqual([3_000, 3_950]);
   });
 
-  it('keeps plain seeded scans full even when a daemon cursor is persisted', async () => {
+  it('keeps periodic full-recovery seeded scans full even when a daemon cursor is persisted', async () => {
     const store = new MemoryRegistryScanCursorStore();
     await store.save({
       chainId: 'evm:31337',
@@ -414,6 +414,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [2_000, 2_999],
       [3_000, 3_500],
     ]);
+    expect(store.saves.map((s) => s.nextBlock)).toEqual([3_000, 3_501]);
   });
 
   it('keeps public list-all scans complete even when a daemon cursor is persisted', async () => {
@@ -465,7 +466,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
 
     await expect(adapter.listContextGraphsFromChain()).rejects.toThrow('range too wide');
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBeUndefined();
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
   it('does not require deploy-block probing when fromBlock is explicit', async () => {
@@ -491,7 +492,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       throw new Error('eth_getCode should not be called');
     });
     registry.queryFilter.setImpl(async () => []);
-    (adapter as any).contextGraphRegistryScanWatermarks.set(REGISTRY.toLowerCase(), 2_050);
+    await (adapter as any).contextGraphRegistryScanCursor.saveWatermark(REGISTRY, 2_050);
 
     await adapter.listContextGraphsFromChain(undefined, { incremental: true });
 

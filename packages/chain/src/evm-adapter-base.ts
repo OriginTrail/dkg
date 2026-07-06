@@ -17,8 +17,6 @@ import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
-  ContextGraphRegistryScanCursorKey,
-  ContextGraphRegistryScanCursorStore,
   V10PublishParams,
   OnChainPublishResult,
   ConvictionReader,
@@ -38,6 +36,7 @@ import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
+import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -625,11 +624,7 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /**
-   * Next unbuffered block for ContextGraphNameRegistry scans, keyed by lowercase
-   * registry address. Read with a reorg buffer; duplicate delivery is harmless.
-   */
-  protected readonly contextGraphRegistryScanWatermarks: Map<string, number> = new Map();
+  protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -639,8 +634,6 @@ export class EVMChainAdapterBase {
   protected readonly kaHighWaterScanPageSize: number;
 
   protected readonly cgRegistryScanPageSize: number;
-
-  protected readonly contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
 
   /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
@@ -656,70 +649,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.contextGraphRegistryScanWatermarks.clear();
-  }
-
-  protected contextGraphRegistryScanCursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
-    return {
-      chainId: this.chainId,
-      deploymentId: this.deploymentId,
-      registryAddress: registryAddress.toLowerCase(),
-    };
-  }
-
-  protected normalizeContextGraphRegistryScanCursor(value: number | undefined): number | undefined {
-    if (value == null) return undefined;
-    if (!Number.isSafeInteger(value) || value <= 0) return undefined;
-    return value;
-  }
-
-  protected async loadContextGraphRegistryScanWatermark(
-    registryAddress: string,
-  ): Promise<number | undefined> {
-    const cacheKey = registryAddress.toLowerCase();
-    const cached = this.normalizeContextGraphRegistryScanCursor(
-      this.contextGraphRegistryScanWatermarks.get(cacheKey),
-    );
-    if (cached != null) return cached;
-
-    if (!this.contextGraphRegistryScanCursorStore) return undefined;
-    try {
-      const persisted = await this.contextGraphRegistryScanCursorStore.load(
-        this.contextGraphRegistryScanCursorKey(cacheKey),
-      );
-      const normalized = this.normalizeContextGraphRegistryScanCursor(persisted);
-      if (normalized != null) {
-        this.contextGraphRegistryScanWatermarks.set(cacheKey, normalized);
-      }
-      return normalized;
-    } catch (err) {
-      console.warn(
-        `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return undefined;
-    }
-  }
-
-  protected async saveContextGraphRegistryScanWatermark(
-    registryAddress: string,
-    nextBlock: number,
-  ): Promise<void> {
-    const normalized = this.normalizeContextGraphRegistryScanCursor(nextBlock);
-    if (normalized == null) return;
-
-    const cacheKey = registryAddress.toLowerCase();
-    this.contextGraphRegistryScanWatermarks.set(cacheKey, normalized);
-    if (!this.contextGraphRegistryScanCursorStore) return;
-    try {
-      await this.contextGraphRegistryScanCursorStore.save(
-        this.contextGraphRegistryScanCursorKey(cacheKey),
-        normalized,
-      );
-    } catch (err) {
-      console.warn(
-        `[chain] ContextGraphNameRegistry scan cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    this.contextGraphRegistryScanCursor.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -758,7 +688,6 @@ export class EVMChainAdapterBase {
       config.cgRegistryScanPageSize,
       CG_REGISTRY_DEFAULT_PAGE_SIZE,
     );
-    this.contextGraphRegistryScanCursorStore = config.contextGraphRegistryScanCursorStore;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).
@@ -929,6 +858,11 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
+      chainId: this.chainId,
+      deploymentId: this.deploymentId,
+      store: config.contextGraphRegistryScanCursorStore,
+    });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

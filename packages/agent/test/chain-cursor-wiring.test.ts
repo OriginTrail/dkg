@@ -31,7 +31,7 @@ describe('DKGAgent chain cursor wiring', () => {
       contextGraphRegistryScanCursorStore: registryCursorStore,
     });
 
-    expect((agent as any).chain.contextGraphRegistryScanCursorStore).toBe(registryCursorStore);
+    expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
   });
 
   it('passes the chain-event lane cursor store into the poller on start', async () => {
