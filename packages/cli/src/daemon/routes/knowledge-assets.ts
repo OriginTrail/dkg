@@ -24,7 +24,7 @@
 // by its lifecycle NAME (the file handle) + `contextGraphId`. Minter-namespaced
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
-import type { InternalRequestContext as RequestContext } from "./context.js";
+import type { RouteRequestContext } from "./context.js";
 import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
 import {
   isPayloadTooLargeError,
@@ -87,7 +87,7 @@ const PREFIX = "/api/knowledge-assets";
 // which `safeDecodeURIComponent` then `validateAssertionName` every name). A
 // B3 read identifier is exempt — it's validated by `classifyKaIdentifier`.
 // Returns the name, or null after writing a 400/error.
-function decodeAndValidateName(seg: string, res: RequestContext["res"]): string | null {
+function decodeAndValidateName(seg: string, res: RouteRequestContext["res"]): string | null {
   if (classifyKaIdentifier(seg).kind === "kaId") return seg;
   const nameVal = validateAssertionName(seg);
   if (!nameVal.valid) {
@@ -100,7 +100,7 @@ function decodeAndValidateName(seg: string, res: RequestContext["res"]): string 
 // Best-effort assertion-activity row + notification SSE for a lifecycle event.
 // Never throws — activity tracking must not break a write/publish path.
 function recordActivityAndNotify(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   input: {
     contextGraphId: string;
     kind: "created" | "promoted" | "published";
@@ -122,7 +122,7 @@ function recordActivityAndNotify(
     /* activity/notification is advisory — never block the lifecycle op */
   }
 }
-function recordPcaDiscount(ctx: RequestContext, contextGraphId: string, onChain: any): void {
+function recordPcaDiscount(ctx: RouteRequestContext, contextGraphId: string, onChain: any): void {
   const cc = onChain?.convictionCostCovered;
   const publisher = onChain?.publisherAddress;
   if (!cc || !publisher) return;
@@ -158,7 +158,7 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
  * carry "Invalid"/"Unsafe" text and must stay 500 (parity with the legacy
  * publish path, which never down-classified them).
  */
-function respondAssertionError(res: RequestContext["res"], e: any): void {
+function respondAssertionError(res: RouteRequestContext["res"], e: any): void {
   if (e?.code === "OVERSIZED_RDF_LITERAL") {
     jsonResponse(res, 400, oversizedRdfLiteralResponseBody(e));
     return;
@@ -267,7 +267,7 @@ function classifyKaIdentifier(
   return { kind: "name" };
 }
 
-function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
+function rejectKaIdMutationIdentifier(seg: string, res: RouteRequestContext["res"]): boolean {
   if (classifyKaIdentifier(seg, { includeCompact: false }).kind !== "kaId") return false;
   jsonResponse(res, 400, {
     code: "KA_ID_MUTATION_UNSUPPORTED",
@@ -278,7 +278,7 @@ function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): 
   return true;
 }
 
-function rejectReservedKaIdentifierName(name: string, res: RequestContext["res"]): boolean {
+function rejectReservedKaIdentifierName(name: string, res: RouteRequestContext["res"]): boolean {
   if (classifyKaIdentifier(name, { includeCompact: false }).kind !== "kaId") return false;
   jsonResponse(res, 400, {
     code: "KA_IDENTIFIER_RESERVED",
@@ -306,7 +306,7 @@ function layerStatus(hist: Record<string, unknown>, layer: "wm" | "swm" | "vm"):
 
 export function resolveFinalizeOptions(
   raw: Record<string, any>,
-  res: RequestContext["res"],
+  res: RouteRequestContext["res"],
   tokenAgentAddress?: string,
 ): Record<string, unknown> | null {
   const {
@@ -409,7 +409,7 @@ function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string 
 }
 
 function resolveBatchRejectionReporterIdentity(
-  ctx: Pick<RequestContext, "agent" | "requestAgentAddress">,
+  ctx: Pick<RouteRequestContext, "agent" | "requestAgentAddress">,
   tokenAgentAddress?: string,
 ): { agentAddress: string; peerId?: string } {
   const agentAddress = tokenAgentAddress || ctx.requestAgentAddress || "unknown";
@@ -436,7 +436,7 @@ function parseExplicitBatchRejectionReporterIdentity(
 }
 
 async function resolveFinalizeStorageLane(
-  agent: RequestContext["agent"],
+  agent: RouteRequestContext["agent"],
   contextGraphId: string,
   name: string,
   finalizeOptions: Record<string, unknown>,
@@ -499,7 +499,7 @@ function classifyVmPublish(pub: unknown): { httpStatus: 200 | 207 | 502; reason?
 // overrides / partial selection are user errors, not silently-ignored fields.
 function validateFinalizedAssertionPublishShape(
   source: Record<string, unknown>,
-  res: RequestContext["res"],
+  res: RouteRequestContext["res"],
 ): boolean {
   if (source.assertionName !== undefined) {
     jsonResponse(res, 400, {
@@ -534,7 +534,7 @@ function validateFinalizedAssertionPublishShape(
 // 500s deep in the publisher. Returns the normalized options, or null after
 // having already written a 400 response (caller must return).
 function resolveFinalizedPublishOptions(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   raw: unknown,
 ): NormalizedFinalizedPublishOptions | null {
   const { res } = ctx;
@@ -547,7 +547,7 @@ function resolveFinalizedPublishOptions(
 }
 
 function resolveInlineVmPublishOptions(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   source: Record<string, unknown>,
 ): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
@@ -555,7 +555,7 @@ function resolveInlineVmPublishOptions(
 }
 
 function resolveStandaloneVmPublishOptions(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   source: Record<string, unknown>,
 ): NormalizedFinalizedPublishOptions | null {
   if (!validateFinalizedAssertionPublishShape(source, ctx.res)) return null;
@@ -566,7 +566,7 @@ function resolveStandaloneVmPublishOptions(
   return resolveFinalizedPublishOptions(ctx, raw);
 }
 
-export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<void> {
+export async function handleKnowledgeAssetsRoutes(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, publisherControl, path, url, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   const method = req.method ?? "GET";

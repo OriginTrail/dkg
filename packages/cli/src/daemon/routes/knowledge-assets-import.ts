@@ -30,7 +30,7 @@ import {
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
 import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
-import type { InternalRequestContext as RequestContext } from "./context.js";
+import type { RouteRequestContext } from "./context.js";
 import {
   jsonResponse,
   readBody,
@@ -81,7 +81,7 @@ type AssertionArtifactResolution = ImportedArtifactResolution & {
 };
 
 type AssertionArtifactFetchResult = Awaited<
-  ReturnType<NonNullable<RequestContext['agent']['fetchAndVerifyAssertionArtifact']>>
+  ReturnType<NonNullable<RouteRequestContext['agent']['fetchAndVerifyAssertionArtifact']>>
 >;
 
 type AssertionArtifactRemoteResult =
@@ -132,7 +132,7 @@ function orderedArtifactCandidatePeers(sourcePeerId: string | undefined, discove
 }
 
 async function discoverArtifactCandidatePeers(
-  agent: RequestContext['agent'],
+  agent: RouteRequestContext['agent'],
   resolved: AssertionArtifactResolution,
 ): Promise<string[]> {
   if (typeof agent.discoverAssertionArtifactCandidates !== 'function') return [];
@@ -146,7 +146,7 @@ async function discoverArtifactCandidatePeers(
 }
 
 async function fetchFirstAvailableAssertionArtifact(
-  agent: RequestContext['agent'],
+  agent: RouteRequestContext['agent'],
   resolved: AssertionArtifactResolution,
   opts: {
     sourcePeerIds: string[];
@@ -184,7 +184,7 @@ async function fetchFirstAvailableAssertionArtifact(
 }
 
 async function resolveAssertionArtifact(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   raw: Record<string, unknown>,
 ): Promise<AssertionArtifactResolution | 'hash_mismatch'> {
   const kind = normalizeAssertionArtifactKind(raw.kind);
@@ -229,7 +229,7 @@ async function resolveAssertionArtifact(
 }
 
 async function resolveExplicitAuthorizedRemoteArtifact(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   raw: Record<string, unknown>,
   kind: AssertionArtifactKind,
   requestedHash: string | undefined,
@@ -281,7 +281,7 @@ function isMissingImportMetadataError(err: unknown): boolean {
 }
 
 function importedArtifactReadOwnerGuard(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   message: string,
 ) {
   return {
@@ -293,7 +293,7 @@ function importedArtifactReadOwnerGuard(
 }
 
 function resolveImportedArtifactForRead(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   raw: Record<string, unknown>,
   message: string,
   opts?: { allowSharedMemoryFallback?: boolean },
@@ -303,7 +303,7 @@ function resolveImportedArtifactForRead(
 
 // POST /api/knowledge-assets/import-artifact/resolve
 // Resolve a completed deterministic import artifact from graph metadata.
-export async function handleKaImportArtifactResolve(ctx: RequestContext): Promise<void> {
+export async function handleKaImportArtifactResolve(ctx: RouteRequestContext): Promise<void> {
   const { req, res } = ctx;
   const body = await readBody(req, SMALL_BODY_BYTES);
   const parsed = safeParseJson(body, res);
@@ -323,7 +323,7 @@ export async function handleKaImportArtifactResolve(ctx: RequestContext): Promis
 
 // POST /api/knowledge-assets/import-artifact/read
 // Generic imported assertion artifact byte reader.
-export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<void> {
+export async function handleKaImportArtifactRead(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, fileStore } = ctx;
   const body = await readBody(req, SMALL_BODY_BYTES);
   const parsed = safeParseJson(body, res);
@@ -483,7 +483,7 @@ export async function handleKaImportArtifactRead(ctx: RequestContext): Promise<v
 
 // POST /api/knowledge-assets/import-artifact/read-markdown
 // Read only the Markdown blob tied to a completed imported assertion.
-export async function handleKaImportArtifactReadMarkdown(ctx: RequestContext): Promise<void> {
+export async function handleKaImportArtifactReadMarkdown(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, fileStore } = ctx;
   const body = await readBody(req, SMALL_BODY_BYTES);
   const parsed = safeParseJson(body, res);
@@ -583,7 +583,7 @@ export async function handleKaImportArtifactReadMarkdown(ctx: RequestContext): P
 
 // POST /api/knowledge-assets/semantic-enrichment/write
 // Write model-derived semantic triples into the completed imported assertion with provenance.
-export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Promise<void> {
+export async function handleKaSemanticEnrichmentWrite(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, requestToken, requestAgentAddress, emitMemoryGraphChanged } = ctx;
   // Mirror the legacy assertion-route preflight: resolve the caller agent
   // from the bearer token so `resolveRequiredWriteContextGraphId` validates
@@ -699,7 +699,7 @@ export async function handleKaSemanticEnrichmentWrite(ctx: RequestContext): Prom
 // side-effects, 400/409/413/415 error mapping, and response shape. The
 // dispatcher passes the already-decoded `name`; the validateAssertionName check
 // mirrors the legacy entry exactly.
-export async function handleKaImportFile(ctx: RequestContext, name: string): Promise<void> {
+export async function handleKaImportFile(ctx: RouteRequestContext, name: string): Promise<void> {
   const {
     req,
     res,
@@ -2230,7 +2230,7 @@ export async function handleKaImportFile(ctx: RequestContext, name: string): Pro
 // (daemon/routes/assertion.ts): identical name + contextGraphId + subGraphName
 // validation, extractionStatus map lookup, 404 mapping, and response shape. The
 // dispatcher passes the already-decoded `name`.
-export async function handleKaExtractionStatus(ctx: RequestContext, name: string): Promise<void> {
+export async function handleKaExtractionStatus(ctx: RouteRequestContext, name: string): Promise<void> {
   const { res, url, extractionStatus, requestAgentAddress } = ctx;
   const assertionName = name;
   const nameVal = validateAssertionName(assertionName);

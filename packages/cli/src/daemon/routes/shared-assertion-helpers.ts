@@ -31,7 +31,7 @@ import {
   isValidContextGraphId,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 const DKG_ONTOLOGY = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -573,7 +573,7 @@ export function handleImportArtifactRouteError(res: ServerResponse, err: unknown
 }
 
 export async function resolveImportedArtifact(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   raw: Record<string, unknown>,
   ownerGuard?: {
     requestAgentAddress: string;

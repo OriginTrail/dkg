@@ -15,11 +15,11 @@
 // inline for a curated MIME allowlist (never text/html or image/svg+xml,
 // the stored-XSS vectors); everything else is forced to download as
 // opaque application/octet-stream.
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import { jsonResponse, safeDecodeURIComponent } from '../http-utils.js';
 import { normalizeDetectedContentType } from '../manifest.js';
 
-export async function handleFileServingRoutes(ctx: RequestContext): Promise<void> {
+export async function handleFileServingRoutes(ctx: RouteRequestContext): Promise<void> {
   const { req, res, path, url, fileStore } = ctx;
 
   // GET /api/file/:hash — serve a stored file by its content hash.

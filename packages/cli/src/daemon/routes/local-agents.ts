@@ -319,10 +319,10 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 
-export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
+export async function handleLocalAgentsRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

@@ -20,9 +20,9 @@ import { createDashboardSessionAuthSource } from '../src/daemon/dashboard-sessio
 import {
   DASHBOARD_SESSION_COOKIE,
 } from '../src/daemon/dashboard-session-cookie.js';
-import { resolveDashboardSseSession } from '../src/daemon/dashboard-sse-session.js';
+import { resolveDashboardSseSession, resolveDashboardSseSessionFromAuthContext } from '../src/daemon/dashboard-sse-session.js';
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
-import { resolveRequestPrincipal, resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
+import { resolveRequestPrincipal, resolveRouteRequestIdentity, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -373,6 +373,32 @@ describe('resolveRouteRequestIdentity', () => {
     });
   });
 
+  it('keeps explicit auth-context resolution separate from the legacy request fallback', () => {
+    const req = { headers: {} } as IncomingMessage;
+    setRequestAuthContext(req, {
+      source: 'dashboard-session',
+      internalCredentialToken: 'agent-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
+      csrf: { required: false, validated: false },
+      dashboardSession: {
+        sessionId: 'session-a',
+        source: 'login',
+        expiresAt: Date.now() + 60_000,
+      },
+    });
+
+    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+      credentialToken: 'agent-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
+      requestAuth: { source: 'dashboard-session' },
+    });
+    expect(resolveRouteRequestIdentityFromAuthContext(req, agent, undefined)).toMatchObject({
+      credentialToken: undefined,
+      principal: { kind: 'node-admin', agentAddress: 'did:dkg:agent:default' },
+      requestAuth: undefined,
+    });
+  });
+
   it('uses the canonical principal helper for token-backed and node-admin callers', () => {
     expect(resolveRequestPrincipal(agent, 'agent-token')).toEqual({
       kind: 'agent',
@@ -458,13 +484,35 @@ describe('httpAuthGuard', () => {
         authSources,
       });
       if (!authResult.allowed) return;
-      res.writeHead(200, { 'Content-Type': 'application/json' });
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const requestAuth = getRequestAuthContext(req) ?? null;
+      if (url.searchParams.get('poisonRequestAuthContext') === '1') {
+        setRequestAuthContext(req, {
+          source: 'dashboard-session',
+          internalCredentialToken: 'poison-token',
+          principal,
+          csrf: { required: false, validated: false },
+          dashboardSession: {
+            sessionId: 'poison-session',
+            source: 'login',
+            expiresAt: 1,
+          },
+        });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         ok: true,
-        requestAuth: getRequestAuthContext(req) ?? null,
+        requestAuth,
+        requestAuthAfterPoison: getRequestAuthContext(req) ?? null,
         authResultContext: authResult.requestAuthContext ?? null,
         dashboardSseSession: url.pathname === '/api/events'
+          ? resolveDashboardSseSessionFromAuthContext(
+            req,
+            authenticateDashboardSessionForSse,
+            authResult.requestAuthContext,
+          ) ?? null
+          : null,
+        legacyDashboardSseSession: url.pathname === '/api/events'
           ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
           : null,
       }));
@@ -701,6 +749,41 @@ describe('httpAuthGuard', () => {
       compatToken: VALID_TOKEN,
       credentialFingerprint: 'credential-fingerprint-1',
     });
+  });
+
+  it('threads authResult dashboard SSE metadata without trusting a later request-attached context', async () => {
+    const store = new DashboardSessionStore();
+    const created = store.createLoginSession(VALID_TOKEN, 'credential-fingerprint-1');
+    authenticateDashboardSessionForSse = (req) => authenticateDashboardSessionRequest(req, store, {
+      dashboardLogin: {
+        isCredentialFingerprintCurrent: () => true,
+      },
+    });
+    authSources = [
+      createDashboardSessionAuthSource({
+        authenticate: authenticateDashboardSessionForSse,
+        resolvePrincipal: () => principal,
+        verifyCsrf: () => true,
+      }),
+    ];
+
+    const res = await fetch(`${baseUrl}/api/events?poisonRequestAuthContext=1`, {
+      headers: {
+        Cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.requestAuth.dashboardSession.sessionId).toBe(created.sessionId);
+    expect(body.requestAuthAfterPoison.dashboardSession.sessionId).toBe('poison-session');
+    expect(body.dashboardSseSession).toMatchObject({
+      sessionId: created.sessionId,
+      expiresAt: created.record.expiresAt,
+      compatToken: VALID_TOKEN,
+      credentialFingerprint: 'credential-fingerprint-1',
+    });
+    expect(body.legacyDashboardSseSession).toBeNull();
   });
 
   it('rejects stale password-login dashboard sessions before opening /api/events', async () => {

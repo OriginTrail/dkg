@@ -13,7 +13,7 @@
 
 import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
@@ -47,7 +47,7 @@ const SCOPED_MARK_ALL_LIMIT = Number.MAX_SAFE_INTEGER;
  * holds even when `httpAuthGuard` is disabled (loopback owner mode), which is
  * the only path where an anonymous caller reaches dispatch.
  */
-function resolveScopedCaller(ctx: RequestContext): string | undefined {
+function resolveScopedCaller(ctx: RouteRequestContext): string | undefined {
   // Fail closed for a genuinely TOKENLESS caller (Codex B1: never hand an
   // anonymous loopback caller the node default agent's feed). When auth is
   // enabled, httpAuthGuard already 401s tokenless requests before dispatch, so
@@ -73,7 +73,7 @@ interface CallerScope {
 }
 
 /** Resolve the caller's member + curated CG sets (+ display names). */
-async function resolveCallerScope(ctx: RequestContext, callerAddress: string): Promise<CallerScope> {
+async function resolveCallerScope(ctx: RouteRequestContext, callerAddress: string): Promise<CallerScope> {
   const cgs = await ctx.agent.listContextGraphs({ callerAgentAddress: callerAddress });
   const memberCgIds = new Set<string>();
   const curatedCgIds = new Set<string>();
@@ -100,7 +100,7 @@ const CONFIRMATION_READ_LIMIT = 200;
  * Read them by type, then keep only the rows whose meta.agentAddress is the
  * caller (multi-agent-node safety; scopeNotifications enforces the same).
  */
-function callerConfirmationRows(ctx: RequestContext, callerAddress: string) {
+function callerConfirmationRows(ctx: RouteRequestContext, callerAddress: string) {
   return ctx.dashDb.getNotificationsOfTypes(CONFIRMATION_TYPES, CONFIRMATION_READ_LIMIT).filter((r) => {
     let metaAddr: unknown;
     try {
@@ -123,11 +123,11 @@ function callerConfirmationRows(ctx: RequestContext, callerAddress: string) {
  * out of the 200-window → hidden + unmarkable (#1365 round-2). The SQL already
  * filters to the caller's wallet, so no JS post-filter is needed.
  */
-function callerPcaDiscountRows(ctx: RequestContext, callerAddress: string) {
+function callerPcaDiscountRows(ctx: RouteRequestContext, callerAddress: string) {
   return ctx.dashDb.getPcaCostCoveredRowsForWallet(callerAddress, CONFIRMATION_READ_LIMIT);
 }
 
-export async function handleNotificationRoutes(ctx: RequestContext): Promise<void> {
+export async function handleNotificationRoutes(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, dashDb, path } = ctx;
 
   // GET /api/notifications — scoped to the caller's member CGs.

@@ -321,7 +321,7 @@ import {
 } from '../local-agents.js';
 
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
@@ -414,7 +414,7 @@ export interface AgentIdentityRouteContext {
   res: ServerResponse;
   agent: AgentIdentityRouteAgent;
   path: string;
-  requestIdentity: RequestContext['requestIdentity'];
+  requestIdentity: RouteRequestContext['requestIdentity'];
 }
 
 export function handleAgentIdentityRoute(ctx: AgentIdentityRouteContext): boolean {
@@ -436,7 +436,7 @@ export function handleAgentIdentityRoute(ctx: AgentIdentityRouteContext): boolea
   return true;
 }
 
-export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> {
+export async function handleAgentChatRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

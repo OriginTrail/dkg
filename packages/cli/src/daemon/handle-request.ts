@@ -312,7 +312,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { InternalRequestContext, MemoryGraphChangedEvent, NotificationSseEvent } from './routes/context.js';
+import type { RouteRequestContext, MemoryGraphChangedEvent, NotificationSseEvent } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -331,7 +331,7 @@ import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
-import { resolveRouteRequestIdentity } from './route-request-identity.js';
+import { resolveRouteRequestIdentityFromAuthContext } from './route-request-identity.js';
 
 
 export async function handleRequest(
@@ -372,12 +372,12 @@ export async function handleRequest(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  const requestIdentity = resolveRouteRequestIdentity(req, agent, requestAuthContext);
+  const requestIdentity = resolveRouteRequestIdentityFromAuthContext(req, agent, requestAuthContext);
   const requestAuth = requestIdentity.requestAuth;
   const requestToken = requestIdentity.credentialToken;
   const requestAgentAddress = requestIdentity.principal.agentAddress;
 
-  const ctx: InternalRequestContext = {
+  const ctx: RouteRequestContext = {
     req,
     res,
     agent,

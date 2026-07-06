@@ -146,7 +146,7 @@ import {
   httpAuthGuardResult,
   reconcileValidTokens,
 } from '../auth.js';
-import { resolveDashboardSseSession } from './dashboard-sse-session.js';
+import { resolveDashboardSseSessionFromAuthContext } from './dashboard-sse-session.js';
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
@@ -3163,7 +3163,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveDashboardSseSession(
+        const dashboardSession = resolveDashboardSseSessionFromAuthContext(
           req,
           authenticateDashboardSession,
           authResult.requestAuthContext,

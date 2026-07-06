@@ -7,14 +7,11 @@ export type DashboardSseSessionAuthenticator = (
   req: IncomingMessage,
 ) => AuthenticatedDashboardSession | null;
 
-export function resolveDashboardSseSession(
+export function resolveDashboardSseSessionFromAuthContext(
   req: IncomingMessage,
   authenticateDashboardSession: DashboardSseSessionAuthenticator,
-  requestAuthContext?: RequestAuthContext,
+  requestAuth: RequestAuthContext | undefined,
 ): SseDashboardSession | undefined {
-  const requestAuth = arguments.length >= 3
-    ? requestAuthContext
-    : getRequestAuthContext(req);
   if (requestAuth?.source !== "dashboard-session") return undefined;
   const activeSession = authenticateDashboardSession(req);
   if (
@@ -32,4 +29,11 @@ export function resolveDashboardSseSession(
       ? { credentialFingerprint: activeSession.credentialFingerprint }
       : {}),
   };
+}
+
+export function resolveDashboardSseSession(
+  req: IncomingMessage,
+  authenticateDashboardSession: DashboardSseSessionAuthenticator,
+): SseDashboardSession | undefined {
+  return resolveDashboardSseSessionFromAuthContext(req, authenticateDashboardSession, getRequestAuthContext(req));
 }

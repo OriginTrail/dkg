@@ -2,13 +2,13 @@
 // throws → 500 PluginError before response start, else destroy the socket so a truncated body isn't seen as 200.
 
 import { jsonResponse } from '../http-utils.js';
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
-function responseStarted(res: RequestContext['res']): boolean {
+function responseStarted(res: RouteRequestContext['res']): boolean {
   return res.writableEnded || res.headersSent;
 }
 
-export async function handlePluginRoutes(ctx: RequestContext): Promise<void> {
+export async function handlePluginRoutes(ctx: RouteRequestContext): Promise<void> {
   for (const plugin of ctx.routePlugins) {
     if (responseStarted(ctx.res)) return;
     try {

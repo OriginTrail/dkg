@@ -320,7 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { InternalRequestContext as RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -394,12 +394,16 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+export interface ContextGraphSignJoinRouteAgent {
+  signJoinRequest(contextGraphId: string, agentAddress: string): Promise<{ agentAddress: string }>;
+}
+
 export interface ContextGraphSignJoinRouteContext {
   req: IncomingMessage;
   res: ServerResponse;
-  agent: RequestContext['agent'];
+  agent: ContextGraphSignJoinRouteAgent;
   path: string;
-  requestIdentity: RequestContext['requestIdentity'];
+  requestIdentity: RouteRequestContext['requestIdentity'];
 }
 
 export async function handleContextGraphSignJoinRoute(
@@ -433,7 +437,7 @@ export async function handleContextGraphSignJoinRoute(
   return true;
 }
 
-export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
+export async function handleContextGraphRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,
