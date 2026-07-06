@@ -18,7 +18,7 @@
 import { ethers } from 'ethers';
 import { jsonResponse, readBody, SMALL_BODY_BYTES, respondIfChainRpcTransportError } from '../http-utils.js';
 import type { ServerResponse } from 'node:http';
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 const FEATURE_UNAVAILABLE_503 = {
   error:

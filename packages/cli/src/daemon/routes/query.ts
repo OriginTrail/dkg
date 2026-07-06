@@ -323,7 +323,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in

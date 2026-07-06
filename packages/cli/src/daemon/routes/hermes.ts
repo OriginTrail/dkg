@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 import {
   jsonResponse,
   readBody,

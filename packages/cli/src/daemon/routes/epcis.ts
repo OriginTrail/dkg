@@ -320,7 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 type ResolveOk<T> = { ok: true; value: T };
 type ResolveErr = { ok: false; status: number; body: object };

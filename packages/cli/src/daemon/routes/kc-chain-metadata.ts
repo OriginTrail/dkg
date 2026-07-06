@@ -7,7 +7,7 @@
 // surface), extracted verbatim out of the retired routes/assertion.ts so the
 // assertion→knowledge-assets migration could delete that file. The `/api/kc`
 // prefix and exact response shapes are preserved unchanged.
-import type { RequestContext } from "./context.js";
+import type { InternalRequestContext as RequestContext } from "./context.js";
 import { jsonResponse } from "../http-utils.js";
 
 export async function handleKcChainMetadataRoutes(ctx: RequestContext): Promise<void> {

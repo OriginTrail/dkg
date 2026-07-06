@@ -320,7 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -399,20 +399,20 @@ export interface ContextGraphSignJoinRouteContext {
   res: ServerResponse;
   agent: RequestContext['agent'];
   path: string;
-  requestAgentAddress: string;
+  requestIdentity: RequestContext['requestIdentity'];
 }
 
 export async function handleContextGraphSignJoinRoute(
   ctx: ContextGraphSignJoinRouteContext,
 ): Promise<boolean> {
-  const { req, res, agent, path, requestAgentAddress } = ctx;
+  const { req, res, agent, path, requestIdentity } = ctx;
 
   const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
   if (req.method !== "POST" || !signJoinMatch) return false;
 
   const contextGraphId = decodeURIComponent(signJoinMatch[1]);
   try {
-    const callerAddress = requestAgentAddress;
+    const callerAddress = requestIdentity.principal.agentAddress;
     try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
     const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
     jsonResponse(res, 200, {
@@ -1122,7 +1122,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  if (await handleContextGraphSignJoinRoute({ req, res, agent, path, requestAgentAddress })) return;
+  if (await handleContextGraphSignJoinRoute(ctx)) return;
 
   // ── Phase 8: project-manifest publish + install (UI-driven) ───────
   //

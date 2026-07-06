@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard } from '../auth.js';
+import { loadTokens, httpAuthGuard, type RequestAuthContext } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -312,7 +312,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import type { InternalRequestContext, MemoryGraphChangedEvent, NotificationSseEvent } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -365,18 +365,19 @@ export async function handleRequest(
   apiPortRef: { value: number },
   routePlugins: RoutePlugin[],
   admission: AdmissionStatsView,
+  requestAuthContext: RequestAuthContext | undefined,
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
   emitNotification?: (event: NotificationSseEvent) => void,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  const requestIdentity = resolveRouteRequestIdentity(req, agent);
+  const requestIdentity = resolveRouteRequestIdentity(req, agent, requestAuthContext);
   const requestAuth = requestIdentity.requestAuth;
   const requestToken = requestIdentity.credentialToken;
   const requestAgentAddress = requestIdentity.principal.agentAddress;
 
-  const ctx: RequestContext = {
+  const ctx: InternalRequestContext = {
     req,
     res,
     agent,

@@ -108,3 +108,7 @@ export interface RequestContext {
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;
 }
+
+export type InternalRequestContext = Omit<RequestContext, 'requestIdentity'> & {
+  requestIdentity: RouteRequestIdentity;
+};

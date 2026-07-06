@@ -13,7 +13,7 @@
 
 import { scopeNotifications, type NotificationScopeContext } from '@origintrail-official/dkg-node-ui';
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 const AGENT_DID_PREFIX = 'did:dkg:agent:';
 const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;

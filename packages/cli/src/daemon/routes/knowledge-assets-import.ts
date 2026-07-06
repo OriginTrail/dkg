@@ -30,7 +30,7 @@ import {
   verifyDkgContentHash,
 } from "@origintrail-official/dkg-core";
 import { findReservedSubjectPrefix, isSkolemizedUri, listAssertionScopedGraphUris } from "@origintrail-official/dkg-publisher";
-import type { RequestContext } from "./context.js";
+import type { InternalRequestContext as RequestContext } from "./context.js";
 import {
   jsonResponse,
   readBody,

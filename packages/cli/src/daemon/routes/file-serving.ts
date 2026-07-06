@@ -15,7 +15,7 @@
 // inline for a curated MIME allowlist (never text/html or image/svg+xml,
 // the stored-XSS vectors); everything else is forced to download as
 // opaque application/octet-stream.
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 import { jsonResponse, safeDecodeURIComponent } from '../http-utils.js';
 import { normalizeDetectedContentType } from '../manifest.js';
 

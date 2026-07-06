@@ -16,7 +16,7 @@ import {
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
 } from '../http-utils.js';
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 
 const ZERO = '0x0000000000000000000000000000000000000000';

@@ -31,7 +31,7 @@ import {
   isValidContextGraphId,
 } from '../http-utils.js';
 import { getExtractionStatusRecord } from '../../extraction-status.js';
-import type { RequestContext } from './context.js';
+import type { InternalRequestContext as RequestContext } from './context.js';
 
 const DKG_ONTOLOGY = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';

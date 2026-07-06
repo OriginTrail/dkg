@@ -25,8 +25,11 @@ export function resolveRequestPrincipal(
 export function resolveRouteRequestIdentity(
   req: IncomingMessage,
   agent: RouteIdentityAgent,
+  requestAuthContext?: RequestAuthContext,
 ): RouteRequestIdentity {
-  const requestAuth = getRequestAuthContext(req);
+  const requestAuth = arguments.length >= 3
+    ? requestAuthContext
+    : getRequestAuthContext(req);
   const credentialToken = requestAuth?.source === "dashboard-session"
     ? requestAuth.internalCredentialToken
     : requestAuth?.token ?? extractBearerToken(req.headers.authorization);

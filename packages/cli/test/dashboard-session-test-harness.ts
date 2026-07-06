@@ -9,10 +9,8 @@ import {
   verifyDashboardCsrf,
   type DashboardLoginOptions,
 } from '../src/daemon/dashboard-session.js';
-import { getRequestAuthContext, httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
-import { handleAgentIdentityRoute } from '../src/daemon/routes/agent-chat.js';
-import { handleContextGraphSignJoinRoute } from '../src/daemon/routes/context-graph.js';
-import { resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
+import { httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
+import { handleRequest } from '../src/daemon/handle-request.js';
 
 export const VALID_TOKEN = 'dashboard-backed-token';
 export const ROTATED_TOKEN = 'dashboard-rotated-token';
@@ -97,25 +95,43 @@ export async function startDashboardSessionServer(options: {
       url.pathname === '/api/agent/identity' ||
       /^\/api\/context-graph\/[^/]+\/sign-join$/.test(url.pathname)
     ) {
-      const requestIdentity = resolveRouteRequestIdentity(req, agent);
-      const routeContext = {
+      await handleRequest(
         req,
         res,
-        agent,
-        path: url.pathname,
-        requestAgentAddress: requestIdentity.principal.agentAddress,
-      };
-      if (handleAgentIdentityRoute(routeContext)) return;
-      if (await handleContextGraphSignJoinRoute(routeContext)) return;
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
+        agent as any,
+        {} as any,
+        null,
+        { nodeRole: 'edge' } as any,
+        Date.now(),
+        {} as any,
+        { wallets: [] } as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        undefined,
+        'test-node-version',
+        'test-node-commit',
+        {} as any,
+        {} as any,
+        {} as any,
+        new Map(),
+        new Map(),
+        {} as any,
+        null,
+        validTokens,
+        '127.0.0.1',
+        { value: 0 },
+        [],
+        { inFlight: 0, max: 0, rejectedTotal: 0 },
+        authResult.requestAuthContext,
+      );
       return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
       authorization: req.headers.authorization ?? null,
-      requestAuth: getRequestAuthContext(req) ?? null,
+      requestAuth: authResult.requestAuthContext ?? null,
     }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
