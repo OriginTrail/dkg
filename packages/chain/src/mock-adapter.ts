@@ -481,6 +481,12 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  async *scanContextGraphRegistryPages(
+    _options: import('./chain-adapter.js').ContextGraphRegistryScanOptions,
+  ): AsyncIterable<import('./chain-adapter.js').ContextGraphRegistryScanPage> {
+    return;
+  }
+
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     return false;
   }

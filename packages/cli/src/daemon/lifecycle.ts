@@ -64,6 +64,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
+  buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
   type ApprovalPolicy,
@@ -93,6 +94,8 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -673,14 +676,17 @@ export function shouldUseIncrementalChainDiscoveryScan(input: {
 }
 
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
   run?: number;
   fullScanEvery?: number;
+  pageBudget?: number;
 }):
-  | { incremental: true }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  | { mode: 'incremental'; pageBudget: number }
+  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
+  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
   if (
@@ -690,11 +696,59 @@ export function chainDiscoveryScanOptions(input: {
   ) {
     fullScanEvery = Math.floor(configuredFullScanEvery);
   }
+  const configuredPageBudget = input.pageBudget;
+  const pageBudget = (
+    typeof configuredPageBudget === 'number' &&
+    Number.isFinite(configuredPageBudget) &&
+    configuredPageBudget >= 1
+  )
+    ? Math.floor(configuredPageBudget)
+    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
   const run = input.run ?? 0;
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  if (periodicFullResync) {
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
+  }
   return input.watermarkSeeded && !periodicFullResync
-    ? { incremental: true }
-    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+    ? { mode: 'incremental', pageBudget }
+    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+}
+
+export function createChainDiscoveryScanRunner(input: {
+  agent: {
+    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
+    discoverContextGraphsFromChain(
+      options: ReturnType<typeof chainDiscoveryScanOptions>,
+    ): Promise<number>;
+  };
+  log: (msg: string) => void;
+  pageBudget?: number;
+  fullScanEvery?: number;
+}): () => Promise<void> {
+  let runs = 0;
+  let inFlight = false;
+  return async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const run = runs++;
+      const found = await input.agent.discoverContextGraphsFromChain(
+        chainDiscoveryScanOptions({
+          run,
+          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
+          pageBudget: input.pageBudget,
+          fullScanEvery: input.fullScanEvery,
+        }),
+      );
+      if (found > 0) {
+        input.log(`Chain scan: discovered ${found} new context graph(s)`);
+      }
+    } catch {
+      /* non-critical */
+    } finally {
+      inFlight = false;
+    }
+  };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1397,6 +1451,16 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  const chainCursorScope = chainBase?.type === 'mock'
+    ? (chainBase.chainId ?? 'mock:31337')
+    : chainBase?.hubAddress
+      ? buildEvmDeploymentId({
+          chainId: chainBase.chainId ?? 'evm:31337',
+          hubAddress: chainBase.hubAddress,
+        })
+      : chainBase?.chainId
+        ? `${chainBase.chainId}:hub=none`
+        : 'none:hub=none';
 
   if (role === 'core' && config.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())
@@ -1446,6 +1510,8 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
+  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1528,6 +1594,8 @@ export async function runDaemonInner(
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     syncCheckpointStore,
+    chainEventCursorStore,
+    contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2024,22 +2092,11 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  let chainScanRuns = 0;
-  const runChainDiscoveryScan = async () => {
-    try {
-      const run = chainScanRuns++;
-      const found = await agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions({
-          run,
-          watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-        }),
-      );
-      if (found > 0)
-        log(`Chain scan: discovered ${found} new context graph(s)`);
-    } catch {
-      /* non-critical */
-    }
-  };
+  const runChainDiscoveryScan = createChainDiscoveryScanRunner({
+    agent,
+    log,
+    pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  });
   setTimeout(runChainDiscoveryScan, 15_000);
   const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();

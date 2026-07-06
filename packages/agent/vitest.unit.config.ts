@@ -39,6 +39,7 @@ export default defineConfig({
       "test/swm-fanout-peer-selection.test.ts",
       "test/publish-literal-size.test.ts",
       "test/verify-batch.test.ts",
+      "test/chain-cursor-wiring.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
