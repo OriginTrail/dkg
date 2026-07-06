@@ -312,7 +312,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from './local-agents.js';
-import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } from './routes/context.js';
+import type { RouteRequestContext, MemoryGraphChangedEvent, NotificationSseEvent } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -331,7 +331,7 @@ import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
-import { resolveRouteRequestIdentity } from './route-request-identity.js';
+import type { RouteRequestIdentity } from './route-request-identity.js';
 
 
 export async function handleRequest(
@@ -365,18 +365,18 @@ export async function handleRequest(
   apiPortRef: { value: number },
   routePlugins: RoutePlugin[],
   admission: AdmissionStatsView,
+  requestIdentity: RouteRequestIdentity,
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
   emitNotification?: (event: NotificationSseEvent) => void,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  const requestIdentity = resolveRouteRequestIdentity(req, agent);
   const requestAuth = requestIdentity.requestAuth;
   const requestToken = requestIdentity.credentialToken;
   const requestAgentAddress = requestIdentity.principal.agentAddress;
 
-  const ctx: RequestContext = {
+  const ctx: RouteRequestContext = {
     req,
     res,
     agent,

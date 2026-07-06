@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import { getRequestAuthContext } from "../auth.js";
+import { getRequestAuthContext, type RequestAuthContext } from "../auth.js";
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import type { SseDashboardSession } from "./sse-hub.js";
 
@@ -7,11 +7,11 @@ export type DashboardSseSessionAuthenticator = (
   req: IncomingMessage,
 ) => AuthenticatedDashboardSession | null;
 
-export function resolveDashboardSseSession(
+export function resolveDashboardSseSessionFromAuthContext(
   req: IncomingMessage,
   authenticateDashboardSession: DashboardSseSessionAuthenticator,
+  requestAuth: RequestAuthContext | undefined,
 ): SseDashboardSession | undefined {
-  const requestAuth = getRequestAuthContext(req);
   if (requestAuth?.source !== "dashboard-session") return undefined;
   const activeSession = authenticateDashboardSession(req);
   if (
@@ -29,4 +29,11 @@ export function resolveDashboardSseSession(
       ? { credentialFingerprint: activeSession.credentialFingerprint }
       : {}),
   };
+}
+
+export function resolveDashboardSseSessionFromAttachedAuthContext(
+  req: IncomingMessage,
+  authenticateDashboardSession: DashboardSseSessionAuthenticator,
+): SseDashboardSession | undefined {
+  return resolveDashboardSseSessionFromAuthContext(req, authenticateDashboardSession, getRequestAuthContext(req));
 }

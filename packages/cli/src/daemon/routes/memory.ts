@@ -332,7 +332,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
@@ -471,7 +471,7 @@ function uniquePeerIds(peerIds: readonly string[]): string[] {
   return out;
 }
 
-export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
+export async function handleMemoryRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

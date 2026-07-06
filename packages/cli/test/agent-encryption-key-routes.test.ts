@@ -1,14 +1,15 @@
 // Tests for the encryption-key management HTTP routes added in PR #540.
 //
 // All three routes are exercised through `handleAgentChatRoutes` with a
-// hand-rolled `RequestContext` — same pattern as `daemon-pca-routes.test.ts`.
+// hand-rolled `RouteRequestContext` — same pattern as `daemon-pca-routes.test.ts`.
 // We only populate the fields the new routes actually touch, so any
 // accidental dependency on the wider ctx surface would surface as an
 // undefined-property crash and we'd notice.
 
 import { describe, it, expect } from 'vitest';
 import { handleAgentChatRoutes } from '../src/daemon/routes/agent-chat.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '' };
@@ -47,10 +48,9 @@ function runCtx(
     agent,
     path: url.pathname,
     url,
-    requestToken,
-    requestAgentAddress,
+    ...testRouteIdentityFields({ token: requestToken, agentAddress: requestAgentAddress }),
     validTokens: new Set<string>(),
-  } as unknown as RequestContext;
+  } as unknown as RouteRequestContext;
   return { res, done: handleAgentChatRoutes(ctx) };
 }
 

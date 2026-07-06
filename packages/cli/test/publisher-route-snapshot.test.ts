@@ -10,7 +10,8 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, FileWorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const CONTEXT_GRAPH = 'publisher-route-snapshot';
 const ENTITY = 'urn:publisher-route:snapshot:entity';
@@ -83,43 +84,42 @@ function createContext(
   method: 'GET' | 'POST',
   path: string,
   body: unknown,
-  publisherControl: RequestContext['publisherControl'],
-): RequestContext {
+  publisherControl: RouteRequestContext['publisherControl'],
+): RouteRequestContext {
   const url = new URL(`http://127.0.0.1${path}`);
   return {
     req: createRequest(method, path, body),
     res: createResponse() as unknown as ServerResponse,
-    agent: {} as RequestContext['agent'],
+    agent: {} as RouteRequestContext['agent'],
     publisherControl,
     publisherRuntime: null,
-    config: {} as RequestContext['config'],
+    config: {} as RouteRequestContext['config'],
     startedAt: 0,
-    dashDb: {} as RequestContext['dashDb'],
-    opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],
-    network: null as RequestContext['network'],
-    tracker: {} as RequestContext['tracker'],
-    memoryManager: {} as RequestContext['memoryManager'],
+    dashDb: {} as RouteRequestContext['dashDb'],
+    opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RouteRequestContext['opWallets'],
+    network: null as RouteRequestContext['network'],
+    tracker: {} as RouteRequestContext['tracker'],
+    memoryManager: {} as RouteRequestContext['memoryManager'],
     bridgeAuthToken: undefined,
     nodeVersion: 'test',
     nodeCommit: 'test',
-    catchupTracker: {} as RequestContext['catchupTracker'],
-    extractionRegistry: {} as RequestContext['extractionRegistry'],
-    fileStore: {} as RequestContext['fileStore'],
+    catchupTracker: {} as RouteRequestContext['catchupTracker'],
+    extractionRegistry: {} as RouteRequestContext['extractionRegistry'],
+    fileStore: {} as RouteRequestContext['fileStore'],
     extractionStatus: new Map(),
     assertionImportLocks: new Map(),
-    vectorStore: {} as RequestContext['vectorStore'],
+    vectorStore: {} as RouteRequestContext['vectorStore'],
     embeddingProvider: null,
     validTokens: new Set(),
     apiHost: '127.0.0.1',
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: '0x0',
+    ...testRouteIdentityFields({ agentAddress: '0x0' }),
   };
 }
 
-function createRequest(method: 'GET' | 'POST', path: string, body: unknown): RequestContext['req'] {
+function createRequest(method: 'GET' | 'POST', path: string, body: unknown): RouteRequestContext['req'] {
   const payload = body === undefined ? [] : [Buffer.from(JSON.stringify(body))];
   const request = Readable.from(payload);
   Object.assign(request, {
@@ -127,7 +127,7 @@ function createRequest(method: 'GET' | 'POST', path: string, body: unknown): Req
     url: path,
     headers: { host: '127.0.0.1' },
   });
-  return request as RequestContext['req'];
+  return request as RouteRequestContext['req'];
 }
 
 function createResponse() {
@@ -149,10 +149,10 @@ function createResponse() {
   };
 }
 
-function responseStatus(ctx: RequestContext): number {
+function responseStatus(ctx: RouteRequestContext): number {
   return (ctx.res as unknown as { statusCode: number }).statusCode;
 }
 
-function responseBody(ctx: RequestContext): Record<string, unknown> {
+function responseBody(ctx: RouteRequestContext): Record<string, unknown> {
   return JSON.parse((ctx.res as unknown as { body: string }).body) as Record<string, unknown>;
 }

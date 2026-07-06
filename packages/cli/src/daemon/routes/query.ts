@@ -323,7 +323,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 
 // Keep these in sync with VerifyCollector's hard enforcement in
@@ -358,7 +358,7 @@ function parseVerifyTimeoutMs(
 }
 
 
-export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
+export async function handleQueryRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

@@ -146,7 +146,7 @@ import {
   httpAuthGuardResult,
   reconcileValidTokens,
 } from '../auth.js';
-import { resolveDashboardSseSession } from './dashboard-sse-session.js';
+import { resolveDashboardSseSessionFromAuthContext } from './dashboard-sse-session.js';
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
@@ -402,6 +402,7 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
+import { resolveRouteRequestIdentityFromAuthContext } from './route-request-identity.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import {
@@ -3163,7 +3164,11 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveDashboardSseSession(req, authenticateDashboardSession);
+        const dashboardSession = resolveDashboardSseSessionFromAuthContext(
+          req,
+          authenticateDashboardSession,
+          authResult.requestAuthContext,
+        );
         res.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache",
@@ -3248,6 +3253,12 @@ export async function runDaemonInner(
       });
       if (handled) return;
 
+      const requestIdentity = resolveRouteRequestIdentityFromAuthContext(
+        req,
+        agent,
+        authResult.requestAuthContext,
+      );
+
       await handleRequest(
         req,
         res,
@@ -3276,6 +3287,7 @@ export async function runDaemonInner(
         apiPortRef,
         routePlugins,
         admissionStats,
+        requestIdentity,
         emitMemoryGraphChanged,
         emitNotification,
       );

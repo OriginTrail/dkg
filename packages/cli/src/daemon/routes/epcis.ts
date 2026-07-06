@@ -320,7 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 type ResolveOk<T> = { ok: true; value: T };
 type ResolveErr = { ok: false; status: number; body: object };
@@ -392,7 +392,7 @@ function resolveSubGraphName(input: unknown): ResolveResult<string | undefined> 
   return { ok: true, value: input };
 }
 
-export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
+export async function handleEpcisRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

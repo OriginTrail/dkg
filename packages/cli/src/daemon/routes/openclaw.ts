@@ -323,7 +323,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 function isOpenClawBridgeTimeoutError(err: any): boolean {
   const message = String(err?.message ?? err ?? '');
@@ -422,7 +422,7 @@ function buildOpenClawAgentTimeoutBody(
 }
 
 
-export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
+export async function handleOpenclawRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

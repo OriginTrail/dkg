@@ -13,7 +13,7 @@
 //      to `chain.getLatestMerkleRootAuthor` — same one-line passthrough
 //      the real `DKGAgent` exposes.
 //   4. The actual `handleAssertionRoutes` route handler is invoked
-//      with a stub `RequestContext`, and we assert the wire-format
+//      with a stub `RouteRequestContext`, and we assert the wire-format
 //      response matches the route contract: `{ kaId, author, attested }`.
 //
 // The route's three error modes are also covered:
@@ -34,7 +34,8 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import { handleKcChainMetadataRoutes } from '../src/daemon/routes/kc-chain-metadata.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -71,20 +72,20 @@ function createAgentShim(opts: AgentShimOpts) {
   if (!opts.withChain) {
     return {
       getKnowledgeCollectionAuthor: async () => null,
-    } as unknown as RequestContext['agent'];
+    } as unknown as RouteRequestContext['agent'];
   }
   const chain = opts.chain!;
   return {
     getKnowledgeCollectionAuthor: async (kaId: bigint) => {
       return chain.getLatestMerkleRootAuthor(kaId);
     },
-  } as unknown as RequestContext['agent'];
+  } as unknown as RouteRequestContext['agent'];
 }
 
 function createContext(args: {
   kcIdPath: string;
-  agent: RequestContext['agent'];
-}): RequestContext {
+  agent: RouteRequestContext['agent'];
+}): RouteRequestContext {
   const fullPath = `/api/kc/${args.kcIdPath}/author`;
   const url = new URL(`http://127.0.0.1${fullPath}`);
   const request = {
@@ -92,42 +93,41 @@ function createContext(args: {
     url: fullPath,
   };
   return {
-    req: request as RequestContext['req'],
+    req: request as RouteRequestContext['req'],
     res: createResponse() as unknown as ServerResponse,
     agent: args.agent,
-    publisherControl: {} as RequestContext['publisherControl'],
+    publisherControl: {} as RouteRequestContext['publisherControl'],
     publisherRuntime: null,
-    config: {} as RequestContext['config'],
+    config: {} as RouteRequestContext['config'],
     startedAt: 0,
-    dashDb: {} as RequestContext['dashDb'],
+    dashDb: {} as RouteRequestContext['dashDb'],
     opWallets: {
       adminWallet: { address: '0x0', privateKey: '0x0' },
       wallets: [],
-    } as RequestContext['opWallets'],
-    network: null as RequestContext['network'],
-    tracker: {} as RequestContext['tracker'],
-    memoryManager: {} as RequestContext['memoryManager'],
+    } as RouteRequestContext['opWallets'],
+    network: null as RouteRequestContext['network'],
+    tracker: {} as RouteRequestContext['tracker'],
+    memoryManager: {} as RouteRequestContext['memoryManager'],
     bridgeAuthToken: undefined,
     nodeVersion: 'test',
     nodeCommit: 'test',
-    catchupTracker: {} as RequestContext['catchupTracker'],
-    extractionRegistry: {} as RequestContext['extractionRegistry'],
-    fileStore: {} as RequestContext['fileStore'],
+    catchupTracker: {} as RouteRequestContext['catchupTracker'],
+    extractionRegistry: {} as RouteRequestContext['extractionRegistry'],
+    fileStore: {} as RouteRequestContext['fileStore'],
     extractionStatus: new Map(),
     assertionImportLocks: new Map(),
-    vectorStore: {} as RequestContext['vectorStore'],
+    vectorStore: {} as RouteRequestContext['vectorStore'],
     embeddingProvider: null,
     validTokens: new Set(),
     apiHost: '127.0.0.1',
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: '0x0',
+    ...testRouteIdentityFields({ agentAddress: '0x0' }),
   };
 }
 
-function responseBody(ctx: RequestContext): Record<string, unknown> {
+function responseBody(ctx: RouteRequestContext): Record<string, unknown> {
   return JSON.parse(
     (ctx.res as unknown as { body: string }).body,
   ) as Record<string, unknown>;

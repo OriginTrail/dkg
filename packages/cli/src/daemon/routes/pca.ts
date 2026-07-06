@@ -16,7 +16,7 @@ import {
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
 } from '../http-utils.js';
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -91,8 +91,8 @@ function walletRpcUrlsForResponse(contracts: PcaContracts): string[] {
   return (contracts.walletRpcUrls ?? []).filter((rpcUrl) => /^https?:\/\//i.test(rpcUrl));
 }
 
-function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
-  const candidate = agent as RequestContext['agent'] & {
+function supportsPcaRpcBridge(agent: RouteRequestContext['agent']): boolean {
+  const candidate = agent as RouteRequestContext['agent'] & {
     supportsPublishingConvictionRpc?: unknown;
     requestPublishingConvictionRpc?: unknown;
   };
@@ -169,7 +169,7 @@ function pcaRpcParamsError(method: PcaRpcMethod, params: unknown[] | undefined):
 }
 
 async function handlePcaRpcRequest(
-  agent: RequestContext['agent'],
+  agent: RouteRequestContext['agent'],
   raw: unknown,
 ): Promise<Record<string, unknown>> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -391,7 +391,7 @@ function serializeAccountInfo(
   };
 }
 
-export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
+export async function handlePcaRoutes(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, path, config, requestToken, validTokens, opWallets } = ctx;
 
   if (!path.startsWith('/api/pca')) return;

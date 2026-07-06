@@ -18,7 +18,7 @@
 import { ethers } from 'ethers';
 import { jsonResponse, readBody, SMALL_BODY_BYTES, respondIfChainRpcTransportError } from '../http-utils.js';
 import type { ServerResponse } from 'node:http';
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 const FEATURE_UNAVAILABLE_503 = {
   error:
@@ -88,7 +88,7 @@ function respondKeyError(res: ServerResponse, err: unknown, address: string): vo
   jsonResponse(res, 500, { error: `operational wallet update failed: ${msg}` });
 }
 
-export async function handleOperationalWalletRoutes(ctx: RequestContext): Promise<void> {
+export async function handleOperationalWalletRoutes(ctx: RouteRequestContext): Promise<void> {
   const { req, res, agent, path, opWallets, config, requestToken, validTokens } = ctx;
 
   if (!path.startsWith('/api/operational-wallets')) return;

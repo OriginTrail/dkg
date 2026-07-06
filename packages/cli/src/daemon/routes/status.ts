@@ -329,7 +329,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -492,7 +492,7 @@ function summarizeRegistryEntry(e: IntegrationEntry) {
   };
 }
 
-export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
+export async function handleStatusRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

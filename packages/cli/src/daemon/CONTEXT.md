@@ -8,7 +8,7 @@ router is in `handle-request.ts`; per-route-group dispatchers live in `routes/`.
 
 **Route group**:
 A self-contained file under `routes/` that exports a single
-`handleXxxRoutes(ctx: RequestContext): Promise<void>` function. The router
+`handleXxxRoutes(ctx: RouteRequestContext): Promise<void>` function. The router
 calls each route group in order; the first one to write a response wins.
 Examples: `routes/epcis.ts`, `routes/status.ts`.
 
@@ -35,11 +35,16 @@ An ElizaOS framework plugin packaged as an `InstallAgentPlugin` integration
 daemon. Different mechanism from **Route plugin** despite the shared word.
 See `packages/adapter-elizaos/`.
 
-**RequestContext**:
-The bag of per-request state passed to every route group and route plugin.
+**RouteRequestContext**:
+The required internal bag of per-request state passed to every route group.
 Holds the live agent, publisher, config, dashDb, vectorStore, file store,
-and the derived per-request fields (`url`, `path`, `requestToken`,
-`requestAgentAddress`). Defined in `routes/context.ts`.
+and the derived per-request fields (`url`, `path`, `requestIdentity`,
+`requestToken`, `requestAgentAddress`). Defined in `routes/context.ts`.
+
+**RequestContext**:
+The plugin-facing compatibility alias exported by `plugin-api.ts`. It is
+kept source-compatible for existing route-plugin fixtures, so
+`requestIdentity` remains optional only at that public boundary.
 
 **httpAuthGuard**:
 The single global authentication gate at `lifecycle.ts:1865`. Runs **before**

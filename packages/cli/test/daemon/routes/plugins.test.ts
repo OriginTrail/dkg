@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { ServerResponse } from 'node:http';
-import type { RequestContext } from '../../../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../../../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from '../../helpers/route-request-context.js';
 import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
 
@@ -58,15 +59,17 @@ function makeRes(): FakeRes {
 }
 
 function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
-  ctx: RequestContext;
+  ctx: RouteRequestContext;
   res: FakeRes;
 } {
   const ctx = {
     req: {} as never,
     res: res as unknown as ServerResponse,
     routePlugins,
+    url: new URL('http://127.0.0.1/api/test'),
     path: '/api/test',
-  } as unknown as RequestContext;
+    ...testRouteIdentityFields(),
+  } as unknown as RouteRequestContext;
   return { ctx, res };
 }
 
@@ -86,6 +89,41 @@ describe('handlePluginRoutes', () => {
   });
   afterEach(() => {
     console.error = originalConsoleError;
+  });
+
+  it('dispatches a compatible plugin handler', async () => {
+    const plugin: RoutePlugin = {
+      name: 'compat',
+      handle(ctx) {
+        ctx.res.writeHead(204);
+        ctx.res.end();
+      },
+    };
+
+    const { ctx, res } = makeCtx([plugin]);
+    await handlePluginRoutes(ctx);
+    expect(res.statusCode).toBe(204);
+  });
+
+  it('projects the public plugin context instead of passing the internal route bag', async () => {
+    let seenCtx: unknown;
+    const plugin: RoutePlugin = {
+      name: 'projection',
+      handle(ctx) {
+        seenCtx = ctx;
+        ctx.res.writeHead(204);
+        ctx.res.end();
+      },
+    };
+
+    const { ctx, res } = makeCtx([plugin]);
+    (ctx as RouteRequestContext & { internalTrace?: string }).internalTrace = 'secret';
+    await handlePluginRoutes(ctx);
+
+    expect(res.statusCode).toBe(204);
+    expect(seenCtx).not.toBe(ctx);
+    expect(seenCtx).not.toHaveProperty('internalTrace');
+    expect(seenCtx).toHaveProperty('requestIdentity');
   });
 
   it('returns without writing when routePlugins is empty', async () => {

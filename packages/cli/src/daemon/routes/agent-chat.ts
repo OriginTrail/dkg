@@ -321,7 +321,7 @@ import {
 } from '../local-agents.js';
 
 import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
 function parsePrecomputedUpdateAttestation(
@@ -414,15 +414,15 @@ export interface AgentIdentityRouteContext {
   res: ServerResponse;
   agent: AgentIdentityRouteAgent;
   path: string;
-  requestAgentAddress: string;
+  requestIdentity: RouteRequestContext['requestIdentity'];
 }
 
 export function handleAgentIdentityRoute(ctx: AgentIdentityRouteContext): boolean {
-  const { req, res, agent, path, requestAgentAddress } = ctx;
+  const { req, res, agent, path, requestIdentity } = ctx;
 
   if (req.method !== "GET" || path !== "/api/agent/identity") return false;
 
-  const agentAddress = requestAgentAddress;
+  const agentAddress = requestIdentity.principal.agentAddress;
   const localAgents = agent.listLocalAgents();
   const current = localAgents.find((a) => a.agentAddress === agentAddress);
   jsonResponse(res, 200, {
@@ -436,7 +436,7 @@ export function handleAgentIdentityRoute(ctx: AgentIdentityRouteContext): boolea
   return true;
 }
 
-export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> {
+export async function handleAgentChatRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,
@@ -638,7 +638,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     }
   }
 
-  if (handleAgentIdentityRoute({ req, res, agent, path, requestAgentAddress })) return;
+  if (handleAgentIdentityRoute(ctx)) return;
 
   // GET /api/agents — enriched with live connection health
   // Optional query params: ?framework=X &skill_type=X

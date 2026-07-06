@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 import {
   jsonResponse,
   readBody,
@@ -147,7 +147,7 @@ function isHermesApiKeyRejection(target: { protocol?: string }, status: number):
 }
 
 function hermesApiKeyRejectedDetails(
-  config: RequestContext['config'],
+  config: RouteRequestContext['config'],
   apiServerKey: string | undefined,
 ): string {
   // A 401/403 with a key forwarded means the key is wrong (realign/rotate); with
@@ -167,7 +167,7 @@ function hermesUnreachableDetails(
   details: string | undefined,
   targets: Array<{ protocol?: string }>,
   apiServerKey: string | undefined,
-  config: RequestContext['config'],
+  config: RouteRequestContext['config'],
 ): string | undefined {
   const needsKey = !apiServerKey && targets.some((t) => t.protocol === 'hermes-openai');
   if (!needsKey) return details;
@@ -175,7 +175,7 @@ function hermesUnreachableDetails(
   return details ? `${details} — ${hint}` : hint;
 }
 
-export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
+export async function handleHermesRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,
@@ -555,7 +555,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   }
 }
 
-function ensureHermesIntegrationEnabled(config: RequestContext['config'], res: RequestContext['res']): boolean {
+function ensureHermesIntegrationEnabled(config: RouteRequestContext['config'], res: RouteRequestContext['res']): boolean {
   if (hasConfiguredLocalAgentChat(config, 'hermes')) return true;
   jsonResponse(res, 409, {
     error: 'Hermes local-agent integration is not enabled',
@@ -718,7 +718,7 @@ async function readHermesOpenAiReply(
 }
 
 async function persistHermesOpenAiUiTurn(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   payload: HermesChatPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
   assistantReply: string,
@@ -760,7 +760,7 @@ async function persistHermesOpenAiUiTurn(
 }
 
 async function pipeHermesOpenAiStream(
-  res: RequestContext['res'],
+  res: RouteRequestContext['res'],
   reader: { read: () => Promise<{ done?: boolean; value?: Uint8Array }> },
   payload: HermesChatPayload,
   response: Response,
@@ -837,7 +837,7 @@ function findHermesOpenAiSseBoundary(buffer: string): { index: number; length: n
 }
 
 async function persistHermesTurnWithDuplicateLock(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   payload: NormalizedHermesPersistTurnPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<HermesPersistRouteResult> {
@@ -875,7 +875,7 @@ async function persistHermesTurnWithDuplicateLock(
 }
 
 async function persistHermesTurnUnlocked(
-  ctx: RequestContext,
+  ctx: RouteRequestContext,
   payload: NormalizedHermesPersistTurnPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<HermesPersistRouteResult> {
@@ -962,7 +962,7 @@ function persistenceStateRank(state: HermesTurnPersistenceState): number {
 }
 
 async function recordHermesTurnPersistenceTransition(
-  memoryManager: RequestContext['memoryManager'],
+  memoryManager: RouteRequestContext['memoryManager'],
   payload: NormalizedHermesPersistTurnPayload,
   verifiedAttachmentRefs: OpenClawAttachmentRef[] | undefined,
 ): Promise<boolean> {
@@ -990,7 +990,7 @@ async function recordHermesTurnPersistenceTransition(
 }
 
 async function importHermesAssistantReply(
-  agent: RequestContext['agent'],
+  agent: RouteRequestContext['agent'],
   sessionId: string,
   turnId: string,
   assistantReply: string,

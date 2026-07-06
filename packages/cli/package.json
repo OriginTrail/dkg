@@ -16,7 +16,7 @@
   },
   "scripts": {
     "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-adapter-hermes run build && pnpm --filter @origintrail-official/dkg-mcp run build && pnpm --filter @origintrail-official/dkg-okf run build",
-    "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
+    "build": "pnpm run typecheck:plugin-api && tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
@@ -28,6 +28,7 @@
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:benchmark:publish-async-get": "vitest run --config vitest.benchmark.config.ts",
     "test:coverage": "vitest run --coverage",
+    "typecheck:plugin-api": "tsc --project tsconfig.plugin-api-typecheck.json --pretty false",
     "clean": "node -e \"const fs=require('fs');for(const d of['dist','network']){fs.rmSync(d,{recursive:true,force:true})};fs.rmSync('tsconfig.tsbuildinfo',{force:true})\""
   },
   "dependencies": {

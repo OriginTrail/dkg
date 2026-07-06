@@ -319,10 +319,10 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 
-export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> {
+export async function handlePublisherRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,

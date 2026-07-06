@@ -22,11 +22,11 @@ export function resolveRequestPrincipal(
   };
 }
 
-export function resolveRouteRequestIdentity(
+export function resolveRouteRequestIdentityFromAuthContext(
   req: IncomingMessage,
   agent: RouteIdentityAgent,
+  requestAuth: RequestAuthContext | undefined,
 ): RouteRequestIdentity {
-  const requestAuth = getRequestAuthContext(req);
   const credentialToken = requestAuth?.source === "dashboard-session"
     ? requestAuth.internalCredentialToken
     : requestAuth?.token ?? extractBearerToken(req.headers.authorization);
@@ -37,4 +37,11 @@ export function resolveRouteRequestIdentity(
     credentialToken,
     principal,
   };
+}
+
+export function resolveRouteRequestIdentityFromAttachedAuthContext(
+  req: IncomingMessage,
+  agent: RouteIdentityAgent,
+): RouteRequestIdentity {
+  return resolveRouteRequestIdentityFromAuthContext(req, agent, getRequestAuthContext(req));
 }

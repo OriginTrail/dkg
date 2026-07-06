@@ -9,10 +9,10 @@ import {
   verifyDashboardCsrf,
   type DashboardLoginOptions,
 } from '../src/daemon/dashboard-session.js';
-import { getRequestAuthContext, httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
+import { httpAuthGuardResult, type RequestAuthPrincipal } from '../src/auth.js';
+import { resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
 import { handleAgentIdentityRoute } from '../src/daemon/routes/agent-chat.js';
 import { handleContextGraphSignJoinRoute } from '../src/daemon/routes/context-graph.js';
-import { resolveRouteRequestIdentity } from '../src/daemon/route-request-identity.js';
 
 export const VALID_TOKEN = 'dashboard-backed-token';
 export const ROTATED_TOKEN = 'dashboard-rotated-token';
@@ -97,25 +97,20 @@ export async function startDashboardSessionServer(options: {
       url.pathname === '/api/agent/identity' ||
       /^\/api\/context-graph\/[^/]+\/sign-join$/.test(url.pathname)
     ) {
-      const requestIdentity = resolveRouteRequestIdentity(req, agent);
-      const routeContext = {
+      const requestIdentity = resolveRouteRequestIdentityFromAuthContext(
         req,
-        res,
         agent,
-        path: url.pathname,
-        requestAgentAddress: requestIdentity.principal.agentAddress,
-      };
+        authResult.requestAuthContext,
+      );
+      const routeContext = { req, res, agent, path: url.pathname, requestIdentity };
       if (handleAgentIdentityRoute(routeContext)) return;
       if (await handleContextGraphSignJoinRoute(routeContext)) return;
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Not found' }));
-      return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       ok: true,
       authorization: req.headers.authorization ?? null,
-      requestAuth: getRequestAuthContext(req) ?? null,
+      requestAuth: authResult.requestAuthContext ?? null,
     }));
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

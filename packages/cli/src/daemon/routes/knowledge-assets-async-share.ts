@@ -22,7 +22,7 @@
 // error mapping, and response shapes are identical to the legacy handlers.
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
-import type { RequestContext } from "./context.js";
+import type { RouteRequestContext } from "./context.js";
 import {
   jsonResponse,
   readBody,
@@ -58,7 +58,7 @@ import {
 // mintable Option-1 seal. (The live dispatch in `knowledge-assets.ts` already
 // serves swm/share-async inline; this standalone faithful-port handler is kept in
 // lockstep so either entry point behaves identically.)
-export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: string): Promise<void> {
+export async function handleKaShareAsyncEnqueue(ctx: RouteRequestContext, name: string): Promise<void> {
   const { req, res, agent, requestToken } = ctx;
   const writePreflightCallerAgentAddress = requestToken
     ? agent.resolveAgentByToken(requestToken)
@@ -143,7 +143,7 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
 //
 // Faithful port of GET /api/assertion/promote-async. List jobs filtered by
 // contextGraphId / state.
-export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> {
+export async function handleKaShareJobsList(ctx: RouteRequestContext): Promise<void> {
   const { res, agent, url } = ctx;
   if (asyncPromoteUnavailable(res)) return;
   const stateParam = url.searchParams.get("state");
@@ -184,7 +184,7 @@ export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> 
 // Faithful port of GET /api/assertion/promote-async/:jobId. The caller passes
 // the already url-decoded + validated `jobId` (the KA dispatch decodes it via
 // `decodePromoteJobId`, exactly as the legacy route did inline).
-export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string): Promise<void> {
+export async function handleKaShareJobStatus(ctx: RouteRequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;
   if (asyncPromoteUnavailable(res)) return;
   const job = await agent.assertion.getPromoteAsyncStatus(jobId);
@@ -199,7 +199,7 @@ export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string)
 // Faithful port of DELETE /api/assertion/promote-async/:jobId — cancel a
 // queued/failed_retrying job. The caller passes the already url-decoded +
 // validated `jobId`.
-export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string): Promise<void> {
+export async function handleKaShareJobCancel(ctx: RouteRequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;
   try {
     await agent.assertion.cancelPromoteAsync(jobId);
@@ -222,7 +222,7 @@ export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string)
 // Faithful port of POST /api/assertion/promote-async/:jobId/recover — requeue
 // a terminal-failed job. The caller passes the already url-decoded + validated
 // `jobId`.
-export async function handleKaShareJobRecover(ctx: RequestContext, jobId: string): Promise<void> {
+export async function handleKaShareJobRecover(ctx: RouteRequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;
   try {
     await agent.assertion.recoverPromoteAsync(jobId);

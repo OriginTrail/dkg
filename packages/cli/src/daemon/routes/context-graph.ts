@@ -320,7 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import type { RouteRequestContext } from './context.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -394,25 +394,29 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
+export interface ContextGraphSignJoinRouteAgent {
+  signJoinRequest(contextGraphId: string, agentAddress: string): Promise<{ agentAddress: string }>;
+}
+
 export interface ContextGraphSignJoinRouteContext {
   req: IncomingMessage;
   res: ServerResponse;
-  agent: RequestContext['agent'];
+  agent: ContextGraphSignJoinRouteAgent;
   path: string;
-  requestAgentAddress: string;
+  requestIdentity: RouteRequestContext['requestIdentity'];
 }
 
 export async function handleContextGraphSignJoinRoute(
   ctx: ContextGraphSignJoinRouteContext,
 ): Promise<boolean> {
-  const { req, res, agent, path, requestAgentAddress } = ctx;
+  const { req, res, agent, path, requestIdentity } = ctx;
 
   const signJoinMatch = path.match(/^\/api\/context-graph\/([^/]+)\/sign-join$/);
   if (req.method !== "POST" || !signJoinMatch) return false;
 
   const contextGraphId = decodeURIComponent(signJoinMatch[1]);
   try {
-    const callerAddress = requestAgentAddress;
+    const callerAddress = requestIdentity.principal.agentAddress;
     try { await readBody(req, SMALL_BODY_BYTES); } catch { /* ignored */ }
     const delegation = await agent.signJoinRequest(contextGraphId, callerAddress);
     jsonResponse(res, 200, {
@@ -433,7 +437,7 @@ export async function handleContextGraphSignJoinRoute(
   return true;
 }
 
-export async function handleContextGraphRoutes(ctx: RequestContext): Promise<void> {
+export async function handleContextGraphRoutes(ctx: RouteRequestContext): Promise<void> {
   const {
     req,
     res,
@@ -1122,7 +1126,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     }
   }
 
-  if (await handleContextGraphSignJoinRoute({ req, res, agent, path, requestAgentAddress })) return;
+  if (await handleContextGraphSignJoinRoute(ctx)) return;
 
   // ── Phase 8: project-manifest publish + install (UI-driven) ───────
   //
