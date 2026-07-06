@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
+import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -29,6 +30,13 @@ vi.mock('../src/config.js', async importOriginal => {
 });
 
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+
+function closeDashboardDbFromAgentCreateArg(createArg: any): void {
+  const db =
+    createArg?.chainEventCursorStore?.cursors?.db ??
+    createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+  db?.close?.();
+}
 
 describe('daemon startup network validation', () => {
   let tempHome: string | undefined;
@@ -160,12 +168,73 @@ describe('daemon startup network validation', () => {
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'edge',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
     } as any, Date.now())).rejects.toThrow('after-agent-create');
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-gnosis');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    expect(mocks.agentCreate.mock.calls[0]?.[0]).toMatchObject({
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    expect(createArg).toMatchObject({
       genesisId: 'gnosis-mainnet',
+      chainEventCursorStore: {
+        loadLane: expect.any(Function),
+        saveLane: expect.any(Function),
+      },
+      contextGraphRegistryScanCursorStore: {
+        load: expect.any(Function),
+        save: expect.any(Function),
+      },
     });
+    expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
+      chainId: 'evm:100',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+    }));
+    closeDashboardDbFromAgentCreateArg(createArg);
+  });
+
+  it('scopes chain event cursors with the EVM default chain id when chainId is omitted', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-omitted-chainid-startup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'Local EVM',
+      genesisId: 'gnosis-mainnet',
+      genesisVersion: 1,
+      relays: [],
+      defaultNodeRole: 'edge',
+    });
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    await expect(runDaemonInner(true, {
+      name: 'omitted-chainid-startup-test',
+      networkConfig: 'local-evm',
+      listenPort: 0,
+      nodeRole: 'edge',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x2234567890123456789012345678901234567890',
+      },
+    } as any, Date.now())).rejects.toThrow('after-agent-create');
+
+    expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
+      chainId: 'evm:31337',
+      hubAddress: '0x2234567890123456789012345678901234567890',
+    }));
+    closeDashboardDbFromAgentCreateArg(createArg);
   });
 });

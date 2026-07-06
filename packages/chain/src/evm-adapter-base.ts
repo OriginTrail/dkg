@@ -14,7 +14,7 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY } from './chain-adapter.js';
+import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
   V10PublishParams,
@@ -36,6 +36,7 @@ import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
+import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -378,7 +379,7 @@ async function contractAddress(contract: Contract): Promise<string> {
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
-    return `${this.chainId}:hub=${this.hubAddress.toLowerCase()}`;
+    return buildEvmDeploymentId({ chainId: this.chainId, hubAddress: this.hubAddress });
   }
 
   readonly chainType = 'evm' as const;
@@ -623,11 +624,7 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /**
-   * Next unbuffered block for ContextGraphNameRegistry scans, keyed by lowercase
-   * registry address. Read with a reorg buffer; duplicate delivery is harmless.
-   */
-  protected readonly contextGraphRegistryScanWatermarks: Map<string, number> = new Map();
+  protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -652,7 +649,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.contextGraphRegistryScanWatermarks.clear();
+    this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -861,6 +858,11 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
+      chainId: this.chainId,
+      deploymentId: this.deploymentId,
+      store: config.contextGraphRegistryScanCursorStore,
+    });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

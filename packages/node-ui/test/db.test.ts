@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteKaNumberStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -545,7 +545,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(21);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(22);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -785,7 +785,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -806,7 +806,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
   });
 });
 
@@ -890,7 +890,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -919,7 +919,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -956,7 +956,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1049,7 +1049,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1115,10 +1115,98 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
+    expect(db.db.prepare(
+      `SELECT name FROM sqlite_master WHERE type='table' AND name='runtime_cursors'`,
+    ).all()).toHaveLength(1);
+  });
+});
+
+describe('DashboardDB — chain RPC cursor stores', () => {
+  it('persists chain-event lane cursors by scope across reopen', async () => {
+    const store = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
+
+    await store.saveLane('contextGraphDiscovery', 1234);
+    await store.saveLane('vmReconcile', 5678);
+    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
+    expect(await store.loadLane('vmReconcile')).toBe(5678);
+    expect(db.db.prepare(
+      `SELECT value FROM runtime_cursors
+       WHERE namespace = 'chainEventPoller.cursor'
+         AND scope = 'evm:1:hub=0xabc'
+         AND key = 'contextGraphDiscovery'`,
+    ).get()).toEqual({ value: 1234 });
+    expect(await new SqliteChainEventCursorStore(db, { scope: 'evm:2:hub=0xabc' }).loadLane('contextGraphDiscovery')).toBeUndefined();
+
+    await store.saveLane('contextGraphDiscovery', 0);
+    await store.saveLane('contextGraphDiscovery', -1);
+    await store.saveLane('contextGraphDiscovery', 1.5);
+    await store.saveLane('contextGraphDiscovery', Number.MAX_SAFE_INTEGER + 1);
+    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
+
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:badLane', '0');
+    expect(await store.loadLane('badLane')).toBeUndefined();
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:legacyLane', '2468');
+    expect(await store.loadLane('legacyLane')).toBe(2468);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
+    expect(await reopened.loadLane('contextGraphDiscovery')).toBe(1234);
+    expect(await reopened.loadLane('vmReconcile')).toBe(5678);
+    expect(await reopened.loadLane('legacyLane')).toBe(2468);
+  });
+
+  it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
+    const store = new SqliteContextGraphRegistryScanCursorStore(db);
+    const key = {
+      chainId: 'evm:1',
+      deploymentId: 'evm:1:hub=0xabc',
+      registryAddress: '0x3333333333333333333333333333333333333333',
+    };
+
+    await store.save(key, 5000);
+    expect(await store.load(key)).toBe(5000);
+    expect(db.db.prepare(
+      `SELECT value FROM runtime_cursors
+       WHERE namespace = 'contextGraphRegistryScan.cursor'
+         AND scope = ?
+         AND key = ?`,
+    ).get(`${key.chainId}:${key.deploymentId}`, key.registryAddress.toLowerCase())).toEqual({ value: 5000 });
+    await store.save(key, 0);
+    await store.save(key, -1);
+    await store.save(key, 1.5);
+    await store.save(key, Number.MAX_SAFE_INTEGER + 1);
+    expect(await store.load(key)).toBe(5000);
+    expect(await store.load({ ...key, registryAddress: '0x4444444444444444444444444444444444444444' })).toBeUndefined();
+
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(
+      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x5555555555555555555555555555555555555555`,
+      'not-a-number',
+    );
+    expect(await store.load({ ...key, registryAddress: '0x5555555555555555555555555555555555555555' })).toBeUndefined();
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(
+      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x6666666666666666666666666666666666666666`,
+      '6000',
+    );
+    expect(await store.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
+    expect(await reopened.load(key)).toBe(5000);
+    expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
   });
 });
 
@@ -1476,7 +1564,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1542,7 +1630,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1571,7 +1659,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -1814,7 +1902,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(21);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(22);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);

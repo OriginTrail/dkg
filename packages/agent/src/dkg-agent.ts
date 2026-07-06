@@ -85,7 +85,7 @@ import {
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -459,10 +459,80 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   publishedUal?: string;
 }
 
-export interface DiscoverContextGraphsFromChainOptions {
+export type DiscoverContextGraphsFromChainOptions = {
+  throwOnChainScanFailure?: boolean;
+  pageBudget?: number;
+  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor';
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
-  throwOnChainScanFailure?: boolean;
+  resumeFromCursor?: boolean;
+};
+
+type NormalizedContextGraphDiscoveryScan =
+  | { mode: 'listAll' }
+  | { mode: 'incremental'; pageBudget?: number }
+  | { mode: 'seedFull' }
+  | { mode: 'seedFromCursor'; pageBudget?: number };
+
+function normalizeContextGraphDiscoveryScan(
+  options: DiscoverContextGraphsFromChainOptions,
+): NormalizedContextGraphDiscoveryScan {
+  if (options.mode !== undefined) {
+    if (options.mode === 'incremental') {
+      return {
+        mode: 'incremental',
+        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'seedFull') return { mode: 'seedFull' };
+    if (options.mode === 'seedFromCursor') {
+      return {
+        mode: 'seedFromCursor',
+        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'listAll') return { mode: 'listAll' };
+    throw new Error(`Unsupported context graph chain discovery scan mode: ${String(options.mode)}`);
+  }
+
+  if (options.incremental === true) {
+    return {
+      mode: 'incremental',
+      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+    };
+  }
+
+  if (options.seedIncrementalWatermark === true) {
+    if (options.resumeFromCursor === true) {
+      return {
+        mode: 'seedFromCursor',
+        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    return { mode: 'seedFull' };
+  }
+
+  return { mode: 'listAll' };
+}
+
+function legacyChainListScanOptions(
+  options: DiscoverContextGraphsFromChainOptions,
+): ContextGraphChainScanOptions | undefined {
+  if (options.mode !== undefined) return undefined;
+  if (options.incremental === true) {
+    return {
+      incremental: true,
+      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+    };
+  }
+  if (options.seedIncrementalWatermark === true) {
+    return {
+      seedIncrementalWatermark: true,
+      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
+      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -535,6 +605,7 @@ export class DKGAgent extends DKGAgentBase {
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
+        contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       };
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
@@ -1088,7 +1159,7 @@ export class DKGAgent extends DKGAgentBase {
    *
    * Defaults to a full scan so SDK callers can rebuild missing local state.
    * Background daemon loops may opt into incremental scans to reuse the
-   * in-memory chain adapter watermark.
+   * chain adapter watermark.
    *
    * Returns the number of newly discovered context graphs.
    */
@@ -1096,26 +1167,26 @@ export class DKGAgent extends DKGAgentBase {
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
     const ctx = createOperationContext('system');
-    if (!this.chain.listContextGraphsFromChain) {
+    const scanMode = normalizeContextGraphDiscoveryScan(options);
+    const legacyListOptions = legacyChainListScanOptions(options);
+    const useLegacyListFallback =
+      scanMode.mode !== 'listAll' &&
+      legacyListOptions !== undefined &&
+      !this.chain.scanContextGraphRegistryPages &&
+      !!this.chain.listContextGraphsFromChain;
+    if (scanMode.mode === 'listAll' && !this.chain.listContextGraphsFromChain) {
       this.log.info(ctx, 'Chain adapter does not support listContextGraphsFromChain — skipping');
       return 0;
     }
+    if (scanMode.mode !== 'listAll' && !this.chain.scanContextGraphRegistryPages && !useLegacyListFallback) {
+      this.log.info(ctx, 'Chain adapter does not support scanContextGraphRegistryPages — skipping');
+      return 0;
+    }
 
-    let onChainContextGraphs;
+    let onChainContextGraphs: ContextGraphOnChain[] = [];
     let partialChainScan = false;
     let partialChainScanError: unknown;
-    try {
-      const scanOptions = options.incremental
-        ? {
-            incremental: true as const,
-          }
-        : options.seedIncrementalWatermark
-          ? {
-              seedIncrementalWatermark: true as const,
-            }
-          : undefined;
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
-    } catch (err) {
+    const handleChainScanFailure = (err: unknown): ContextGraphOnChain[] | undefined => {
       const message = err instanceof Error ? err.message : String(err);
       const signature = message
         .replace(/stopped after block \d+/g, 'stopped after block N')
@@ -1129,18 +1200,11 @@ export class DKGAgent extends DKGAgentBase {
       }
       const partialError = isContextGraphChainScanPartialError(err);
       if (options.throwOnChainScanFailure && !partialError) throw err;
-      if (!partialError) return 0;
+      if (!partialError) return undefined;
       partialChainScan = true;
       partialChainScanError = err;
-      onChainContextGraphs = err.partialResults;
-    }
-    if (!partialChainScan && this.chainContextGraphScanFailure) {
-      this.log.info(
-        ctx,
-        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
-      );
-      this.chainContextGraphScanFailure = undefined;
-    }
+      return err.partialResults;
+    };
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup
     const knownOnChainIds = new Set<string>();
@@ -1151,65 +1215,108 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     let discovered = 0;
-    for (const p of onChainContextGraphs) {
-      if (knownOnChainIds.has(p.contextGraphId)) continue;
+    const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
+      for (const p of contextGraphs) {
+        if (knownOnChainIds.has(p.contextGraphId)) continue;
 
-      if (!p.name) {
-        // Hash-only entry (metadata not revealed) — record for dedup but don't
-        // subscribe to gossip topics since hash-keyed topics are unusable.
-        this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
-        knownOnChainIds.add(p.contextGraphId);
-        continue;
-      }
-
-      // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
-      // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
-      // so apply the strict default: only auto-subscribe when this node's wallet matches
-      // `creator` (the address that called claimName). Real participants will have the CG
-      // surfaced through manual subscribe / catch-up triggered by their curator.
-      if (Number(p.accessPolicy) === 1) {
-        const isCurator = !!this.defaultAgentAddress
-          && typeof p.creator === 'string'
-          && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
-        if (!isCurator) {
-          this.log.info(ctx, `Skipping auto-subscribe to curated chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
+        if (!p.name) {
+          // Hash-only entry (metadata not revealed) — record for dedup but don't
+          // subscribe to gossip topics since hash-keyed topics are unusable.
+          this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
           knownOnChainIds.add(p.contextGraphId);
           continue;
         }
+
+        // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
+        // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
+        // so apply the strict default: only auto-subscribe when this node's wallet matches
+        // `creator` (the address that called claimName). Real participants will have the CG
+        // surfaced through manual subscribe / catch-up triggered by their curator.
+        if (Number(p.accessPolicy) === 1) {
+          const isCurator = !!this.defaultAgentAddress
+            && typeof p.creator === 'string'
+            && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
+          if (!isCurator) {
+            this.log.info(ctx, `Skipping auto-subscribe to curated chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
+            knownOnChainIds.add(p.contextGraphId);
+            continue;
+          }
+        }
+
+        this.setContextGraphSubscription(p.name, {
+          name: p.name,
+          subscribed: true,
+          synced: false,
+          metaSynced: false,
+          onChainId: p.contextGraphId,
+        });
+        this.subscribeToContextGraph(p.name, { trackSyncScope: false });
+
+        // Persist the on-chain ID to the ontology graph so the publisher's
+        // VM registration guard can find it via RDF (it has no access to
+        // the in-memory subscribedContextGraphs map).
+        const cgUri = contextGraphDataGraphUri(p.name);
+        const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+        // Single-valued binding guard (RS heal): on-chain id is immutable; clear
+        // any prior value so the cgId resolver / heal never read a multi-valued
+        // (LIMIT-1-nondeterministic) binding.
+        await this.store.deleteByPattern({
+          graph: ontoGraph,
+          subject: cgUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        });
+        await this.store.insert([{
+          subject: cgUri,
+          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          object: `"${p.contextGraphId}"`,
+          graph: ontoGraph,
+        }]);
+
+        this.contextGraphMetaProjection.markDirty(p.name);
+        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
+        knownOnChainIds.add(p.contextGraphId);
+        discovered++;
       }
+    };
 
-      this.setContextGraphSubscription(p.name, {
-        name: p.name,
-        subscribed: true,
-        synced: false,
-        metaSynced: false,
-        onChainId: p.contextGraphId,
-      });
-      this.subscribeToContextGraph(p.name, { trackSyncScope: false });
-
-      // Persist the on-chain ID to the ontology graph so the publisher's
-      // VM registration guard can find it via RDF (it has no access to
-      // the in-memory subscribedContextGraphs map).
-      const cgUri = contextGraphDataGraphUri(p.name);
-      const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      // Single-valued binding guard (RS heal): on-chain id is immutable; clear
-      // any prior value so the cgId resolver / heal never read a multi-valued
-      // (LIMIT-1-nondeterministic) binding.
-      await this.store.deleteByPattern({
-        graph: ontoGraph,
-        subject: cgUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-      });
-      await this.store.insert([{
-        subject: cgUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-        object: `"${p.contextGraphId}"`,
-        graph: ontoGraph,
-      }]);
-
-      this.contextGraphMetaProjection.markDirty(p.name);
-      this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
-      discovered++;
+    if (scanMode.mode === 'listAll' || useLegacyListFallback) {
+      try {
+        onChainContextGraphs = await this.chain.listContextGraphsFromChain!(
+          undefined,
+          useLegacyListFallback ? legacyListOptions : undefined,
+        );
+      } catch (err) {
+        const partialResults = handleChainScanFailure(err);
+        if (!partialResults) return 0;
+        onChainContextGraphs = partialResults;
+      }
+      await applyDiscoveredContextGraphs(onChainContextGraphs);
+    } else {
+      const iterator = this.chain.scanContextGraphRegistryPages!(scanMode)[Symbol.asyncIterator]();
+      try {
+        while (true) {
+          let next: Awaited<ReturnType<typeof iterator.next>>;
+          try {
+            next = await iterator.next();
+          } catch (err) {
+            const partialResults = handleChainScanFailure(err);
+            if (!partialResults) return 0;
+            break;
+          }
+          if (next.done) break;
+          await applyDiscoveredContextGraphs(next.value.contextGraphs);
+          await next.value.ack();
+        }
+      } finally {
+        await iterator.return?.();
+      }
+    }
+    if (!partialChainScan && this.chainContextGraphScanFailure) {
+      this.log.info(
+        ctx,
+        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+      );
+      this.chainContextGraphScanFailure = undefined;
     }
 
     if (discovered > 0) {

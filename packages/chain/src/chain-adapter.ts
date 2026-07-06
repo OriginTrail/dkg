@@ -358,19 +358,62 @@ export function isContextGraphChainScanPartialError(
   );
 }
 
-export interface ContextGraphChainScanOptions {
-  /**
-   * When true and `fromBlock` is omitted, adapters may resume from an
-   * in-memory watermark with a reorg buffer. The default preserves public
-   * list-all semantics for SDK callers.
-   */
-  incremental?: boolean;
-  /**
-   * When true on a successful full scan, adapters may seed the in-memory
-   * incremental watermark for later daemon background scans. This is opt-in so
-   * public SDK list-all calls remain side-effect free by default.
-   */
-  seedIncrementalWatermark?: boolean;
+/**
+ * Public ContextGraphNameRegistry list options.
+ *
+ * Default calls use `listAll` semantics and never mutate daemon watermarks.
+ * The two boolean shapes are retained as legacy compatibility wrappers around
+ * the paged cursor scanner. New cursor-backed daemon scans should use
+ * `scanContextGraphRegistryPages`, where callers explicitly acknowledge a page
+ * after local apply succeeds.
+ */
+export type ContextGraphChainListOptions = { mode?: 'listAll' };
+export type ContextGraphLegacyIncrementalScanOptions =
+  | {
+      incremental: true;
+      pageBudget?: number;
+    }
+  | {
+      seedIncrementalWatermark: true;
+      resumeFromCursor?: boolean;
+      pageBudget?: number;
+    };
+export type ContextGraphChainScanOptions =
+  | ContextGraphChainListOptions
+  | ContextGraphLegacyIncrementalScanOptions;
+
+/** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
+export type ContextGraphRegistryScanOptions =
+  | {
+      mode: 'incremental';
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+    }
+  | {
+      mode: 'seedFromCursor';
+      pageBudget?: number;
+    };
+
+export interface ContextGraphRegistryScanPage {
+  contextGraphs: ContextGraphOnChain[];
+  ack(): Promise<void>;
+}
+
+export function buildEvmDeploymentId(input: { chainId: string; hubAddress: string }): string {
+  return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
+}
+
+export interface ContextGraphRegistryScanCursorKey {
+  chainId: string;
+  deploymentId: string;
+  registryAddress: string;
+}
+
+export interface ContextGraphRegistryScanCursorStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
+  save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -927,13 +970,19 @@ export interface ChainAdapter {
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
-  submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
-  /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
-  revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
-  /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
-  listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
-  /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
-  hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
+    /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
+    revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
+    /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
+    listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
+    /**
+     * Daemon cursor-backed ContextGraphNameRegistry scan. Each yielded page must
+     * be acknowledged after the caller has applied it locally; only then may the
+     * adapter advance durable scan progress.
+     */
+    scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
+    /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
+    hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

@@ -33,8 +33,9 @@ import type {
   LiftTransitionType,
   LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
+  CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -1134,6 +1135,10 @@ export interface DKGAgentConfig {
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
+  /** Durable lane cursor store for the chain event poller. Defaults to in-memory. */
+  chainEventCursorStore?: ChainEventCursorPersistence;
+  /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
+  contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
