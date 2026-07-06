@@ -128,8 +128,8 @@ function buildOntologyTriples(
     dt ? `"${escLit(v)}"^^<${dt}>` : `"${escLit(v)}"`;
 
   const quads = [
-    { subject: ontologyUri, predicate: NS.rdf + 'type', object: `<${NS.owl}Ontology>` },
-    { subject: ontologyUri, predicate: NS.rdf + 'type', object: `<${NS.prov}Entity>` },
+    { subject: ontologyUri, predicate: NS.rdf + 'type', object: NS.owl + 'Ontology' },
+    { subject: ontologyUri, predicate: NS.rdf + 'type', object: NS.prov + 'Entity' },
     { subject: ontologyUri, predicate: NS.rdfs + 'label', object: lit(`Project ontology — ${contextGraphId}`) },
     { subject: ontologyUri, predicate: NS.schema + 'name', object: lit(`Project ontology — ${contextGraphId}`) },
     { subject: ontologyUri, predicate: NS.dcterms + 'title', object: lit(`Project ontology — ${contextGraphId}`) },
@@ -139,9 +139,9 @@ function buildOntologyTriples(
     { subject: ontologyUri, predicate: NS.dcterms + 'source', object: lit(starterSlug) },
     { subject: ontologyUri, predicate: NS.schema + 'encodingFormat', object: lit('text/turtle') },
     { subject: ontologyUri, predicate: NS.schema + 'text', object: lit(ttl) },
-    { subject: ontologyUri, predicate: NS.dcterms + 'references', object: `<${guideUri}>` },
+    { subject: ontologyUri, predicate: NS.dcterms + 'references', object: guideUri },
 
-    { subject: guideUri, predicate: NS.rdf + 'type', object: `<${NS.schema}DigitalDocument>` },
+    { subject: guideUri, predicate: NS.rdf + 'type', object: NS.schema + 'DigitalDocument' },
     { subject: guideUri, predicate: NS.rdfs + 'label', object: lit(`Agent guide — ${contextGraphId} ontology`) },
     { subject: guideUri, predicate: NS.schema + 'name', object: lit(`Agent guide — ${contextGraphId} ontology`) },
     { subject: guideUri, predicate: NS.dcterms + 'title', object: lit(`Agent guide — ${contextGraphId} ontology`) },
@@ -149,7 +149,7 @@ function buildOntologyTriples(
     { subject: guideUri, predicate: NS.dcterms + 'modified', object: lit(nowIso, NS.xsd + 'dateTime') },
     { subject: guideUri, predicate: NS.schema + 'encodingFormat', object: lit('text/markdown') },
     { subject: guideUri, predicate: NS.schema + 'text', object: lit(guide) },
-    { subject: guideUri, predicate: NS.schema + 'about', object: `<${ontologyUri}>` },
+    { subject: guideUri, predicate: NS.schema + 'about', object: ontologyUri },
   ];
   return { ontologyUri, guideUri, quads };
 }
