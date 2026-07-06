@@ -41,8 +41,7 @@ import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 /**
- * Maps a Hub-registered contract name to the function that invalidates
- * the corresponding boot-bound field on `EVMChainAdapter.contracts`.
+ * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
  * Used by:
  *   1. `startHubRotationListener` — when the Hub rotation poller sees
@@ -58,33 +57,36 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * which owns side-channel state (in-flight probe, ready flag) that
  * a simple field reset wouldn't touch.
  *
- * Names listed here MUST match boot-bound contracts that `init()` resolves via
- * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`
- * — keep these in sync when adding/removing bindings in `init()`.
+ * Boot-bound names listed here MUST match contracts that `init()` resolves via
+ * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`. Lazy
+ * names listed here MUST match helpers such as `getIdentityStorage()`.
  */
-type ContractInvalidator = (adapter: EVMChainAdapterBase) => void;
+type HubBindingInvalidationPolicy = {
+  invalidate: (adapter: EVMChainAdapterBase) => void;
+  invalidateOnRotation?: (adapter: EVMChainAdapterBase) => void;
+};
 
-const BOOT_BOUND_CONTRACT_INVALIDATORS = new Map<string, ContractInvalidator>([
-  ['Identity',                   (a) => { (a as any).contracts.identity = undefined; }],
-  ['Profile',                    (a) => { (a as any).contracts.profile = undefined; }],
-  ['ProfileStorage',             (a) => { (a as any).contracts.profileStorage = undefined; }],
-  ['ParametersStorage',          (a) => { (a as any).contracts.parametersStorage = undefined; }],
-  ['Staking',                    (a) => { (a as any).contracts.staking = undefined; }],
-  ['Token',                      (a) => { (a as any).contracts.token = undefined; }],
-  ['AskStorage',                 (a) => { (a as any).contracts.askStorage = undefined; }],
-  ['KnowledgeAssets',            (a) => { (a as any).contracts.knowledgeAssets = undefined; }],
-  ['KnowledgeAssetsStorage',     (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; }],
-  ['KnowledgeAssetsLifecycle',   (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; }],
-  ['DKGKnowledgeAssets',         (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; }],
-  ['ContextGraphNameRegistry',   (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; }],
-  ['ContextGraphs',              (a) => { (a as any).contracts.contextGraphs = undefined; }],
-  ['ContextGraphStorage',        (a) => { (a as any).contracts.contextGraphStorage = undefined; }],
-  ['DKGPublishingConvictionNFT', (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; }],
-  ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
-]);
-
-const LAZY_BINDING_INVALIDATORS = new Map<string, ContractInvalidator>([
-  ['IdentityStorage',            (a) => { (a as any).invalidateIdentityStorageBinding(); }],
+const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>([
+  ['Identity',                   { invalidate: (a) => { (a as any).contracts.identity = undefined; } }],
+  ['IdentityStorage',            {
+    invalidate: (a) => { (a as any).invalidateIdentityStorageBinding(); },
+    invalidateOnRotation: (a) => { (a as any).invalidateIdentityStorageBinding(); },
+  }],
+  ['Profile',                    { invalidate: (a) => { (a as any).contracts.profile = undefined; } }],
+  ['ProfileStorage',             { invalidate: (a) => { (a as any).contracts.profileStorage = undefined; } }],
+  ['ParametersStorage',          { invalidate: (a) => { (a as any).contracts.parametersStorage = undefined; } }],
+  ['Staking',                    { invalidate: (a) => { (a as any).contracts.staking = undefined; } }],
+  ['Token',                      { invalidate: (a) => { (a as any).contracts.token = undefined; } }],
+  ['AskStorage',                 { invalidate: (a) => { (a as any).contracts.askStorage = undefined; } }],
+  ['KnowledgeAssets',            { invalidate: (a) => { (a as any).contracts.knowledgeAssets = undefined; } }],
+  ['KnowledgeAssetsStorage',     { invalidate: (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; } }],
+  ['KnowledgeAssetsLifecycle',   { invalidate: (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; } }],
+  ['DKGKnowledgeAssets',         { invalidate: (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; } }],
+  ['ContextGraphNameRegistry',   { invalidate: (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; } }],
+  ['ContextGraphs',              { invalidate: (a) => { (a as any).contracts.contextGraphs = undefined; } }],
+  ['ContextGraphStorage',        { invalidate: (a) => { (a as any).contracts.contextGraphStorage = undefined; } }],
+  ['DKGPublishingConvictionNFT', { invalidate: (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; } }],
+  ['Chronos',                    { invalidate: (a) => { (a as any).contracts.chronos = undefined; } }],
 ]);
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
@@ -720,19 +722,46 @@ export class EVMChainAdapterBase {
     this.identityIdCache.invalidateAll();
   }
 
+  protected async identityStorageAddressChanged(
+    previous: Contract | undefined,
+    next: Contract,
+  ): Promise<boolean> {
+    if (!previous) return false;
+    if (previous === next) return false;
+    try {
+      return (await contractAddress(previous)).toLowerCase() !== (await contractAddress(next)).toLowerCase();
+    } catch {
+      return true;
+    }
+  }
+
   protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
     await this.init();
-    const identityStorage = await this.getIdentityStorage();
+    const previousIdentityStorage = this.contracts.identityStorage;
+    const identityStorage = await this.getIdentityStorage({ refresh: true });
+    const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
+    if (identityStorageChanged) this.identityIdCache.invalidateAll();
     const id: bigint = await this.readContract(
       identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
     );
-    return BigInt(id);
+    const identityId = BigInt(id);
+    if (identityStorageChanged) this.identityIdCache.seed(checksum, identityId);
+    return identityId;
   }
 
   protected async readIdentityIdForAddress(address: string): Promise<bigint> {
     return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
+  }
+
+  protected async refreshIdentityIdForAddress(address: string): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    this.identityIdCache.invalidate(checksum);
+    const identityId = await this.readIdentityIdFromStorage(checksum);
+    this.identityIdCache.seed(checksum, identityId);
+    return identityId;
   }
 
   protected static preflightCacheFresh(
@@ -1785,8 +1814,8 @@ export class EVMChainAdapterBase {
     return ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(address)]));
   }
 
-  protected async getIdentityStorage(): Promise<Contract> {
-    if (!this.contracts.identityStorage) {
+  protected async getIdentityStorage(options: { refresh?: boolean } = {}): Promise<Contract> {
+    if (options.refresh || !this.contracts.identityStorage) {
       this.contracts.identityStorage = await this.resolveContract('IdentityStorage');
     }
     return this.contracts.identityStorage;
@@ -3178,13 +3207,13 @@ export class EVMChainAdapterBase {
    *      See the `randomSamplingPairCache` field comment for the
    *      coupling invariants this path preserves.
    *
-   *   2. Lazy bindings with dependent caches, currently `IdentityStorage`,
-   *      clear their lazy slot and dependent cache, then use the same rotation
-   *      finalization as boot-bound bindings.
+   *   2. Names in `HUB_BINDING_INVALIDATORS` may clear a lazy slot and
+   *      dependent cache through `invalidateOnRotation`, then use the same
+   *      rotation finalization as boot-bound bindings.
    *
-   *   3. Any name in `BOOT_BOUND_CONTRACT_INVALIDATORS` -> leave the existing
-   *      `this.contracts.X` field intact but flip `this.initialized` back to
-   *      `false` so the next `await
+   *   3. Any name in `HUB_BINDING_INVALIDATORS` without a rotation invalidator
+   *      leaves the existing `this.contracts.X` field intact but flips
+   *      `this.initialized` back to `false` so the next `await
    *      this.init()` re-resolves every binding fresh from Hub. Keeping
    *      the old handle until the next init pass avoids a race where an
    *      in-flight public method already passed `init()` and then trips
@@ -3235,15 +3264,10 @@ export class EVMChainAdapterBase {
       this.invalidateRandomSamplingPair();
       return;
     }
-    const lazyInvalidator = LAZY_BINDING_INVALIDATORS.get(name);
-    if (lazyInvalidator) {
-      lazyInvalidator(this);
-      this.finalizeKnownHubRotation();
-      return;
-    }
-    if (BOOT_BOUND_CONTRACT_INVALIDATORS.has(name)) {
-      this.finalizeKnownHubRotation();
-    }
+    const policy = HUB_BINDING_INVALIDATORS.get(name);
+    if (!policy) return;
+    policy.invalidateOnRotation?.(this);
+    this.finalizeKnownHubRotation();
   }
 
   protected finalizeKnownHubRotation(): void {
@@ -3272,11 +3296,8 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
-    for (const invalidator of BOOT_BOUND_CONTRACT_INVALIDATORS.values()) {
-      invalidator(this);
-    }
-    for (const invalidator of LAZY_BINDING_INVALIDATORS.values()) {
-      invalidator(this);
+    for (const policy of HUB_BINDING_INVALIDATORS.values()) {
+      policy.invalidate(this);
     }
     this.invalidatePublishPreflightCache();
     this.invalidateRandomSamplingPair();
