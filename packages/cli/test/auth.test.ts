@@ -20,10 +20,10 @@ import { createDashboardSessionAuthSource } from '../src/daemon/dashboard-sessio
 import {
   DASHBOARD_SESSION_COOKIE,
 } from '../src/daemon/dashboard-session-cookie.js';
-import { resolveDashboardSseSession, resolveDashboardSseSessionFromAuthContext } from '../src/daemon/dashboard-sse-session.js';
+import { resolveDashboardSseSessionFromRequestContext, resolveDashboardSseSessionFromAuthContext } from '../src/daemon/dashboard-sse-session.js';
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
-import { resolveRequestPrincipal, resolveRouteRequestIdentity, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
+import { resolveRequestPrincipal, resolveRouteRequestIdentityFromRequestContext, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -354,7 +354,7 @@ describe('resolveRouteRequestIdentity', () => {
       },
     });
 
-    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+    expect(resolveRouteRequestIdentityFromRequestContext(req, agent)).toMatchObject({
       credentialToken: 'agent-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
       requestAuth: { source: 'dashboard-session' },
@@ -367,7 +367,7 @@ describe('resolveRouteRequestIdentity', () => {
       headers: { authorization: 'Bearer agent-token' },
     } as IncomingMessage;
 
-    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+    expect(resolveRouteRequestIdentityFromRequestContext(req, agent)).toMatchObject({
       credentialToken: 'agent-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:token' },
       requestAuth: undefined,
@@ -388,7 +388,7 @@ describe('resolveRouteRequestIdentity', () => {
       },
     });
 
-    expect(resolveRouteRequestIdentity(req, agent)).toMatchObject({
+    expect(resolveRouteRequestIdentityFromRequestContext(req, agent)).toMatchObject({
       credentialToken: 'agent-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:resolved' },
       requestAuth: { source: 'dashboard-session' },
@@ -633,7 +633,7 @@ describe('httpAuthGuard', () => {
           ) ?? null
           : null,
         legacyDashboardSseSession: url.pathname === '/api/events'
-          ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
+          ? resolveDashboardSseSessionFromRequestContext(req, authenticateDashboardSessionForSse) ?? null
           : null,
       }));
     });
@@ -984,7 +984,7 @@ describe('httpAuthGuard', () => {
       },
     });
 
-    const dashboardSession = resolveDashboardSseSession(req, () => ({
+    const dashboardSession = resolveDashboardSseSessionFromRequestContext(req, () => ({
       sessionId: 'session-1',
       compatToken: 'token-b',
       csrfToken: 'csrf-token',

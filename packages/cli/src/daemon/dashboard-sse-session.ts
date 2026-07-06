@@ -31,7 +31,7 @@ export function resolveDashboardSseSessionFromAuthContext(
   };
 }
 
-export function resolveDashboardSseSession(
+export function resolveDashboardSseSessionFromRequestContext(
   req: IncomingMessage,
   authenticateDashboardSession: DashboardSseSessionAuthenticator,
 ): SseDashboardSession | undefined {

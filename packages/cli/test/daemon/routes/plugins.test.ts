@@ -105,6 +105,27 @@ describe('handlePluginRoutes', () => {
     expect(res.statusCode).toBe(204);
   });
 
+  it('projects the public plugin context instead of passing the internal route bag', async () => {
+    let seenCtx: unknown;
+    const plugin: RoutePlugin = {
+      name: 'projection',
+      handle(ctx) {
+        seenCtx = ctx;
+        ctx.res.writeHead(204);
+        ctx.res.end();
+      },
+    };
+
+    const { ctx, res } = makeCtx([plugin]);
+    (ctx as RouteRequestContext & { internalTrace?: string }).internalTrace = 'secret';
+    await handlePluginRoutes(ctx);
+
+    expect(res.statusCode).toBe(204);
+    expect(seenCtx).not.toBe(ctx);
+    expect(seenCtx).not.toHaveProperty('internalTrace');
+    expect(seenCtx).toHaveProperty('requestIdentity');
+  });
+
   it('returns without writing when routePlugins is empty', async () => {
     const { ctx, res } = makeCtx([]);
     await handlePluginRoutes(ctx);
