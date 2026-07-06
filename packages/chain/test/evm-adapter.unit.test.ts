@@ -202,6 +202,26 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(readContract.calls).toHaveLength(1);
   });
 
+  it('identity id reads populate the canonical IdentityStorage lazy binding', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const identityStorage = { identityStorage: true };
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => identityStorage);
+    a.readContract = recorder(async (_contract: unknown, _label: string, method: string) => (
+      method === 'getIdentityId' ? 42n : true
+    ));
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(identityStorage);
+
+    await expect(a.isOperationalWalletRegistered(42n, ADDR)).resolves.toBe(true);
+    expect(a.resolveContract.calls).toHaveLength(1);
+    expect(a.readContract.calls).toHaveLength(2);
+    expect(a.readContract.calls[0][0]).toBe(identityStorage);
+    expect(a.readContract.calls[1][0]).toBe(identityStorage);
+  });
+
   it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
     const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
 
@@ -210,10 +230,15 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(readContract.calls).toHaveLength(1);
 
     (a as any).contracts.identityStorage = { stale: true };
+    const init = recorder(async () => { (a as any).initialized = true; });
+    (a as any).init = init;
     (a as any).applyHubRotationEventName('IdentityStorage');
 
     expect((a as any).contracts.identityStorage).toBeUndefined();
+    expect((a as any).initialized).toBe(false);
     await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(init.calls).toHaveLength(1);
+    expect((a as any).initialized).toBe(true);
     expect(readContract.calls).toHaveLength(2);
   });
 
