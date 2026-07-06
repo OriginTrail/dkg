@@ -316,9 +316,13 @@ export function defineChainPublishSuite(config) {
           console.log(`Publishing into existing context graph "${contextGraphId}" on ${name} (no create/register; reuses a registered CG)`);
         }
 
-        // Private CGs must be synced to this node before it can validate/publish
-        // into them (a public open-publish CG needs none of this).
-        if (CG_SUBSCRIBE) {
+        // Private/curated CGs must be synced to this node before it can validate/
+        // publish into them (a public open-publish CG needs none of this). Auto-on
+        // when the id is canonical ("<curator>/<slug>", contains '/') — bare public
+        // names ('sports'/'foodie-network') skip it. V10_CG_SUBSCRIBE=true forces it.
+        const needsSubscribe = CG_SUBSCRIBE
+          || (typeof contextGraphId === 'string' && contextGraphId.includes('/'));
+        if (needsSubscribe) {
           console.log(`🔗 ${name} subscribing to private CG "${contextGraphId}" (syncing from curator)…`);
           await subscribeAndWait(client, contextGraphId, name, CG_SUBSCRIBE_TIMEOUT_MS);
           console.log(`✅ ${name} synced CG "${contextGraphId}" — proceeding to publish`);

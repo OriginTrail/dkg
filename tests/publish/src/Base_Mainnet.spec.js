@@ -11,9 +11,11 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Base Mainnet',
   blockchainName: 'v10:base:8453',
-  // 'sports' is an existing REGISTERED, public, open-publish CG on Base mainnet — no
-  // ~100-TRAC registration needed, only the tiny per-publish bid (~0.000273 TRAC).
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'sports',
+  // Default: the org's private publish-test CG on Base mainnet (curated, curator
+  // 0xB34ca972…). Nodes auto-subscribe to it (it contains '/') before publishing.
+  // NOTE: publishes need >=3 staked-core MEMBER ACKs — add more member cores or
+  // override to a public CG ('sports') via DKG_CONTEXT_GRAPH_ID if quorum is short.
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || '0xB34ca972B85264f2a9303C236c7e52D000B1e7d6/publish-tests',
   // Known-good, already-indexed UAL — used to exercise query/VM GET/Query Remote
   // when a publish fails (no fresh UAL). Override via DKG_FALLBACK_UAL.
   fallbackUal: process.env.DKG_FALLBACK_UAL
