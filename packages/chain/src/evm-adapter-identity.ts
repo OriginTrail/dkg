@@ -275,6 +275,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
     await this.init();
 
     let identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      identityId = await this.refreshIdentityIdForAddress(this.signer.address);
+    }
 
     // Step 1: Create profile if none exists
     if (identityId === 0n) {

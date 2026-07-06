@@ -39,6 +39,7 @@ beforeEach(() => {
 
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   const ADDR = '0x00000000000000000000000000000000000000a1';
+  const ADDR2 = '0x00000000000000000000000000000000000000a2';
   const identityInterface = new Interface([
     'event IdentityCreated(uint72 indexed identityId, bytes32 indexed operationalKey, bytes32 indexed adminKey)',
   ]);
@@ -222,6 +223,34 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(a.readContract.calls[1][0]).toBe(identityStorage);
   });
 
+  it('identity cache misses refresh IdentityStorage so a missed Hub rotation cannot pin stale zero reads', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
+    const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
+    let resolveCount = 0;
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => {
+      resolveCount += 1;
+      return resolveCount === 1 ? oldIdentityStorage : newIdentityStorage;
+    });
+    a.readContract = recorder(async (contract: unknown) => (
+      contract === oldIdentityStorage ? 0n : 42n
+    ));
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(newIdentityStorage);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+  });
+
   it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
     const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
 
@@ -258,7 +287,7 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   });
 
   it('ensureProfile seeds the signer identity cache after IdentityCreated', async () => {
-    const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 0n]);
     a.contracts.identity = { interface: identityInterface };
     a.contracts.profile = { interface: profileInterface };
     a.sendContractTransaction = recorder(async () => ({
@@ -271,7 +300,20 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
 
     await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(77n);
     await expect(a.getIdentityId()).resolves.toBe(77n);
-    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile freshly rechecks a cached signer zero before creating a profile', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 55n]);
+    a.sendContractTransaction = recorder(async () => {
+      throw new Error('ensureProfile should not create a duplicate profile');
+    });
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(55n);
+    await expect(a.getIdentityId()).resolves.toBe(55n);
+    expect(readContract.calls).toHaveLength(2);
+    expect(a.sendContractTransaction.calls).toHaveLength(0);
   });
 
   it('registerIdentity seeds the signer identity cache after IdentityCreated', async () => {
