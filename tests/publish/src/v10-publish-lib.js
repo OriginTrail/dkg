@@ -44,6 +44,15 @@ const OP_TIMEOUT_MS = Number(process.env.V10_OP_TIMEOUT_MS || 6 * 60 * 1000);
 const CG_REGISTER = String(process.env.V10_CG_REGISTER || 'false').toLowerCase() === 'true';
 const CG_ACCESS_POLICY = Number(process.env.V10_CG_ACCESS_POLICY || 0);
 const CG_PUBLISH_POLICY = Number(process.env.V10_CG_PUBLISH_POLICY || 1);
+// PRIVATE-CG support. A private (non-public) CG is not globally resolvable: a node
+// that doesn't host it can't validate the contextGraphId and rejects the write with
+// "ontology/agents definition scan exceeded listContextGraphs budget". Setting
+// V10_CG_SUBSCRIBE=true makes each publishing node subscribe to the CG first — it
+// syncs the CG (definition + allowlist) from the curator, then "knows" it and can
+// publish. Requires the curator node to be reachable on the DKG network. Leave
+// false for public open-publish CGs (sports/foodie-network), which need no sync.
+const CG_SUBSCRIBE = String(process.env.V10_CG_SUBSCRIBE || 'false').toLowerCase() === 'true';
+const CG_SUBSCRIBE_TIMEOUT_MS = Number(process.env.V10_CG_SUBSCRIBE_TIMEOUT_MS || 90000);
 
 // Read-back resilience. (1) A publish confirms on-chain but VM indexing lags a
 // few seconds, so reads RETRY before failing. (2) If a publish fails (no fresh
@@ -147,7 +156,41 @@ export function makeNodeClient(baseUrl, token) {
         accessPolicy: opts.accessPolicy ?? 0,
         publishPolicy: opts.publishPolicy ?? 1,
       }).then((r) => r.data),
+    // subscribe to (and sync) a context graph this node does not host. Returns
+    // { subscribed, catchup: { status: queued|running|done, jobId } }. Re-calling
+    // returns the current catchup status, so it doubles as a poll.
+    subscribe: (contextGraphId, includeSharedMemory = true) =>
+      req('POST', '/api/context-graph/subscribe', { contextGraphId, includeSharedMemory }, { acceptStatuses: [200, 202] }).then((r) => r.data),
   };
+}
+
+// Subscribe a node to a private CG and wait until its catch-up sync reports done
+// (or timeout). Idempotent: a node already synced returns done immediately.
+async function subscribeAndWait(client, contextGraphId, nodeName, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    let res;
+    try {
+      res = await client.subscribe(contextGraphId);
+    } catch (error) {
+      throw new Error(`subscribe to "${contextGraphId}" on ${nodeName} failed: ${error.message}`);
+    }
+    const status = res?.catchup?.status || 'unknown';
+    if (status !== last) {
+      console.log(`   ↪ ${nodeName} subscribe/catchup: ${status}`);
+      last = status;
+    }
+    if (status === 'done') return res;
+    if (status === 'failed' || status === 'error') {
+      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} reported ${status}`);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`catch-up sync for "${contextGraphId}" on ${nodeName} did not finish within ${timeoutMs}ms (last status: ${status}) — is the curator node reachable on the DKG network?`);
+    }
+    await sleep(3000);
+  }
 }
 
 function queryHasData(result) {
@@ -270,7 +313,15 @@ export function defineChainPublishSuite(config) {
             console.log(`${already ? '' : '⚠️  '}Context graph "${contextGraphId}" on-chain register on ${name}: ${error.message}${already ? ' (ok — already on-chain)' : ''}`);
           }
         } else {
-          console.log(`Publishing into existing context graph "${contextGraphId}" on ${name} (no create/register; reuses a registered open-publish CG)`);
+          console.log(`Publishing into existing context graph "${contextGraphId}" on ${name} (no create/register; reuses a registered CG)`);
+        }
+
+        // Private CGs must be synced to this node before it can validate/publish
+        // into them (a public open-publish CG needs none of this).
+        if (CG_SUBSCRIBE) {
+          console.log(`🔗 ${name} subscribing to private CG "${contextGraphId}" (syncing from curator)…`);
+          await subscribeAndWait(client, contextGraphId, name, CG_SUBSCRIBE_TIMEOUT_MS);
+          console.log(`✅ ${name} synced CG "${contextGraphId}" — proceeding to publish`);
         }
 
         for (let i = 0; i < KA_COUNT; i++) {
