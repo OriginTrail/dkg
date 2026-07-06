@@ -12,6 +12,7 @@
     "pr1370-admin-op-wallet"
   ],
   "all": [
+    "ack-candidate-isolation",
     "agent-provenance",
     "conviction-lazy-settle",
     "core-peers-features",
