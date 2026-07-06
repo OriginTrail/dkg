@@ -27,8 +27,6 @@ type HubRotationLogWithIdentity = ethers.Log & {
   logIndex?: unknown;
 };
 
-type HubRotationScanMode = 'probe' | 'dispatch';
-
 export class HubRotationPoller {
   private readonly readProvider: HubRotationReadProvider;
   private readonly intervalMs: number;
@@ -40,7 +38,6 @@ export class HubRotationPoller {
   private binding: HubRotationBinding | undefined;
   private readonly seenLogIds = new Map<string, number>();
   private started = false;
-  private startInFlight: Promise<void> | null = null;
   private generation = 0;
 
   constructor(config: HubRotationPollerConfig) {
@@ -56,19 +53,10 @@ export class HubRotationPoller {
 
   async start(hub: Contract, hubAddress: string): Promise<void> {
     if (this.started) return;
-    if (this.startInFlight) return this.startInFlight;
 
     this.bind(hub, hubAddress);
     const generation = ++this.generation;
     this.started = true;
-    const startPromise = this.seed(generation)
-      .catch(() => { /* optional bootstrap path */ })
-      .finally(() => {
-        if (this.startInFlight === startPromise) this.startInFlight = null;
-        if (this.inFlight === startPromise) this.inFlight = null;
-      });
-    this.startInFlight = startPromise;
-    this.inFlight = startPromise;
 
     this.timer = setInterval(() => {
       if (this.inFlight) return;
@@ -84,7 +72,6 @@ export class HubRotationPoller {
 
   stop(): void {
     this.generation++;
-    this.startInFlight = null;
     this.inFlight = null;
     if (this.timer) {
       clearInterval(this.timer);
@@ -102,27 +89,18 @@ export class HubRotationPoller {
   }
 
   async pollOnce(generation = this.generation): Promise<void> {
-    await this.scan(generation, 'dispatch');
-  }
-
-  private async seed(generation: number): Promise<void> {
-    await this.scan(generation, 'probe');
-  }
-
-  private async scan(generation: number, mode: HubRotationScanMode): Promise<void> {
     const binding = this.binding;
-    if (!binding || binding.topics.length === 0 || generation !== this.generation) return;
+    if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
-    const label = mode === 'probe' ? 'Hub rotation seed' : 'Hub rotation poll';
     const previousLastScannedBlock = this.lastScannedBlock;
     const head = await this.readProvider(
-      `${label} getBlockNumber`,
+      'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
     );
-    if (generation !== this.generation) return;
-    const fromBlock = this.scanFromBlock(mode, previousLastScannedBlock, head);
+    if (!this.started || generation !== this.generation) return;
+    const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
     const logs = await this.readProvider<ethers.Log[]>(
-      `${label} getLogs`,
+      'Hub rotation poll getLogs',
       (provider) => provider.getLogs({
         address: binding.hubAddress,
         fromBlock,
@@ -131,23 +109,17 @@ export class HubRotationPoller {
       }),
       { policy: 'wideLogScan' },
     );
-    if (generation !== this.generation) return;
+    if (!this.started || generation !== this.generation) return;
 
-    // Probe mode intentionally does not mark logs as seen; the first buffered
-    // dispatch must still process rotations that landed during adapter init.
-    if (mode === 'dispatch') this.dispatchLogs(binding.hub, logs);
+    this.dispatchLogs(binding.hub, logs);
     this.lastScannedBlock = previousLastScannedBlock == null
       ? head
       : Math.max(previousLastScannedBlock, head);
     this.pruneSeenLogs(head);
   }
 
-  private scanFromBlock(
-    mode: HubRotationScanMode,
-    previousLastScannedBlock: number | undefined,
-    head: number,
-  ): number {
-    if (mode === 'probe' || previousLastScannedBlock == null) {
+  private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {
+    if (previousLastScannedBlock == null) {
       return Math.max(0, head - this.reorgBufferBlocks);
     }
     const candidateFromBlock = previousLastScannedBlock + 1 - this.reorgBufferBlocks;
