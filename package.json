@@ -51,6 +51,7 @@
     "test:devnet:conviction-lazy-settle": "vitest run --config devnet/conviction-lazy-settle/vitest.config.ts",
     "test:devnet:rfc51-publishing-allocation": "vitest run --config devnet/rfc51-publishing-allocation/vitest.config.ts",
     "test:devnet:core-peers-features": "vitest run --config devnet/core-peers-features/vitest.config.ts",
+    "test:devnet:ack-candidate-isolation": "vitest run --config devnet/ack-candidate-isolation/vitest.config.ts",
     "test:devnet:edge-update-flow": "vitest run --config devnet/edge-update-flow/vitest.config.ts",
     "test:devnet:greenfield-10min": "vitest run --config devnet/greenfield-10min/vitest.config.ts",
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
