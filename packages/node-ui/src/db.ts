@@ -2400,6 +2400,89 @@ export class SqliteSyncCheckpointStore {
   }
 }
 
+// --- Chain/RPC cursor stores ---
+
+function parsePositiveSafeIntegerSetting(value: string | undefined): number | undefined {
+  if (value == null) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * SQLite-backed lane cursor store for `ChainEventPoller`.
+ *
+ * The store is intentionally implemented against the generic settings table:
+ * cursor rows are tiny, durable, and should not be pruned. `scope` should
+ * include the effective chain/deployment identity so a node-home reused across
+ * networks never applies an old lane cursor to a different chain.
+ */
+export class SqliteChainEventCursorStore {
+  private readonly db: Database.Database;
+  private readonly scope: string;
+
+  constructor(dashboard: DashboardDB, options: { scope?: string } = {}) {
+    this.db = dashboard.db;
+    this.scope = options.scope ?? 'default';
+  }
+
+  async loadLane(lane: string): Promise<number | undefined> {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(this.key(lane)) as { value: string } | undefined;
+    return parsePositiveSafeIntegerSetting(row?.value);
+  }
+
+  async saveLane(lane: string, blockNumber: number): Promise<void> {
+    if (!Number.isSafeInteger(blockNumber) || blockNumber <= 0) return;
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(this.key(lane), String(blockNumber));
+  }
+
+  private key(lane: string): string {
+    return `chainEventPoller.cursor:${this.scope}:${lane}`;
+  }
+}
+
+/**
+ * SQLite-backed ContextGraphNameRegistry scan cursor.
+ *
+ * The value is the next unbuffered block after a successfully scanned
+ * contiguous prefix. It is keyed by chain/deployment/registry address; corrupt
+ * values are ignored by returning `undefined`, which fails closed to the
+ * historical scan path.
+ */
+export class SqliteContextGraphRegistryScanCursorStore {
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(this.key(key)) as { value: string } | undefined;
+    return parsePositiveSafeIntegerSetting(row?.value);
+  }
+
+  async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
+    if (!Number.isSafeInteger(nextBlock) || nextBlock <= 0) return;
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(this.key(key), String(nextBlock));
+  }
+
+  private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
+    return [
+      'contextGraphRegistryScan.cursor',
+      key.chainId,
+      key.deploymentId,
+      key.registryAddress.toLowerCase(),
+    ].join(':');
+  }
+}
+
 // --- Universal Messenger substrate stores (rc.9 plan PR-1) ---
 
 /**

@@ -360,17 +360,35 @@ export function isContextGraphChainScanPartialError(
 
 export interface ContextGraphChainScanOptions {
   /**
-   * When true and `fromBlock` is omitted, adapters may resume from an
-   * in-memory watermark with a reorg buffer. The default preserves public
+   * When true and `fromBlock` is omitted, adapters may resume from a
+   * scan watermark with a reorg buffer. The default preserves public
    * list-all semantics for SDK callers.
    */
   incremental?: boolean;
   /**
-   * When true on a successful full scan, adapters may seed the in-memory
+   * When true on a successful full scan, adapters may seed the
    * incremental watermark for later daemon background scans. This is opt-in so
    * public SDK list-all calls remain side-effect free by default.
    */
   seedIncrementalWatermark?: boolean;
+  /**
+   * Optional daemon/background scan budget. When set, adapters may stop after
+   * this many successful log pages and return the scanned prefix while keeping
+   * any durable cursor advanced only through covered pages. Public SDK callers
+   * should leave this unset to preserve complete list-all semantics.
+   */
+  pageBudget?: number;
+}
+
+export interface ContextGraphRegistryScanCursorKey {
+  chainId: string;
+  deploymentId: string;
+  registryAddress: string;
+}
+
+export interface ContextGraphRegistryScanCursorStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
+  save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

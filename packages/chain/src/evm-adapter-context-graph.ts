@@ -114,7 +114,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    return this.contextGraphRegistryScanWatermarks.has(registryAddress);
+    return (await this.loadContextGraphRegistryScanWatermark(registryAddress)) != null;
   }
 
   async listContextGraphsFromChain(
@@ -129,12 +129,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const incremental = options?.incremental === true && fromBlock === undefined;
     const seedIncrementalWatermark =
       options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
-    const watermark = incremental
-      ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
+    const watermarkEligible = fromBlock === undefined && (incremental || seedIncrementalWatermark);
+    const pageBudget = watermarkEligible && Number.isFinite(options?.pageBudget) && (options?.pageBudget ?? 0) >= 1
+      ? Math.floor(options?.pageBudget ?? 0)
       : undefined;
+    const persistedWatermark = watermarkEligible
+      ? await this.loadContextGraphRegistryScanWatermark(registryAddress)
+      : undefined;
+    const canResumeFromWatermark = watermarkEligible && persistedWatermark !== undefined;
     const scan =
       fromBlock === undefined
-        ? incremental && watermark !== undefined
+        ? canResumeFromWatermark
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
           : await this.resolveContractDeployBlock(
               registryAddress,
@@ -144,13 +149,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
     const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
     const start = fromBlock ?? (
-      incremental && watermark !== undefined
-        ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+      canResumeFromWatermark
+        ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
         : deployBlock
     );
     if (start > head) {
       if (seedIncrementalWatermark) {
-        this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
+        await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
       }
       return [];
     }
@@ -158,7 +163,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (incremental && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (incremental && pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
@@ -175,8 +180,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let preferred: JsonRpcProvider | undefined;
     let scannedAnyPage = false;
 
-    // Incremental daemon scans can resume from the scanned prefix after a later
-    // page failure. Public list-all calls should remain all-or-error.
+    // Daemon scans can resume from the scanned prefix after a later page
+    // failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
       try {
@@ -205,11 +210,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         results.push(...pageResults);
         scannedAnyPage = true;
-        if (incremental) {
-          this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
+        if (incremental || seedIncrementalWatermark) {
+          await this.saveContextGraphRegistryScanWatermark(registryAddress, hi + 1);
         }
+        const scannedPages = Math.floor((hi - start) / pageSize) + 1;
+        if (pageBudget !== undefined && scannedPages >= pageBudget && hi < head) return results;
       } catch (err) {
-        if (incremental && scannedAnyPage) {
+        if ((incremental || seedIncrementalWatermark) && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
             `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
@@ -228,7 +235,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     }
 
     if (seedIncrementalWatermark) {
-      this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
+      await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
     }
 
     return results;

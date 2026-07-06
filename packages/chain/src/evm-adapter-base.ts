@@ -17,6 +17,8 @@ import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import { DEFAULT_APPROVAL_POLICY } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
+  ContextGraphRegistryScanCursorKey,
+  ContextGraphRegistryScanCursorStore,
   V10PublishParams,
   OnChainPublishResult,
   ConvictionReader,
@@ -638,6 +640,8 @@ export class EVMChainAdapterBase {
 
   protected readonly cgRegistryScanPageSize: number;
 
+  protected readonly contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+
   /**
    * Reset the PR3 publish-preflight cache. Public so daemon code that
    * knows about an external chain reconfiguration (e.g. a hot-reload
@@ -653,6 +657,69 @@ export class EVMChainAdapterBase {
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
     this.contextGraphRegistryScanWatermarks.clear();
+  }
+
+  protected contextGraphRegistryScanCursorKey(registryAddress: string): ContextGraphRegistryScanCursorKey {
+    return {
+      chainId: this.chainId,
+      deploymentId: this.deploymentId,
+      registryAddress: registryAddress.toLowerCase(),
+    };
+  }
+
+  protected normalizeContextGraphRegistryScanCursor(value: number | undefined): number | undefined {
+    if (value == null) return undefined;
+    if (!Number.isSafeInteger(value) || value <= 0) return undefined;
+    return value;
+  }
+
+  protected async loadContextGraphRegistryScanWatermark(
+    registryAddress: string,
+  ): Promise<number | undefined> {
+    const cacheKey = registryAddress.toLowerCase();
+    const cached = this.normalizeContextGraphRegistryScanCursor(
+      this.contextGraphRegistryScanWatermarks.get(cacheKey),
+    );
+    if (cached != null) return cached;
+
+    if (!this.contextGraphRegistryScanCursorStore) return undefined;
+    try {
+      const persisted = await this.contextGraphRegistryScanCursorStore.load(
+        this.contextGraphRegistryScanCursorKey(cacheKey),
+      );
+      const normalized = this.normalizeContextGraphRegistryScanCursor(persisted);
+      if (normalized != null) {
+        this.contextGraphRegistryScanWatermarks.set(cacheKey, normalized);
+      }
+      return normalized;
+    } catch (err) {
+      console.warn(
+        `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    }
+  }
+
+  protected async saveContextGraphRegistryScanWatermark(
+    registryAddress: string,
+    nextBlock: number,
+  ): Promise<void> {
+    const normalized = this.normalizeContextGraphRegistryScanCursor(nextBlock);
+    if (normalized == null) return;
+
+    const cacheKey = registryAddress.toLowerCase();
+    this.contextGraphRegistryScanWatermarks.set(cacheKey, normalized);
+    if (!this.contextGraphRegistryScanCursorStore) return;
+    try {
+      await this.contextGraphRegistryScanCursorStore.save(
+        this.contextGraphRegistryScanCursorKey(cacheKey),
+        normalized,
+      );
+    } catch (err) {
+      console.warn(
+        `[chain] ContextGraphNameRegistry scan cursor save failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -691,6 +758,7 @@ export class EVMChainAdapterBase {
       config.cgRegistryScanPageSize,
       CG_REGISTRY_DEFAULT_PAGE_SIZE,
     );
+    this.contextGraphRegistryScanCursorStore = config.contextGraphRegistryScanCursorStore;
     // BUG-022 root-cause fix: force ethers' `PollingEventSubscriber`
     // (eth_getLogs over a sliding block window) instead of the default
     // `FilterIdEventSubscriber` (eth_newFilter + eth_getFilterChanges).

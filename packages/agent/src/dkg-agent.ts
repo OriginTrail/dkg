@@ -463,6 +463,7 @@ export interface DiscoverContextGraphsFromChainOptions {
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
   throwOnChainScanFailure?: boolean;
+  pageBudget?: number;
 }
 
 /**
@@ -535,6 +536,7 @@ export class DKGAgent extends DKGAgentBase {
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
+        contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       };
       if (config.chainConfig.adminPrivateKey) {
         chain = new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey });
@@ -1088,7 +1090,7 @@ export class DKGAgent extends DKGAgentBase {
    *
    * Defaults to a full scan so SDK callers can rebuild missing local state.
    * Background daemon loops may opt into incremental scans to reuse the
-   * in-memory chain adapter watermark.
+   * chain adapter watermark.
    *
    * Returns the number of newly discovered context graphs.
    */
@@ -1106,12 +1108,14 @@ export class DKGAgent extends DKGAgentBase {
     let partialChainScanError: unknown;
     try {
       const scanOptions = options.incremental
-        ? {
-            incremental: true as const,
-          }
+          ? {
+              incremental: true as const,
+              ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+            }
         : options.seedIncrementalWatermark
           ? {
               seedIncrementalWatermark: true as const,
+              ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
             }
           : undefined;
       onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);

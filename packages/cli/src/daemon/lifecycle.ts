@@ -91,6 +91,8 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -600,14 +602,16 @@ export function mergePreferredRelays(input: {
 }
 
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
   run?: number;
   fullScanEvery?: number;
+  pageBudget?: number;
 }):
-  | { incremental: true }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  | { incremental: true; pageBudget: number }
+  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true; pageBudget: number } {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
   if (
@@ -617,11 +621,19 @@ export function chainDiscoveryScanOptions(input: {
   ) {
     fullScanEvery = Math.floor(configuredFullScanEvery);
   }
+  const configuredPageBudget = input.pageBudget;
+  const pageBudget = (
+    typeof configuredPageBudget === 'number' &&
+    Number.isFinite(configuredPageBudget) &&
+    configuredPageBudget >= 1
+  )
+    ? Math.floor(configuredPageBudget)
+    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
   const run = input.run ?? 0;
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
   return input.watermarkSeeded && !periodicFullResync
-    ? { incremental: true }
-    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+    ? { incremental: true, pageBudget }
+    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true, pageBudget };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1308,6 +1320,7 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  const chainCursorScope = `${chainBase?.chainId ?? 'none'}:hub=${(chainBase?.hubAddress ?? 'none').toLowerCase()}`;
 
   if (role === 'core' && config.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())
@@ -1357,6 +1370,8 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
+  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1438,6 +1453,8 @@ export async function runDaemonInner(
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     syncCheckpointStore,
+    chainEventCursorStore,
+    contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -1929,19 +1946,25 @@ export async function runDaemonInner(
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   let chainScanRuns = 0;
+  let chainScanInFlight = false;
   const runChainDiscoveryScan = async () => {
+    if (chainScanInFlight) return;
+    chainScanInFlight = true;
     try {
       const run = chainScanRuns++;
       const found = await agent.discoverContextGraphsFromChain(
         chainDiscoveryScanOptions({
           run,
           watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
+          pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
         }),
       );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);
     } catch {
       /* non-critical */
+    } finally {
+      chainScanInFlight = false;
     }
   };
   setTimeout(runChainDiscoveryScan, 15_000);

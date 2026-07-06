@@ -164,8 +164,18 @@ describe('daemon startup network validation', () => {
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-gnosis');
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    expect(mocks.agentCreate.mock.calls[0]?.[0]).toMatchObject({
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    expect(createArg).toMatchObject({
       genesisId: 'gnosis-mainnet',
+      chainEventCursorStore: {
+        loadLane: expect.any(Function),
+        saveLane: expect.any(Function),
+      },
+      contextGraphRegistryScanCursorStore: {
+        load: expect.any(Function),
+        save: expect.any(Function),
+      },
     });
+    createArg.chainEventCursorStore?.db?.close?.();
   });
 });

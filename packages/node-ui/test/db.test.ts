@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteKaNumberStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -1119,6 +1119,61 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
+  });
+});
+
+describe('DashboardDB — chain RPC cursor stores', () => {
+  it('persists chain-event lane cursors by scope across reopen', async () => {
+    const store = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
+
+    await store.saveLane('contextGraphDiscovery', 1234);
+    await store.saveLane('vmReconcile', 5678);
+    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
+    expect(await store.loadLane('vmReconcile')).toBe(5678);
+    expect(await new SqliteChainEventCursorStore(db, { scope: 'evm:2:hub=0xabc' }).loadLane('contextGraphDiscovery')).toBeUndefined();
+
+    await store.saveLane('contextGraphDiscovery', 0);
+    await store.saveLane('contextGraphDiscovery', -1);
+    await store.saveLane('contextGraphDiscovery', 1.5);
+    await store.saveLane('contextGraphDiscovery', Number.MAX_SAFE_INTEGER + 1);
+    expect(await store.loadLane('contextGraphDiscovery')).toBe(1234);
+
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run('chainEventPoller.cursor:evm:1:hub=0xabc:badLane', '0');
+    expect(await store.loadLane('badLane')).toBeUndefined();
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteChainEventCursorStore(db, { scope: 'evm:1:hub=0xabc' });
+    expect(await reopened.loadLane('contextGraphDiscovery')).toBe(1234);
+    expect(await reopened.loadLane('vmReconcile')).toBe(5678);
+  });
+
+  it('persists registry scan cursors by deployment key and ignores corrupt values', async () => {
+    const store = new SqliteContextGraphRegistryScanCursorStore(db);
+    const key = {
+      chainId: 'evm:1',
+      deploymentId: 'evm:1:hub=0xabc',
+      registryAddress: '0x3333333333333333333333333333333333333333',
+    };
+
+    await store.save(key, 5000);
+    expect(await store.load(key)).toBe(5000);
+    await store.save(key, 0);
+    await store.save(key, -1);
+    await store.save(key, 1.5);
+    await store.save(key, Number.MAX_SAFE_INTEGER + 1);
+    expect(await store.load(key)).toBe(5000);
+    expect(await store.load({ ...key, registryAddress: '0x4444444444444444444444444444444444444444' })).toBeUndefined();
+
+    db.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(
+      `contextGraphRegistryScan.cursor:${key.chainId}:${key.deploymentId}:0x5555555555555555555555555555555555555555`,
+      'not-a-number',
+    );
+    expect(await store.load({ ...key, registryAddress: '0x5555555555555555555555555555555555555555' })).toBeUndefined();
   });
 });
 

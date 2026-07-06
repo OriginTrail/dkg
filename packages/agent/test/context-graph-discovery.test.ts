@@ -2353,12 +2353,19 @@ describe('discoverContextGraphsFromChain', () => {
 
     expect(await agent.discoverContextGraphsFromChain()).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ incremental: true, pageBudget: 7 })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({
+      seedIncrementalWatermark: true,
+      pageBudget: 11,
+    })).toBe(0);
 
     expect(calls).toEqual([
       undefined,
       { incremental: true },
+      { incremental: true, pageBudget: 7 },
       { seedIncrementalWatermark: true },
+      { seedIncrementalWatermark: true, pageBudget: 11 },
     ]);
   }, 15000);
 
