@@ -193,7 +193,7 @@ export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
 }
 
 /** Current diagnostic consumer label, if a caller established one. */
-export function currentRpcUsageConsumer(): string | undefined {
+function activeRpcUsageConsumer(): string | undefined {
   return rpcUsageConsumerContext.getStore();
 }
 
@@ -228,7 +228,7 @@ export class RpcUsageTracker {
   static readonly MAX_WINDOW_METHODS = 64;
   static readonly MAX_WINDOW_CONSUMERS = 128;
 
-  record(method: string, consumer = currentRpcUsageConsumer()): void {
+  record(method: string): void {
     // Authoritative window/lifetime state first, OUTSIDE any try — pure map
     // arithmetic that cannot realistically throw, and it must never be
     // skipped because an OPTIONAL sink misbehaved.
@@ -236,7 +236,7 @@ export class RpcUsageTracker {
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
     if (raw === 'eth_call') {
-      const normalizedConsumer = normalizeRpcUsageConsumer(consumer);
+      const normalizedConsumer = activeRpcUsageConsumer();
       if (normalizedConsumer) {
         const consumerKey = this.ethCallConsumers.has(normalizedConsumer) ||
           this.ethCallConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
@@ -337,7 +337,7 @@ export function createCountingJsonRpcProvider(
     const retry = await pureRetry(attemptReq, response, attempt);
     if (retry) {
       try {
-        for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) tracker.record(method, currentRpcUsageConsumer());
+        for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) tracker.record(method);
       } catch { /* accounting must never break the retry path */ }
     }
     return retry;
@@ -356,6 +356,6 @@ export function createCountingJsonRpcProvider(
     fetchRequest,
     network,
     providerOptions,
-    (method) => tracker.record(method, currentRpcUsageConsumer()),
+    (method) => tracker.record(method),
   );
 }

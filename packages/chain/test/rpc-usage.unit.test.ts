@@ -9,6 +9,7 @@
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { Contract } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -426,9 +427,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const t = new RpcUsageTracker(() => 'evm:31337');
     const max = RpcUsageTracker.MAX_WINDOW_CONSUMERS;
     for (let i = 0; i < max + 4; i++) {
-      t.record('eth_call', `consumer.${i}`);
+      withRpcUsageConsumer(`consumer.${i}`, () => t.record('eth_call'));
     }
-    t.record('eth_call', 'consumer.0');
+    withRpcUsageConsumer('consumer.0', () => t.record('eth_call'));
 
     const w = t.drainWindow();
     expect(Object.keys(w.ethCallByConsumer ?? {})).toHaveLength(max + 1);
@@ -458,5 +459,27 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer?.['unit.eth_call']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('attributes failover contract-view eth_call attempts to the readContract label', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_call'] });
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+    const contract = new Contract(HUB, ['function value() view returns (uint256)']);
+
+    await expect(a.readContract(contract, 'unit.contract.value', 'value')).resolves.toBe(0n);
+
+    const usage = a.drainRpcUsage();
+    const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
+    expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
+    expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer?.['unit.contract.value']).toBe(rawEthCallHits);
   }, 30_000);
 });
