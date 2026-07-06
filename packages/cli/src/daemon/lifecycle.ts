@@ -64,6 +64,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
+  buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
   type ApprovalPolicy,
@@ -611,7 +612,7 @@ export function chainDiscoveryScanOptions(input: {
   pageBudget?: number;
 }):
   | { incremental: true; pageBudget: number }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true; pageBudget: number } {
+  | { seedIncrementalWatermark: true; resumeFromCursor: true; throwOnChainScanFailure: true; pageBudget: number } {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
   if (
@@ -633,7 +634,7 @@ export function chainDiscoveryScanOptions(input: {
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
   return input.watermarkSeeded && !periodicFullResync
     ? { incremental: true, pageBudget }
-    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true, pageBudget };
+    : { seedIncrementalWatermark: true, resumeFromCursor: true, throwOnChainScanFailure: true, pageBudget };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -1320,7 +1321,9 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
-  const chainCursorScope = `${chainBase?.chainId ?? 'none'}:hub=${(chainBase?.hubAddress ?? 'none').toLowerCase()}`;
+  const chainCursorScope = chainBase?.chainId && chainBase?.hubAddress
+    ? buildEvmDeploymentId({ chainId: chainBase.chainId, hubAddress: chainBase.hubAddress })
+    : 'none:hub=none';
 
   if (role === 'core' && config.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())

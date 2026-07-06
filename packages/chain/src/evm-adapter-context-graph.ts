@@ -129,14 +129,23 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const incremental = options?.incremental === true && fromBlock === undefined;
     const seedIncrementalWatermark =
       options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
-    const watermarkEligible = fromBlock === undefined && (incremental || seedIncrementalWatermark);
-    const pageBudget = watermarkEligible && Number.isFinite(options?.pageBudget) && (options?.pageBudget ?? 0) >= 1
-      ? Math.floor(options?.pageBudget ?? 0)
-      : undefined;
-    const persistedWatermark = watermarkEligible
+    const cursorResumedSeed =
+      seedIncrementalWatermark && options?.resumeFromCursor === true;
+    const scanPlan = {
+      resumeFromWatermark: incremental || cursorResumedSeed,
+      persistProgress: incremental || seedIncrementalWatermark,
+      allowPartialFailure: incremental || seedIncrementalWatermark,
+      seedAtEnd: seedIncrementalWatermark,
+      pageBudget: (incremental || cursorResumedSeed) &&
+        Number.isFinite(options?.pageBudget) &&
+        (options?.pageBudget ?? 0) >= 1
+          ? Math.floor(options?.pageBudget ?? 0)
+          : undefined,
+    };
+    const persistedWatermark = scanPlan.resumeFromWatermark
       ? await this.loadContextGraphRegistryScanWatermark(registryAddress)
       : undefined;
-    const canResumeFromWatermark = watermarkEligible && persistedWatermark !== undefined;
+    const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
     const scan =
       fromBlock === undefined
         ? canResumeFromWatermark
@@ -154,7 +163,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         : deployBlock
     );
     if (start > head) {
-      if (seedIncrementalWatermark) {
+      if (scanPlan.seedAtEnd) {
         await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
       }
       return [];
@@ -163,7 +172,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (incremental && pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (incremental && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
@@ -210,13 +219,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         results.push(...pageResults);
         scannedAnyPage = true;
-        if (incremental || seedIncrementalWatermark) {
+        if (scanPlan.persistProgress) {
           await this.saveContextGraphRegistryScanWatermark(registryAddress, hi + 1);
         }
         const scannedPages = Math.floor((hi - start) / pageSize) + 1;
-        if (pageBudget !== undefined && scannedPages >= pageBudget && hi < head) return results;
+        if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return results;
       } catch (err) {
-        if ((incremental || seedIncrementalWatermark) && scannedAnyPage) {
+        if (scanPlan.allowPartialFailure && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
             `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
@@ -234,7 +243,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       }
     }
 
-    if (seedIncrementalWatermark) {
+    if (scanPlan.seedAtEnd) {
       await this.saveContextGraphRegistryScanWatermark(registryAddress, head + 1);
     }
 

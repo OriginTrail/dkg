@@ -372,12 +372,23 @@ export interface ContextGraphChainScanOptions {
    */
   seedIncrementalWatermark?: boolean;
   /**
+   * Explicitly allow a seeded daemon/background scan to resume from the
+   * existing scan watermark. `seedIncrementalWatermark` without this flag keeps
+   * full scan semantics and starts at the registry deploy block.
+   */
+  resumeFromCursor?: boolean;
+  /**
    * Optional daemon/background scan budget. When set, adapters may stop after
    * this many successful log pages and return the scanned prefix while keeping
    * any durable cursor advanced only through covered pages. Public SDK callers
-   * should leave this unset to preserve complete list-all semantics.
+   * should leave this unset to preserve complete list-all semantics. The budget
+   * is honored only for incremental scans or explicit cursor-resumed seed scans.
    */
   pageBudget?: number;
+}
+
+export function buildEvmDeploymentId(input: { chainId: string; hubAddress: string }): string {
+  return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
 }
 
 export interface ContextGraphRegistryScanCursorKey {

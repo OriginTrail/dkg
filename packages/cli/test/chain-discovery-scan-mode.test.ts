@@ -5,6 +5,7 @@ describe('chainDiscoveryScanOptions', () => {
   it('uses failure-throwing full-history watermark seeding before a seed exists', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: false })).toEqual({
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       throwOnChainScanFailure: true,
       pageBudget: 30,
     });
@@ -29,6 +30,7 @@ describe('chainDiscoveryScanOptions', () => {
       fullScanEvery: 48,
     })).toEqual({
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       throwOnChainScanFailure: true,
       pageBudget: 30,
     });

@@ -2357,6 +2357,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       pageBudget: 11,
     })).toBe(0);
 
@@ -2365,7 +2366,7 @@ describe('discoverContextGraphsFromChain', () => {
       { incremental: true },
       { incremental: true, pageBudget: 7 },
       { seedIncrementalWatermark: true },
-      { seedIncrementalWatermark: true, pageBudget: 11 },
+      { seedIncrementalWatermark: true, resumeFromCursor: true, pageBudget: 11 },
     ]);
   }, 15000);
 

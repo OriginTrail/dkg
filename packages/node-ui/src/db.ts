@@ -2408,6 +2408,24 @@ function parsePositiveSafeIntegerSetting(value: string | undefined): number | un
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+class SettingsPositiveIntegerCursorStore {
+  constructor(private readonly db: Database.Database) {}
+
+  load(key: string): number | undefined {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(key) as { value: string } | undefined;
+    return parsePositiveSafeIntegerSetting(row?.value);
+  }
+
+  save(key: string, value: number): void {
+    if (!Number.isSafeInteger(value) || value <= 0) return;
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(key, String(value));
+  }
+}
+
 /**
  * SQLite-backed lane cursor store for `ChainEventPoller`.
  *
@@ -2418,25 +2436,21 @@ function parsePositiveSafeIntegerSetting(value: string | undefined): number | un
  */
 export class SqliteChainEventCursorStore {
   private readonly db: Database.Database;
+  private readonly cursors: SettingsPositiveIntegerCursorStore;
   private readonly scope: string;
 
   constructor(dashboard: DashboardDB, options: { scope?: string } = {}) {
     this.db = dashboard.db;
+    this.cursors = new SettingsPositiveIntegerCursorStore(this.db);
     this.scope = options.scope ?? 'default';
   }
 
   async loadLane(lane: string): Promise<number | undefined> {
-    const row = this.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(this.key(lane)) as { value: string } | undefined;
-    return parsePositiveSafeIntegerSetting(row?.value);
+    return this.cursors.load(this.key(lane));
   }
 
   async saveLane(lane: string, blockNumber: number): Promise<void> {
-    if (!Number.isSafeInteger(blockNumber) || blockNumber <= 0) return;
-    this.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(this.key(lane), String(blockNumber));
+    this.cursors.save(this.key(lane), blockNumber);
   }
 
   private key(lane: string): string {
@@ -2453,24 +2467,18 @@ export class SqliteChainEventCursorStore {
  * historical scan path.
  */
 export class SqliteContextGraphRegistryScanCursorStore {
-  private readonly db: Database.Database;
+  private readonly cursors: SettingsPositiveIntegerCursorStore;
 
   constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
+    this.cursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
   }
 
   async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
-    const row = this.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(this.key(key)) as { value: string } | undefined;
-    return parsePositiveSafeIntegerSetting(row?.value);
+    return this.cursors.load(this.key(key));
   }
 
   async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
-    if (!Number.isSafeInteger(nextBlock) || nextBlock <= 0) return;
-    this.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(this.key(key), String(nextBlock));
+    this.cursors.save(this.key(key), nextBlock);
   }
 
   private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {

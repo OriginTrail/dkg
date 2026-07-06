@@ -320,6 +320,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     await adapter.listContextGraphsFromChain(undefined, {
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       pageBudget: 2,
     });
 
@@ -372,6 +373,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     await adapter.listContextGraphsFromChain(undefined, {
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       pageBudget: 1,
     });
 
@@ -380,6 +382,38 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [3_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 3_949],
     ]);
     expect(store.saves.map((s) => s.nextBlock)).toEqual([3_000, 3_950]);
+  });
+
+  it('keeps plain seeded scans full even when a daemon cursor is persisted', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    await store.save({
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: REGISTRY,
+    }, 3_000);
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= 10 && 10 <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: 10 }]
+          : [],
+      ),
+    });
+    const { adapter } = makeAdapter(registry, 3_500, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+
+    const results = await adapter.listContextGraphsFromChain(undefined, {
+      seedIncrementalWatermark: true,
+    });
+
+    expect(results.map((cg) => cg.blockNumber)).toEqual([10]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+      [1_000, 1_999],
+      [2_000, 2_999],
+      [3_000, 3_500],
+    ]);
   });
 
   it('keeps public list-all scans complete even when a daemon cursor is persisted', async () => {
@@ -392,6 +426,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     await seedAdapter.listContextGraphsFromChain(undefined, {
       seedIncrementalWatermark: true,
+      resumeFromCursor: true,
       pageBudget: 1,
     });
 

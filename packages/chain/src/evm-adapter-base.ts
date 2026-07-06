@@ -14,7 +14,7 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY } from './chain-adapter.js';
+import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
 import type {
   ApprovalPolicy,
   ContextGraphRegistryScanCursorKey,
@@ -380,7 +380,7 @@ async function contractAddress(contract: Contract): Promise<string> {
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
-    return `${this.chainId}:hub=${this.hubAddress.toLowerCase()}`;
+    return buildEvmDeploymentId({ chainId: this.chainId, hubAddress: this.hubAddress });
   }
 
   readonly chainType = 'evm' as const;

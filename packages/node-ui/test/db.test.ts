@@ -1174,6 +1174,11 @@ describe('DashboardDB — chain RPC cursor stores', () => {
       'not-a-number',
     );
     expect(await store.load({ ...key, registryAddress: '0x5555555555555555555555555555555555555555' })).toBeUndefined();
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
+    expect(await reopened.load(key)).toBe(5000);
   });
 });
 

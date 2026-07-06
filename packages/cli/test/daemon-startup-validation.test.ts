@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
+import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -160,6 +161,12 @@ describe('daemon startup network validation', () => {
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'edge',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
     } as any, Date.now())).rejects.toThrow('after-agent-create');
 
     expect(mocks.loadNetworkConfig).toHaveBeenCalledWith('mainnet-gnosis');
@@ -176,6 +183,10 @@ describe('daemon startup network validation', () => {
         save: expect.any(Function),
       },
     });
+    expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
+      chainId: 'evm:100',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+    }));
     createArg.chainEventCursorStore?.db?.close?.();
   });
 });

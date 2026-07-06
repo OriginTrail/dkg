@@ -462,6 +462,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export interface DiscoverContextGraphsFromChainOptions {
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
+  resumeFromCursor?: boolean;
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
 }
@@ -1115,6 +1116,7 @@ export class DKGAgent extends DKGAgentBase {
         : options.seedIncrementalWatermark
           ? {
               seedIncrementalWatermark: true as const,
+              ...(options.resumeFromCursor ? { resumeFromCursor: true as const } : {}),
               ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
             }
           : undefined;
