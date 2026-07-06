@@ -17,7 +17,11 @@ const drain = DKGAgentBase.prototype.drainRpcUsage;
 
 describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', () => {
   it('delegates to the adapter and passes the window through VERBATIM', () => {
-    const window = { byMethod: { eth_call: 42, eth_getLogs: 7 }, lifetimeTotal: 49 };
+    const window = {
+      byMethod: { eth_call: 42, eth_getLogs: 7 },
+      ethCallByConsumer: { 'pcaNFT.getAccountInfo': 42 },
+      lifetimeTotal: 49,
+    };
     const out = drain.call({ chain: { drainRpcUsage: () => window } } as never);
     expect(out).toBe(window); // same object — no reshaping/copying in the boundary
   });

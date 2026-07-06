@@ -41,6 +41,48 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     );
     expect(lines).toEqual(['rpc_usage method=other count=5 window_s=60 chain=unknown']);
   });
+
+  it('emits companion eth_call consumer attribution lines without changing aggregate lines', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_call: 42, eth_getLogs: 7 },
+        ethCallByConsumer: {
+          'pcaNFT.getAccountInfo': 30,
+          'Hub.getContractAddress_Token': 12,
+          unsafe_consumer: 0,
+        },
+        lifetimeTotal: 49,
+      },
+      60,
+      'base:8453',
+    );
+
+    expect(lines).toContain('rpc_usage method=eth_call count=42 window_s=60 chain=base:8453');
+    expect(lines).toContain('rpc_usage method=eth_getLogs count=7 window_s=60 chain=base:8453');
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=30 window_s=60 chain=base:8453',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_call consumer=Hub.getContractAddress_Token count=12 window_s=60 chain=base:8453',
+    );
+    expect(lines.some((l) => l.includes('unsafe_consumer'))).toBe(false);
+    for (const l of lines) expect(l).toMatch(/^rpc_usage(_by_consumer)?( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+  });
+
+  it('sanitizes unsafe consumer values in attribution lines', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_call: 2 },
+        ethCallByConsumer: { 'bad consumer=value': 2 },
+        lifetimeTotal: 2,
+      },
+      60,
+    );
+    expect(lines).toEqual([
+      'rpc_usage method=eth_call count=2 window_s=60',
+      'rpc_usage_by_consumer method=eth_call consumer=other count=2 window_s=60',
+    ]);
+  });
 });
 
 describe('composite daemon source — agent + publisher-runtime windows merged at drain time', () => {

@@ -21,6 +21,7 @@
  *    per method TODAY, with exact sums (deltas, not cumulative gauges).
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { JsonRpcProvider } from 'ethers';
 import type {
   FetchRequest,
@@ -120,12 +121,18 @@ export function mergeRpcUsageWindows(
   const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
   if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
+  const ethCallByConsumer: Record<string, number> = {};
   let lifetimeTotal = 0;
   for (const w of defined) {
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
+    for (const [consumer, c] of Object.entries(w.ethCallByConsumer ?? {})) {
+      ethCallByConsumer[consumer] = (ethCallByConsumer[consumer] ?? 0) + c;
+    }
     lifetimeTotal += w.lifetimeTotal;
   }
-  return { byMethod, lifetimeTotal };
+  return Object.keys(ethCallByConsumer).length === 0
+    ? { byMethod, lifetimeTotal }
+    : { byMethod, ethCallByConsumer, lifetimeTotal };
 }
 
 export interface RpcUsageWindow {
@@ -137,6 +144,14 @@ export interface RpcUsageWindow {
    * must sanitize keys for their own sink (the cli logfmt formatter does).
    */
   byMethod: Record<string, number>;
+  /**
+   * Optional raw `eth_call` attribution by bounded code-owned consumer label.
+   * This is a companion diagnostic dimension only: `byMethod.eth_call` remains
+   * the billing-exact aggregate count and existing dashboards should continue
+   * to use it. The consumer map is emitted as separate daemon log lines so it
+   * cannot double-count aggregate `rpc_usage` queries.
+   */
+  ethCallByConsumer?: Record<string, number>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
 }
@@ -152,6 +167,36 @@ export function rpcUsageWindowTotal(window: RpcUsageWindow): number {
   return total;
 }
 
+const rpcUsageConsumerContext = new AsyncLocalStorage<string>();
+
+/**
+ * Bound code-owned read labels for logfmt-safe consumer attribution. Labels are
+ * intentionally not derived from calldata, addresses, request ids, or peer ids.
+ */
+export function normalizeRpcUsageConsumer(consumer: string | undefined): string | undefined {
+  if (typeof consumer !== 'string') return undefined;
+  const normalized = consumer
+    .trim()
+    .replace(/[^A-Za-z0-9_.:-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (normalized.length === 0) return undefined;
+  if (normalized.length > 64) return 'other';
+  return normalized;
+}
+
+/** Run a provider read under a bounded diagnostic consumer label. */
+export function withRpcUsageConsumer<T>(consumer: string, fn: () => T): T {
+  const normalized = normalizeRpcUsageConsumer(consumer);
+  if (!normalized) return fn();
+  return rpcUsageConsumerContext.run(normalized, fn);
+}
+
+/** Current diagnostic consumer label, if a caller established one. */
+export function currentRpcUsageConsumer(): string | undefined {
+  return rpcUsageConsumerContext.getStore();
+}
+
 /**
  * In-process accumulator for raw JSON-RPC request counts. `record()` is on the
  * hot path of every RPC — it does one map increment and one counter add, never
@@ -159,6 +204,7 @@ export function rpcUsageWindowTotal(window: RpcUsageWindow): number {
  */
 export class RpcUsageTracker {
   private window = new Map<string, number>();
+  private ethCallConsumers = new Map<string, number>();
   private lifetime = 0;
 
   constructor(
@@ -180,14 +226,25 @@ export class RpcUsageTracker {
    * one rpc_usage log line per fabricated name every minute.
    */
   static readonly MAX_WINDOW_METHODS = 64;
+  static readonly MAX_WINDOW_CONSUMERS = 128;
 
-  record(method: string): void {
+  record(method: string, consumer = currentRpcUsageConsumer()): void {
     // Authoritative window/lifetime state first, OUTSIDE any try — pure map
     // arithmetic that cannot realistically throw, and it must never be
     // skipped because an OPTIONAL sink misbehaved.
     const raw = typeof method === 'string' && method.length > 0 && method.length <= 128 ? method : 'other';
     const key = this.window.has(raw) || this.window.size < RpcUsageTracker.MAX_WINDOW_METHODS ? raw : 'other';
     this.window.set(key, (this.window.get(key) ?? 0) + 1);
+    if (raw === 'eth_call') {
+      const normalizedConsumer = normalizeRpcUsageConsumer(consumer);
+      if (normalizedConsumer) {
+        const consumerKey = this.ethCallConsumers.has(normalizedConsumer) ||
+          this.ethCallConsumers.size < RpcUsageTracker.MAX_WINDOW_CONSUMERS
+          ? normalizedConsumer
+          : 'other';
+        this.ethCallConsumers.set(consumerKey, (this.ethCallConsumers.get(consumerKey) ?? 0) + 1);
+      }
+    }
     this.lifetime += 1;
     // Best-effort applies ONLY to the OTel side effect (and the chainId
     // thunk it evaluates) — a throwing metrics backend must not break the
@@ -211,7 +268,15 @@ export class RpcUsageTracker {
     const byMethod: Record<string, number> = {};
     for (const [method, count] of this.window) byMethod[method] = count;
     this.window.clear();
-    return { byMethod, lifetimeTotal: this.lifetime };
+    let ethCallByConsumer: Record<string, number> | undefined;
+    if (this.ethCallConsumers.size > 0) {
+      ethCallByConsumer = {};
+      for (const [consumer, count] of this.ethCallConsumers) ethCallByConsumer[consumer] = count;
+    }
+    this.ethCallConsumers.clear();
+    return ethCallByConsumer == null
+      ? { byMethod, lifetimeTotal: this.lifetime }
+      : { byMethod, ethCallByConsumer, lifetimeTotal: this.lifetime };
   }
 }
 
@@ -272,7 +337,7 @@ export function createCountingJsonRpcProvider(
     const retry = await pureRetry(attemptReq, response, attempt);
     if (retry) {
       try {
-        for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) tracker.record(method);
+        for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) tracker.record(method, currentRpcUsageConsumer());
       } catch { /* accounting must never break the retry path */ }
     }
     return retry;
@@ -287,5 +352,10 @@ export function createCountingJsonRpcProvider(
         // dynamic detection behavior.
         staticNetwork: network as JsonRpcApiProviderOptions['staticNetwork'],
       };
-  return new CountingJsonRpcProvider(fetchRequest, network, providerOptions, (method) => tracker.record(method));
+  return new CountingJsonRpcProvider(
+    fetchRequest,
+    network,
+    providerOptions,
+    (method) => tracker.record(method, currentRpcUsageConsumer()),
+  );
 }

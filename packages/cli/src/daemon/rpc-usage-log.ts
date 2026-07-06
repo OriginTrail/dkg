@@ -7,6 +7,9 @@
  *
  * Line shape (parsed in LogQL with `| logfmt` on the log body):
  *   rpc_usage method=eth_call count=42 window_s=60 chain=base:8453
+ *
+ * Companion diagnostic line shape for `eth_call` attribution:
+ *   rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=7 window_s=60 chain=base:8453
  */
 
 import { rpcUsageWindowTotal, type RpcUsageDrainable, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
@@ -32,6 +35,13 @@ export function formatRpcUsageLines(
   for (const [method, count] of Object.entries(usage.byMethod)) {
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
+  }
+  for (const [consumer, count] of Object.entries(usage.ethCallByConsumer ?? {})) {
+    if (!Number.isFinite(count) || count <= 0) continue;
+    lines.push(
+      `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
+      `count=${Math.floor(count)} window_s=${windowSeconds}${chain}`,
+    );
   }
   return lines;
 }

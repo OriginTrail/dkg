@@ -18,7 +18,14 @@ import {
 } from '@opentelemetry/sdk-metrics';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { boundedRpcMethodLabel, mergeRpcUsageWindows, rpcUsageWindowTotal, RpcUsageTracker } from '../src/rpc-usage.js';
+import {
+  boundedRpcMethodLabel,
+  mergeRpcUsageWindows,
+  normalizeRpcUsageConsumer,
+  rpcUsageWindowTotal,
+  RpcUsageTracker,
+  withRpcUsageConsumer,
+} from '../src/rpc-usage.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -332,11 +339,20 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
   it('mergeRpcUsageWindows sums per-method and lifetime across trackers', () => {
     const merged = mergeRpcUsageWindows(
-      { byMethod: { eth_call: 5, eth_estimateGas: 2 }, lifetimeTotal: 100 },
-      { byMethod: { eth_call: 3, eth_sendRawTransaction: 4 }, lifetimeTotal: 50 },
+      {
+        byMethod: { eth_call: 5, eth_estimateGas: 2 },
+        ethCallByConsumer: { 'pcaNFT.getAccountInfo': 2 },
+        lifetimeTotal: 100,
+      },
+      {
+        byMethod: { eth_call: 3, eth_sendRawTransaction: 4 },
+        ethCallByConsumer: { 'pcaNFT.getAccountInfo': 1, 'token.balanceOf': 2 },
+        lifetimeTotal: 50,
+      },
     );
     expect(merged).toEqual({
       byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
+      ethCallByConsumer: { 'pcaNFT.getAccountInfo': 3, 'token.balanceOf': 2 },
       lifetimeTotal: 150,
     });
   });
@@ -361,4 +377,86 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod['debug_traceTransaction']).toBe(1); // NOT sanitized to 'other'
     expect(w.byMethod['other']).toBe(2);
   });
+
+  it('attributes eth_call to the current bounded consumer without changing aggregate totals', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('pcaNFT.getAccountInfo', () => {
+      t.record('eth_call');
+      t.record('eth_call');
+      t.record('eth_getLogs');
+    });
+    t.record('eth_call');
+
+    const w = t.drainWindow();
+    expect(w.byMethod).toEqual({ eth_call: 3, eth_getLogs: 1 });
+    expect(w.ethCallByConsumer).toEqual({ 'pcaNFT.getAccountInfo': 2 });
+    expect(rpcUsageWindowTotal(w)).toBe(4);
+  });
+
+  it('keeps overlapping async consumer scopes isolated', async () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    await Promise.all([
+      withRpcUsageConsumer('cgStorage.getContextGraph', async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        t.record('eth_call');
+      }),
+      withRpcUsageConsumer('pcaNFT.getAccountInfo', async () => {
+        t.record('eth_call');
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        t.record('eth_call');
+      }),
+    ]);
+
+    const w = t.drainWindow();
+    expect(w.byMethod).toEqual({ eth_call: 3 });
+    expect(w.ethCallByConsumer).toEqual({
+      'cgStorage.getContextGraph': 1,
+      'pcaNFT.getAccountInfo': 2,
+    });
+  });
+
+  it('normalizes and bounds consumer labels', () => {
+    expect(normalizeRpcUsageConsumer(' Hub.getContractAddress(Token) ')).toBe('Hub.getContractAddress_Token');
+    expect(normalizeRpcUsageConsumer('bad label/with=spaces')).toBe('bad_label_with_spaces');
+    expect(normalizeRpcUsageConsumer('')).toBeUndefined();
+    expect(normalizeRpcUsageConsumer('x'.repeat(65))).toBe('other');
+  });
+
+  it('caps distinct eth_call consumer keys and overflows to other', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    const max = RpcUsageTracker.MAX_WINDOW_CONSUMERS;
+    for (let i = 0; i < max + 4; i++) {
+      t.record('eth_call', `consumer.${i}`);
+    }
+    t.record('eth_call', 'consumer.0');
+
+    const w = t.drainWindow();
+    expect(Object.keys(w.ethCallByConsumer ?? {})).toHaveLength(max + 1);
+    expect(w.ethCallByConsumer?.['consumer.0']).toBe(2);
+    expect(w.ethCallByConsumer?.other).toBe(4);
+    expect(w.byMethod.eth_call).toBe(max + 5);
+  });
+
+  it('attributes failover eth_call attempts to the readProvider label', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_call'] });
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [primary.url, backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(
+      a.readProvider('unit.eth_call', (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest'])),
+    ).resolves.toBeDefined();
+
+    const usage = a.drainRpcUsage();
+    const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
+    expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
+    expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer?.['unit.eth_call']).toBe(rawEthCallHits);
+  }, 30_000);
 });
