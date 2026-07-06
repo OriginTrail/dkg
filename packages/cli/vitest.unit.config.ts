@@ -30,7 +30,12 @@ export default defineConfig({
           'test/dashboard-session-policy.test.ts',
           'test/dashboard-session-exchange.test.ts',
           'test/dashboard-login-attempt-limiter.test.ts',
+          'test/dashboard-login.test.ts',
+          'test/dashboard-session-auth-source.test.ts',
+          'test/dashboard-session-cookie.test.ts',
+          'test/dashboard-session-store.test.ts',
           'test/dashboard-session.test.ts',
+          'test/route-request-identity-dashboard.test.ts',
           'test/sse-hub.test.ts',
           // Pure logic — no hardhat needed. Adding to the unit config means
           // contributors can run it via `pnpm test:unit` in ~2s instead of

@@ -8,6 +8,7 @@ import {
   verifyToken,
   extractBearerToken,
   httpAuthGuard,
+  httpAuthGuardResult,
   getRequestAuthContext,
   setRequestAuthContext,
   loadTokens,
@@ -153,12 +154,15 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -184,12 +188,15 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -214,12 +221,15 @@ describe('resolveRequestAuthDecision', () => {
       resolve: vi.fn(() => ({
         ok: true as const,
         credentialToken: VALID_TOKEN,
-        context: {
-          source: 'dashboard-session' as const,
-          internalCredentialToken: VALID_TOKEN,
-          principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
-          csrf: { required: false, validated: false },
-        },
+        accept: () => ({
+          ok: true as const,
+          context: {
+            source: 'dashboard-session' as const,
+            internalCredentialToken: VALID_TOKEN,
+            principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+            csrf: { required: false, validated: false },
+          },
+        }),
       })),
     };
 
@@ -238,6 +248,84 @@ describe('resolveRequestAuthDecision', () => {
 
     expect(decision).toBeNull();
     expect(authSource.resolve).not.toHaveBeenCalled();
+  });
+
+  it('validates auth-source credential tokens before accepting the source decision', () => {
+    const accept = vi.fn(() => ({
+      ok: true as const,
+      context: {
+        source: 'dashboard-session' as const,
+        internalCredentialToken: 'stale-dashboard-token',
+        principal: { kind: 'node-admin' as const, agentAddress: 'did:dkg:agent:default' },
+        csrf: { required: false, validated: false },
+      },
+    }));
+    const resolve = vi.fn(() => ({
+      ok: true as const,
+      credentialToken: 'stale-dashboard-token',
+      accept,
+    }));
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { cookie: 'dkg_ui_session=present' } }),
+      validTokens,
+      { authSources: [{ resolve }] },
+    );
+
+    expect(decision).toBeNull();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(accept).not.toHaveBeenCalled();
+  });
+
+  it('continues to later auth sources after a stale source candidate', () => {
+    const staleAccept = vi.fn(() => ({ ok: true as const }));
+    const validAccept = vi.fn(() => ({
+      ok: true as const,
+      // Deliberately include a stray runtime field to prove the resolver keeps
+      // the verified candidate token as the single accepted credential token.
+      credentialToken: 'swapped-token',
+      context: {
+        source: 'dashboard-session' as const,
+        internalCredentialToken: VALID_TOKEN,
+        principal,
+        csrf: { required: false, validated: false },
+      },
+    } as any));
+
+    const decision = resolveRequestAuthDecision(
+      request('/api/agents', { headers: { cookie: 'dkg_ui_session=present' } }),
+      validTokens,
+      {
+        authSources: [
+          {
+            resolve: vi.fn(() => ({
+              ok: true as const,
+              credentialToken: 'stale-dashboard-token',
+              accept: staleAccept,
+            })),
+          },
+          {
+            resolve: vi.fn(() => ({
+              ok: true as const,
+              credentialToken: VALID_TOKEN,
+              accept: validAccept,
+            })),
+          },
+        ],
+      },
+    );
+
+    expect(decision).toMatchObject({
+      ok: true,
+      credentialToken: VALID_TOKEN,
+      context: {
+        source: 'dashboard-session',
+        internalCredentialToken: VALID_TOKEN,
+        principal,
+      },
+    });
+    expect(staleAccept).not.toHaveBeenCalled();
+    expect(validAccept).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -271,6 +359,7 @@ describe('resolveRouteRequestIdentity', () => {
       requestAuth: { source: 'dashboard-session' },
     });
   });
+
 
   it('falls back to bearer credentials for compatibility callers without resolved auth context', () => {
     const req = {
@@ -364,15 +453,17 @@ describe('httpAuthGuard', () => {
     authSources = undefined;
     authenticateDashboardSessionForSse = () => null;
     server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-      if (!(await httpAuthGuard(req, res, true, validTokens, corsOrigin, {
+      const authResult = await httpAuthGuardResult(req, res, true, validTokens, corsOrigin, {
         resolvePrincipal: () => principal,
         authSources,
-      }))) return;
+      });
+      if (!authResult.allowed) return;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
       res.end(JSON.stringify({
         ok: true,
         requestAuth: getRequestAuthContext(req) ?? null,
+        authResultContext: authResult.requestAuthContext ?? null,
         dashboardSseSession: url.pathname === '/api/events'
           ? resolveDashboardSseSession(req, authenticateDashboardSessionForSse) ?? null
           : null,
@@ -551,6 +642,7 @@ describe('httpAuthGuard', () => {
       principal,
       csrf: { required: false, validated: false },
     });
+    expect(body.authResultContext).toEqual(body.requestAuth);
   });
 
   it('resolves the same principal shape for valid SSE query-token auth', async () => {
@@ -563,6 +655,7 @@ describe('httpAuthGuard', () => {
       principal,
       csrf: { required: false, validated: false },
     });
+    expect(body.authResultContext).toEqual(body.requestAuth);
     expect(body.dashboardSseSession).toBeNull();
   });
 
@@ -601,6 +694,7 @@ describe('httpAuthGuard', () => {
       },
     });
     expect(body.requestAuth.dashboardSession).not.toHaveProperty('credentialFingerprint');
+    expect(body.authResultContext).toEqual(body.requestAuth);
     expect(body.dashboardSseSession).toMatchObject({
       sessionId: created.sessionId,
       expiresAt: created.record.expiresAt,

@@ -143,7 +143,7 @@ import { createPublicSnapshotStore, createPublisherControlFromStore, startPublis
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import {
   loadTokens,
-  httpAuthGuard,
+  httpAuthGuardResult,
   reconcileValidTokens,
 } from '../auth.js';
 import { resolveDashboardSseSession } from './dashboard-sse-session.js';
@@ -3121,8 +3121,9 @@ export async function runDaemonInner(
         if (handledSession) return;
       }
 
-      // Auth guard — rejects with 401 if token is invalid/missing
-      const authAllowed = await httpAuthGuard(
+      // Auth guard rejects invalid/missing credentials and returns the accepted
+      // auth context as the canonical handoff for route dispatch and SSE.
+      const authResult = await httpAuthGuardResult(
         req,
         res,
         authEnabled,
@@ -3133,7 +3134,7 @@ export async function runDaemonInner(
           authSources: [dashboardSessionAuthSource],
         },
       );
-      if (!authAllowed) return;
+      if (!authResult.allowed) return;
 
       // Retired installable apps framework (V9): respond with 410 Gone so upgraded
       // nodes give a clear migration hint for both the JSON API and any bookmarked

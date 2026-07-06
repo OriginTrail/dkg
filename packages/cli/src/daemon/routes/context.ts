@@ -24,6 +24,7 @@ import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
 import type { RequestAuthContext } from '../../auth.js';
+import type { RouteRequestIdentity } from '../route-request-identity.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -90,14 +91,17 @@ export interface RequestContext {
   // shedding load. Deliberately the read-only `AdmissionStatsView`, not the
   // concrete limiter — plugin-facing routes must not reach tryAcquire()/release().
   admission: AdmissionStatsView;
-  // Derived per-request (from req.url + headers + token). Routes read
-  // `path`, `url`, `requestAgentAddress` extensively; pre-computing
-  // here keeps every group on the same fast path.
+  // Derived per-request route identity. New route code should use
+  // `requestIdentity` so all auth sources flow through one boundary.
   url: URL;
   path: string;
-  requestAuth?: RequestAuthContext;
+  // Optional on the public plugin-facing type so existing plugins that
+  // construct RequestContext fixtures do not take a semver-major break.
+  requestIdentity?: RouteRequestIdentity;
   // Compatibility aliases for route modules that still need token-backed
-  // self-calls or node-admin checks. New code should prefer `requestAuth`.
+  // self-calls or node-admin checks. Keep these derived from
+  // `requestIdentity`; do not treat them as independent auth models.
+  requestAuth?: RequestAuthContext;
   requestToken: string | undefined;
   requestAgentAddress: string;
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void;

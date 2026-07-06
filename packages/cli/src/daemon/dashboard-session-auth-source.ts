@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { verifyToken } from "../auth.js";
-import type { RequestAuthDecision, RequestAuthPrincipal, RequestAuthSource } from "../auth.js";
+import type { RequestAuthPrincipal, RequestAuthSource } from "../auth.js";
 import type { AuthenticatedDashboardSession } from "./dashboard-session-store.js";
 import { hasTrustedDashboardOrigin, isUnsafeHttpMethod } from "./dashboard-session-policy.js";
 
@@ -65,39 +64,44 @@ export function createDashboardSessionAuthSource(
   options: DashboardSessionAuthSourceOptions,
 ): RequestAuthSource {
   return {
-    resolve(req: IncomingMessage, validTokens: Set<string>, corsOrigin?: string | null): RequestAuthDecision | null {
+    resolve(req: IncomingMessage, corsOrigin?: string | null) {
       const session = options.authenticate(req);
-      if (!session || !verifyToken(session.compatToken, validTokens)) return null;
+      if (!session) return null;
 
-      const authorization = authorizeDashboardSessionRequest(req, session, {
-        corsOrigin,
-        verifyCsrf: options.verifyCsrf,
-      });
-      if (!authorization.ok) {
-        return {
-          ok: false,
-          status: authorization.status,
-          error: authorization.error,
-          code: authorization.code,
-        };
-      }
-      const principal = options.resolvePrincipal(session.compatToken);
       return {
         ok: true,
         credentialToken: session.compatToken,
-        context: {
-          source: "dashboard-session",
-          internalCredentialToken: session.compatToken,
-          principal,
-          csrf: {
-            required: authorization.csrfRequired,
-            validated: authorization.csrfValidated,
-          },
-          dashboardSession: {
-            sessionId: session.sessionId,
-            source: session.source,
-            expiresAt: session.expiresAt,
-          },
+        accept: () => {
+          const authorization = authorizeDashboardSessionRequest(req, session, {
+            corsOrigin,
+            verifyCsrf: options.verifyCsrf,
+          });
+          if (!authorization.ok) {
+            return {
+              ok: false,
+              status: authorization.status,
+              error: authorization.error,
+              code: authorization.code,
+            };
+          }
+          const principal = options.resolvePrincipal(session.compatToken);
+          return {
+            ok: true,
+            context: {
+              source: "dashboard-session",
+              internalCredentialToken: session.compatToken,
+              principal,
+              csrf: {
+                required: authorization.csrfRequired,
+                validated: authorization.csrfValidated,
+              },
+              dashboardSession: {
+                sessionId: session.sessionId,
+                source: session.source,
+                expiresAt: session.expiresAt,
+              },
+            },
+          };
         },
       };
     },

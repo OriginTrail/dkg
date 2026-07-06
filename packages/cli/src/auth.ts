@@ -819,12 +819,23 @@ export type RequestAuthDecision =
   | { ok: true; context?: RequestAuthContext; credentialToken: string }
   | { ok: false; status: 403; error: string; code?: string };
 
+export type RequestAuthSourceAcceptedDecision =
+  | { ok: true; context?: RequestAuthContext }
+  | { ok: false; status: 403; error: string; code?: string };
+
+export type RequestAuthSourceResolution =
+  | {
+      ok: true;
+      credentialToken: string;
+      accept: () => RequestAuthSourceAcceptedDecision;
+    }
+  | { ok: false; status: 403; error: string; code?: string };
+
 export interface RequestAuthSource {
   resolve: (
     req: IncomingMessage,
-    validTokens: Set<string>,
     corsOrigin?: string | null,
-  ) => RequestAuthDecision | null;
+  ) => RequestAuthSourceResolution | null;
 }
 
 function resolveRequestPrincipal(token: string, options?: HttpAuthGuardOptions): RequestAuthPrincipal | undefined {
@@ -882,8 +893,17 @@ export function resolveRequestAuthDecision(
   if (explicitAuthAttempt) return null;
 
   for (const source of options?.authSources ?? []) {
-    const decision = source.resolve(req, validTokens, corsOrigin);
-    if (decision) return decision;
+    const sourceResolution = source.resolve(req, corsOrigin);
+    if (!sourceResolution) continue;
+    if (!sourceResolution.ok) return sourceResolution;
+    if (!verifyToken(sourceResolution.credentialToken, validTokens)) continue;
+    const sourceDecision = sourceResolution.accept();
+    if (!sourceDecision.ok) return sourceDecision;
+    return {
+      ok: true,
+      credentialToken: sourceResolution.credentialToken,
+      context: sourceDecision.context,
+    };
   }
 
   return null;
@@ -925,41 +945,35 @@ export function resolveRequestAuthDecision(
  * that still references them keeps compiling; the cache is a no-op.
  */
 
+export type HttpAuthGuardResult =
+  | { allowed: true; requestAuthContext?: RequestAuthContext }
+  | { allowed: false };
+
 /**
- * HTTP auth guard. Returns `true` if the request is allowed to
- * proceed, `false` if a 401 response was sent.
+ * HTTP auth guard with first-class auth context result. Returns
+ * `{ allowed: false }` after writing the rejection response, or
+ * `{ allowed: true, requestAuthContext? }` when the request may proceed.
  *
- * For body-carrying signed requests (the only case where the HMAC
- * cannot be verified synchronously from headers alone) the guard
- * returns a `Promise<boolean>` that resolves AFTER the body has been
- * drained and the HMAC has been verified — so callers that `await`
- * the result are guaranteed not to run their handler until the
- * signature is confirmed. The
- * older response-time guard remains installed as defense-in-depth for
- * legacy callers that don't `await`, but the supported contract is to
- * always `await` the return value.
- *
- * Usage in the server handler:
- *   if (!(await httpAuthGuard(req, res, authEnabled, validTokens))) return;
- *
- * Body-less paths (GET / HEAD / OPTIONS / public paths / unsigned
- * requests / framing-bodyless signed requests) still resolve
- * synchronously to a bare `boolean` so existing fast-path callers do
- * not pay an awaiting cost on hot routes.
+ * For body-carrying signed requests (the only case where the HMAC cannot be
+ * verified synchronously from headers alone) this returns a promise that
+ * resolves after the body has been drained and the HMAC has been verified.
+ * Callers that await the result are guaranteed not to run their handler until
+ * the signature is confirmed. The older response-time guard remains installed
+ * as defense-in-depth for legacy callers that still use `httpAuthGuard()`.
  */
-export function httpAuthGuard(
+export function httpAuthGuardResult(
   req: IncomingMessage,
   res: ServerResponse,
   authEnabled: boolean,
   validTokens: Set<string>,
   corsOrigin?: string | null,
   options?: HttpAuthGuardOptions,
-): boolean | Promise<boolean> {
-  if (!authEnabled) return true;
-  if (req.method === 'OPTIONS') return true;
+): HttpAuthGuardResult | Promise<HttpAuthGuardResult> {
+  if (!authEnabled) return { allowed: true };
+  if (req.method === 'OPTIONS') return { allowed: true };
 
   const pathname = new URL(req.url ?? '/', `http://${req.headers.host}`).pathname;
-  if (isPublicPath(req.method ?? '', pathname)) return true;
+  if (isPublicPath(req.method ?? '', pathname)) return { allowed: true };
 
   const authDecision = resolveRequestAuthDecision(req, validTokens, options, corsOrigin);
   if (authDecision?.ok === false) {
@@ -971,11 +985,15 @@ export function httpAuthGuard(
       error: authDecision.error,
       ...(authDecision.code ? { code: authDecision.code } : {}),
     }));
-    return false;
+    return { allowed: false };
   }
 
   if (authDecision?.ok === true) {
     if (authDecision.context) setRequestAuthContext(req, authDecision.context);
+    const allowedAuthDecision = (): HttpAuthGuardResult => ({
+      allowed: true,
+      requestAuthContext: authDecision.context,
+    });
     const acceptedCredentialToken = authDecision.credentialToken;
 
     const now = Date.now();
@@ -1001,7 +1019,7 @@ export function httpAuthGuard(
         res.end(
           JSON.stringify({ error: 'Stale or unparseable x-dkg-timestamp' }),
         );
-        return false;
+        return { allowed: false };
       }
     }
 
@@ -1037,7 +1055,7 @@ export function httpAuthGuard(
         res.end(JSON.stringify({
           error: 'Signed-request mode requires x-dkg-timestamp, x-dkg-nonce, and x-dkg-signature.',
         }));
-        return false;
+        return { allowed: false };
       }
       // Pre-body replay rejection: an attacker swapping in a fresh
       // nonce still fails the post-body HMAC (nonce is bound), but
@@ -1063,7 +1081,7 @@ export function httpAuthGuard(
           ...corsHeaders(corsOrigin ?? '*'),
         });
         res.end(JSON.stringify({ error: 'Replayed nonce' }));
-        return false;
+        return { allowed: false };
       }
       // Stash the auth context so route handlers can call
       // verifyHttpSignedRequestAfterBody(req, rawBody) after
@@ -1173,7 +1191,7 @@ export function httpAuthGuard(
               error: `Signed request rejected: ${outcome.reason}`,
             }),
           );
-          return false;
+          return { allowed: false };
         }
         pending.verified = true;
       } else {
@@ -1211,10 +1229,10 @@ export function httpAuthGuard(
           req,
           res,
           corsOrigin ?? undefined,
-        );
+        ).then((allowed) => allowed ? allowedAuthDecision() : { allowed: false });
       }
 
-      return true;
+      return allowedAuthDecision();
     }
 
     // the previous revision of this
@@ -1233,7 +1251,7 @@ export function httpAuthGuard(
     // responsible for whatever replay semantics they need at the
     // application layer.
 
-    return true;
+    return allowedAuthDecision();
   }
 
   res.writeHead(401, {
@@ -1244,7 +1262,20 @@ export function httpAuthGuard(
     }),
   });
   res.end(JSON.stringify({ error: 'Unauthorized — provide a valid Bearer token in the Authorization header' }));
-  return false;
+  return { allowed: false };
+}
+
+export function httpAuthGuard(
+  req: IncomingMessage,
+  res: ServerResponse,
+  authEnabled: boolean,
+  validTokens: Set<string>,
+  corsOrigin?: string | null,
+  options?: HttpAuthGuardOptions,
+): boolean | Promise<boolean> {
+  const result = httpAuthGuardResult(req, res, authEnabled, validTokens, corsOrigin, options);
+  if ('then' in result) return result.then((value) => value.allowed);
+  return result.allowed;
 }
 
 /**

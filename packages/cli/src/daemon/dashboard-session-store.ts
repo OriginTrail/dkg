@@ -42,6 +42,9 @@ export class DashboardSessionStore {
     sessionId: string;
     record: DashboardSessionRecord;
   } {
+    if ((source as DashboardSessionSource) === "login") {
+      throw new Error("Login dashboard sessions require createLoginSession() with a credential fingerprint");
+    }
     this.prune(now);
     const record: DashboardSessionRecord = {
       compatToken,
