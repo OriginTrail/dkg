@@ -7,6 +7,7 @@ export * from './chain-adapter.js';
 export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
+  normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,

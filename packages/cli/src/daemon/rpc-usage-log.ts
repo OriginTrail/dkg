@@ -13,6 +13,7 @@
  */
 
 import {
+  normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
   type RpcUsageWindow,
@@ -21,10 +22,6 @@ import {
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback;
-}
-
-function normalizeRpcUsageWindow(usage: RpcUsageWindow): RpcUsageWindow & { ethCallByConsumer: Record<string, number> } {
-  return { ...usage, ethCallByConsumer: usage.ethCallByConsumer ?? {} };
 }
 
 /**
