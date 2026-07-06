@@ -47,6 +47,8 @@ type UnexpectedRequestContextKeys = Exclude<keyof RequestContext, ExpectedReques
 type RequestContextWithoutIdentity = Omit<RequestContext, 'requestIdentity'>;
 type PluginHandleContext = Parameters<RoutePlugin['handle']>[0];
 
+export type RequestContextKeepsHistoricalPublicKeys = Assert<IsNever<MissingRequestContextKeys>>;
+export type RequestContextDoesNotExposeUnexpectedKeys = Assert<IsNever<UnexpectedRequestContextKeys>>;
 export type RequestIdentityRemainsOptional = Assert<IsOptional<RequestContext, 'requestIdentity'>>;
 export type RequestContextCanOmitIdentity = Assert<RequestContextWithoutIdentity extends RequestContext ? true : false>;
 export type RoutePluginAcceptsContextWithoutIdentity = Assert<
