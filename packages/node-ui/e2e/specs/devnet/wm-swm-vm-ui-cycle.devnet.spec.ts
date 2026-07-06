@@ -80,11 +80,14 @@ test.beforeAll(async () => {
       '(set in scripts/devnet.sh); got a non-SPARQL-over-HTTP backend instead',
   ).toBe('oxigraph-server');
 
-  // `/api/status` answering does NOT mean the seeded primary context graph has
-  // finished registering — on a cold boot `listContextGraphs()` can briefly
-  // return [] and make this spec falsely skip with "No context graphs". Poll for
-  // a bounded window so a still-propagating CG isn't mistaken for an empty
-  // devnet; a genuinely-empty operator devnet still falls through to the skip.
+  // Devnet-HEALTH gate (unchanged intent): a settled CI devnet always has the
+  // seeded primary CG registered by global-setup, so an empty list means a
+  // partitioned mesh / dropped CG — keep failing loudly (CI) / skipping (local).
+  // `/api/status` answering does NOT prove the seed finished, so on a cold boot
+  // `listContextGraphs()` can briefly return []; poll a bounded window before
+  // deciding. NOTE: this spec no longer promotes on the shared seeded CG
+  // (`cgs[0]`); it provisions its OWN dedicated CG below (#1464). The gate stays
+  // purely as a "the devnet booted correctly" health check.
   let cgs = await listContextGraphs(1);
   if (cgs.length === 0) {
     const deadline = Date.now() + 30_000;
@@ -94,8 +97,69 @@ test.beforeAll(async () => {
     }
   }
   requireDevnetPrecondition(test, cgs.length === 0, 'No context graphs on devnet');
-  run.cgId = cgs[0]!.id;
-  run.cgName = cgs[0]!.name;
+
+  // #1464 — provision a DEDICATED, unique-per-run context graph so the UI's
+  // promote-all (`widget-promote-all-btn`) sees ONLY this spec's own clean,
+  // default-graph assertion. On the SHARED seeded CG the bulk promote iterates
+  // EVERY WM assertion in the CG and aborts the whole batch if any one throws
+  // (layer-widgets.tsx); sibling specs leave foreign `_named_graph` WM
+  // assertions there, which the promote guard KA_NAMED_GRAPH_SHARE_UNSUPPORTED
+  // (dkg-publisher.ts) correctly rejects → the fixture's own root failed to
+  // migrate INTERMITTENTLY (depends on test ordering). A private, single-
+  // assertion CG removes that cross-test coupling entirely.
+  //
+  // LOCAL create only (no `register`): WM import + WM→SWM promote are local
+  // operations that need no on-chain registration (only the deferred VM-publish
+  // `fixme` below would). The CG is curated by THIS node's agent — the same
+  // identity that curates the seeded CGs (both go through the shared devnet auth
+  // token) — so it renders under the browser's "My Context Graphs" (curator
+  // match / `callerInvolved`), exactly like `devnet-test`. A plain-slug id
+  // (matching the seeded `devnet-test` shape) keeps the
+  // `did:dkg:context-graph:<id>/...` graph URIs the layer-count helpers build
+  // well-formed.
+  //
+  // `accessPolicy: 0` (OPEN) matches the seeded devnet CGs on purpose: the
+  // daemon's context-graph listing DROPS private/unknown-privacy rows when the
+  // caller has no resolvable wallet (dkg-agent-cg-resolve.ts) — only `public`
+  // rows survive that branch. Creating open makes this CG a faithful clone of
+  // `devnet-test`, so it can't be silently filtered out of either the list the
+  // poll below reads or the one the browser reads, regardless of how the devnet
+  // auth token resolves. (Open vs curated has no effect on the local WM→SWM
+  // promote this spec exercises.)
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const dedicatedCgId = `wm-swm-ui-cycle-1464-${stamp}`;
+  const dedicatedCgName = `WM-SWM UI Cycle 1464 ${stamp}`;
+  const createRes = await devnetApiFetch('/api/context-graph/create', {
+    method: 'POST',
+    nodeNum: 1,
+    body: JSON.stringify({ id: dedicatedCgId, name: dedicatedCgName, accessPolicy: 0 }),
+  });
+  if (!createRes.ok) {
+    const body = await createRes.text().catch(() => '');
+    throw new Error(`dedicated CG create failed: ${createRes.status} ${body}`);
+  }
+
+  // The daemon lists a CG only once it is persisted AND passes the caller-scoped
+  // visibility filter (curator === this node's agent ⇒ `callerInvolved`). Poll
+  // the SAME listing the browser reads so the first `shell.goto()` can't race
+  // the create; if it never lists, fail HERE with a clear message instead of
+  // surfacing later as a confusing `openProjectTab` timeout.
+  //
+  // CLEANUP: intentionally none. There is no CG-definition delete/drop route
+  // (only `/api/context-graph/subscriptions` DELETE tears down subscriptions),
+  // so an afterAll would have nothing to call. It's safe to leave the CG: it's
+  // unique per run so it can't contaminate the shared seeded CG, and CI tears
+  // the whole devnet down after the run.
+  await expect(async () => {
+    const list = await listContextGraphs(1);
+    expect(
+      list.some((c) => c.id === dedicatedCgId),
+      `dedicated CG ${dedicatedCgId} not yet visible in the node's context-graph list`,
+    ).toBe(true);
+  }).toPass({ timeout: 30_000, intervals: [500, 1000, 2000] });
+
+  run.cgId = dedicatedCgId;
+  run.cgName = dedicatedCgName;
 });
 
 async function openProjectTab(page: Page, name: string) {
@@ -238,19 +302,20 @@ test.describe('WM → SWM → VM via the UI', () => {
   });
 
   // DEFERRED (OriginTrail/dkg#966): the SWM → VM publish step is a browser-
-  // coverage gap, NOT the promote bug this spec proves. Both the project-view
-  // bulk "Publish to Verifiable Memory" control (`widget-publish-vm-btn`) and the
-  // `PublishPanel` in `MemoryLayerView` now publish EVERY selected SWM assertion
-  // as its own on-chain Knowledge Asset via the canonical per-KA /vm/publish
-  // (Design B, any entity count). On the shared seeded devnet CG (~25 SWM roots)
-  // that fires ~25 real on-chain mints — too slow/flaky for a browser e2e, and it
-  // touches roots this spec doesn't own. Neither surface offers a click-path to
-  // publish ONLY this spec's imported root, so there is no clean single-assertion
-  // target. End-to-end on-chain mint is already verified by the API-driven
-  // sibling spec (`wm-swm-vm-lifecycle.devnet.spec`). Kept as `fixme` until this
-  // spec provisions its own dedicated single-assertion CG so the bulk publish
-  // maps 1:1 to our root. The import → promote steps above are the asserting
-  // cycle for the blank-node fix.
+  // coverage gap, NOT the promote bug this spec proves. The project-view bulk
+  // "Publish to Verifiable Memory" control (`widget-publish-vm-btn`) publishes
+  // every selected SWM assertion as its own on-chain Knowledge Asset via the
+  // canonical per-KA /vm/publish. Now that this spec runs on its OWN dedicated,
+  // single-assertion CG (see beforeAll), that bulk publish WOULD map 1:1 to our
+  // one root — but the dedicated CG is created LOCAL-ONLY (unregistered), and a
+  // VM publish requires the CG to be registered on-chain AND ACK quorum from
+  // connected core peers. Registering + funding + a real mint from the browser
+  // is a heavier, slower flow than this promote-focused spec should own, and its
+  // end-to-end on-chain mint is already verified by the API-driven sibling spec
+  // (`wm-swm-vm-lifecycle.devnet.spec`). Kept as `fixme`: un-deferring it means
+  // registering this CG on-chain (e.g. create with `register: true` + a
+  // `waitForConnectedPeers` gate) first. The import → promote steps above are
+  // the asserting cycle for the blank-node fix.
   test.fixme('publishes SWM → VM via the UI and the entity lands in Verifiable Memory', async ({ shell, page }) => {
     test.skip(!run.rootUri, 'Promote step did not run');
     await shell.goto();
