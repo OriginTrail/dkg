@@ -54,6 +54,14 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     return { topics: encoded.topics, data: encoded.data };
   }
 
+  function profileCreatedLog(identityId: bigint) {
+    const encoded = profileInterface.encodeEventLog(
+      profileInterface.getEvent('ProfileCreated')!,
+      [identityId],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
+
   function makeIdentityLookupAdapter(values: bigint[]) {
     const a: any = new EVMChainAdapter(minimalConfig());
     a.initialized = true;
@@ -166,14 +174,23 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     }
   });
 
-  it('repairs a cached self zero when a live signer-address lookup observes a positive identity', async () => {
+  it('shares the short signer zero cache between getIdentityId and getIdentityIdForAddress', async () => {
+    vi.useFakeTimers({ now: 0 });
     const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
 
-    await expect(a.getIdentityId()).resolves.toBe(0n);
-    await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
-    await expect(a.getIdentityId()).resolves.toBe(42n);
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
 
-    expect(readContract.calls).toHaveLength(2);
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shares cache entries between getIdentityId and getIdentityIdForAddress for the signer', async () => {
@@ -251,10 +268,28 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     await expect(a.getIdentityId()).resolves.toBe(88n);
     expect(readContract.calls).toHaveLength(0);
   });
+
+  it('registerIdentity seeds the signer identity cache after ProfileCreated fallback', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [profileCreatedLog(89n)],
+      hash: '0x' + '56'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(89n);
+    await expect(a.getIdentityId()).resolves.toBe(89n);
+    expect(readContract.calls).toHaveLength(1);
+  });
 });
 
 describe('EVMChainAdapter random sampling identity lookup', () => {
-  it('createChallenge uses the cached self identity path and reads back by the emitted identity', async () => {
+  it('createChallenge reads back by the emitted identity without pre-reading signer identity', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const challengeIdentityId = 99n;
     const cachedIdentityId = 42n;
@@ -286,19 +321,18 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     };
     const rss = { __rss: true };
     const rs = { interface: rsInterface };
-    const getIdentityId = recorder(async () => cachedIdentityId);
     const readContract = recorder(async () => challengeRaw);
     const sendContractTransaction = recorder(async () => receipt as any);
 
     a.init = async () => undefined;
-    a.getIdentityId = getIdentityId;
+    a.getIdentityId = recorder(async () => cachedIdentityId);
     a.getRandomSampling = async () => ({ rs, rss });
     a.readContract = readContract;
     a.sendContractTransaction = sendContractTransaction;
 
     const result = await a.createChallenge();
 
-    expect(getIdentityId.calls).toHaveLength(1);
+    expect(a.getIdentityId.calls).toHaveLength(0);
     expect(sendContractTransaction.calls[0][1]).toBe('createChallenge');
     expect(readContract.calls).toHaveLength(1);
     expect(readContract.calls[0][0]).toBe(rss);
