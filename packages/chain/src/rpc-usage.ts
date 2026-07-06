@@ -89,24 +89,12 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
 }
 
 /** A fresh all-zero window — the identity element for merging and the value of "nothing to report". */
-export function emptyRpcUsageWindow(): RpcUsageWindow {
+export function emptyRpcUsageWindow(): NormalizedRpcUsageWindow {
   return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
 }
 
-/**
- * Compatibility input accepted at merge/format/drain boundaries. Chain-owned
- * producers return a concrete {@link RpcUsageWindow}; this loose shape exists
- * only so pre-attribution drain sources do not break aggregate `rpc_usage`
- * logging while rolling through a mixed-version process boundary.
- */
-export type RpcUsageWindowInput = {
-  byMethod: Record<string, number>;
-  ethCallByConsumer?: Record<string, number>;
-  lifetimeTotal: number;
-};
-
-/** Normalize a legacy/loose input into the concrete telemetry model. */
-export function normalizeRpcUsageWindow(window: RpcUsageWindowInput): RpcUsageWindow {
+/** Normalize a public drain-window input into the concrete telemetry model. */
+export function normalizeRpcUsageWindow(window: RpcUsageWindow): NormalizedRpcUsageWindow {
   return {
     byMethod: window.byMethod,
     ethCallByConsumer: window.ethCallByConsumer ?? {},
@@ -137,9 +125,9 @@ export interface RpcUsageDrainable {
  * always a concrete window — empty when there is nothing to merge.
  */
 export function mergeRpcUsageWindows(
-  ...windows: Array<RpcUsageWindowInput | undefined>
-): RpcUsageWindow {
-  const defined = windows.filter((w): w is RpcUsageWindowInput => w !== undefined);
+  ...windows: Array<RpcUsageWindow | undefined>
+): NormalizedRpcUsageWindow {
+  const defined = windows.filter((w): w is RpcUsageWindow => w !== undefined);
   if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
   const ethCallByConsumer: Record<string, number> = {};
@@ -170,12 +158,19 @@ export interface RpcUsageWindow {
    * the billing-exact aggregate count and existing dashboards should continue
    * to use it. The consumer map is emitted as separate daemon log lines so it
    * cannot double-count aggregate `rpc_usage` queries. Empty map means no
-   * attributed `eth_call`s in the current drain window. Legacy missing-field
-   * compatibility is isolated in {@link normalizeRpcUsageWindow}.
+   * attributed `eth_call`s in the current drain window. Optional only to
+   * preserve source compatibility for external drain sources that still return
+   * the pre-attribution aggregate window. Package-owned producers return the
+   * concrete {@link NormalizedRpcUsageWindow} shape.
    */
-  ethCallByConsumer: Record<string, number>;
+  ethCallByConsumer?: Record<string, number>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
+}
+
+/** Concrete package-owned telemetry window after legacy inputs are normalized. */
+export interface NormalizedRpcUsageWindow extends RpcUsageWindow {
+  ethCallByConsumer: Record<string, number>;
 }
 
 /**
@@ -286,7 +281,7 @@ export class RpcUsageTracker {
    * cumulative totals) are what the daemon logs, so `sum_over_time` in Grafana
    * yields exact request counts over any range.
    */
-  drainWindow(): RpcUsageWindow {
+  drainWindow(): NormalizedRpcUsageWindow {
     const byMethod: Record<string, number> = {};
     for (const [method, count] of this.window) byMethod[method] = count;
     this.window.clear();

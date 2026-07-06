@@ -13,15 +13,18 @@
  */
 
 import {
-  normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
-  type RpcUsageWindowInput,
+  type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback;
+}
+
+function normalizeRpcUsageWindow(usage: RpcUsageWindow): RpcUsageWindow & { ethCallByConsumer: Record<string, number> } {
+  return { ...usage, ethCallByConsumer: usage.ethCallByConsumer ?? {} };
 }
 
 /**
@@ -30,7 +33,7 @@ function safeToken(value: string, fallback: string): string {
  * nothing rather than a stream of zeros).
  */
 export function formatRpcUsageLines(
-  usage: RpcUsageWindowInput,
+  usage: RpcUsageWindow,
   windowSeconds: number,
   chainId?: string,
 ): string[] {

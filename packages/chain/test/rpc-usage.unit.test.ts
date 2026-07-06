@@ -26,8 +26,10 @@ import {
   normalizeRpcUsageConsumer,
   rpcUsageWindowTotal,
   RpcUsageTracker,
+  type RpcUsageDrainable,
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
+import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -378,6 +380,21 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(mergeRpcUsageWindows()).toEqual(empty);
   });
 
+  it('keeps legacy aggregate-only drain sources source-compatible at public boundaries', () => {
+    const drainable: RpcUsageDrainable = {
+      drainRpcUsage: () => ({ byMethod: { eth_call: 1 }, lifetimeTotal: 1 }),
+    };
+    const adapter = {
+      drainRpcUsage: () => ({ byMethod: { eth_getLogs: 2 }, lifetimeTotal: 2 }),
+    } satisfies Pick<ChainAdapter, 'drainRpcUsage'>;
+
+    expect(mergeRpcUsageWindows(drainable.drainRpcUsage(), adapter.drainRpcUsage?.())).toEqual({
+      byMethod: { eth_call: 1, eth_getLogs: 2 },
+      ethCallByConsumer: {},
+      lifetimeTotal: 3,
+    });
+  });
+
   it('tracker.record never throws; window keys stay RAW (log token-safety is the formatter concern)', () => {
     const t = new RpcUsageTracker(() => 'evm:31337');
     expect(() => t.record('eth_call')).not.toThrow();
@@ -404,6 +421,27 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.byMethod).toEqual({ eth_call: 3, eth_getLogs: 1 });
     expect(w.ethCallByConsumer).toEqual({ 'pcaNFT.getAccountInfo': 2 });
     expect(rpcUsageWindowTotal(w)).toBe(4);
+  });
+
+  it('drains eth_call consumer attribution as a per-window delta', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('pcaNFT.getAccountInfo', () => t.record('eth_call'));
+
+    const first = t.drainWindow();
+    expect(first.byMethod).toEqual({ eth_call: 1 });
+    expect(first.ethCallByConsumer).toEqual({ 'pcaNFT.getAccountInfo': 1 });
+    expect(first.lifetimeTotal).toBe(1);
+
+    t.record('eth_getLogs');
+    const second = t.drainWindow();
+    expect(second.byMethod).toEqual({ eth_getLogs: 1 });
+    expect(second.ethCallByConsumer).toEqual({});
+    expect(second.lifetimeTotal).toBe(2);
+
+    const third = t.drainWindow();
+    expect(third.byMethod).toEqual({});
+    expect(third.ethCallByConsumer).toEqual({});
+    expect(third.lifetimeTotal).toBe(2);
   });
 
   it('keeps overlapping async consumer scopes isolated', async () => {
@@ -542,5 +580,29 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.contract.value']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('attributes readContractWith eth_call attempts through the real transport path', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_call'] });
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+    const contract = new Contract(HUB, ['function value() view returns (uint256)']);
+
+    await expect(
+      a.readContractWith(contract, 'unit.contract.with', (c: any) => c.value()),
+    ).resolves.toBe(0n);
+
+    const usage = a.drainRpcUsage();
+    const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
+    expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
+    expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer['unit.contract.with']).toBe(rawEthCallHits);
   }, 30_000);
 });

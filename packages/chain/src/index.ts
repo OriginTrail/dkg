@@ -7,11 +7,10 @@ export * from './chain-adapter.js';
 export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
-  normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
+  type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageWindow,
-  type RpcUsageWindowInput,
 } from './rpc-usage.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export {
