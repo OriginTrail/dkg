@@ -89,7 +89,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
+  createProductionACKCollector, StorageACKHandler,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -1446,14 +1446,57 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
+  /**
+   * Connected, QUORUM-ELIGIBLE confirmed core peers only — no edge/non-core
+   * padding. This is the ACK-readiness predicate (see
+   * `ACKCollectorDeps.getReadinessCorePeers`): the readiness wait must count
+   * only real cores, so a padded dial pool (cores + an edge peer) can't disarm
+   * it and let the round fast-fail before a slow-to-identify core shows up.
+   */
+  private getConfirmedCorePeers(): string[] {
+    const connected = this.node.libp2p
+      .getPeers()
+      .map(p => p.toString())
+      .filter(id => id !== this.peerId);
+    return connected.filter(id => this.knownCorePeerIds.has(id));
+  }
+
   private getACKCandidatePeers(): string[] {
-    const peers = this.node.libp2p.getPeers();
-    const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-    const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
+    const confirmedCore = this.getConfirmedCorePeers();
     const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     if (confirmedCore.length >= quorum) return confirmedCore;
+    const connected = this.node.libp2p
+      .getPeers()
+      .map(p => p.toString())
+      .filter(id => id !== this.peerId);
     const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
     return [...confirmedCore, ...rest];
+  }
+
+  /**
+   * Public ACK-transport peer-selection boundary (otReviewAgent #1404).
+   *
+   * The CLI daemon's `ackTransportFactory` MUST build its collector callbacks
+   * from here rather than re-deriving core classification by reaching into the
+   * private `knownCorePeerIds` set behind an `any` cast — that duplicated the
+   * peer model in two places and would silently drift on any rename. This is the
+   * single owner of the two DISTINCT pools:
+   *   - `getConnectedCorePeers`: the padded ACK dial pool — confirmed cores
+   *     first, then non-core padding when confirmed cores are below quorum, so a
+   *     slow-to-identify core never caps the pool below quorum (#1107).
+   *   - `getReadinessCorePeers`: confirmed cores ONLY (never the padding), so a
+   *     connected edge peer can't disarm the peer-readiness wait (#1404 P1).
+   * The agent's own publish/update ACK providers consume the same pair, so the
+   * daemon and agent publish paths share one classification, not three copies.
+   */
+  getACKTransportPeerSelectors(): {
+    getConnectedCorePeers: () => string[];
+    getReadinessCorePeers: () => string[];
+  } {
+    return {
+      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getReadinessCorePeers: () => this.getConfirmedCorePeers(),
+    };
   }
 
   /**
@@ -1480,7 +1523,7 @@ export class DKGAgent extends DKGAgentBase {
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
-    const collector = new ACKCollector({
+    const collector = createProductionACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
@@ -1496,7 +1539,11 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Padded ACK dial pool + confirmed-core-only readiness probe, from the
+      // single agent-owned selector so this path can't drift from the daemon's
+      // (otReviewAgent #1404 P1). Readiness never counts the padding, so a
+      // connected edge peer can't disarm the peer-readiness wait.
+      ...this.getACKTransportPeerSelectors(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1664,7 +1711,7 @@ export class DKGAgent extends DKGAgentBase {
     if (typeof this.chain.getEvmChainId !== 'function') return undefined;
     if (typeof this.chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
 
-    const collector = new ACKCollector({
+    const collector = createProductionACKCollector({
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
@@ -1675,7 +1722,11 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      // Padded ACK dial pool + confirmed-core-only readiness probe, from the
+      // single agent-owned selector so this path can't drift from the daemon's
+      // (otReviewAgent #1404 P1). Readiness never counts the padding, so a
+      // connected edge peer can't disarm the peer-readiness wait.
+      ...this.getACKTransportPeerSelectors(),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

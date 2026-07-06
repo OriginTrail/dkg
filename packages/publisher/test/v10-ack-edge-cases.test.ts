@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { ACKCollector, createProductionACKCollector, DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS, type ACKCollectorDeps } from '../src/ack-collector.js';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -233,6 +233,131 @@ describe('ACKCollector quorum fast-fail (spec §9.0 Phase 3)', () => {
     const uniqueIdentities = new Set(result.acks.map(a => a.nodeIdentityId));
     expect(uniqueIdentities.size).toBe(3);
   });
+});
+
+// ── ACKCollector core-peer readiness gate (#1404) ────────────────────────
+
+describe('ACKCollector core-peer readiness gate (#1404)', () => {
+  it('exports a positive production readiness timeout (providers wire this on)', () => {
+    expect(DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it('createProductionACKCollector ENABLES the readiness gate (waits+proceeds, not a legacy one-shot)', async () => {
+    // The factory is the SINGLE production construction boundary (daemon publish
+    // + update providers, CLI publisher runner all route through it). It must
+    // inject DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS so a bare one-shot snapshot
+    // can never reach production. Below quorum on the first snapshots, reaching 3
+    // mid-wait: a factory-built collector rides the wait and PROCEEDS; a fail-fast
+    // one-shot (i.e. the gate NOT injected) would reject 'quorum impossible' here.
+    const snapshots = [
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1', 'peer-2'],
+    ];
+    let call = 0;
+    const collector = createProductionACKCollector({
+      gossipPublish: noop(),
+      sendP2P: buildSendP2P(),
+      getConnectedCorePeers: () => snapshots[Math.min(call++, snapshots.length - 1)],
+      sleep: async () => {}, // collapse the injected wait — sleep drives the budget
+      log: noop(),
+    });
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);          // proceeded past the gate
+    expect(call).toBeGreaterThanOrEqual(3);       // it polled until quorum formed
+  });
+
+  it('gate DISABLED (no timeout): one-shot fail-fast, exactly one snapshot, no polling', async () => {
+    let snapshots = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
+      getConnectedCorePeers: () => { snapshots++; return ['peer-0', 'peer-1']; },
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect(buildCollectParams({ requiredACKs: 3 })))
+      .rejects.toThrow('quorum impossible');
+    expect(snapshots).toBe(1); // legacy one-shot: no wait
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
+  });
+
+  it('gate ENABLED: waits then PROCEEDS when the pool reaches quorum mid-wait', async () => {
+    // Below quorum on the first snapshots, reaches 3 on a later poll.
+    const snapshots = [
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1'],
+      ['peer-0', 'peer-1', 'peer-2'],
+    ];
+    let call = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: buildSendP2P(),
+      getConnectedCorePeers: () => snapshots[Math.min(call++, snapshots.length - 1)],
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {}, // collapse the wait — the injected sleep drives the budget
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);          // proceeded past the gate
+    expect(call).toBeGreaterThanOrEqual(3);       // it polled until quorum formed
+  });
+
+  it('gate ENABLED: still fails closed with the FINAL count if quorum never forms', async () => {
+    let snapshots = 0;
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: noop() as any,
+      getConnectedCorePeers: () => { snapshots++; return ['peer-0', 'peer-1']; },
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {},
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect(buildCollectParams({ requiredACKs: 3 })))
+      .rejects.toThrow('need 3 ACKs but only 2 core peers connected — quorum impossible');
+    expect(snapshots).toBeGreaterThan(1);         // it polled (not a one-shot)
+    expect((deps.sendP2P as unknown as Tracked).calls).toHaveLength(0);
+  });
+
+  it('otReviewAgent #1404 P1: readiness counts CONFIRMED cores, not the padded dial pool — a connected edge peer cannot disarm the wait', async () => {
+    // 2 confirmed cores + 1 edge peer on a 3-signature chain, with a 3rd core
+    // that identifies moments later. The DIAL pool is padded to length 3
+    // (2 cores + edge); under the OLD gate that padded count satisfied
+    // readiness, skipped the wait, froze the edge into the snapshot, and
+    // fast-failed once the edge couldn't ACK. Readiness must instead count only
+    // the 2 confirmed cores, wait for the 3rd core, then dial the 3 real cores.
+    let readinessCalls = 0;
+    const cores3 = ['peer-0', 'peer-1', 'peer-2'];
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      // 'edge' has no peer-N index, so its send throws (it never ACKs) — exactly
+      // what makes a frozen [core, core, edge] snapshot fast-fail.
+      sendP2P: buildSendP2P(),
+      // DIAL pool: padded with the edge until the 3rd core identifies.
+      getConnectedCorePeers: () =>
+        readinessCalls >= 3 ? cores3 : ['peer-0', 'peer-1', 'edge'],
+      // READINESS: confirmed cores only — 2 until the 3rd core shows up mid-wait.
+      getReadinessCorePeers: () => {
+        readinessCalls += 1;
+        return readinessCalls >= 3 ? cores3 : ['peer-0', 'peer-1'];
+      },
+      corePeerReadinessTimeoutMs: 5000,
+      sleep: async () => {}, // collapse the wait; readiness polls drive the budget
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect(buildCollectParams({ requiredACKs: 3 }));
+    expect(result.acks).toHaveLength(3);         // dialed the 3 real cores, not the edge
+    expect(readinessCalls).toBeGreaterThan(1);   // it WAITED on confirmed cores (didn't skip)
+  });
+
+  // NOTE: `collect` and `collectUpdate` both call the SAME shared preflight
+  // (`getQuorumEligibleCorePeersOrThrow`), so the cases above exercise the exact
+  // gate the UPDATE path uses. See storage-update-ack.test.ts for collectUpdate
+  // quorum coverage. The existing cases wire ONLY getConnectedCorePeers, so they
+  // also lock in the readiness-probe fallback (getReadinessCorePeers ?? …).
 });
 
 // ── ACKCollector identity verification ───────────────────────────────────

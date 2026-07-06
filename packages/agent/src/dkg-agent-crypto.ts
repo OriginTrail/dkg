@@ -301,6 +301,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  POLICY_STATE_RETRY_ATTEMPTS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
@@ -379,6 +380,51 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+/**
+ * #1404 — bounded retry-on-transient-UNKNOWN for a SINGLE access-policy-state
+ * read. A small PURE module-level helper (NOT on the DKGAgent surface): the
+ * underlying on-chain reads fail closed to 'unknown' when one read exceeds
+ * {@link CHAIN_POLICY_READ_TIMEOUT_MS} (2.5s) — a slow chain RPC (observed on
+ * Base) blows that easily and would refuse an otherwise-live CG. Retrying a
+ * transient 'unknown'/throw lets a slow RPC land a CONFIRMED 0/1 before we fail
+ * closed; a confirmed 0/1/'unregistered' returns IMMEDIATELY (no extra reads).
+ * Genuine unavailability still ends 'unknown', or re-throws on the final attempt,
+ * so the caller fails closed (never a plaintext downgrade on a guess). `backoffMs`
+ * is injectable so tests collapse the delay; `onRetryUnknown` keeps this
+ * logging-agnostic. Its ONLY consumer is
+ * {@link WorkspaceCryptoMethods.resolvePublishAccessPolicyState}, so retry
+ * semantics live inside that one canonical policy operation and can't be forgotten
+ * or bypassed by a caller composing its own read. Exported for direct unit test.
+ */
+export async function retryTransientPolicyState(
+  read: () => Promise<0 | 1 | 'unregistered' | 'unknown'>,
+  opts?: {
+    attempts?: number;
+    backoffMs?: (attempt: number) => number;
+    onRetryUnknown?: (attempt: number, attempts: number) => void;
+  },
+): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+  const attempts = Math.max(1, opts?.attempts ?? POLICY_STATE_RETRY_ATTEMPTS);
+  const backoffMs = opts?.backoffMs ?? ((attempt: number) => 300 * attempt);
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  let state: 0 | 1 | 'unregistered' | 'unknown' = 'unknown';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      state = await read();
+    } catch (err) {
+      if (attempt >= attempts) throw err; // caller's try/catch fails closed
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    if (state !== 'unknown') return state; // confirmed 0 / 1 / 'unregistered'
+    if (attempt < attempts) {
+      opts?.onRetryUnknown?.(attempt, attempts);
+      await sleep(backoffMs(attempt));
+    }
+  }
+  return state;
+}
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -685,6 +731,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * {@link CHAIN_POLICY_READ_TIMEOUT_MS}, so callers fail closed instead of
    * blocking forever. The timer is `unref`'d so a dead RPC never keeps the
    * process alive.
+   *
+   * NOTE (otReviewAgent #1404 P2): the underlying RPC is NOT cancelled on
+   * timeout — the ethers read path (`isContextGraphActiveOnChain` /
+   * `getContextGraphAccessPolicy` → `readContract`) takes no `AbortSignal`, and
+   * ethers v6 provider calls don't cleanly abort an in-flight JSON-RPC anyway.
+   * So a timed-out read runs to completion in the background. Combined with
+   * {@link retryTransientPolicyState}, a single policy resolve can therefore
+   * leave up to `POLICY_STATE_RETRY_ATTEMPTS` abandoned reads — but the reads
+   * are idempotent (no state), strictly SEQUENTIAL (a backoff sleep separates
+   * attempts), and bounded by that small fixed attempt count, so the only cost
+   * is a few extra eth_calls + slight RPC load per slow publish. Threading a
+   * cancellation signal would require changing the public ChainAdapter read
+   * interface + every adapter for no correctness gain, so we accept + document
+   * the bounded extra in-flight read budget instead.
    */
   private raceChainPolicyRead<T>(p: Promise<T>): Promise<T | typeof TIMEOUT_SENTINEL> {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -696,6 +756,51 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       p.finally(() => { if (timer) clearTimeout(timer); }),
       timeout,
     ]);
+  }
+
+  /**
+   * #1404 — THE canonical publish access-policy-state operation. Publish (and any
+   * future caller) asks ONE question — "what is the on-chain access policy for
+   * this CG?" — and this owns the WHOLE answer: it selects the correct read (the
+   * raw on-chain slot for a numeric id when `rawOnChainSlot` is set, otherwise the
+   * shared tri-state resolver) AND applies the bounded transient-UNKNOWN retry
+   * ({@link retryTransientPolicyState}). Callers therefore can neither diverge on
+   * which read to use nor forget the retry — there is no public higher-order retry
+   * primitive to compose (or skip). Fail-closed is preserved end to end: a
+   * confirmed 0/1/'unregistered' returns immediately; genuine unavailability stays
+   * 'unknown' or re-throws on the final attempt, so the caller's try/catch fails
+   * closed (never a plaintext downgrade on a guess). `backoffMs`/`attempts` are
+   * injectable so tests collapse the delay.
+   */
+  async resolvePublishAccessPolicyState(this: DKGAgent,
+    cgId: string,
+    opCtx?: OperationContext,
+    opts?: {
+      rawOnChainSlot?: boolean;
+      logLabel?: string;
+      attempts?: number;
+      backoffMs?: (attempt: number) => number;
+    },
+  ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    const read = async (): Promise<0 | 1 | 'unregistered' | 'unknown'> => {
+      if (opts?.rawOnChainSlot && /^\d+$/.test(cgId.trim())) {
+        const policy = await this.readLiveOnChainAccessPolicy(cgId.trim(), opCtx);
+        return policy === 0 || policy === 1 ? policy : 'unknown';
+      }
+      return this.resolveOnChainAccessPolicyState(cgId, opCtx);
+    };
+    const label = opts?.logLabel ?? 'chain access-policy';
+    return retryTransientPolicyState(read, {
+      attempts: opts?.attempts,
+      backoffMs: opts?.backoffMs,
+      onRetryUnknown: opCtx
+        ? (attempt, total) =>
+            this.log.warn(
+              opCtx,
+              `${label} came back UNKNOWN (attempt ${attempt}/${total}) — retrying the on-chain read before failing closed`,
+            )
+        : undefined,
+    });
   }
 
   /**

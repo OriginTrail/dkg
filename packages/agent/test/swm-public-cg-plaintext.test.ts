@@ -145,6 +145,16 @@ function makeAgentLike(opts: {
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
   agentLike.resolveWorkspaceRecipientsGated = (DKGAgent.prototype as any).resolveWorkspaceRecipientsGated;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
+  // #1404 — probeIsCurated resolves the tri-state via the ONE canonical policy
+  // operation `resolvePublishAccessPolicyState` (read-selection + bounded retry
+  // owned in one place); bind it (with collapsed backoff) so this partial-agent
+  // harness doesn't throw `this.resolvePublishAccessPolicyState is not a function`
+  // and mis-report policy.
+  agentLike.resolvePublishAccessPolicyState = function (this: any, cgId: any, opCtx: any, opts: any) {
+    return (DKGAgent.prototype as any).resolvePublishAccessPolicyState.call(
+      this, cgId, opCtx, { ...opts, backoffMs: () => 0 },
+    );
+  };
   return agentLike;
 }
 

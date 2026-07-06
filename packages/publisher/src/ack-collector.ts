@@ -37,7 +37,23 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  /**
+   * The DIAL pool: the peers the collector snapshots and dials for ACKs. The
+   * daemon may PAD this with non-core peers when confirmed cores are below
+   * quorum (best-effort dial to avoid `pool_below_quorum`), so its length is
+   * NOT a reliable "quorum is reachable" signal — see {@link getReadinessCorePeers}.
+   */
   getConnectedCorePeers: () => string[];
+  /**
+   * The READINESS predicate: how many QUORUM-ELIGIBLE confirmed core peers are
+   * connected right now (NO padding with edge/non-core peers). The readiness
+   * wait polls THIS — not {@link getConnectedCorePeers} — so a padded dial pool
+   * (e.g. 2 cores + 1 edge on a 3-signature chain) can no longer disarm the
+   * wait and let the round fast-fail before a slow-to-identify 3rd core shows
+   * up. Optional: defaults to {@link getConnectedCorePeers} for back-compat, so
+   * callers that don't distinguish the two keep the legacy behaviour.
+   */
+  getReadinessCorePeers?: () => string[];
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -64,6 +80,17 @@ export interface ACKCollectorDeps {
    * real `setTimeout` delay.
    */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * When > 0, the collector polls {@link getConnectedCorePeers} for up to this
+   * many ms before its one-shot quorum snapshot, so a publish that fires while
+   * the last core peer(s) are still connecting/identifying doesn't throw
+   * `quorum impossible` a moment too early (the dominant intermittent-publish
+   * failure on small/NAT'd chains like Base). Omitted / 0 disables the wait,
+   * keeping the legacy fail-fast one-shot behaviour — unit tests rely on this;
+   * the production node wiring passes
+   * {@link DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS}.
+   */
+  corePeerReadinessTimeoutMs?: number;
 }
 
 export interface CollectedACK {
@@ -115,6 +142,23 @@ const TRANSIENT_DECLINE_BACKOFF_CAP_MS = 8_000;
 function transientDeclineBackoffMs(retry: number): number {
   return Math.min(1000 * 2 ** Math.max(0, retry - 1), TRANSIENT_DECLINE_BACKOFF_CAP_MS);
 }
+// Pre-collection peer-readiness gate. `knownCorePeerIds` (the set behind
+// `getConnectedCorePeers`) is populated ASYNCHRONOUSLY — a core peer is only
+// counted once libp2p identify completes and the `peer:update` reclassifier
+// runs (dkg-agent-lifecycle `handlePeerUpdateForSyncRetry`, #1093), and
+// warm-core redials settle over time. So the old one-shot snapshot taken the
+// instant a publish starts routinely races the last core peer(s)
+// connecting/identifying and threw `quorum impossible` a moment before the
+// pool would have been ready — the dominant intermittent-publish failure on
+// small/NAT'd chains like Base. When enabled (see `corePeerReadinessTimeoutMs`
+// in the deps) we poll up to that bound before snapshotting; the round still
+// fails closed with the TRUE count if quorum never forms, so no genuinely-
+// under-quorum publish is masked, and the happy path (already at quorum) adds
+// zero latency. The gate is OFF by default (timeout 0) so unit tests keep
+// their fast one-shot semantics; the production node wiring opts in with
+// {@link DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS}.
+export const DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS = 15_000;
+const PEER_READINESS_POLL_MS = 500;
 const MAX_DECLINE_CODE_CHARS = 64;
 const MAX_DECLINE_MESSAGE_CHARS = 240;
 
@@ -156,6 +200,81 @@ export class ACKCollector {
 
   constructor(deps: ACKCollectorDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Wait (bounded by {@link PEER_READINESS_TIMEOUT_MS}) until at least
+   * `required` connected core peers are visible, then return the snapshot.
+   * Returns immediately when the pool is already at/above quorum, so the happy
+   * path adds zero latency. If the deadline passes still short, returns the
+   * final (insufficient) snapshot — the caller then throws `quorum impossible`
+   * with the TRUE count, identical to the old one-shot behaviour minus the
+   * early-race false negatives.
+   */
+  private async getQuorumEligibleCorePeersOrThrow(
+    required: number,
+    log: (msg: string) => void,
+  ): Promise<string[]> {
+    // Readiness is decided by QUORUM-ELIGIBLE CONFIRMED cores only — never the
+    // padded dial pool. `getConnectedCorePeers` may be padded with non-core
+    // peers when confirmed cores are below quorum (best-effort dial), so polling
+    // it for readiness would let a single connected edge peer disarm the wait
+    // and fast-fail before a slow 3rd core identifies. Fall back to it only when
+    // no distinct readiness probe is wired (legacy callers / unit tests). The
+    // whole readiness poll is gated on the timeout being enabled, so the legacy
+    // one-shot path takes EXACTLY the single dial snapshot below (no extra read).
+    const timeoutMs = this.deps.corePeerReadinessTimeoutMs ?? 0;
+    if (timeoutMs > 0) {
+      const readinessProbe = this.deps.getReadinessCorePeers ?? this.deps.getConnectedCorePeers;
+      let readyCount = readinessProbe().length;
+      if (readyCount < required) {
+        const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+        log(
+          `[ACKCollector] ${readyCount}/${required} core peers connected — waiting up to ` +
+          `${timeoutMs}ms for quorum-eligible peers to connect/identify`,
+        );
+        // Bound the wait by the SAME poll interval handed to `sleep` (elapsed =
+        // sum of PEER_READINESS_POLL_MS steps) rather than a `Date.now()` deadline,
+        // so a test that injects a fast/no-op `sleep` fully controls how many polls
+        // run — no wall-clock dependency, no tight-loop footgun.
+        for (let waited = 0; waited < timeoutMs; waited += PEER_READINESS_POLL_MS) {
+          await sleep(PEER_READINESS_POLL_MS);
+          readyCount = readinessProbe().length;
+          if (readyCount >= required) {
+            log(`[ACKCollector] core-peer quorum ready: ${readyCount}/${required} connected`);
+            break;
+          }
+        }
+      }
+    }
+    // Snapshot the DIAL pool (which may be padded) AFTER the readiness gate, so
+    // we still dial the broader pool when confirmed cores never reach quorum
+    // (unchanged `pool_below_quorum` fallback) but only after the wait has had
+    // its chance to let a real core identify.
+    const peers = this.deps.getConnectedCorePeers();
+    // Own the full pre-collection quorum invariant in one place: below-quorum is
+    // a THROW here, not a normal return value each caller re-checks. Preserve the
+    // exact legacy messages + peerOutcome shapes so log greps + tests keep matching.
+    if (peers.length === 0) {
+      throw new QuorumUnmetError({
+        collected: 0,
+        required,
+        dialled: 0,
+        peerOutcomes: [],
+        legacyMessage: 'ACK collection failed: no connected core peers',
+      });
+    }
+    if (peers.length < required) {
+      throw new QuorumUnmetError({
+        collected: 0,
+        required,
+        dialled: peers.length,
+        peerOutcomes: peers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
+        legacyMessage:
+          `ACK collection failed: need ${required} ACKs but only ${peers.length} core peers connected — quorum impossible`,
+      });
+    }
+    return peers;
   }
 
   async collect(params: {
@@ -384,29 +503,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
-    if (corePeers.length === 0) {
-      // Pre-dial impossibility — wrap in the typed surface but preserve
-      // the legacy `ACK collection failed: no connected core peers` text
-      // so log greps + existing tests keep matching.
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: 0,
-        peerOutcomes: [],
-        legacyMessage: 'ACK collection failed: no connected core peers',
-      });
-    }
-    if (corePeers.length < REQUIRED_ACKS) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: corePeers.length,
-        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
-        legacyMessage:
-          `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
-      });
-    }
+    const corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log);
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     const catalogRoot = params.catalogCommitment?.catalogRoot
@@ -533,26 +630,7 @@ export class ACKCollector {
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
-    if (corePeers.length === 0) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: 0,
-        peerOutcomes: [],
-        legacyMessage: 'ACK collection failed: no connected core peers',
-      });
-    }
-    if (corePeers.length < REQUIRED_ACKS) {
-      throw new QuorumUnmetError({
-        collected: 0,
-        required: REQUIRED_ACKS,
-        dialled: corePeers.length,
-        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
-        legacyMessage:
-          `ACK collection failed: need ${REQUIRED_ACKS} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
-      });
-    }
+    const corePeers = await this.getQuorumEligibleCorePeersOrThrow(REQUIRED_ACKS, log);
     log(`[ACKCollector] Requesting UPDATE ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
     // 13-field UPDATE ACK digest — byte-identical to what the peer signs
@@ -1117,4 +1195,30 @@ export class ACKCollector {
     }
     return true;
   }
+}
+
+/**
+ * The SINGLE production construction boundary for ACK collection. It always
+ * enables the core-peer readiness gate ({@link DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS})
+ * so a publish that fires while the last core peer is still connecting/identifying
+ * doesn't fail `quorum impossible` a moment too early — the dominant intermittent-
+ * publish failure on small/NAT'd chains like Base.
+ *
+ * Every production caller — the daemon publish + update ACK providers
+ * (`dkg-agent.ts`) and the CLI publisher runner (`publisher-runner.ts`) — routes
+ * through here instead of hand-copying `corePeerReadinessTimeoutMs` into a bare
+ * `new ACKCollector(...)`, so the readiness opt-in cannot be silently forgotten
+ * when a new production call site is added (a bare constructor would compile but
+ * silently revert to the legacy one-shot snapshot). The deps type OMITS
+ * `corePeerReadinessTimeoutMs` precisely so callers can't accidentally under- or
+ * mis-configure it. Unit tests that want the legacy fail-fast one-shot construct
+ * {@link ACKCollector} directly with `corePeerReadinessTimeoutMs: 0` (or omitted).
+ */
+export function createProductionACKCollector(
+  deps: Omit<ACKCollectorDeps, 'corePeerReadinessTimeoutMs'>,
+): ACKCollector {
+  return new ACKCollector({
+    ...deps,
+    corePeerReadinessTimeoutMs: DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
+  });
 }

@@ -53,6 +53,7 @@ export {
   CuratorUnconfirmedError,
   CuratorRejectedError,
   type DKGPublisherConfig,
+  type V10ACKChainCapabilities,
   type WorkspaceSenderKeyEncryptInput,
   type WorkspaceSenderKeyEncryptor,
   type ShareOptions,
@@ -69,7 +70,9 @@ export {
 } from './workspace-agent-recipients.js';
 export {
   ACKCollector,
+  createProductionACKCollector,
   DEFAULT_REQUIRED_ACKS,
+  DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS,
   type ACKCollectorDeps,
   type CollectedACK,
   type ACKCollectionResult,

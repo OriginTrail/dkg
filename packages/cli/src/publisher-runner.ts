@@ -2,7 +2,8 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { createV10ACKProviderForPublisher, type ACKTransportFactory } from './ack-provider.js';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
@@ -25,14 +26,6 @@ export interface PublisherRuntimeWallet {
 export interface PublisherInspector {
   readonly publisher: AsyncLiftPublisher;
   readonly stop: () => Promise<void>;
-}
-
-interface ACKTransportFactory {
-  publisherPeerId: string;
-  gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
-  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: () => string[];
-  log?: (message: string) => void;
 }
 
 type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
@@ -385,145 +378,6 @@ function logPublisherWalletAttribution(
       `will publish in no-attribution mode (identityId=0): ${noAttributionWallets.join(', ')}`,
     );
   }
-}
-
-function createV10ACKProviderForPublisher(
-  publisher: DKGPublisher,
-  transport?: ACKTransportFactory,
-): PublishOptions['v10ACKProvider'] | undefined {
-  if (!transport) return undefined;
-  const chain = (publisher as unknown as {
-    chain?: {
-      isV10Ready?: () => boolean;
-      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
-      verifyACKIdentityDetailed?: (
-        recoveredAddress: string,
-        claimedIdentityId: bigint,
-      ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
-      getMinimumRequiredSignatures?: () => Promise<number>;
-      getEvmChainId?: () => Promise<bigint>;
-      getKnowledgeAssetsLifecycleAddress?: () => Promise<string>;
-    };
-  }).chain;
-  // `isV10Ready()` is the authoritative capability gate — rejects
-  // NoChainAdapter (returns false) and unresolved EVM adapters.
-  if (!chain?.isV10Ready?.()) return undefined;
-  if (typeof chain.verifyACKIdentity !== 'function') return undefined;
-  // The H5 prefix requires both a numeric chain id AND the deployed KAV10
-  // address. Without them the collector cannot build a digest that matches
-  // what core-node handlers sign, so refuse to hand back a provider at all.
-  if (typeof chain.getEvmChainId !== 'function') return undefined;
-  if (typeof chain.getKnowledgeAssetsLifecycleAddress !== 'function') return undefined;
-
-  const collector = new ACKCollector({
-    gossipPublish: transport.gossipPublish,
-    sendP2P: transport.sendP2P,
-    getConnectedCorePeers: transport.getConnectedCorePeers,
-    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
-    // Prefer the structured verifier when the chain adapter exposes it
-    // so the rejection log can report the specific failing gate.
-    ...(typeof chain.verifyACKIdentityDetailed === 'function' ? {
-      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint) =>
-        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId),
-    } : {}),
-    log: transport.log,
-  });
-
-  return async (
-    merkleRoot,
-    contextGraphId,
-    kaCount,
-    rootEntities,
-    publicByteSize,
-    stagingQuads,
-    epochs,
-    tokenAmount,
-    swmGraphId,
-    subGraphName,
-    merkleLeafCount,
-    isEncryptedPayload,
-    catalogCommitment,
-  ) => {
-    // Fail loud on non-numeric or non-positive CG ids. V10 publish requires
-    // a real on-chain context graph; `ZeroContextGraphId` at
-    // `KnowledgeAssetsV10.sol:379` rejects cgId 0 on chain. Reject `<= 0n`
-    // rather than `=== 0n` so `BigInt("-1") === -1n` is caught here instead
-    // of dying in ethers' uint256 encoder inside the evm-adapter.
-    // `contextGraphId` here is the TARGET on-chain numeric id; `swmGraphId`
-    // (optional) is the source SWM graph name and is NOT required to be
-    // numeric.
-    let cgIdBigInt: bigint;
-    try {
-      cgIdBigInt = BigInt(contextGraphId);
-    } catch {
-      throw new Error(
-        `Async V10 publish requires a numeric on-chain context graph id; ` +
-        `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-      );
-    }
-    if (cgIdBigInt <= 0n) {
-      throw new Error(
-        `Async V10 publish requires a positive on-chain context graph id; got ${cgIdBigInt}. ` +
-        `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
-      );
-    }
-    if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
-      throw new Error(
-        `Async V10 publish requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
-        'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
-      );
-    }
-    // PR3 / RC11: wrap each chain pre-flight read in its own try/catch
-    // so a failure is promoted to the typed `RpcPreconditionError`
-    // (rather than the opaque "V10 ACK collection failed" string).
-    // Mirrors the agent-side V10 ACK provider in
-    // `dkg-agent.ts:createV10ACKProvider` so the daemon log surfaces
-    // the same shape regardless of which entry point produced the
-    // publish. `wrapAsRpcPreconditionIfApplicable` is a no-op when
-    // the error is already typed.
-    let requiredACKs: number | undefined;
-    if (typeof chain.getMinimumRequiredSignatures === 'function') {
-      try {
-        requiredACKs = await chain.getMinimumRequiredSignatures();
-      } catch (err) {
-        throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
-      }
-    }
-    let chainIdBig: bigint;
-    try {
-      chainIdBig = await chain.getEvmChainId!();
-    } catch (err) {
-      throw wrapAsRpcPreconditionIfApplicable(err, 'getEvmChainId');
-    }
-    let kav10Address: string;
-    try {
-      kav10Address = await chain.getKnowledgeAssetsLifecycleAddress!();
-    } catch (err) {
-      throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
-    }
-    const result = await collector.collect({
-      merkleRoot,
-      contextGraphId: cgIdBigInt,
-      contextGraphIdStr: contextGraphId,
-      publisherPeerId: transport.publisherPeerId,
-      publicByteSize,
-      isPrivate: isEncryptedPayload === true,
-      kaCount,
-      rootEntities,
-      chainId: chainIdBig,
-      kav10Address,
-      requiredACKs,
-      stagingQuads,
-      epochs,
-      tokenAmount,
-      swmGraphId,
-      subGraphName,
-      merkleLeafCount,
-      isEncryptedPayload,
-      catalogCommitment,
-    });
-    return result.acks;
-  };
 }
 
 function createChainRecoveryResolver(

@@ -1,0 +1,105 @@
+/**
+ * #1404 — CLI publisher ACK readiness-gate wiring.
+ *
+ * The core-peer readiness gate only protects a production publish if the
+ * construction site actually opts in. The daemon publish/update providers are
+ * covered in `packages/agent/test/v10-ack-provider-wiring.test.ts`; this file
+ * pins the THIRD production site — the CLI publisher runner — so a bare
+ * `new ACKCollector(...)` that dropped the readiness opt-in here would be a red
+ * test, not silent false confidence.
+ *
+ * We intercept the centralized `createProductionACKCollector` factory (which
+ * injects `DEFAULT_CORE_PEER_READINESS_TIMEOUT_MS` — proven in
+ * `packages/publisher/test/v10-ack-edge-cases.test.ts`) and assert the CLI
+ * provider routes through it. The provider builder lives in its own intentional
+ * internal module (`src/ack-provider.ts`) with a stable contract, so this test
+ * imports it there instead of forcing `publisher-runner.ts` to widen its surface.
+ */
+import { describe, expect, it, vi } from 'vitest';
+import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
+
+const capturedFactoryDeps: unknown[] = [];
+
+vi.mock('@origintrail-official/dkg-publisher', async () => {
+  const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
+    '@origintrail-official/dkg-publisher',
+  );
+  return {
+    ...actual,
+    createProductionACKCollector: (deps: unknown) => {
+      capturedFactoryDeps.push(deps);
+      return {
+        async collect(): Promise<never> {
+          throw new Error('stub collect() should not run in wiring test');
+        },
+        async collectUpdate(): Promise<never> {
+          throw new Error('stub collectUpdate() should not run in wiring test');
+        },
+      };
+    },
+  };
+});
+
+// Import AFTER the mock is registered so the CLI module binds the mocked factory.
+const { createV10ACKProviderForPublisher } = await import('../src/ack-provider.js');
+
+/** Minimal publisher whose V10 ACK capability accessor satisfies every guard. */
+function fakeV10Publisher(): DKGPublisher {
+  const capabilities = {
+    isV10Ready: () => true,
+    verifyACKIdentity: async () => true,
+    verifyACKIdentityDetailed: async () => ({ valid: true as const }),
+    getEvmChainId: async () => 8453n,
+    getKnowledgeAssetsLifecycleAddress: async () => `0x${'00'.repeat(20)}`,
+  };
+  return {
+    getV10ACKChainCapabilities: () => capabilities,
+  } as unknown as DKGPublisher;
+}
+
+function fakeTransport() {
+  return {
+    publisherPeerId: 'peer-self',
+    gossipPublish: async () => undefined,
+    sendP2P: async () => new Uint8Array(),
+    // Padded dial pool (all 3) vs. a DISTINCT confirmed-core-only readiness probe
+    // (just core-a). The two lists differ on purpose so the pass-through assertion
+    // fails if the CLI provider aliased readiness onto getConnectedCorePeers or
+    // dropped the callback (otReviewAgent #1404).
+    getConnectedCorePeers: () => ['core-a', 'core-b', 'core-c'],
+    getReadinessCorePeers: () => ['core-a'],
+    log: () => undefined,
+  };
+}
+
+describe('CLI publisher ACK provider — readiness gate wiring (#1404)', () => {
+  it('routes the ACK collector through createProductionACKCollector (readiness opt-in cannot be skipped)', () => {
+    capturedFactoryDeps.length = 0;
+    const provider = createV10ACKProviderForPublisher(fakeV10Publisher(), fakeTransport());
+    expect(provider).toBeTypeOf('function');
+    expect(capturedFactoryDeps).toHaveLength(1);
+    const deps = capturedFactoryDeps[0] as {
+      getConnectedCorePeers?: () => string[];
+      getReadinessCorePeers?: () => string[];
+      corePeerReadinessTimeoutMs?: number;
+    };
+    expect(deps.getConnectedCorePeers).toBeTypeOf('function');
+    // #1404: the SEPARATE confirmed-core-only readiness probe must be forwarded
+    // to the collector unchanged — not aliased onto getConnectedCorePeers and not
+    // dropped (which would fall the collector back to the padded pool and let an
+    // edge peer disarm the readiness wait). Assert it round-trips the distinct
+    // sentinel from the transport.
+    expect(deps.getReadinessCorePeers).toBeTypeOf('function');
+    expect(deps.getReadinessCorePeers!()).toEqual(['core-a']);
+    expect(deps.getConnectedCorePeers!()).toEqual(['core-a', 'core-b', 'core-c']);
+    // The production factory owns the readiness timeout; the CLI must NOT
+    // hand-copy the constant (the centralization this test protects).
+    expect(deps.corePeerReadinessTimeoutMs).toBeUndefined();
+  });
+
+  it('returns undefined and never constructs a collector when no transport is supplied', () => {
+    capturedFactoryDeps.length = 0;
+    expect(createV10ACKProviderForPublisher(fakeV10Publisher(), undefined)).toBeUndefined();
+    expect(capturedFactoryDeps).toHaveLength(0);
+  });
+});
