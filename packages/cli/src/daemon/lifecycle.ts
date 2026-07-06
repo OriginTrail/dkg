@@ -1362,9 +1362,16 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
-  const chainCursorScope = chainBase?.chainId && chainBase?.hubAddress
-    ? buildEvmDeploymentId({ chainId: chainBase.chainId, hubAddress: chainBase.hubAddress })
-    : 'none:hub=none';
+  const chainCursorScope = chainBase?.type === 'mock'
+    ? (chainBase.chainId ?? 'mock:31337')
+    : chainBase?.hubAddress
+      ? buildEvmDeploymentId({
+          chainId: chainBase.chainId ?? 'evm:31337',
+          hubAddress: chainBase.hubAddress,
+        })
+      : chainBase?.chainId
+        ? `${chainBase.chainId}:hub=none`
+        : 'none:hub=none';
 
   if (role === 'core' && config.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())

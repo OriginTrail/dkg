@@ -2341,10 +2341,14 @@ describe('discoverContextGraphsFromChain', () => {
 
   it('keeps full chain discovery as the default and makes incremental opt-in', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const calls: unknown[] = [];
+    const listCalls: unknown[] = [];
+    const scanCalls: unknown[] = [];
     (chain as any).listContextGraphsFromChain = async (_fromBlock?: number, options?: unknown) => {
-      calls.push(options);
+      listCalls.push(options);
       return [];
+    };
+    (chain as any).scanContextGraphRegistryPages = async function* (options: unknown) {
+      scanCalls.push(options);
     };
 
     const result = await createTestAgent({ chainAdapter: chain });
@@ -2360,13 +2364,142 @@ describe('discoverContextGraphsFromChain', () => {
       pageBudget: 11,
     })).toBe(0);
 
-    expect(calls).toEqual([
+    expect(listCalls).toEqual([
       undefined,
-      { mode: 'incremental', commitPage: expect.any(Function) },
-      { mode: 'incremental', commitPage: expect.any(Function), pageBudget: 7 },
-      { mode: 'seedFull', commitPage: expect.any(Function) },
-      { mode: 'seedFromCursor', commitPage: expect.any(Function), pageBudget: 11 },
     ]);
+    expect(scanCalls).toEqual([
+      { mode: 'incremental' },
+      { mode: 'incremental', pageBudget: 7 },
+      { mode: 'seedFull' },
+      { mode: 'seedFromCursor', pageBudget: 11 },
+    ]);
+  }, 15000);
+
+  it('keeps legacy chain discovery scan options as explicit cursor-mode aliases', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const scanCalls: unknown[] = [];
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* (options: unknown) {
+      scanCalls.push(options);
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ incremental: true, pageBudget: 5 })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({
+      seedIncrementalWatermark: true,
+      resumeFromCursor: true,
+      pageBudget: 6,
+    })).toBe(0);
+
+    expect(scanCalls).toEqual([
+      { mode: 'incremental' },
+      { mode: 'incremental', pageBudget: 5 },
+      { mode: 'seedFull' },
+      { mode: 'seedFromCursor', pageBudget: 6 },
+    ]);
+  }, 15000);
+
+  it('applies cursor scan pages once and acknowledges after local discovery work', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000001';
+    const revealed: ContextGraphOnChain = {
+      contextGraphId,
+      name: 'paged-revealed',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    const scanCalls: unknown[] = [];
+    const ackedCounts: number[] = [];
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* (options: unknown) {
+      scanCalls.push(options);
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          ackedCounts.push(1);
+        },
+      };
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          ackedCounts.push(2);
+        },
+      };
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+
+    const discovered = await agent.discoverContextGraphsFromChain({
+      mode: 'seedFromCursor',
+      pageBudget: 1,
+    });
+
+    expect(discovered).toBe(1);
+    expect(scanCalls).toEqual([{ mode: 'seedFromCursor', pageBudget: 1 }]);
+    expect(ackedCounts).toEqual([1, 2]);
+    const entry = agent.getSubscribedContextGraphs().get('paged-revealed');
+    expect(entry).toBeDefined();
+    expect(entry!.onChainId).toBe(contextGraphId);
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri('paged-revealed');
+    const onChainIdBinding = await result.store.query(`
+      ASK WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${contextGraphId}" .
+        }
+      }
+    `);
+    expect(onChainIdBinding.type).toBe('boolean');
+    if (onChainIdBinding.type === 'boolean') {
+      expect(onChainIdBinding.value).toBe(true);
+    }
+  }, 15000);
+
+  it('propagates cursor scan page apply failures without acknowledging progress', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000002',
+      name: 'apply-failure-revealed',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          acked += 1;
+        },
+      };
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+    const originalInsert = result.store.insert.bind(result.store);
+    (result.store as any).insert = async (quads: Parameters<typeof originalInsert>[0]) => {
+      if (quads.some((quad) => quad.predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`)) {
+        throw new Error('local on-chain id insert failed');
+      }
+      return originalInsert(quads);
+    };
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .rejects.toThrow('local on-chain id insert failed');
+    expect(acked).toBe(0);
+    expect((agent as any).chainContextGraphScanFailure).toBeUndefined();
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {
@@ -2406,6 +2539,9 @@ describe('discoverContextGraphsFromChain', () => {
     (chain as any).listContextGraphsFromChain = async () => {
       throw failure;
     };
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      throw failure;
+    };
 
     const result = await createTestAgent({ chainAdapter: chain });
     agent = result.agent;
@@ -2423,7 +2559,8 @@ describe('discoverContextGraphsFromChain', () => {
   it('processes partial chain scan prefixes without marking the scan recovered', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     let calls = 0;
-    (chain as any).listContextGraphsFromChain = async () => {
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
       calls += 1;
       const stopped = calls === 1 ? 1_999 : 3_999;
       const failedFrom = calls === 1 ? 2_000 : 4_000;
@@ -2451,6 +2588,10 @@ describe('discoverContextGraphsFromChain', () => {
       err.scannedToBlock = stopped;
       err.failedFromBlock = failedFrom;
       err.failedToBlock = failedTo;
+      yield {
+        contextGraphs: err.partialResults,
+        ack: async () => {},
+      };
       throw err;
     };
     const entries: Array<{ level: string; message: string }> = [];

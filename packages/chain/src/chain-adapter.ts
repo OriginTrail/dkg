@@ -358,34 +358,54 @@ export function isContextGraphChainScanPartialError(
   );
 }
 
-export type ContextGraphChainScanPageCommit = (
-  contextGraphs: ContextGraphOnChain[],
-) => void | Promise<void>;
-
 /**
  * ContextGraphNameRegistry scan mode.
  *
  * Public/default calls use `listAll` semantics and never mutate daemon
- * watermarks. Cursor-backed daemon modes require a per-page commit callback so
- * the adapter can advance durable progress only after the consumer has applied
- * the discoveries from that page.
+ * watermarks. Cursor-backed daemon scans are exposed through
+ * `scanContextGraphRegistryPages`, where callers explicitly acknowledge a page
+ * after local apply succeeds.
  */
 export type ContextGraphChainScanOptions =
   | { mode?: 'listAll' }
   | {
       mode: 'incremental';
-      commitPage: ContextGraphChainScanPageCommit;
       pageBudget?: number;
     }
   | {
       mode: 'seedFull';
-      commitPage: ContextGraphChainScanPageCommit;
     }
   | {
       mode: 'seedFromCursor';
-      commitPage: ContextGraphChainScanPageCommit;
+      pageBudget?: number;
+    }
+  | {
+      incremental: true;
+      pageBudget?: number;
+    }
+  | {
+      seedIncrementalWatermark: true;
+      resumeFromCursor?: boolean;
       pageBudget?: number;
     };
+
+export type ContextGraphRegistryScanOptions =
+  | {
+      mode: 'incremental';
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+    }
+  | {
+      mode: 'seedFromCursor';
+      pageBudget?: number;
+    };
+
+export interface ContextGraphRegistryScanPage {
+  contextGraphs: ContextGraphOnChain[];
+  ack(): Promise<void>;
+}
 
 export function buildEvmDeploymentId(input: { chainId: string; hubAddress: string }): string {
   return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
@@ -956,13 +976,19 @@ export interface ChainAdapter {
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
-  submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
-  /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
-  revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
-  /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
-  listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
-  /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
-  hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
+    /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
+    revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
+    /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
+    listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
+    /**
+     * Daemon cursor-backed ContextGraphNameRegistry scan. Each yielded page must
+     * be acknowledged after the caller has applied it locally; only then may the
+     * adapter advance durable scan progress.
+     */
+    scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
+    /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
+    hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
