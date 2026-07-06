@@ -89,18 +89,18 @@ export const readOnlyOwnerActionSubmitter: OwnerActionSubmitter = {
 
 export type OwnerKey = 'hot' | 'hardware';
 
-/** Args for the per-call RESOLVING submitter (cross-account deregister, create). */
+/** Args for `useResolvingOwnerActionSubmitter` — the per-call RESOLVING submitter (cross-account
+ *  deregister, create). */
 export interface ResolvingOwnerActionSubmitterArgs {
-  /** Advisory only — the manage writes resolve per the accountId PASSED to each method. */
-  accountId?: string;
   /** Create-time selector: 'hardware' → browser wallet, else daemon. */
   ownerKey?: OwnerKey;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
   onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'];
 }
 
-/** Args for the same-account RESOLVED submitter (resolve-once from the display access). */
-export interface ResolvedOwnerActionSubmitterArgs {
+/** Args for `usePinnedOwnerActionSubmitter` — the same-account ACCESS-PINNED submitter (resolve-once from
+ *  the display access). */
+export interface PinnedOwnerActionSubmitterArgs {
   /** The display-resolved owner access for THIS account. */
   access: PcaOwnerAccess;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
@@ -148,6 +148,54 @@ export function resolveOwnerActionSubmitterKind({
   connectedWallet?: string | null;
 }): OwnerActionSubmitterKind {
   return submitterKindForOwnerMode(resolvePcaOwnerAccess({ owner, primaryWallet, connectedWallet }).mode);
+}
+
+/**
+ * The signer KIND for a (possibly different) account's OWNER — `'daemon' | 'wallet' | undefined`.
+ * The approve batch calls this to count device prompts for a CROSS-account deregister (renew's
+ * old `deregisterFrom`). It re-fetches that account's owner and reduces via the owner-access model,
+ * so the classification math lives in the owner-access layer, not the component (folds the former
+ * inline `ApproveWalletsModal.signerKindForAccount`, #1470 item).
+ *
+ * ALL classification inputs — `primaryWallet` (this node's `wallets[0]`, the daemon signer),
+ * `connectedWallet`, and `walletWrongNetwork` — are passed EXPLICITLY by the caller; there are NO
+ * ambient wallet-store reads and NO wallet-list refetch, so the only async is `fetchPca(accountId)`.
+ * The old inline predicate keyed the daemon branch on the modal's cached `ownerWallet` and the
+ * wallet branch on `connectedWallet` only (no wallet-LIST dependency at all), so its only async was
+ * `fetchPca(deregisterFrom)`, correlated with the execution path. An internal `fetchWalletsBalances()`
+ * would add an UNCORRELATED failure that maps to `undefined` and can disarm the R4 wallet-signing
+ * lock (deviceTotal 0 / no `walletBatchSigning`) while the resolving deregister submitter
+ * independently re-fetches, succeeds, and opens a browser prompt with the lock off — the exact
+ * contract #1468/R4 protects. Keeping the fetch out preserves the old correlation.
+ *
+ * `undefined` for a missing id, a read failure, or an owner this node can't sign for
+ * (external / wrong-network) — byte-identical to the old inline predicate (the `signerKindRef`
+ * oracle pins it): `daemon` when the owner is this node's primary wallet; `wallet` only when the
+ * connected wallet owns it ON THE RIGHT NETWORK (`writesEnabled`). inv-16: this only PLANS the
+ * device count — the actual deregister still re-resolves + re-verifies ownership per prompt.
+ */
+export async function resolveSignerKindForAccount(opts: {
+  accountId?: string;
+  primaryWallet?: string | null;
+  connectedWallet?: string | null;
+  walletWrongNetwork?: boolean;
+}): Promise<'daemon' | 'wallet' | undefined> {
+  const { accountId, primaryWallet, connectedWallet, walletWrongNetwork } = opts;
+  if (!accountId) return undefined;
+  const snapshot = await fetchPca(accountId).catch(() => null);
+  if (!snapshot?.owner) return undefined;
+  const access = resolvePcaOwnerAccess({
+    owner: snapshot.owner,
+    primaryWallet: primaryWallet ?? null,
+    connectedWallet,
+    walletWrongNetwork,
+  });
+  const kind = submitterKindForOwnerMode(access.mode);
+  if (kind === 'daemon') return 'daemon';
+  // The wrong-network gate lives in `writesEnabled` (mode stays 'wallet'): a wrong-network wallet
+  // owner is NOT counted as a device prompt, matching the old `!walletWrongNetwork` conjunct.
+  if (kind === 'wallet' && access.writesEnabled) return 'wallet';
+  return undefined;
 }
 
 /**
@@ -215,7 +263,7 @@ function resolvingCreate(args: ResolvingOwnerActionSubmitterArgs): OwnerActionSu
 }
 
 // Internal (NOT a hook) — the per-call resolving submitter. Exposed to components via
-// `useResolvingOwnerActionSubmitter`, and reused by the resolved submitter's fallback branches.
+// `useResolvingOwnerActionSubmitter`, and reused by the pinned submitter's fallback branches.
 function resolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return {
     create: resolvingCreate(args),
@@ -233,7 +281,7 @@ function resolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs =
 }
 
 // Internal (NOT a hook) — the same-account resolve-ONCE submitter, with the two safety fallbacks.
-function resolvedOwnerActionSubmitter(
+function pinnedOwnerActionSubmitter(
   access: PcaOwnerAccess,
   onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'],
 ): OwnerActionSubmitter {
@@ -262,20 +310,23 @@ function resolvedOwnerActionSubmitter(
 }
 
 /**
- * The per-call RESOLVING submitter (T3 / #1468): every manage write re-fetches the PCA owner +
- * re-classifies (via `resolveOwnerActionSubmitterForAccount`, keyed on the accountId PASSED to the
- * method). Use for CROSS-account writes — renew's / self-coverage's deregister from a DIFFERENT
- * account — and for create. This is the security seam; it must NOT be pinned onto React state.
+ * `useResolvingOwnerActionSubmitter` — the per-call RESOLVING strategy (T3 / #1468): every manage
+ * write re-fetches the PCA owner + re-classifies (via `resolveOwnerActionSubmitterForAccount`, keyed
+ * on the accountId PASSED to the method). Use for CROSS-account writes — renew's / self-coverage's
+ * deregister from a DIFFERENT account — and for create. Routing is ENTIRELY per-call (the accountId
+ * each method receives); the hook itself takes no bound account. This is the security seam; it must
+ * NOT be pinned onto React state.
  */
 export function useResolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return resolvingOwnerActionSubmitter(args);
 }
 
 /**
- * The same-account RESOLVED submitter (T3 / #1468): resolves the signer ONCE from the display
- * `access` for writes on THAT account (the resolve-once win), with the T1 wallet re-verify + the
- * unknown-mode self-heal baked in (see `resolvedOwnerActionSubmitter`). create/settle unchanged.
+ * `usePinnedOwnerActionSubmitter` — the same-account ACCESS-PINNED strategy (T3 / #1468): resolves the
+ * signer ONCE from the display `access` for writes on THAT account (the resolve-once win), with the
+ * T1 wallet re-verify + the unknown-mode self-heal baked in (see `pinnedOwnerActionSubmitter`).
+ * create/settle unchanged.
  */
-export function useResolvedOwnerActionSubmitter(args: ResolvedOwnerActionSubmitterArgs): OwnerActionSubmitter {
-  return resolvedOwnerActionSubmitter(args.access, args.onWalletProgress);
+export function usePinnedOwnerActionSubmitter(args: PinnedOwnerActionSubmitterArgs): OwnerActionSubmitter {
+  return pinnedOwnerActionSubmitter(args.access, args.onWalletProgress);
 }

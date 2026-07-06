@@ -513,6 +513,54 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // #1469 — the SNAPSHOT-load window (sibling of R4's wallets-load window): when the PCA snapshot
+  // (owner) hasn't loaded at click but the WALLETS have and a wallet is connected, the target access
+  // is `unknown` (no-snapshot) and `mayTargetWritePromptWallet` arms on `!owner`. So a connected-owner
+  // target that resolves to the wallet still runs under the wallet-signing lock, never the daemon's
+  // no-prompt / freely-dismissable contract. RED without the fix (targetWalletManaged =
+  // access.mode==='wallet' && access.writesEnabled): the owner-undefined click never arms the lock →
+  // the wallet write opens a device prompt with the lock off / times out. seedBulk enables immediate
+  // sponsor-mode submit while the snapshot is still pending.
+  it('no-snapshot window (wallets before snapshot): a connected-owner target arms the wallet-signing lock before the snapshot loads, then wallet-signs', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Wallets resolve normally; the PCA SNAPSHOT (fetchPca) stays PENDING through the click, so at
+    // submit `snapshot` is undefined ⇒ access.mode 'unknown' (no-snapshot) ⇒ the #1469 lock arm.
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    let resolveSnapshot!: (value: unknown) => void;
+    const snapshotPromise = new Promise((resolve) => { resolveSnapshot = resolve; });
+    mocks.fetchPca.mockImplementation(() => snapshotPromise as any);
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    // The lock + device step arm from the render-time targetWalletManaged (owner undefined +
+    // connected wallet ⇒ mayTargetWritePromptWallet), BEFORE the snapshot re-fetch resolves.
+    await waitForText(container, 'Confirm on your device');
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Resolve the snapshot (owner == connected wallet) → the parked register routes to the WALLET.
+    resolveSnapshot(ownedSnap(CONNECTED_OWNER, { accountId: '8' }));
+    await waitForText(container, 'approved on-chain');
+    expect(mocks.walletRegisterAgent).toHaveBeenCalledWith('8', ADDR_A); // routed to the WALLET signer
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // never the daemon (no-prompt) path
+    await unmount();
+  });
+
   it('wallet-managed renew progress counts only wallet-signed writes, not daemon deregisters', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,

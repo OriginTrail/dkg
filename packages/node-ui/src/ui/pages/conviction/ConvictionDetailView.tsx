@@ -1,7 +1,7 @@
 import React from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchPca, fetchWalletsBalances, type PcaSnapshot } from '../../api.js';
-import { useResolvedOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { usePinnedOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import { useWalletBootstrap } from '../../hooks/useWalletBootstrap.js';
 import { detailDeviceFlow, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
@@ -23,7 +23,7 @@ import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../pca/address.js';
-import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
@@ -47,14 +47,15 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
   const connectedWallet = useWalletStore((s) => s.address);
   const wallets = wb?.wallets ?? [];
-  // L3: a transient balances blip (wb null + error) must NOT reclassify
-  // owned→not-owner and flicker the owner controls into a definitive "you're not
-  // the owner" — show "can't confirm" instead and keep the retry.
-  const walletsUnknown = !wb && !!wbError;
+  // The wallet-list load state (#1470): split loading from unreadable so a daemon PCA shows
+  // "loading" (mode 'unknown'), NOT a read-only/external flash, while the balances fetch is in
+  // flight. L3: a balances READ FAILURE (wb null + error) still classifies unknown ('unreadable') —
+  // the owner controls read "can't confirm ownership" + Retry, never a definitive non-owner.
+  const primaryWalletState = resolvePrimaryWalletState(wb, wbError);
   // #1375 — the single owner-access model. Called before the early returns (Rules of
   // Hooks); while the snapshot is still loading `owner` is undefined and this render path
   // returns early below, so the resulting access is never consumed on that path.
-  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: wallets[0], walletsUnknown });
+  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: wallets[0], primaryWalletState });
 
   useWalletBootstrap();
 
@@ -73,21 +74,30 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   }
 
   const ownerInPool = wallets.some((w) => eqAddress(w, snapshot.owner));
+  // Owner can't be classified because this node's wallet list is loading or unreadable (#1470).
+  // `owner` is present here (past the snapshot early-returns), so this is never the no-snapshot
+  // cause — split the two so a still-LOADING read shows a neutral "confirming ownership" affordance
+  // (no false "Couldn't load", no Retry), while a FAILED read keeps the "can't confirm" + Retry.
+  // Both stay `unknown` (never a definitive read-only/external verdict — the daemon-flash fix).
+  const walletsLoading = access.ownerUnknownCause === 'wallets-loading';
+  const walletsUnreadable = access.ownerUnknownCause === 'wallets-unreadable';
 
   // gateReason stays consumer-built for now (model gateReason deferred to a later step): the
   // exact same branches, re-expressed on access.mode / access.wrongNetwork — identical values
   // to the old ownerMode / walletWrongNetwork now that both come from the one model.
-  const ownerGateReason = walletsUnknown
+  const ownerGateReason = walletsLoading
+    ? `Confirming ownership of PCA #${accountId}…`
+    : walletsUnreadable
     ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
     : access.mode === 'wallet' && access.wrongNetwork
-      ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
-      : access.mode === 'wallet'
-        ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
-        : ownerInPool
-          ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
-          : connectedWallet
-            ? `Owner-only - connected as ${connectedWallet}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
-            : `Owner-only - connect ${snapshot.owner} to manage PCA #${accountId}.`;
+    ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
+    : access.mode === 'wallet'
+    ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
+    : ownerInPool
+    ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
+    : connectedWallet
+    ? `Owner-only - connected as ${connectedWallet}; switch to ${snapshot.owner} to manage PCA #${accountId}.`
+    : `Owner-only - connect ${snapshot.owner} to manage PCA #${accountId}.`;
 
   return (
     <DetailBody
@@ -99,7 +109,8 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       access={access}
       connectedWallet={connectedWallet}
       ownerOnlyReason={ownerGateReason}
-      walletsUnknown={walletsUnknown}
+      walletsLoading={walletsLoading}
+      walletsUnreadable={walletsUnreadable}
       onRetryWallets={refreshWallets}
       refresh={refresh}
     />
@@ -115,7 +126,8 @@ function DetailBody({
   access,
   connectedWallet,
   ownerOnlyReason,
-  walletsUnknown,
+  walletsLoading,
+  walletsUnreadable,
   onRetryWallets,
   refresh,
 }: {
@@ -127,7 +139,10 @@ function DetailBody({
   access: PcaOwnerAccess;
   connectedWallet?: string | null;
   ownerOnlyReason: string;
-  walletsUnknown: boolean;
+  /** Wallet list still loading (owner unconfirmed) → neutral affordance, no Retry. */
+  walletsLoading: boolean;
+  /** Wallet list read FAILED (owner unconfirmable) → "can't confirm" + Retry. */
+  walletsUnreadable: boolean;
   onRetryWallets: () => void;
   refresh: () => void;
 }) {
@@ -145,7 +160,7 @@ function DetailBody({
     flow: (v) => detailDeviceFlow(v ?? 'topup'),
     describeActionError: (err, v) => describeDetailWalletError(err, v ?? 'topup'),
   });
-  const owner = useResolvedOwnerActionSubmitter({
+  const owner = usePinnedOwnerActionSubmitter({
     // Item 3 (#1375) — resolve the owner submitter ONCE from `access` for THIS account. daemon
     // pins (server-side); a wallet-owned account re-verifies ownership per write (T1). Wallet
     // device progress flows through onWalletProgress; the submitter liveness stays per-prompt.
@@ -192,14 +207,21 @@ function DetailBody({
       )}
 
       {!access.writesEnabled && (
-        <div className="v10-modal-warning" role="status">
-          ⓘ {ownerOnlyReason}{' '}
-          {walletsUnknown ? (
-            <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
-          ) : (
-            'Wallet probe stays available.'
-          )}
-        </div>
+        // Pure LOADING window (#1470): a neutral "confirming ownership" tip — no false "Couldn't
+        // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
+        // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
+        walletsLoading ? (
+          <div className="v10-modal-tip" role="status">{ownerOnlyReason}</div>
+        ) : (
+          <div className="v10-modal-warning" role="status">
+            ⓘ {ownerOnlyReason}{' '}
+            {walletsUnreadable ? (
+              <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
+            ) : (
+              'Wallet probe stays available.'
+            )}
+          </div>
+        )
       )}
 
       <StatStrip
