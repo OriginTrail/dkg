@@ -11,11 +11,12 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Base Mainnet',
   blockchainName: 'v10:base:8453',
-  // Default: the org's private publish-test CG on Base mainnet (curated, curator
-  // 0xB34ca972…). Nodes auto-subscribe to it (it contains '/') before publishing.
-  // NOTE: publishes need >=3 staked-core MEMBER ACKs — add more member cores or
-  // override to a public CG ('sports') via DKG_CONTEXT_GRAPH_ID if quorum is short.
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || '0xB34ca972B85264f2a9303C236c7e52D000B1e7d6/publish-tests',
+  // Default: the public 'sports' CG on Base mainnet. Publish tests use a PUBLIC
+  // CG because the node only honors open-write (anyone publishes) for public-read
+  // CGs — a private CG rejects writes from non-participant nodes regardless of
+  // publishPolicy (see dkg-agent-swm-host.ts: accessPolicy===0 && publishPolicy===1).
+  // Override with DKG_CONTEXT_GRAPH_ID; a '/'-scoped id auto-subscribes first.
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'sports',
   // Known-good, already-indexed UAL — used to exercise query/VM GET/Query Remote
   // when a publish fails (no fresh UAL). Override via DKG_FALLBACK_UAL.
   fallbackUal: process.env.DKG_FALLBACK_UAL

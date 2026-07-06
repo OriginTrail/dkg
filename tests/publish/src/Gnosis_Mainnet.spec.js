@@ -11,11 +11,12 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Gnosis Mainnet',
   blockchainName: 'v10:gnosis:100',
-  // Default: the org's private publish-test CG on Gnosis mainnet (curated, curator
-  // 0x1B5BaC67…). Nodes auto-subscribe to it (it contains '/') before publishing.
-  // NOTE: publishes need >=3 staked-core MEMBER ACKs — add more member cores or
-  // override to a public CG ('foodie-network') via DKG_CONTEXT_GRAPH_ID if short.
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || '0x1B5BaC670b72AE6F1cf5442e8923db98691b7B33/gnosis-publish-tests',
+  // Default: the public 'foodie-network' CG on Gnosis mainnet. Publish tests use a
+  // PUBLIC CG because the node only honors open-write (anyone publishes) for
+  // public-read CGs — a private CG rejects writes from non-participant nodes
+  // regardless of publishPolicy (see dkg-agent-swm-host.ts).
+  // Override with DKG_CONTEXT_GRAPH_ID; a '/'-scoped id auto-subscribes first.
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'foodie-network',
   // Known-good, already-indexed UAL — fallback for the read ops when a publish
   // fails (no fresh UAL). Override via DKG_FALLBACK_UAL.
   fallbackUal: process.env.DKG_FALLBACK_UAL
