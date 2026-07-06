@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
 import {
@@ -59,6 +59,7 @@ function seam<A extends unknown[], R>(initialImpl: (...args: A) => R) {
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
 const REGISTRY = '0x3333333333333333333333333333333333333333';
+const commitRegistryScanPage = async () => {};
 
 class MemoryRegistryScanCursorStore {
   readonly values = new Map<string, number>();
@@ -180,7 +181,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
 
-    const partial = await adapter.listContextGraphsFromChain(undefined, { incremental: true }).catch((err) => err);
+    const partial = await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    }).catch((err) => err);
 
     expect(partial).toBeInstanceOf(ContextGraphChainScanPartialError);
     expect(partial.partialResults).toHaveLength(1);
@@ -191,7 +195,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     registry.queryFilter.reset();
     registry.queryFilter.setImpl(async () => []);
-    await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+    await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    });
 
     expect(registry.queryFilter.calls[0][1]).toBe(1_950);
     expect(registry.queryFilter.calls[0][2]).toBe(2_100);
@@ -210,7 +217,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     registry.queryFilter.queueOnce({ type: 'throw', error: new Error('range too wide') });
 
     const partial = await adapter.listContextGraphsFromChain(undefined, {
-      seedIncrementalWatermark: true,
+      mode: 'seedFull',
+      commitPage: commitRegistryScanPage,
     }).catch((err) => err);
 
     expect(partial).toBeInstanceOf(ContextGraphChainScanPartialError);
@@ -248,7 +256,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       value: Promise.resolve([{ topics: [], data: '0xbad', blockNumber: 2_000 }]),
     });
 
-    const partial = await adapter.listContextGraphsFromChain(undefined, { incremental: true }).catch((err) => err);
+    const partial = await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    }).catch((err) => err);
 
     expect(partial).toBeInstanceOf(ContextGraphChainScanPartialError);
     expect(partial.partialResults).toHaveLength(1);
@@ -290,7 +301,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
 
-    const seeded = await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+    const seeded = await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'seedFull',
+      commitPage: commitRegistryScanPage,
+    });
 
     expect(seeded.map((cg) => cg.blockNumber)).toEqual([historicalGraphBlock]);
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(head + 1);
@@ -301,7 +315,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
     registry.queryFilter.clear();
 
-    await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+    await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    });
 
     expect(provider.getCode.calls).toEqual([]);
     expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
@@ -319,8 +336,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     registry.queryFilter.setImpl(async () => []);
 
     await adapter.listContextGraphsFromChain(undefined, {
-      seedIncrementalWatermark: true,
-      resumeFromCursor: true,
+      mode: 'seedFromCursor',
+      commitPage: commitRegistryScanPage,
       pageBudget: 2,
     });
 
@@ -342,7 +359,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     await expect(restarted.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
     await restarted.listContextGraphsFromChain(undefined, {
-      incremental: true,
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
       pageBudget: 1,
     });
 
@@ -351,6 +369,116 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [2_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_949],
     ]);
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000, 2_000, 2_950]);
+  });
+
+  it('does not advance durable registry cursor until page discoveries are committed', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry({
+      queryFilter: seam(async () => [{ topics: [], data: '0x01', blockNumber: 10 }]),
+    });
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+
+    await expect(adapter.listContextGraphsFromChain(undefined, {
+      mode: 'seedFromCursor',
+      commitPage: async () => {
+        throw new Error('commit failed');
+      },
+      pageBudget: 1,
+    })).rejects.toThrow('commit failed');
+    expect(store.saves).toEqual([]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
+
+    const restartedRegistry = makeRegistry();
+    const { adapter: restarted } = makeAdapter(restartedRegistry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    restartedRegistry.queryFilter.setImpl(async () => []);
+
+    await restarted.listContextGraphsFromChain(undefined, {
+      mode: 'seedFromCursor',
+      commitPage: commitRegistryScanPage,
+      pageBudget: 1,
+    });
+
+    expect(restartedRegistry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+    ]);
+    expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000]);
+  });
+
+  it('falls back to deploy-block scanning when durable cursor load fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = {
+      load: vi.fn(async () => {
+        throw new Error('cursor load failed');
+      }),
+      save: vi.fn(async () => {}),
+    };
+    try {
+      const registry = makeRegistry();
+      const { adapter } = makeAdapter(registry, 2_100, {
+        contextGraphRegistryScanCursorStore: store,
+      });
+      registry.queryFilter.setImpl(async () => []);
+
+      await adapter.listContextGraphsFromChain(undefined, {
+        mode: 'seedFromCursor',
+        commitPage: commitRegistryScanPage,
+        pageBudget: 1,
+      });
+
+      expect(store.load).toHaveBeenCalledTimes(1);
+      expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+        [0, 1_999],
+      ]);
+      expect(store.save).toHaveBeenCalledWith(expect.any(Object), 2_000);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('keeps save failures non-fatal and advances the process-local registry cursor', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = {
+      load: vi.fn(async () => undefined),
+      save: vi.fn(async () => {
+        throw new Error('cursor save failed');
+      }),
+    };
+    try {
+      const registry = makeRegistry();
+      const { adapter, provider } = makeAdapter(registry, 2_100, {
+        contextGraphRegistryScanCursorStore: store,
+      });
+      registry.queryFilter.setImpl(async () => []);
+
+      await adapter.listContextGraphsFromChain(undefined, {
+        mode: 'seedFull',
+        commitPage: commitRegistryScanPage,
+      });
+
+      expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_101);
+      provider.getCode = seam(async () => {
+        throw new Error('deploy block probing should not run with process-local cursor');
+      });
+      registry.queryFilter.clear();
+
+      await adapter.listContextGraphsFromChain(undefined, {
+        mode: 'incremental',
+        commitPage: commitRegistryScanPage,
+      });
+
+      expect(provider.getCode.calls).toEqual([]);
+      expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+        [2_101 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_100],
+      ]);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('continues cursor-resumed daemon catch-up scans from the persisted cursor', async () => {
@@ -372,8 +500,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     registry.queryFilter.setImpl(async () => []);
 
     await adapter.listContextGraphsFromChain(undefined, {
-      seedIncrementalWatermark: true,
-      resumeFromCursor: true,
+      mode: 'seedFromCursor',
+      commitPage: commitRegistryScanPage,
       pageBudget: 1,
     });
 
@@ -404,7 +532,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
 
     const results = await adapter.listContextGraphsFromChain(undefined, {
-      seedIncrementalWatermark: true,
+      mode: 'seedFull',
+      commitPage: commitRegistryScanPage,
     });
 
     expect(results.map((cg) => cg.blockNumber)).toEqual([10]);
@@ -426,8 +555,8 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     seedRegistry.queryFilter.setImpl(async () => []);
 
     await seedAdapter.listContextGraphsFromChain(undefined, {
-      seedIncrementalWatermark: true,
-      resumeFromCursor: true,
+      mode: 'seedFromCursor',
+      commitPage: commitRegistryScanPage,
       pageBudget: 1,
     });
 
@@ -445,17 +574,40 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     ]);
   });
 
-  it('reports no registry scan watermark after preflight cache invalidation', async () => {
+  it('reports no registry scan watermark after preflight cache invalidation without a durable store', async () => {
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 4_000);
     registry.queryFilter.setImpl(async () => []);
 
-    await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+    await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'seedFull',
+      commitPage: commitRegistryScanPage,
+    });
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
     adapter.invalidatePublishPreflightCache();
 
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
+  });
+
+  it('preflight cache invalidation clears only the in-memory registry cursor cache', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 4_000, {
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'seedFull',
+      commitPage: commitRegistryScanPage,
+    });
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
+
+    adapter.invalidatePublishPreflightCache();
+
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
+    await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
   });
 
   it('rethrows later page failures for public list-all scans', async () => {
@@ -494,7 +646,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     registry.queryFilter.setImpl(async () => []);
     await (adapter as any).contextGraphRegistryScanCursor.saveWatermark(REGISTRY, 2_050);
 
-    await adapter.listContextGraphsFromChain(undefined, { incremental: true });
+    await adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    });
 
     expect(provider.getCode.calls).toEqual([]);
     expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
@@ -542,7 +697,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const defaultBlockBudget = CG_REGISTRY_MAX_SCAN_PAGES * defaultPageSize;
     const { adapter } = makeAdapter(registry, defaultBlockBudget);
 
-    await expect(adapter.listContextGraphsFromChain(undefined, { incremental: true })).rejects.toThrow(
+    await expect(adapter.listContextGraphsFromChain(undefined, {
+      mode: 'incremental',
+      commitPage: commitRegistryScanPage,
+    })).rejects.toThrow(
       new RegExp(`incremental ContextGraphNameRegistry scan would need.*budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages`),
     );
     expect(registry.queryFilter.calls).toEqual([]);

@@ -459,13 +459,15 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   publishedUal?: string;
 }
 
-export interface DiscoverContextGraphsFromChainOptions {
-  incremental?: boolean;
-  seedIncrementalWatermark?: boolean;
-  resumeFromCursor?: boolean;
+export type DiscoverContextGraphsFromChainOptions = {
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-}
+} & (
+  | { mode?: 'listAll' }
+  | { mode: 'incremental' }
+  | { mode: 'seedFull' }
+  | { mode: 'seedFromCursor' }
+);
 
 /**
  * High-level facade that ties together all DKG agent capabilities:
@@ -1104,49 +1106,9 @@ export class DKGAgent extends DKGAgentBase {
       return 0;
     }
 
-    let onChainContextGraphs;
+    let onChainContextGraphs: ContextGraphOnChain[] = [];
     let partialChainScan = false;
     let partialChainScanError: unknown;
-    try {
-      const scanOptions = options.incremental
-          ? {
-              incremental: true as const,
-              ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-            }
-        : options.seedIncrementalWatermark
-          ? {
-              seedIncrementalWatermark: true as const,
-              ...(options.resumeFromCursor ? { resumeFromCursor: true as const } : {}),
-              ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-            }
-          : undefined;
-      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const signature = message
-        .replace(/stopped after block \d+/g, 'stopped after block N')
-        .replace(/\[\d+,\s*\d+\]/g, '[range]')
-        .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
-      if (this.chainContextGraphScanFailure?.signature !== signature) {
-        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
-        this.chainContextGraphScanFailure = { signature, count: 1 };
-      } else {
-        this.chainContextGraphScanFailure.count += 1;
-      }
-      const partialError = isContextGraphChainScanPartialError(err);
-      if (options.throwOnChainScanFailure && !partialError) throw err;
-      if (!partialError) return 0;
-      partialChainScan = true;
-      partialChainScanError = err;
-      onChainContextGraphs = err.partialResults;
-    }
-    if (!partialChainScan && this.chainContextGraphScanFailure) {
-      this.log.info(
-        ctx,
-        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
-      );
-      this.chainContextGraphScanFailure = undefined;
-    }
 
     // Build a set of all known on-chain IDs (stored and computed) for fast dedup
     const knownOnChainIds = new Set<string>();
@@ -1157,7 +1119,9 @@ export class DKGAgent extends DKGAgentBase {
     }
 
     let discovered = 0;
-    for (const p of onChainContextGraphs) {
+    let committedByScanPage = false;
+    const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
+      for (const p of contextGraphs) {
       if (knownOnChainIds.has(p.contextGraphId)) continue;
 
       if (!p.name) {
@@ -1216,6 +1180,64 @@ export class DKGAgent extends DKGAgentBase {
       this.contextGraphMetaProjection.markDirty(p.name);
       this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
       discovered++;
+    }
+
+    };
+
+    try {
+      const mode = options.mode ?? 'listAll';
+      const commitPage = async (page: ContextGraphOnChain[]): Promise<void> => {
+        committedByScanPage = true;
+        await applyDiscoveredContextGraphs(page);
+      };
+      const scanOptions = mode === 'incremental'
+        ? {
+            mode,
+            commitPage,
+            ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+          }
+        : mode === 'seedFull'
+          ? {
+              mode,
+              commitPage,
+            }
+          : mode === 'seedFromCursor'
+            ? {
+                mode,
+                commitPage,
+                ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+              }
+            : undefined;
+      onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const signature = message
+        .replace(/stopped after block \d+/g, 'stopped after block N')
+        .replace(/\[\d+,\s*\d+\]/g, '[range]')
+        .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
+      if (this.chainContextGraphScanFailure?.signature !== signature) {
+        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
+        this.chainContextGraphScanFailure = { signature, count: 1 };
+      } else {
+        this.chainContextGraphScanFailure.count += 1;
+      }
+      const partialError = isContextGraphChainScanPartialError(err);
+      if (options.throwOnChainScanFailure && !partialError) throw err;
+      if (!partialError) return 0;
+      partialChainScan = true;
+      partialChainScanError = err;
+      onChainContextGraphs = committedByScanPage ? [] : err.partialResults;
+    }
+    if (!partialChainScan && this.chainContextGraphScanFailure) {
+      this.log.info(
+        ctx,
+        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+      );
+      this.chainContextGraphScanFailure = undefined;
+    }
+
+    if (!committedByScanPage) {
+      await applyDiscoveredContextGraphs(onChainContextGraphs);
     }
 
     if (discovered > 0) {

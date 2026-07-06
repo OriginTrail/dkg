@@ -15,7 +15,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 21;
+const SCHEMA_VERSION = 22;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -795,6 +795,23 @@ export class DashboardDB {
         );
         CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
           ON sync_checkpoints(expires_at);
+      `);
+    }
+
+    if (version < 22) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_cursors (
+          namespace TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value INTEGER NOT NULL CHECK (value > 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (namespace, scope, key)
+        );
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_runtime_cursors_namespace_scope
+          ON runtime_cursors(namespace, scope);
       `);
     }
 

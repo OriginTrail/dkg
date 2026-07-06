@@ -2352,21 +2352,20 @@ describe('discoverContextGraphsFromChain', () => {
     await agent.start();
 
     expect(await agent.discoverContextGraphsFromChain()).toBe(0);
-    expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
-    expect(await agent.discoverContextGraphsFromChain({ incremental: true, pageBudget: 7 })).toBe(0);
-    expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental' })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental', pageBudget: 7 })).toBe(0);
+    expect(await agent.discoverContextGraphsFromChain({ mode: 'seedFull' })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({
-      seedIncrementalWatermark: true,
-      resumeFromCursor: true,
+      mode: 'seedFromCursor',
       pageBudget: 11,
     })).toBe(0);
 
     expect(calls).toEqual([
       undefined,
-      { incremental: true },
-      { incremental: true, pageBudget: 7 },
-      { seedIncrementalWatermark: true },
-      { seedIncrementalWatermark: true, resumeFromCursor: true, pageBudget: 11 },
+      { mode: 'incremental', commitPage: expect.any(Function) },
+      { mode: 'incremental', commitPage: expect.any(Function), pageBudget: 7 },
+      { mode: 'seedFull', commitPage: expect.any(Function) },
+      { mode: 'seedFromCursor', commitPage: expect.any(Function), pageBudget: 11 },
     ]);
   }, 15000);
 
@@ -2415,7 +2414,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(await agent.discoverContextGraphsFromChain()).toBe(0);
     await expect(
       agent.discoverContextGraphsFromChain({
-        seedIncrementalWatermark: true,
+        mode: 'seedFull',
         throwOnChainScanFailure: true,
       }),
     ).rejects.toThrow('seed scan failed');
@@ -2462,10 +2461,10 @@ describe('discoverContextGraphsFromChain', () => {
       await agent.start();
 
       await expect(agent.discoverContextGraphsFromChain({
-        incremental: true,
+        mode: 'incremental',
         throwOnChainScanFailure: true,
       })).rejects.toThrow('partial ContextGraphNameRegistry scan');
-      expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
+      expect(await agent.discoverContextGraphsFromChain({ mode: 'incremental' })).toBe(0);
     } finally {
       Logger.setSink(null);
     }

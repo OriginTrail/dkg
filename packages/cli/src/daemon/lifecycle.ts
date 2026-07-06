@@ -611,9 +611,9 @@ export function chainDiscoveryScanOptions(input: {
   fullScanEvery?: number;
   pageBudget?: number;
 }):
-  | { incremental: true; pageBudget: number }
-  | { seedIncrementalWatermark: true; resumeFromCursor: true; throwOnChainScanFailure: true; pageBudget: number }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
+  | { mode: 'incremental'; pageBudget: number }
+  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
+  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
   const configuredFullScanEvery = input.fullScanEvery;
   let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
   if (
@@ -634,11 +634,11 @@ export function chainDiscoveryScanOptions(input: {
   const run = input.run ?? 0;
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
   if (periodicFullResync) {
-    return { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
   return input.watermarkSeeded && !periodicFullResync
-    ? { incremental: true, pageBudget }
-    : { seedIncrementalWatermark: true, resumeFromCursor: true, throwOnChainScanFailure: true, pageBudget };
+    ? { mode: 'incremental', pageBudget }
+    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
 }
 
 export function createChainDiscoveryScanRunner(input: {

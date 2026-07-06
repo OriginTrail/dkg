@@ -16,7 +16,7 @@ import {
 } from './evm-adapter-base.js';
 import { isTooLowAllowanceError } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphChainScanPageCommit, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
 type ContextGraphRegistryScanPlan =
@@ -26,6 +26,7 @@ type ContextGraphRegistryScanPlan =
       persistProgress: false;
       allowPartialFailure: false;
       seedAtEnd: false;
+      commitPage?: undefined;
       pageBudget?: undefined;
     }
   | {
@@ -34,6 +35,7 @@ type ContextGraphRegistryScanPlan =
       persistProgress: true;
       allowPartialFailure: true;
       seedAtEnd: false;
+      commitPage: ContextGraphChainScanPageCommit;
       pageBudget?: number;
     }
   | {
@@ -42,6 +44,7 @@ type ContextGraphRegistryScanPlan =
       persistProgress: true;
       allowPartialFailure: true;
       seedAtEnd: true;
+      commitPage: ContextGraphChainScanPageCommit;
       pageBudget?: undefined;
     }
   | {
@@ -50,6 +53,7 @@ type ContextGraphRegistryScanPlan =
       persistProgress: true;
       allowPartialFailure: true;
       seedAtEnd: true;
+      commitPage: ContextGraphChainScanPageCommit;
       pageBudget?: number;
     };
 
@@ -73,35 +77,39 @@ function buildContextGraphRegistryScanPlan(
     };
   }
 
-  if (options?.incremental === true) {
+  if (options?.mode === 'incremental') {
     return {
       mode: 'incremental',
       resumeFromWatermark: true,
       persistProgress: true,
       allowPartialFailure: true,
       seedAtEnd: false,
+      commitPage: options.commitPage,
       pageBudget: normalizePageBudget(options.pageBudget),
     };
   }
 
-  if (options?.seedIncrementalWatermark === true) {
-    const cursorResumedSeed = options.resumeFromCursor === true;
-    return cursorResumedSeed
-      ? {
-          mode: 'seedFromCursor',
-          resumeFromWatermark: true,
-          persistProgress: true,
-          allowPartialFailure: true,
-          seedAtEnd: true,
-          pageBudget: normalizePageBudget(options.pageBudget),
-        }
-      : {
-          mode: 'seedFull',
-          resumeFromWatermark: false,
-          persistProgress: true,
-          allowPartialFailure: true,
-          seedAtEnd: true,
-        };
+  if (options?.mode === 'seedFull') {
+    return {
+      mode: 'seedFull',
+      resumeFromWatermark: false,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+      commitPage: options.commitPage,
+    };
+  }
+
+  if (options?.mode === 'seedFromCursor') {
+    return {
+      mode: 'seedFromCursor',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+      commitPage: options.commitPage,
+      pageBudget: normalizePageBudget(options.pageBudget),
+    };
   }
 
   return {
@@ -243,6 +251,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     );
     if (start > head) {
       if (scanPlan.seedAtEnd) {
+        await scanPlan.commitPage([]);
         await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
       }
       return [];
@@ -272,6 +281,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
+      let pageResults: ContextGraphOnChain[];
       try {
         const page = await this.queryEventLogsPage(
           registry,
@@ -284,7 +294,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           preferred,
         );
         preferred = page.provider;
-        const pageResults: ContextGraphOnChain[] = [];
+        pageResults = [];
         for (const log of page.logs) {
           const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
           if (!parsed || parsed.name !== 'NameClaimed') continue;
@@ -296,13 +306,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             metadataRevealed: false,
           });
         }
-        results.push(...pageResults);
-        scannedAnyPage = true;
-        if (scanPlan.persistProgress) {
-          await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
-        }
-        const scannedPages = Math.floor((hi - start) / pageSize) + 1;
-        if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return results;
       } catch (err) {
         if (scanPlan.allowPartialFailure && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
@@ -320,6 +323,16 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         throw err;
       }
+      if (scanPlan.persistProgress) {
+        await scanPlan.commitPage(pageResults);
+      }
+      results.push(...pageResults);
+      scannedAnyPage = true;
+      if (scanPlan.persistProgress) {
+        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
+      }
+      const scannedPages = Math.floor((hi - start) / pageSize) + 1;
+      if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return results;
     }
 
     if (scanPlan.seedAtEnd) {

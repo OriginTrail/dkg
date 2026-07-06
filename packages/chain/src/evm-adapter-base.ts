@@ -649,7 +649,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.contextGraphRegistryScanCursor.clear();
+    this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
 
   protected clearIdentityIdForAddress(address: string): void {

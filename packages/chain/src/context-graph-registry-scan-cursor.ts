@@ -23,7 +23,7 @@ export class ContextGraphRegistryScanCursor {
     },
   ) {}
 
-  clear(): void {
+  clearMemoryCache(): void {
     this.watermarks.clear();
   }
 

@@ -4,15 +4,14 @@ import { chainDiscoveryScanOptions, createChainDiscoveryScanRunner } from '../sr
 describe('chainDiscoveryScanOptions', () => {
   it('uses bounded cursor-resumable watermark seeding before a seed exists', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: false })).toEqual({
-      seedIncrementalWatermark: true,
-      resumeFromCursor: true,
+      mode: 'seedFromCursor',
       throwOnChainScanFailure: true,
       pageBudget: 30,
     });
   });
 
   it('keeps steady-state daemon scans incremental-only', () => {
-    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({ incremental: true, pageBudget: 30 });
+    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('keeps the first daemon scan incremental when the watermark is already seeded', () => {
@@ -20,7 +19,7 @@ describe('chainDiscoveryScanOptions', () => {
       watermarkSeeded: true,
       run: 0,
       fullScanEvery: 48,
-    })).toEqual({ incremental: true, pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('keeps a periodic full-history recovery path after the watermark is seeded', () => {
@@ -29,7 +28,7 @@ describe('chainDiscoveryScanOptions', () => {
       run: 48,
       fullScanEvery: 48,
     })).toEqual({
-      seedIncrementalWatermark: true,
+      mode: 'seedFull',
       throwOnChainScanFailure: true,
     });
   });
@@ -39,7 +38,7 @@ describe('chainDiscoveryScanOptions', () => {
       watermarkSeeded: true,
       run: 47,
       fullScanEvery: 48,
-    })).toEqual({ incremental: true, pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('ignores fractional full-scan cadence overrides below one', () => {
@@ -47,14 +46,14 @@ describe('chainDiscoveryScanOptions', () => {
       watermarkSeeded: true,
       run: 1,
       fullScanEvery: 0.5,
-    })).toEqual({ incremental: true, pageBudget: 30 });
+    })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
 
   it('honors a valid custom page budget', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
       pageBudget: 7.9,
-    })).toEqual({ incremental: true, pageBudget: 7 });
+    })).toEqual({ mode: 'incremental', pageBudget: 7 });
   });
 
   it('serializes overlapping scheduled chain scans and resets after settle', async () => {

@@ -358,34 +358,34 @@ export function isContextGraphChainScanPartialError(
   );
 }
 
-export interface ContextGraphChainScanOptions {
-  /**
-   * When true and `fromBlock` is omitted, adapters may resume from a
-   * scan watermark with a reorg buffer. The default preserves public
-   * list-all semantics for SDK callers.
-   */
-  incremental?: boolean;
-  /**
-   * When true on a successful full scan, adapters may seed the
-   * incremental watermark for later daemon background scans. This is opt-in so
-   * public SDK list-all calls remain side-effect free by default.
-   */
-  seedIncrementalWatermark?: boolean;
-  /**
-   * Explicitly allow a seeded daemon/background scan to resume from the
-   * existing scan watermark. `seedIncrementalWatermark` without this flag keeps
-   * full scan semantics and starts at the registry deploy block.
-   */
-  resumeFromCursor?: boolean;
-  /**
-   * Optional daemon/background scan budget. When set, adapters may stop after
-   * this many successful log pages and return the scanned prefix while keeping
-   * any durable cursor advanced only through covered pages. Public SDK callers
-   * should leave this unset to preserve complete list-all semantics. The budget
-   * is honored only for incremental scans or explicit cursor-resumed seed scans.
-   */
-  pageBudget?: number;
-}
+export type ContextGraphChainScanPageCommit = (
+  contextGraphs: ContextGraphOnChain[],
+) => void | Promise<void>;
+
+/**
+ * ContextGraphNameRegistry scan mode.
+ *
+ * Public/default calls use `listAll` semantics and never mutate daemon
+ * watermarks. Cursor-backed daemon modes require a per-page commit callback so
+ * the adapter can advance durable progress only after the consumer has applied
+ * the discoveries from that page.
+ */
+export type ContextGraphChainScanOptions =
+  | { mode?: 'listAll' }
+  | {
+      mode: 'incremental';
+      commitPage: ContextGraphChainScanPageCommit;
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+      commitPage: ContextGraphChainScanPageCommit;
+    }
+  | {
+      mode: 'seedFromCursor';
+      commitPage: ContextGraphChainScanPageCommit;
+      pageBudget?: number;
+    };
 
 export function buildEvmDeploymentId(input: { chainId: string; hubAddress: string }): string {
   return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
