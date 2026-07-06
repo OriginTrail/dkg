@@ -1106,9 +1106,13 @@ export class DKGAgent extends DKGAgentBase {
     let partialChainScanError: unknown;
     try {
       const scanOptions = options.incremental
-        ? { incremental: true }
+        ? {
+            incremental: true as const,
+          }
         : options.seedIncrementalWatermark
-          ? { seedIncrementalWatermark: true }
+          ? {
+              seedIncrementalWatermark: true as const,
+            }
           : undefined;
       onChainContextGraphs = await this.chain.listContextGraphsFromChain(undefined, scanOptions);
     } catch (err) {

@@ -9,7 +9,11 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
+import {
+  EVMChainAdapterBase,
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  CG_REGISTRY_REORG_BUFFER_BLOCKS,
+} from './evm-adapter-base.js';
 import { isTooLowAllowanceError } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';

@@ -1,60 +1,50 @@
 import { describe, expect, it } from 'vitest';
-import {
-  chainDiscoveryScanOptions,
-  shouldUseIncrementalChainDiscoveryScan,
-} from '../src/daemon/lifecycle.js';
-
-describe('shouldUseIncrementalChainDiscoveryScan', () => {
-  it('starts with a full scan before any watermark seed exists', () => {
-    expect(
-      shouldUseIncrementalChainDiscoveryScan({
-        run: 0,
-        watermarkSeeded: false,
-        fullScanEvery: 48,
-      }),
-    ).toBe(false);
-  });
-
-  it('keeps retrying full scans until a watermark seed succeeds', () => {
-    expect(
-      shouldUseIncrementalChainDiscoveryScan({
-        run: 1,
-        watermarkSeeded: false,
-        fullScanEvery: 48,
-      }),
-    ).toBe(false);
-  });
-
-  it('uses incremental scans after a successful watermark seed', () => {
-    expect(
-      shouldUseIncrementalChainDiscoveryScan({
-        run: 1,
-        watermarkSeeded: true,
-        fullScanEvery: 48,
-      }),
-    ).toBe(true);
-  });
-
-  it('keeps the scheduled full-resync cadence after a watermark seed', () => {
-    expect(
-      shouldUseIncrementalChainDiscoveryScan({
-        run: 48,
-        watermarkSeeded: true,
-        fullScanEvery: 48,
-      }),
-    ).toBe(false);
-  });
-});
+import { chainDiscoveryScanOptions } from '../src/daemon/lifecycle.js';
 
 describe('chainDiscoveryScanOptions', () => {
-  it('uses failure-throwing watermark seeding for full daemon scans', () => {
-    expect(chainDiscoveryScanOptions(false)).toEqual({
+  it('uses failure-throwing full-history watermark seeding before a seed exists', () => {
+    expect(chainDiscoveryScanOptions({ watermarkSeeded: false })).toEqual({
       seedIncrementalWatermark: true,
       throwOnChainScanFailure: true,
     });
   });
 
   it('keeps steady-state daemon scans incremental-only', () => {
-    expect(chainDiscoveryScanOptions(true)).toEqual({ incremental: true });
+    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({ incremental: true });
+  });
+
+  it('keeps the first daemon scan incremental when the watermark is already seeded', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      run: 0,
+      fullScanEvery: 48,
+    })).toEqual({ incremental: true });
+  });
+
+  it('keeps a periodic full-history recovery path after the watermark is seeded', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      run: 48,
+      fullScanEvery: 48,
+    })).toEqual({
+      seedIncrementalWatermark: true,
+      throwOnChainScanFailure: true,
+    });
+  });
+
+  it('does not force a full scan before the configured recovery cadence', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      run: 47,
+      fullScanEvery: 48,
+    })).toEqual({ incremental: true });
+  });
+
+  it('ignores fractional full-scan cadence overrides below one', () => {
+    expect(chainDiscoveryScanOptions({
+      watermarkSeeded: true,
+      run: 1,
+      fullScanEvery: 0.5,
+    })).toEqual({ incremental: true });
   });
 });

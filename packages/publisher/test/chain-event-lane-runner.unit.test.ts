@@ -3,6 +3,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence } from '../src/chain-event-poller.js';
+import { ChainEventLaneRunner, type ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import type { JournalEntry } from '../src/publish-journal.js';
 
@@ -294,6 +295,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       async save(n: number) { this.saved.push(n); },
     };
     let failContextLane = true;
+    let now = 0;
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
@@ -309,7 +311,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       publishHandler: makeHandler(),
       intervalMs: 20,
       cursorPersistence: cursor,
-      clock: () => 0,
+      clock: () => now,
       onContextGraphCreated: async () => { /* sink */ },
       onKARegisteredToContextGraph: async () => { /* sink */ },
     });
@@ -327,6 +329,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(cursor.saved).toEqual([]);
 
     failContextLane = false;
+    now = 60_000;
     await (poller as unknown as { poll(): Promise<void> }).poll();
 
     expect(filters[2].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
@@ -820,10 +823,11 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(filters[3].toBlock).toBe(1100);
   });
 
-  it('retries a failed context graph discovery lane on the next tick', async () => {
+  it('backs off a failed context graph discovery lane and retries the same range later', async () => {
     const filters: EventFilter[] = [];
     const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     let calls = 0;
+    let now = 0;
     const adapter = {
       chainId: 'mock:0',
       getBlockNumber: async () => 100,
@@ -842,15 +846,19 @@ describe('ChainEventPoller lane runner and cursors', () => {
       publishHandler: makeHandler(),
       intervalMs: 20,
       cursorPersistence: cursor,
-      clock: () => 0,
+      clock: () => now,
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await poller.start();
-    await new Promise((r) => setTimeout(r, 80));
-    await poller.stop();
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 20;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    expect(filters).toHaveLength(1);
 
-    expect(filters.length).toBeGreaterThanOrEqual(2);
+    now = 60_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[1].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[0].fromBlock).toBe(1);
@@ -858,6 +866,131 @@ describe('ChainEventPoller lane runner and cursors', () => {
     expect(filters[1].fromBlock).toBe(1);
     expect(filters[1].toBlock).toBe(100);
     expect(saveCalls).toEqual([{ lane: 'contextGraphDiscovery', block: 100 }]);
+  });
+
+  it('exponentially backs off repeated lane failures and resets after success', async () => {
+    const filters: EventFilter[] = [];
+    const saveCalls: Array<{ lane: ChainEventPollerLane; block: number }> = [];
+    let calls = 0;
+    let head = 100;
+    let now = 0;
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
+        filters.push(f);
+        calls++;
+        if (calls === 1 || calls === 2 || calls === 4) throw new Error('rpc down');
+      },
+    } as unknown as ChainAdapter;
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane(lane, block) { saveCalls.push({ lane, block }); },
+    };
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 20,
+      cursorPersistence: cursor,
+      clock: () => now,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 60_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 120_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 180_000;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
+    ]);
+    expect(saveCalls).toEqual([{ lane: 'contextGraphDiscovery', block: 100 }]);
+
+    head = 200;
+    now = 180_020;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 240_019;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+    now = 240_020;
+    await (poller as unknown as { poll(): Promise<void> }).poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
+      [101, 200],
+      [101, 200],
+    ]);
+    expect(saveCalls).toEqual([
+      { lane: 'contextGraphDiscovery', block: 100 },
+      { lane: 'contextGraphDiscovery', block: 200 },
+    ]);
+  });
+
+  it('caps repeated lane failures at the internal max backoff', async () => {
+    const filters: EventFilter[] = [];
+    let calls = 0;
+    let now = 0;
+    const adapter = {
+      chainId: 'mock:0',
+      getBlockNumber: async () => 100,
+      listenForEvents: async function* (f: EventFilter): AsyncIterable<ChainEvent> {
+        filters.push(f);
+        calls++;
+        if (calls <= 5) throw new Error('rpc down');
+      },
+    } as unknown as ChainAdapter;
+    const lane: ChainEventPollerLaneSpec = {
+      name: 'contextGraphDiscovery',
+      enabled: () => true,
+      eventTypes: () => ['ContextGraphCreated'],
+      requiresFullHistory: () => false,
+      cadenceMs: 20,
+      dispatch: async () => { /* sink */ },
+    };
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [lane],
+      maxRange: 1000,
+      clock: () => now,
+      log: { info() {}, warn() {}, error() {} } as any,
+    });
+
+    await runner.poll();
+    now = 59_999;
+    await runner.poll();
+    now = 60_000;
+    await runner.poll();
+    now = 179_999;
+    await runner.poll();
+    now = 180_000;
+    await runner.poll();
+    now = 419_999;
+    await runner.poll();
+    now = 420_000;
+    await runner.poll();
+    now = 719_999;
+    await runner.poll();
+    now = 720_000;
+    await runner.poll();
+    now = 1_019_999;
+    await runner.poll();
+    now = 1_020_000;
+    await runner.poll();
+
+    expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
+      [1, 100],
+      [1, 100],
+      [1, 100],
+      [1, 100],
+      [1, 100],
+      [1, 100],
+    ]);
   });
 
   it('keeps headless scans due until a known head proves the lane is caught up', async () => {

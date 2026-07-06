@@ -118,6 +118,10 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+async function flushAsyncWork(turns = 8): Promise<void> {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
@@ -1117,34 +1121,73 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
-    // ethers v6 `Contract.on(...)` is async — providers that reject
-    // filter installation (e.g. HTTP-only endpoints, mocked providers)
-    // must NOT bubble as unhandled rejections, and the listener-started
-    // flag must NOT be flipped if subscription failed (so a future
-    // retry remains possible).
-    const a = new EVMChainAdapter(minimalConfig());
-    const fakeHub = {
-      on: async (_event: string, _cb: (...args: unknown[]) => void) => {
-        throw new Error('provider does not support filter subscriptions');
-      },
+  it('startHubRotationListener validates Hub binding without touching RPC logs', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => {
+        throw new Error('startup should not read block number');
+      }),
+      getLogs: recorder(async () => {
+        throw new Error('startup should not read logs');
+      }),
     };
-    (a as any).contracts.hub = fakeHub;
-    (a as any).hubRotationListenerStarted = false;
-    let unhandled: unknown = null;
-    const onRejection = (reason: unknown) => { unhandled = reason; };
-    process.on('unhandledRejection', onRejection);
-    try {
-      await expect((a as any).startHubRotationListener()).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(unhandled).toBeNull();
-      expect((a as any).hubRotationListenerStarted).toBe(false);
-    } finally {
-      process.off('unhandledRejection', onRejection);
-    }
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(true);
   });
 
-  it('startHubRotationListener skips optional listener setup when primary static validation fails but backup reads still work', async () => {
+  it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => []),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+      ));
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(false);
+  });
+
+  it('startHubRotationListener does not consume RPC budget while backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
@@ -1165,25 +1208,144 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       }),
       getBlockNumber: recorder(async () => 123),
     };
-    const on = recorder(async () => {
-      throw new Error('listener subscription should be skipped');
-    });
-
     a.primaryProvider = primaryProvider;
     a.provider = primaryProvider;
     a.providers = [primaryProvider, backupProvider];
     a.rpcUrls = ['https://primary.example', 'https://backup.example'];
-    a.contracts.hub = { on };
-    a.hubRotationListenerStarted = false;
+    a.contracts.hub = {
+      interface: new ethers.Interface([
+        'event NewContract(string contractName, address newContractAddress)',
+        'event ContractChanged(string contractName, address newContractAddress)',
+        'event NewAssetStorage(string contractName, address newContractAddress)',
+        'event AssetStorageChanged(string contractName, address newContractAddress)',
+      ]),
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
 
     await expect(a.startHubRotationListener()).resolves.toBeUndefined();
-    expect(on.calls).toEqual([]);
-    expect(a.hubRotationListenerStarted).toBe(false);
+    await flushAsyncWork();
+    expect(a.hubRotationPoller.isStarted).toBe(true);
 
     await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
       .resolves.toBe(123);
     expect(primaryProvider.getBlockNumber.calls).toEqual([]);
-    expect(backupProvider.getBlockNumber.calls).toEqual([[]]);
+    expect(backupProvider.getBlockNumber.calls).toHaveLength(1);
+  });
+
+  it('startHubRotationListener wires Hub rotation names into adapter invalidation without subscriptions', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    let head = 1_000;
+    let includeRotationLog = false;
+    const provider = {
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (_filter: any) => includeRotationLog ? [{
+        blockNumber: 1_001,
+        blockHash: '0x' + '30'.repeat(32),
+        transactionHash: '0x' + '31'.repeat(32),
+        index: 0,
+        topics: changed.topics,
+        data: changed.data,
+      }] : []),
+      destroy: recorder(() => undefined),
+    };
+    const on = recorder(async () => {
+      throw new Error('ethers subscription should not be installed');
+    });
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+      on,
+    };
+    a.contracts.contextGraphs = { stale: true };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.initialized = true;
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      includeRotationLog = true;
+      head = 1_001;
+      await vi.advanceTimersByTimeAsync(30_000);
+      a.destroy();
+
+      expect(on.calls).toEqual([]);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
+        address: '0x0000000000000000000000000000000000000001',
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
+        iface.getEvent('ContractChanged')!.topicHash,
+        iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('AssetStorageChanged')!.topicHash,
+        iface.getEvent('NewAssetStorage')!.topicHash,
+      ]);
+      expect(a.contracts.contextGraphs).toEqual({ stale: true });
+      expect(a.cachedKav10Address).toBeUndefined();
+      expect(a.initialized).toBe(false);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy clears the Hub rotation poll interval', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async (_filter: any) => []),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(0);
+
+      a.destroy();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.destroy.calls).toHaveLength(1);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
   });
 
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {

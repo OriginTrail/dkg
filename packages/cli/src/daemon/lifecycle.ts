@@ -599,22 +599,27 @@ export function mergePreferredRelays(input: {
   };
 }
 
-export function shouldUseIncrementalChainDiscoveryScan(input: {
-  run: number;
-  watermarkSeeded: boolean;
-  fullScanEvery: number;
-}): boolean {
-  return (
-    input.watermarkSeeded &&
-    input.run !== 0 &&
-    input.run % input.fullScanEvery !== 0
-  );
-}
+export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
 
-export function chainDiscoveryScanOptions(incremental: boolean):
+export function chainDiscoveryScanOptions(input: {
+  watermarkSeeded: boolean;
+  run?: number;
+  fullScanEvery?: number;
+}):
   | { incremental: true }
   | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
-  return incremental
+  const configuredFullScanEvery = input.fullScanEvery;
+  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
+  if (
+    typeof configuredFullScanEvery === 'number' &&
+    Number.isFinite(configuredFullScanEvery) &&
+    configuredFullScanEvery >= 1
+  ) {
+    fullScanEvery = Math.floor(configuredFullScanEvery);
+  }
+  const run = input.run ?? 0;
+  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  return input.watermarkSeeded && !periodicFullResync
     ? { incremental: true }
     : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
 }
@@ -1923,18 +1928,15 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
   let chainScanRuns = 0;
   const runChainDiscoveryScan = async () => {
     try {
       const run = chainScanRuns++;
-      const incremental = shouldUseIncrementalChainDiscoveryScan({
-        run,
-        watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-        fullScanEvery: CHAIN_FULL_SCAN_EVERY,
-      });
       const found = await agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions(incremental),
+        chainDiscoveryScanOptions({
+          run,
+          watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
+        }),
       );
       if (found > 0)
         log(`Chain scan: discovered ${found} new context graph(s)`);

@@ -35,6 +35,7 @@ import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_M
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import { HubRotationPoller } from './hub-rotation-poller.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -43,8 +44,8 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * the corresponding boot-bound field on `EVMChainAdapter.contracts`.
  *
  * Used by:
- *   1. `startHubRotationListener` — when a Hub rotation event fires
- *      for `name`, the listener checks this allowlist, marks the
+ *   1. `startHubRotationListener` — when the Hub rotation poller sees
+ *      `name`, it checks this allowlist, marks the
  *      adapter uninitialised, and leaves the existing handle intact so
  *      in-flight calls that already passed `init()` don't observe a
  *      transient `undefined`.
@@ -117,6 +118,11 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 );
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+// Keep generic Hub binding invalidation responsive for read paths while still
+// replacing four hidden ethers subscription pollers with one owned log poller.
+const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
+const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
@@ -494,8 +500,8 @@ export class EVMChainAdapterBase {
    * has a defensive guard against. Resolving both names atomically
    * inside one cache eliminates that race.
    *
-   * See `HubResolutionCache` for the semantics; the listener
-   * installed in `init()` invalidates this cache on
+   * See `HubResolutionCache` for the semantics; the poller
+   * started in `init()` invalidates this cache on
    * `Hub.ContractChanged` / `Hub.NewContract` for **either** name,
    * and `withHubStaleRetry()` invalidates it when a write surfaces
    * `UnauthorizedAccess(Only Contracts in Hub)`.
@@ -521,7 +527,7 @@ export class EVMChainAdapterBase {
 
   protected readonly pcaReadCache = new PcaReadCache();
 
-  protected hubRotationListenerStarted = false;
+  protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
    * Single-flight guard for the best-effort
@@ -785,6 +791,12 @@ export class EVMChainAdapterBase {
       () => this.chainId,
       async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
     );
+    this.hubRotationPoller = new HubRotationPoller({
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
+      intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
+      reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
+      onContractName: (name) => this.applyHubRotationEventName(name),
+    });
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -1997,7 +2009,7 @@ export class EVMChainAdapterBase {
    * address fails loudly instead of reconciling from empty logs.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
-    // Re-resolve contract handles first. The Hub-rotation listener flips
+    // Re-resolve contract handles first. The Hub rotation poller flips
     // `initialized` to false but leaves the old bindings in place, so without
     // this a long-lived adapter keeps querying the PRE-rotation
     // DKGKnowledgeAssets after the 10.0.4 redeploy this getter exists for.
@@ -3017,9 +3029,8 @@ export class EVMChainAdapterBase {
    * Used at write-side call sites that touch any of the redeployable
    * V10 contracts (PCA NFT, ContextGraphs, KnowledgeCollection, etc.)
    * so the FIRST write after a Hub rotation self-heals even when the
-   * event listener never fired (HTTP-only RPC endpoints, dropped
-   * subscriptions, rate-limited filter installs — all of which we
-   * see in the wild on public Base Sepolia / Gnosis Chain RPCs).
+   * low-cadence Hub poller has not observed the rotation yet, or when
+   * the RPC endpoint cannot serve log scans.
    *
    * Idempotency note: the wrapped closure MUST be safe to call twice.
    * That holds for our write paths because the on-chain side either
@@ -3073,7 +3084,7 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Subscribe to Hub rotation events and invalidate the local cache for any
+   * Poll Hub rotation events and invalidate the local cache for any
    * Hub-rotated contract.
    *
    * Two invalidation paths, dispatched by name:
@@ -3108,53 +3119,42 @@ export class EVMChainAdapterBase {
    * on the update path it emits both `ContractChanged` AND
    * `NewContract`. Storage bindings resolved through
    * `getAssetStorageAddress(...)` emit the parallel `AssetStorageChanged`
-   * / `NewAssetStorage` events. We listen to all four events so the cache
+   * / `NewAssetStorage` events. We poll all four event topics so the cache
    * invalidates regardless of which Hub set owns the name, and both the
    * RS-pair invalidation and the generic boot-bound invalidation are
    * idempotent so duplicate notifications are harmless.
    *
-   * `Contract.on(...)` is async in ethers v6: a sync `try/catch` would
-   * miss provider rejections (e.g. HTTP-only endpoints that can't
-   * install filter subscriptions) and leave us with an unhandled
-   * rejection. We `await` every subscription and only set
-   * `hubRotationListenerStarted` after all succeed, so a failed
-   * provider can be retried by a future call site if we ever need to
-   * — and meanwhile the TTL refresh path (for RS) and the
-   * `withHubStaleRetry` write-side fallback (for all boot-bound
-   * contracts) still keep stale bindings recoverable without a
-   * working event subscription.
+   * We deliberately avoid `Contract.on(...)` here. With `polling: true`,
+   * ethers implements each subscription as its own steady `eth_getLogs`
+   * poller. One adapter-owned poller with an OR-topic filter preserves
+   * rotation detection without four hidden idle log streams.
    */
   protected async startHubRotationListener(): Promise<void> {
-    if (this.hubRotationListenerStarted) return;
-    const onChange = (name: unknown): void => {
-      if (typeof name !== 'string') return;
-      if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
-        this.invalidateRandomSamplingPair();
-        return;
-      }
-      if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
-        this.invalidatePublishPreflightCache();
-        // Force the next public-method entry through `init()` so it
-        // re-resolves every binding. Do not clear the current handle
-        // here: the callback can fire between a public method's
-        // `await init()` and its first `this.contracts.X` read.
-        this.initialized = false;
-      }
-    };
+    if (this.hubRotationPoller.isStarted) return;
     try {
-      await withTimeout(
-        this.ensureConfiguredStaticChainIdValidated(this.primaryProvider),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'Hub rotation listener chainId validation',
+      await this.hubRotationPoller.start(
+        this.contracts.hub,
+        await contractAddress(this.contracts.hub),
       );
-      await this.contracts.hub.on('ContractChanged', onChange);
-      await this.contracts.hub.on('NewContract', onChange);
-      await this.contracts.hub.on('AssetStorageChanged', onChange);
-      await this.contracts.hub.on('NewAssetStorage', onChange);
-      this.hubRotationListenerStarted = true;
-    } catch {
-      /* provider doesn't support filter subscriptions — TTL refresh (RS)
-       * and `withHubStaleRetry` (writes) are the fallbacks */
+    } catch (err) {
+      console.warn(
+        `[chain] Hub rotation poller setup disabled: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  protected applyHubRotationEventName(name: string): void {
+    if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
+      this.invalidateRandomSamplingPair();
+      return;
+    }
+    if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
+      this.invalidatePublishPreflightCache();
+      // Force the next public-method entry through `init()` so it re-resolves
+      // every binding. Do not clear the current handle here: the callback can
+      // fire between a public method's `await init()` and its first
+      // `this.contracts.X` read.
+      this.initialized = false;
     }
   }
 
@@ -3163,8 +3163,8 @@ export class EVMChainAdapterBase {
    *
    * Used by `withHubStaleRetry` on the write-side self-heal path when
    * a Hub-rotated contract surfaces `UnauthorizedAccess(Only Contracts
-   * in Hub)`: the listener may have missed the rotation event (HTTP-only
-   * RPC, dropped subscription, etc.) so the failing operation can't tell
+   * in Hub)`: the poller may not have observed the rotation yet (HTTP-only
+   * RPC, log-scan failure, etc.) so the failing operation can't tell
    * which specific name was rotated. Resetting everything is the safest
    * fallback — the next `await this.init()` re-resolves all 15+ bindings
    * in a single pass (still under a second on a healthy RPC) and the
@@ -3212,6 +3212,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.hubRotationPoller.stop();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

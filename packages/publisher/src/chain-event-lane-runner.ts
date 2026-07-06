@@ -19,10 +19,13 @@ interface ChainEventPollerLaneState {
   lastBlock: number;
   headKnown: boolean;
   requiresFullHistory?: boolean;
-  lastRunAt?: number;
+  nextRunAtMs?: number;
+  failureBackoffMs?: number;
 }
 
 const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
+const FAILURE_BACKOFF_INITIAL_MS = 60_000;
+const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
 export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
@@ -50,6 +53,11 @@ interface ChainEventPollerLaneScanResult {
   blockNumber: number;
   advanced: boolean;
 }
+
+type ChainEventLaneScheduleOutcome =
+  | { kind: 'noWork'; now: number }
+  | { kind: 'success'; now: number; caughtUp: boolean }
+  | { kind: 'failure'; now: number };
 
 export interface ChainEventLaneRunnerConfig {
   chain: ChainAdapter;
@@ -134,6 +142,12 @@ export class ChainEventLaneRunner {
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
   }
 
+  private scheduleDelayMs(value: number | undefined, fallback: number): number {
+    return Number.isFinite(value) && value! >= 0
+      ? Math.floor(value!)
+      : fallback;
+  }
+
   private stateFor(lane: ChainEventPollerLane): ChainEventPollerLaneState {
     let state = this.laneState.get(lane);
     if (!state) {
@@ -177,8 +191,8 @@ export class ChainEventLaneRunner {
   }
 
   private laneDue(lane: ChainEventPollerLaneRuntime, now: number): boolean {
-    const lastRunAt = lane.state.lastRunAt;
-    return lastRunAt == null || now - lastRunAt >= lane.spec.cadenceMs;
+    const nextRunAtMs = lane.state.nextRunAtMs;
+    return nextRunAtMs == null || now >= nextRunAtMs;
   }
 
   private async persistScanResults(
@@ -248,7 +262,7 @@ export class ChainEventLaneRunner {
       : fromBlock + this.maxRange - 1;
 
     if (fromBlock > upperBound) {
-      state.lastRunAt = now;
+      this.applyLaneSchedule(lane, { kind: 'noWork', now });
       return { lane, blockNumber: state.lastBlock, advanced: false };
     }
 
@@ -267,12 +281,32 @@ export class ChainEventLaneRunner {
 
       state.lastBlock = upperBound;
       advanced = true;
+      this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      state.lastRunAt = advanced && caughtUp ? now : undefined;
+      this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
     return { lane, blockNumber: state.lastBlock, advanced };
+  }
+
+  private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
+    const state = lane.state;
+    if (outcome.kind === 'noWork') {
+      state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
+      return;
+    }
+    if (outcome.kind === 'success') {
+      state.failureBackoffMs = undefined;
+      state.nextRunAtMs = outcome.caughtUp ? outcome.now + lane.spec.cadenceMs : undefined;
+      return;
+    }
+
+    const previous = state.failureBackoffMs;
+    const next = previous == null
+      ? Math.max(FAILURE_BACKOFF_INITIAL_MS, lane.spec.cadenceMs)
+      : Math.min(previous * 2, FAILURE_BACKOFF_MAX_MS);
+    state.failureBackoffMs = next;
+    state.nextRunAtMs = outcome.now + next;
   }
 
   private applyHistoryModeTransition(

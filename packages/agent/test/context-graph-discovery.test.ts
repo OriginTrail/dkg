@@ -2355,7 +2355,11 @@ describe('discoverContextGraphsFromChain', () => {
     expect(await agent.discoverContextGraphsFromChain({ incremental: true })).toBe(0);
     expect(await agent.discoverContextGraphsFromChain({ seedIncrementalWatermark: true })).toBe(0);
 
-    expect(calls).toEqual([undefined, { incremental: true }, { seedIncrementalWatermark: true }]);
+    expect(calls).toEqual([
+      undefined,
+      { incremental: true },
+      { seedIncrementalWatermark: true },
+    ]);
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {

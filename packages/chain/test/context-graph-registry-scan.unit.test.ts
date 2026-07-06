@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError } from '../src/chain-adapter.js';
-import { CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from '../src/evm-adapter-base.js';
+import {
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  CG_REGISTRY_REORG_BUFFER_BLOCKS,
+} from '../src/evm-adapter-base.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -228,15 +231,23 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
   });
 
   it('can seed the incremental watermark from an explicit successful full scan', async () => {
-    const registry = makeRegistry();
-    const { adapter, provider } = makeAdapter(registry, 4_000);
-    registry.queryFilter.setImpl(async () => []);
+    const historicalGraphBlock = 10_000;
+    const head = 20_000;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= historicalGraphBlock && historicalGraphBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: historicalGraphBlock }]
+          : [],
+      ),
+    });
+    const { adapter, provider } = makeAdapter(registry, head);
 
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(false);
 
-    await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
+    const seeded = await adapter.listContextGraphsFromChain(undefined, { seedIncrementalWatermark: true });
 
-    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(4_001);
+    expect(seeded.map((cg) => cg.blockNumber)).toEqual([historicalGraphBlock]);
+    expect((adapter as any).contextGraphRegistryScanWatermarks.get(REGISTRY.toLowerCase())).toBe(head + 1);
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
     provider.getCode = seam(async () => {
@@ -248,7 +259,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     expect(provider.getCode.calls).toEqual([]);
     expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-      [4_001 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 4_000],
+      [head + 1 - CG_REGISTRY_REORG_BUFFER_BLOCKS, head],
     ]);
   });
 
