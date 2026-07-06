@@ -41,7 +41,7 @@ import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 /**
- * Maps a Hub-registered contract name to the function that invalidates
+ * Maps a Hub-registered contract name to the policy that invalidates
  * the corresponding boot-bound field on `EVMChainAdapter.contracts`.
  *
  * Used by:
@@ -63,27 +63,92 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`
  * — keep these in sync when adding/removing bindings in `init()`.
  */
-const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapterBase) => void>([
-  ['Identity',                   (a) => { (a as any).contracts.identity = undefined; }],
-  ['IdentityStorage',            (a) => { (a as any).invalidateIdentityStorageBinding(); }],
-  ['Profile',                    (a) => { (a as any).contracts.profile = undefined; }],
-  ['ProfileStorage',             (a) => { (a as any).contracts.profileStorage = undefined; }],
-  ['ParametersStorage',          (a) => { (a as any).contracts.parametersStorage = undefined; }],
-  ['Staking',                    (a) => { (a as any).contracts.staking = undefined; }],
-  ['Token',                      (a) => { (a as any).contracts.token = undefined; }],
-  ['AskStorage',                 (a) => { (a as any).contracts.askStorage = undefined; }],
-  ['KnowledgeAssets',            (a) => { (a as any).contracts.knowledgeAssets = undefined; }],
-  ['KnowledgeAssetsStorage',     (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; }],
-  ['KnowledgeAssetsLifecycle',   (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; }],
-  ['DKGKnowledgeAssets',         (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; }],
-  ['ContextGraphNameRegistry',   (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; }],
-  ['ContextGraphs',              (a) => { (a as any).contracts.contextGraphs = undefined; }],
-  ['ContextGraphStorage',        (a) => { (a as any).contracts.contextGraphStorage = undefined; }],
-  ['DKGPublishingConvictionNFT', (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; }],
-  ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
+type BoundContractInvalidationPolicy = {
+  invalidate: (adapter: EVMChainAdapterBase) => void;
+  onRotation?: (adapter: EVMChainAdapterBase) => void;
+};
+
+const BOUND_CONTRACT_INVALIDATORS = new Map<string, BoundContractInvalidationPolicy>([
+  ['Identity',                   { invalidate: (a) => { (a as any).contracts.identity = undefined; } }],
+  ['IdentityStorage',            {
+    invalidate: (a) => { (a as any).invalidateIdentityStorageBinding(); },
+    onRotation: (a) => {
+      (a as any).invalidateIdentityStorageBinding();
+      (a as any).initialized = false;
+    },
+  }],
+  ['Profile',                    { invalidate: (a) => { (a as any).contracts.profile = undefined; } }],
+  ['ProfileStorage',             { invalidate: (a) => { (a as any).contracts.profileStorage = undefined; } }],
+  ['ParametersStorage',          { invalidate: (a) => { (a as any).contracts.parametersStorage = undefined; } }],
+  ['Staking',                    { invalidate: (a) => { (a as any).contracts.staking = undefined; } }],
+  ['Token',                      { invalidate: (a) => { (a as any).contracts.token = undefined; } }],
+  ['AskStorage',                 { invalidate: (a) => { (a as any).contracts.askStorage = undefined; } }],
+  ['KnowledgeAssets',            { invalidate: (a) => { (a as any).contracts.knowledgeAssets = undefined; } }],
+  ['KnowledgeAssetsStorage',     { invalidate: (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; } }],
+  ['KnowledgeAssetsLifecycle',   { invalidate: (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; } }],
+  ['DKGKnowledgeAssets',         { invalidate: (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; } }],
+  ['ContextGraphNameRegistry',   { invalidate: (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; } }],
+  ['ContextGraphs',              { invalidate: (a) => { (a as any).contracts.contextGraphs = undefined; } }],
+  ['ContextGraphStorage',        { invalidate: (a) => { (a as any).contracts.contextGraphStorage = undefined; } }],
+  ['DKGPublishingConvictionNFT', { invalidate: (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; } }],
+  ['Chronos',                    { invalidate: (a) => { (a as any).contracts.chronos = undefined; } }],
 ]);
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
+
+type IdentityIdCacheEntry = {
+  identityId: bigint;
+  ttlMs: number;
+};
+
+class IdentityIdCache {
+  private readonly values = new ReadThroughTtlCache<string, IdentityIdCacheEntry>({
+    ttlMs: (entry) => entry.ttlMs,
+  });
+
+  constructor(
+    private readonly signerCacheKey: string,
+    private readonly positiveTtlMs: number,
+    private readonly signerZeroTtlMs: number,
+  ) {}
+
+  async getOrLoad(
+    address: string,
+    load: (checksumAddress: string) => Promise<bigint>,
+  ): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    const cacheKey = checksum.toLowerCase();
+    const entry = await this.values.getOrLoad(cacheKey, cacheKey, async () => {
+      const identityId = await load(checksum);
+      return this.entry(cacheKey, identityId);
+    });
+    return entry.identityId;
+  }
+
+  seed(address: string, identityId: bigint): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.values.seed(cacheKey, this.entry(cacheKey, identityId));
+  }
+
+  invalidate(address: string): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.values.invalidate(cacheKey);
+  }
+
+  invalidateAll(): void {
+    this.values.invalidateAll();
+  }
+
+  private entry(cacheKey: string, identityId: bigint): IdentityIdCacheEntry {
+    const ttlMs = identityId > 0n
+      ? this.positiveTtlMs
+      : cacheKey === this.signerCacheKey
+        ? this.signerZeroTtlMs
+        : 0;
+    return { identityId, ttlMs };
+  }
+}
 
 /**
  * Upper bound on the pre-10.0.4 KnowledgeAssetCreated fallback scan, in
@@ -512,38 +577,16 @@ export class EVMChainAdapterBase {
 
   protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
 
-  protected static readonly IDENTITY_ID_NEGATIVE_TTL_MS = 0;
-
   protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
 
-  protected static readonly SIGNER_IDENTITY_ID_CACHE_KEY = 'signer';
-
   /**
-   * OT-RFC-39 — per-process cache for `getIdentityIdForAddress`.
-   * Positive hits are memoised with a bounded TTL; negative hits are only
-   * single-flighted so a later external registration is visible immediately.
-   * Local mutations seed/invalidate through the cache so stale in-flight reads
-   * cannot win.
+   * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
+   * a bounded TTL; arbitrary-address negative hits are only single-flighted so
+   * later external registration is visible immediately. The signer address has
+   * a short zero TTL so fresh edge-node startup sync does not repeat the same
+   * self `0n` lookup per page.
    */
-  protected readonly identityIdByAddressCache = new ReadThroughTtlCache<string, bigint>({
-    ttlMs: (value) => value > 0n
-      ? EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS
-      : EVMChainAdapterBase.IDENTITY_ID_NEGATIVE_TTL_MS,
-  });
-
-  /**
-   * Signer-only identity cache for `getIdentityId()`.
-   *
-   * Edge nodes commonly have no node-operator identity (`0n`) and fall back to
-   * agent-key signing. A short zero TTL prevents startup sync from repeating the
-   * same self lookup per page while keeping arbitrary-address negative lookups
-   * live and bounding external profile-creation visibility delay.
-   */
-  protected readonly signerIdentityIdCache = new ReadThroughTtlCache<string, bigint>({
-    ttlMs: (value) => value > 0n
-      ? EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS
-      : EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
-  });
+  protected identityIdCache!: IdentityIdCache;
 
   protected readonly pcaReadCache = new PcaReadCache();
 
@@ -672,25 +715,16 @@ export class EVMChainAdapterBase {
   }
 
   protected clearIdentityIdForAddress(address: string): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.identityIdByAddressCache.invalidate(cacheKey);
-    if (cacheKey === this.signer.address.toLowerCase()) {
-      this.signerIdentityIdCache.invalidate(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY);
-    }
+    this.identityIdCache.invalidate(address);
   }
 
   protected seedIdentityIdForAddress(address: string, identityId: bigint): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.identityIdByAddressCache.seed(cacheKey, identityId);
-    if (cacheKey === this.signer.address.toLowerCase()) {
-      this.signerIdentityIdCache.seed(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY, identityId);
-    }
+    this.identityIdCache.seed(address, identityId);
   }
 
   protected invalidateIdentityStorageBinding(): void {
     this.contracts.identityStorage = undefined;
-    this.identityIdByAddressCache.invalidateAll();
-    this.signerIdentityIdCache.invalidateAll();
+    this.identityIdCache.invalidateAll();
   }
 
   protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
@@ -705,16 +739,7 @@ export class EVMChainAdapterBase {
   }
 
   protected async readIdentityIdForAddress(address: string): Promise<bigint> {
-    if (!ethers.isAddress(address)) return 0n;
-    const checksum = ethers.getAddress(address);
-    const cacheKey = checksum.toLowerCase();
-    return this.identityIdByAddressCache.getOrLoad(cacheKey, cacheKey, async () => {
-      const identityId = await this.readIdentityIdFromStorage(checksum);
-      if (identityId > 0n && cacheKey === this.signer.address.toLowerCase()) {
-        this.signerIdentityIdCache.seed(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY, identityId);
-      }
-      return identityId;
-    });
+    return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
   }
 
   protected static preflightCacheFresh(
@@ -907,6 +932,11 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
+    this.identityIdCache = new IdentityIdCache(
+      this.signer.address.toLowerCase(),
+      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
+      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
+    );
     this.hubAddress = config.hubAddress;
     if (config.tokenAddress && !ethers.isAddress(config.tokenAddress)) {
       throw new Error(`Invalid tokenAddress: ${config.tokenAddress}`);
@@ -2027,11 +2057,7 @@ export class EVMChainAdapterBase {
   // =====================================================================
 
   async getIdentityId(): Promise<bigint> {
-    return this.signerIdentityIdCache.getOrLoad(
-      EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY,
-      EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY,
-      () => this.readIdentityIdForAddress(this.signer.address),
-    );
+    return this.readIdentityIdForAddress(this.signer.address);
   }
 
   // =====================================================================
@@ -3159,11 +3185,11 @@ export class EVMChainAdapterBase {
    *      See the `randomSamplingPairCache` field comment for the
    *      coupling invariants this path preserves.
    *
-   *   2. `IdentityStorage` -> clear the lazy storage binding and the
-   *      dependent identity caches, then force the next public-method
-   *      entry through `init()`.
+   *   2. Any name in `BOUND_CONTRACT_INVALIDATORS` with an explicit
+   *      rotation policy -> run that policy. `IdentityStorage` uses this
+   *      to clear its lazy storage binding and dependent identity cache.
    *
-   *   3. Any other name in `BOUND_CONTRACT_INVALIDATORS` → leave the
+   *   3. Any other name in `BOUND_CONTRACT_INVALIDATORS` -> leave the
    *      existing `this.contracts.X` field intact but flip
    *      `this.initialized` back to `false` so the next `await
    *      this.init()` re-resolves every binding fresh from Hub. Keeping
@@ -3216,12 +3242,12 @@ export class EVMChainAdapterBase {
       this.invalidateRandomSamplingPair();
       return;
     }
-    if (name === 'IdentityStorage') {
-      this.invalidateIdentityStorageBinding();
-      this.initialized = false;
+    const policy = BOUND_CONTRACT_INVALIDATORS.get(name);
+    if (policy?.onRotation) {
+      policy.onRotation(this);
       return;
     }
-    if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
+    if (policy) {
       this.invalidatePublishPreflightCache();
       // Force the next public-method entry through `init()` so it re-resolves
       // every binding. Do not clear the current handle here: the callback can
@@ -3247,8 +3273,8 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
-    for (const invalidator of BOUND_CONTRACT_INVALIDATORS.values()) {
-      invalidator(this);
+    for (const policy of BOUND_CONTRACT_INVALIDATORS.values()) {
+      policy.invalidate(this);
     }
     this.invalidatePublishPreflightCache();
     this.invalidateRandomSamplingPair();

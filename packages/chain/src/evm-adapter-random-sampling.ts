@@ -74,8 +74,6 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
 
-    const identityId = await this.getIdentityId();
-
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
 
@@ -105,7 +103,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       // off the Challenge struct fetched below, so everything stays
       // consistent if the storage layout shifts.
       let contextGraphId = 0n;
-      let challengeIdentityId = identityId;
+      let challengeIdentityId: bigint | undefined;
       const rsIface = rs.interface;
       for (const log of receipt.logs) {
         try {
@@ -117,13 +115,13 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
           }
         } catch { /* not this contract */ }
       }
-      if (contextGraphId === 0n) {
+      if (contextGraphId === 0n || challengeIdentityId == null) {
         // The picker only emits the event when it actually lands on a CG,
         // so a missing event is a bug — fail loud rather than fall back
         // to "lookup by KC" which V10 doesn't support natively.
         throw new Error(
           'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
-          'cannot route proof builder without contextGraphId.',
+          'cannot route proof builder without identityId and contextGraphId.',
         );
       }
 
