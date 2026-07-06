@@ -20,10 +20,11 @@ describe('dashboard session store invariants', () => {
   it('requires login sessions to carry a credential fingerprint', () => {
     const store = new DashboardSessionStore();
     const issuedAt = 1_000;
-    if (false) {
-      // @ts-expect-error Login sessions must be created with a fingerprint.
-      store.create(VALID_TOKEN, 'login', issuedAt);
-    }
+    expect(() => store.create(
+      VALID_TOKEN,
+      'login' as unknown as Parameters<DashboardSessionStore['create']>[1],
+      issuedAt,
+    )).toThrow(/credential fingerprint/);
 
     const created = store.createLoginSession(VALID_TOKEN, 'credential-a', issuedAt);
     const authenticated = store.authenticateSessionId(created.sessionId, issuedAt + 1);
