@@ -36,7 +36,7 @@ export function formatRpcUsageLines(
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
-  for (const [consumer, count] of Object.entries(usage.ethCallByConsumer)) {
+  for (const [consumer, count] of Object.entries(usage.ethCallByConsumer ?? {})) {
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(
       `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +

@@ -25,6 +25,12 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     expect(formatRpcUsageLines({ byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 123 }, 60, 'base:8453')).toEqual([]);
   });
 
+  it('preserves aggregate lines for legacy windows without consumer attribution', () => {
+    expect(formatRpcUsageLines({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }, 60, 'base:8453')).toEqual([
+      'rpc_usage method=eth_call count=2 window_s=60 chain=base:8453',
+    ]);
+  });
+
   it('omits chain when unset and skips zero/negative/NaN counts', () => {
     const lines = formatRpcUsageLines(
       { byMethod: { eth_call: 3, eth_getLogs: 0, eth_gasPrice: NaN as unknown as number }, ethCallByConsumer: {}, lifetimeTotal: 3 },

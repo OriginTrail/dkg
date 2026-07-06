@@ -360,8 +360,14 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
   it('mergeRpcUsageWindows skips undefined inputs; nothing to merge yields a concrete EMPTY window', () => {
     const w = { byMethod: { eth_call: 1 }, ethCallByConsumer: {}, lifetimeTotal: 1 };
+    const legacy = { byMethod: { eth_call: 2 }, lifetimeTotal: 2 };
     const empty = { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
     expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
+    expect(mergeRpcUsageWindows(legacy)).toEqual({
+      byMethod: { eth_call: 2 },
+      ethCallByConsumer: {},
+      lifetimeTotal: 2,
+    });
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
     expect(mergeRpcUsageWindows()).toEqual(empty);
   });

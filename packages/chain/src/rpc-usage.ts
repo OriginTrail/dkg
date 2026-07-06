@@ -125,7 +125,7 @@ export function mergeRpcUsageWindows(
   let lifetimeTotal = 0;
   for (const w of defined) {
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
-    for (const [consumer, c] of Object.entries(w.ethCallByConsumer)) {
+    for (const [consumer, c] of Object.entries(w.ethCallByConsumer ?? {})) {
       ethCallByConsumer[consumer] = (ethCallByConsumer[consumer] ?? 0) + c;
     }
     lifetimeTotal += w.lifetimeTotal;
@@ -148,9 +148,11 @@ export interface RpcUsageWindow {
    * the billing-exact aggregate count and existing dashboards should continue
    * to use it. The consumer map is emitted as separate daemon log lines so it
    * cannot double-count aggregate `rpc_usage` queries. Empty map means no
-   * attributed `eth_call`s in the current drain window.
+   * attributed `eth_call`s in the current drain window. Optional at the public
+   * drain boundary for compatibility with pre-attribution drain sources; local
+   * chain helpers return a normalized concrete map.
    */
-  ethCallByConsumer: Record<string, number>;
+  ethCallByConsumer?: Record<string, number>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
 }
