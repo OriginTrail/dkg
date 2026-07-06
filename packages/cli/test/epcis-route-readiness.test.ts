@@ -3,6 +3,7 @@ import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const VALID_OBJECT_EVENT_DOC = {
   '@context': {
@@ -113,8 +114,7 @@ function createContext(overrides: Partial<RouteRequestContext> = {}): RouteReque
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: '0x0',
+    ...testRouteIdentityFields({ agentAddress: '0x0' }),
     ...overrides,
   };
 }

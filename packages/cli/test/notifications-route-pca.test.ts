@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleNotificationRoutes } from '../src/daemon/routes/notifications.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const CALLER = '0xaaaa000000000000000000000000000000000001';
 const OTHER = '0xbbbb000000000000000000000000000000000002';
@@ -80,7 +81,9 @@ function makeCtx(
   };
   const ctx = {
     req: fakeReq(method, path, body), res, agent, dashDb,
-    path: url.pathname, url, requestToken: TOKEN,
+    path: url.pathname,
+    url,
+    ...testRouteIdentityFields({ token: TOKEN, agentAddress: 'did:dkg:agent:' + CALLER }),
   } as unknown as RouteRequestContext;
   return { ctx, res };
 }

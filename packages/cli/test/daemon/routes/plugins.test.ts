@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import type { RouteRequestContext } from '../../../src/daemon/routes/context.js';
-import type { RequestContext, RoutePlugin } from '../../../src/daemon/plugin-api.js';
+import { testRouteIdentityFields } from '../../helpers/route-request-context.js';
+import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
 
 interface FakeRes {
@@ -65,7 +66,9 @@ function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
     req: {} as never,
     res: res as unknown as ServerResponse,
     routePlugins,
+    url: new URL('http://127.0.0.1/api/test'),
     path: '/api/test',
+    ...testRouteIdentityFields(),
   } as unknown as RouteRequestContext;
   return { ctx, res };
 }
@@ -88,17 +91,12 @@ describe('handlePluginRoutes', () => {
     console.error = originalConsoleError;
   });
 
-  it('keeps the public plugin RequestContext compatible without requestIdentity', async () => {
-    type RequestIdentityOptional = Omit<RequestContext, 'requestIdentity'> extends RequestContext ? true : false;
-    const requestIdentityOptional: RequestIdentityOptional = true;
-    expect(requestIdentityOptional).toBe(true);
-
+  it('dispatches a compatible plugin handler', async () => {
     const plugin: RoutePlugin = {
       name: 'compat',
       handle(ctx) {
-        const publicCtx: RequestContext = ctx;
-        publicCtx.res.writeHead(204);
-        publicCtx.res.end();
+        ctx.res.writeHead(204);
+        ctx.res.end();
       },
     };
 

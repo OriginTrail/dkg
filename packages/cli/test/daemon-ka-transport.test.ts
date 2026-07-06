@@ -10,6 +10,7 @@ import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} };
@@ -31,7 +32,15 @@ function runKaCtx(
   const req: any = { method, url: rawPath };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
-  const ctx = { req, res, agent, path: url.pathname, url, ...ctxOverrides } as unknown as RouteRequestContext;
+  const ctx = {
+    req, res, agent, path: url.pathname, url,
+    ...testRouteIdentityFields({
+      token: ctxOverrides.requestToken,
+      agentAddress: ctxOverrides.requestAgentAddress,
+      requestAuth: ctxOverrides.requestAuth,
+    }),
+    ...ctxOverrides,
+  } as unknown as RouteRequestContext;
   return { res, done: handleKnowledgeAssetsRoutes(ctx) };
 }
 
@@ -40,7 +49,10 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
   const req: any = { method, url: rawPath };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${rawPath}`);
-  const ctx = { req, res, agent, path: url.pathname, url } as unknown as RouteRequestContext;
+  const ctx = {
+    req, res, agent, path: url.pathname, url,
+    ...testRouteIdentityFields(),
+  } as unknown as RouteRequestContext;
   return { res, done: handleMemoryRoutes(ctx) };
 }
 

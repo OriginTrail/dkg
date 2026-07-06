@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string>, writableEnded: false };
@@ -34,6 +35,7 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
     agent,
     path: url.pathname,
     url,
+    ...testRouteIdentityFields(),
   } as unknown as RouteRequestContext;
   return { ctx, res };
 }

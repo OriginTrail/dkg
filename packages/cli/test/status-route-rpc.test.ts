@@ -28,6 +28,7 @@ import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
@@ -118,6 +119,7 @@ describe('/api/status selected overlay details', () => {
         res,
         path: url.pathname,
         url,
+        ...testRouteIdentityFields(),
         network,
         config: {
           name: 'status-selected-overlay-test',
@@ -180,6 +182,7 @@ describe('/api/status selected overlay details', () => {
           res,
           path: url.pathname,
           url,
+          ...testRouteIdentityFields(),
           network,
           config: {
             name: 'status-failover-counter-test',
@@ -232,6 +235,7 @@ describe('/api/status selected overlay details', () => {
         res,
         path: url.pathname,
         url,
+        ...testRouteIdentityFields(),
         network: null,
         config: {
           name: 'identity-ensure-transport-test',

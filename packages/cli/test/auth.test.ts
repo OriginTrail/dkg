@@ -24,6 +24,7 @@ import { resolveDashboardSseSession, resolveDashboardSseSessionFromAuthContext }
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
 import { resolveRequestPrincipal, resolveRouteRequestIdentity, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
+import { resolveLifecycleDashboardSseSession, resolveLifecycleRouteRequestIdentity } from '../src/daemon/lifecycle.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -408,6 +409,74 @@ describe('resolveRouteRequestIdentity', () => {
     expect(resolveRequestPrincipal(agent, undefined)).toEqual({
       kind: 'node-admin',
       agentAddress: 'did:dkg:agent:default',
+    });
+  });
+});
+
+
+describe('lifecycle auth routing', () => {
+  const agent = {
+    resolveAgentByToken: (token: string | undefined) => token === 'auth-result-token'
+      ? 'did:dkg:agent:auth-result'
+      : 'did:dkg:agent:fallback',
+    resolveAgentAddress: (token: string | undefined) => token === 'auth-result-token'
+      ? 'did:dkg:agent:auth-result'
+      : 'did:dkg:agent:fallback',
+  };
+
+  const authResultContext: RequestAuthContext = {
+    source: 'dashboard-session',
+    internalCredentialToken: 'auth-result-token',
+    principal: { kind: 'agent', agentAddress: 'did:dkg:agent:auth-result-principal' },
+    csrf: { required: false, validated: false },
+    dashboardSession: {
+      sessionId: 'auth-result-session',
+      source: 'login',
+      expiresAt: Date.now() + 60_000,
+    },
+  };
+
+  const poisonedRequestContext: RequestAuthContext = {
+    source: 'dashboard-session',
+    internalCredentialToken: 'poison-token',
+    principal: { kind: 'agent', agentAddress: 'did:dkg:agent:poison-principal' },
+    csrf: { required: false, validated: false },
+    dashboardSession: {
+      sessionId: 'poison-session',
+      source: 'login',
+      expiresAt: Date.now() + 60_000,
+    },
+  };
+
+  it('threads the authResult context through lifecycle route and SSE identity wiring', () => {
+    const req = { headers: { authorization: 'Bearer poison-header' } } as IncomingMessage;
+    setRequestAuthContext(req, poisonedRequestContext);
+
+    expect(resolveLifecycleRouteRequestIdentity(req, agent, authResultContext)).toMatchObject({
+      credentialToken: 'auth-result-token',
+      principal: { kind: 'agent', agentAddress: 'did:dkg:agent:auth-result-principal' },
+      requestAuth: { source: 'dashboard-session' },
+    });
+
+    const dashboardSession = resolveLifecycleDashboardSseSession(
+      req,
+      () => ({
+        sessionId: 'auth-result-session',
+        compatToken: 'auth-result-token',
+        csrfToken: 'csrf-token',
+        source: 'login',
+        issuedAt: 1,
+        expiresAt: authResultContext.dashboardSession.expiresAt,
+        credentialFingerprint: 'fingerprint',
+      }),
+      authResultContext,
+    );
+
+    expect(dashboardSession).toEqual({
+      sessionId: 'auth-result-session',
+      compatToken: 'auth-result-token',
+      expiresAt: authResultContext.dashboardSession.expiresAt,
+      credentialFingerprint: 'fingerprint',
     });
   });
 });

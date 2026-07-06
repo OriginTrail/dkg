@@ -35,6 +35,7 @@ import {
 import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import { handleKcChainMetadataRoutes } from '../src/daemon/routes/kc-chain-metadata.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const ZERO = '0x0000000000000000000000000000000000000000';
@@ -122,8 +123,7 @@ function createContext(args: {
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: '0x0',
+    ...testRouteIdentityFields({ agentAddress: '0x0' }),
   };
 }
 

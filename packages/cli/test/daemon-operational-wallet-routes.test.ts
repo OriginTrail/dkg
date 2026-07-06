@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import { handleOperationalWalletRoutes } from '../src/daemon/routes/operational-wallets.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const PRIMARY = '0x' + '1'.repeat(40);
 const SECOND = '0x' + '2'.repeat(40);
@@ -45,7 +46,7 @@ function runCtx(
     // Default auth disabled → node-admin gate short-circuits true; route-logic
     // tests below run without a token. Gating is covered in its own block.
     config: { auth: { enabled: auth?.authEnabled ?? false } },
-    requestToken: auth?.requestToken,
+    ...testRouteIdentityFields({ token: auth?.requestToken }),
     validTokens: auth?.validTokens ?? new Set<string>(),
   } as unknown as RouteRequestContext;
   return { res, done: handleOperationalWalletRoutes(ctx) };

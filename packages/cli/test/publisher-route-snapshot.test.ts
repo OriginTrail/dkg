@@ -11,6 +11,7 @@ import { DKGPublisher, FileWorkspacePublicSnapshotStore } from '@origintrail-off
 import { createPublisherControlFromStore } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RouteRequestContext } from '../src/daemon/routes/context.js';
+import { testRouteIdentityFields } from './helpers/route-request-context.js';
 
 const CONTEXT_GRAPH = 'publisher-route-snapshot';
 const ENTITY = 'urn:publisher-route:snapshot:entity';
@@ -114,8 +115,7 @@ function createContext(
     apiPortRef: { value: 0 },
     url,
     path: url.pathname,
-    requestToken: undefined,
-    requestAgentAddress: '0x0',
+    ...testRouteIdentityFields({ agentAddress: '0x0' }),
   };
 }
 
