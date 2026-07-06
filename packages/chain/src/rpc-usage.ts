@@ -90,7 +90,7 @@ export function jsonRpcMethodsFromBody(body: Uint8Array | null | undefined): str
 
 /** A fresh all-zero window — the identity element for merging and the value of "nothing to report". */
 export function emptyRpcUsageWindow(): RpcUsageWindow {
-  return { byMethod: {}, lifetimeTotal: 0 };
+  return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
 }
 
 /**
@@ -125,14 +125,12 @@ export function mergeRpcUsageWindows(
   let lifetimeTotal = 0;
   for (const w of defined) {
     for (const [m, c] of Object.entries(w.byMethod)) byMethod[m] = (byMethod[m] ?? 0) + c;
-    for (const [consumer, c] of Object.entries(w.ethCallByConsumer ?? {})) {
+    for (const [consumer, c] of Object.entries(w.ethCallByConsumer)) {
       ethCallByConsumer[consumer] = (ethCallByConsumer[consumer] ?? 0) + c;
     }
     lifetimeTotal += w.lifetimeTotal;
   }
-  return Object.keys(ethCallByConsumer).length === 0
-    ? { byMethod, lifetimeTotal }
-    : { byMethod, ethCallByConsumer, lifetimeTotal };
+  return { byMethod, ethCallByConsumer, lifetimeTotal };
 }
 
 export interface RpcUsageWindow {
@@ -145,13 +143,14 @@ export interface RpcUsageWindow {
    */
   byMethod: Record<string, number>;
   /**
-   * Optional raw `eth_call` attribution by bounded code-owned consumer label.
+   * Raw `eth_call` attribution by bounded code-owned consumer label.
    * This is a companion diagnostic dimension only: `byMethod.eth_call` remains
    * the billing-exact aggregate count and existing dashboards should continue
    * to use it. The consumer map is emitted as separate daemon log lines so it
-   * cannot double-count aggregate `rpc_usage` queries.
+   * cannot double-count aggregate `rpc_usage` queries. Empty map means no
+   * attributed `eth_call`s in the current drain window.
    */
-  ethCallByConsumer?: Record<string, number>;
+  ethCallByConsumer: Record<string, number>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
 }
@@ -268,15 +267,10 @@ export class RpcUsageTracker {
     const byMethod: Record<string, number> = {};
     for (const [method, count] of this.window) byMethod[method] = count;
     this.window.clear();
-    let ethCallByConsumer: Record<string, number> | undefined;
-    if (this.ethCallConsumers.size > 0) {
-      ethCallByConsumer = {};
-      for (const [consumer, count] of this.ethCallConsumers) ethCallByConsumer[consumer] = count;
-    }
+    const ethCallByConsumer: Record<string, number> = {};
+    for (const [consumer, count] of this.ethCallConsumers) ethCallByConsumer[consumer] = count;
     this.ethCallConsumers.clear();
-    return ethCallByConsumer == null
-      ? { byMethod, lifetimeTotal: this.lifetime }
-      : { byMethod, ethCallByConsumer, lifetimeTotal: this.lifetime };
+    return { byMethod, ethCallByConsumer, lifetimeTotal: this.lifetime };
   }
 }
 

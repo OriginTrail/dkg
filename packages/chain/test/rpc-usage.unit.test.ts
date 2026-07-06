@@ -359,8 +359,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('mergeRpcUsageWindows skips undefined inputs; nothing to merge yields a concrete EMPTY window', () => {
-    const w = { byMethod: { eth_call: 1 }, lifetimeTotal: 1 };
-    const empty = { byMethod: {}, lifetimeTotal: 0 };
+    const w = { byMethod: { eth_call: 1 }, ethCallByConsumer: {}, lifetimeTotal: 1 };
+    const empty = { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
     expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
     expect(mergeRpcUsageWindows()).toEqual(empty);
@@ -432,9 +432,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     withRpcUsageConsumer('consumer.0', () => t.record('eth_call'));
 
     const w = t.drainWindow();
-    expect(Object.keys(w.ethCallByConsumer ?? {})).toHaveLength(max + 1);
-    expect(w.ethCallByConsumer?.['consumer.0']).toBe(2);
-    expect(w.ethCallByConsumer?.other).toBe(4);
+    expect(Object.keys(w.ethCallByConsumer)).toHaveLength(max + 1);
+    expect(w.ethCallByConsumer['consumer.0']).toBe(2);
+    expect(w.ethCallByConsumer.other).toBe(4);
     expect(w.byMethod.eth_call).toBe(max + 5);
   });
 
@@ -458,7 +458,28 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
-    expect(usage.ethCallByConsumer?.['unit.eth_call']).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer['unit.eth_call']).toBe(rawEthCallHits);
+  }, 30_000);
+
+  it('attributes same-endpoint eth_call retry attempts to the readProvider label', async () => {
+    installMeter();
+    const rpc = await startLoopbackRpc({ throttle: ['eth_call'] });
+    servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(
+      a.readProvider('unit.eth_call.retry', (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest'])),
+    ).rejects.toBeTruthy();
+
+    const usage = a.drainRpcUsage();
+    const rawEthCallHits = rpc.hits('eth_call');
+    expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
+    expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer['unit.eth_call.retry']).toBe(rawEthCallHits);
   }, 30_000);
 
   it('attributes failover contract-view eth_call attempts to the readContract label', async () => {
@@ -480,6 +501,6 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const rawEthCallHits = primary.hits('eth_call') + backup.hits('eth_call');
     expect(rawEthCallHits).toBeGreaterThanOrEqual(2);
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
-    expect(usage.ethCallByConsumer?.['unit.contract.value']).toBe(rawEthCallHits);
+    expect(usage.ethCallByConsumer['unit.contract.value']).toBe(rawEthCallHits);
   }, 30_000);
 });
