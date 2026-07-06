@@ -39,7 +39,7 @@ export function resolveRouteRequestIdentityFromAuthContext(
   };
 }
 
-export function resolveRouteRequestIdentityFromRequestContext(
+export function resolveRouteRequestIdentityFromAttachedAuthContext(
   req: IncomingMessage,
   agent: RouteIdentityAgent,
 ): RouteRequestIdentity {
