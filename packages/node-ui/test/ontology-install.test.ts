@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('@origintrail-official/dkg-core', () => {
+  throw new Error('ontologyInstall must use the browser-safe project-ontology subpath');
+});
+
 import { installOntology } from '../src/ui/lib/ontologyInstall.js';
 
 type PostedQuad = {

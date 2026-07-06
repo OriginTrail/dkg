@@ -34,4 +34,28 @@ describe('buildProjectOntologyTriples', () => {
       objects.filter((object) => !object.startsWith('"') && !RAW_IRI_OBJECT_RE.test(object)),
     ).toEqual([]);
   });
+
+  it('preserves TTL and guide text as escaped schema:text literals', () => {
+    const contextGraphId = 'test-project';
+    const ttl = '@prefix ex: <urn:example:> .\nex:note "quoted\\\\path" .';
+    const guide = '# Agent guide\nSay "hello" and keep tab\tspacing.';
+
+    const { ontologyUri, guideUri, quads } = buildProjectOntologyTriples({
+      contextGraphId,
+      starterSlug: 'scientific-research',
+      ttl,
+      guide,
+      nowIso: '2026-01-15T09:00:00.000Z',
+    });
+
+    expect(quads.find((quad) =>
+      quad.subject === ontologyUri &&
+      quad.predicate === 'http://schema.org/text',
+    )?.object).toBe('"@prefix ex: <urn:example:> .\\nex:note \\"quoted\\\\\\\\path\\" ."');
+
+    expect(quads.find((quad) =>
+      quad.subject === guideUri &&
+      quad.predicate === 'http://schema.org/text',
+    )?.object).toBe('"# Agent guide\\nSay \\"hello\\" and keep tab\\tspacing."');
+  });
 });

@@ -28,7 +28,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { buildProjectOntologyTriples } from '@origintrail-official/dkg-core';
+import { buildProjectOntologyTriples } from '../packages/core/src/project-ontology-runtime.js';
 import { makeClient, parseArgs, resolveToken } from './lib/dkg-daemon.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
