@@ -6,12 +6,12 @@
 // The async, deliberately re-fetching face stays in
 // `ownerActions.resolveOwnerActionSubmitterForAccount` — do NOT force it onto React state.
 import { isWrongNetwork, useWalletStore } from '../stores/wallet.js';
-import { resolvePcaOwnerAccess, type PcaOwnerAccess } from './ownerAccess.js';
+import { resolvePcaOwnerAccess, type PcaOwnerAccess, type PcaPrimaryWalletState } from './ownerAccess.js';
 
 export function usePcaOwnerAccess(input: {
   owner?: string | null;
   primaryWallet?: string | null;
-  primaryWalletState?: 'loading' | 'unreadable' | 'ready';
+  primaryWalletState?: PcaPrimaryWalletState;
 }): PcaOwnerAccess {
   const connectedWallet = useWalletStore((s) => s.address);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));

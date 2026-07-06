@@ -23,7 +23,7 @@ import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
 import { eqAddress } from '../../pca/address.js';
-import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
@@ -51,7 +51,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   // "loading" (mode 'unknown'), NOT a read-only/external flash, while the balances fetch is in
   // flight. L3: a balances READ FAILURE (wb null + error) still classifies unknown ('unreadable') —
   // the owner controls read "can't confirm ownership" + Retry, never a definitive non-owner.
-  const primaryWalletState: 'loading' | 'unreadable' | 'ready' = wb ? 'ready' : wbError ? 'unreadable' : 'loading';
+  const primaryWalletState = resolvePrimaryWalletState(wb, wbError);
   // #1375 — the single owner-access model. Called before the early returns (Rules of
   // Hooks); while the snapshot is still loading `owner` is undefined and this render path
   // returns early below, so the resulting access is never consumed on that path.

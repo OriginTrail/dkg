@@ -39,6 +39,22 @@ export type PcaOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
  */
 export type PcaOwnerUnknownCause = 'no-snapshot' | 'wallets-unreadable' | 'wallets-loading';
 
+/**
+ * The load state of this node's wallet list (`wallets[0]` = the daemon signer), as consumed by
+ * the owner-access model. `'ready'` classifies the owner normally; `'loading'` / `'unreadable'`
+ * ⇒ `unknown` (cause `wallets-loading` / `wallets-unreadable`).
+ */
+export type PcaPrimaryWalletState = 'loading' | 'unreadable' | 'ready';
+
+/**
+ * Map a `useFetch(fetchWalletsBalances)` `{ data, error }` pair to a `PcaPrimaryWalletState` — the
+ * SINGLE source the modal + detail view derive it from: data ⇒ `'ready'`; error-without-data ⇒
+ * `'unreadable'`; neither ⇒ `'loading'`.
+ */
+export function resolvePrimaryWalletState(data: unknown, error: unknown): PcaPrimaryWalletState {
+  return data ? 'ready' : error ? 'unreadable' : 'loading';
+}
+
 export interface PcaOwnerAccessInput {
   /** The on-chain PCA owner. Absent/empty ⇒ `unknown` (`no-snapshot`). */
   owner?: string | null;
@@ -54,7 +70,7 @@ export interface PcaOwnerAccessInput {
    * (the default when omitted) ⇒ classify the owner normally. Split out of the former
    * `walletsUnknown` boolean so a daemon PCA shows loading (not read-only) during the fetch.
    */
-  primaryWalletState?: 'loading' | 'unreadable' | 'ready';
+  primaryWalletState?: PcaPrimaryWalletState;
 }
 
 /**
@@ -72,15 +88,6 @@ export interface PcaOwnerAccess {
   writesEnabled: boolean;
   /** Present only when `mode === 'unknown'`; names which read is missing. */
   ownerUnknownCause?: PcaOwnerUnknownCause;
-  /**
-   * The target-write signing plan: could an owner write open a browser-wallet signature? True
-   * when the owner is a loaded wallet on the right network, OR — during a load window (`mode`
-   * still `unknown`) — a wallet is connected and the owner is either not-yet-known (#1469) or
-   * equals the connected wallet (subsumes R4). Safe-direction over-arm; the resolving submitter
-   * refuses read-only / daemon-confirms once the re-fetched owner is known. See
-   * `computeMayPromptWallet`.
-   */
-  mayPromptWallet: boolean;
 }
 
 /**
@@ -94,8 +101,9 @@ export function ownerModeWritesEnabled(mode: PcaOwnerMode, wrongNetwork: boolean
 }
 
 /**
- * The target-write signing plan — could an owner write open a browser-wallet signature? The
- * single source `ApproveWalletsModal.targetWalletManaged` reads.
+ * The target-write signing plan — could an owner write open a browser-wallet signature? A pure
+ * helper OVER the owner-access model (deliberately NOT a field on it — keeps the model minimal);
+ * `ApproveWalletsModal.targetWalletManaged` is its single caller.
  *  - Clause 1: a loaded wallet-owned PCA on the right network (`mode === 'wallet' && writesEnabled`).
  *  - Clause 2: a load window (`mode === 'unknown'` — loading / unreadable / no-snapshot) with a
  *    connected wallet, when the owner is not-yet-known (`!owner` ⇒ closes #1469) or equals the
@@ -104,14 +112,13 @@ export function ownerModeWritesEnabled(mode: PcaOwnerMode, wrongNetwork: boolean
  * call-time by the wallet submitter, inv-16), and the resolving submitter refuses read-only /
  * daemon-confirms instantly once the re-fetched owner turns out not to be the connected wallet.
  */
-function computeMayPromptWallet(
-  mode: PcaOwnerMode,
+export function mayTargetWritePromptWallet(
+  access: Pick<PcaOwnerAccess, 'mode' | 'writesEnabled'>,
   owner: string | null | undefined,
   connectedWallet: string | null | undefined,
-  writesEnabled: boolean,
 ): boolean {
-  if (mode === 'wallet' && writesEnabled) return true;
-  if (mode === 'unknown') return !!connectedWallet && (!owner || eqAddress(owner, connectedWallet));
+  if (access.mode === 'wallet' && access.writesEnabled) return true;
+  if (access.mode === 'unknown') return !!connectedWallet && (!owner || eqAddress(owner, connectedWallet));
   return false;
 }
 
@@ -134,31 +141,13 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
   // reading this node's wallets" before it ever classifies the owner. `'loading'` is split from
   // `'unreadable'` so a daemon PCA shows loading (not read-only) while the balances fetch runs.
   if (primaryWalletState === 'loading') {
-    return {
-      mode: 'unknown',
-      wrongNetwork: walletWrongNetwork,
-      writesEnabled: false,
-      ownerUnknownCause: 'wallets-loading',
-      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
-    };
+    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'wallets-loading' };
   }
   if (primaryWalletState === 'unreadable') {
-    return {
-      mode: 'unknown',
-      wrongNetwork: walletWrongNetwork,
-      writesEnabled: false,
-      ownerUnknownCause: 'wallets-unreadable',
-      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
-    };
+    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'wallets-unreadable' };
   }
   if (!owner) {
-    return {
-      mode: 'unknown',
-      wrongNetwork: walletWrongNetwork,
-      writesEnabled: false,
-      ownerUnknownCause: 'no-snapshot',
-      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
-    };
+    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'no-snapshot' };
   }
 
   // inv-17 precedence — byte-for-byte from detailOwnerMode / the async classifier
@@ -175,9 +164,8 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
 
   const wrongNetwork = walletWrongNetwork;
   const writesEnabled = ownerModeWritesEnabled(mode, wrongNetwork);
-  const mayPromptWallet = computeMayPromptWallet(mode, owner, connectedWallet, writesEnabled);
 
-  return { mode, wrongNetwork, writesEnabled, mayPromptWallet };
+  return { mode, wrongNetwork, writesEnabled };
 }
 
 // The sync display hook `usePcaOwnerAccess` lives in `./usePcaOwnerAccess.ts` so THIS module

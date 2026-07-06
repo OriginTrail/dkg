@@ -7,7 +7,7 @@ import {
   pcaTopUp,
   pcaSettle,
 } from '../api.js';
-import { isWrongNetwork, useWalletStore } from '../stores/wallet.js';
+import { useWalletStore } from '../stores/wallet.js';
 import {
   walletOwnerActionSubmitter,
   type WalletOwnerActionSubmitterDeps,
@@ -160,15 +160,16 @@ export function resolveOwnerActionSubmitterKind({
  * so the classification math lives in the owner-access layer, not the component (folds the former
  * inline `ApproveWalletsModal.signerKindForAccount`, #1470 item).
  *
- * `primaryWallet` (this node's `wallets[0]`, the daemon signer) is passed BY THE CALLER from its
- * already-loaded wallet list — deliberately NOT re-fetched here. The old inline predicate keyed the
- * daemon branch on the modal's cached `ownerWallet` and the wallet branch on `connectedWallet` only
- * (no wallet-LIST dependency at all), so its only async was `fetchPca(deregisterFrom)`, correlated
- * with the execution path. An internal `fetchWalletsBalances()` would add an UNCORRELATED failure
- * that maps to `undefined` and can disarm the R4 wallet-signing lock (deviceTotal 0 / no
- * `walletBatchSigning`) while the resolving deregister submitter independently re-fetches, succeeds,
- * and opens a browser prompt with the lock off — the exact contract #1468/R4 protects. Keeping the
- * fetch out preserves the old correlation.
+ * ALL classification inputs — `primaryWallet` (this node's `wallets[0]`, the daemon signer),
+ * `connectedWallet`, and `walletWrongNetwork` — are passed EXPLICITLY by the caller; there are NO
+ * ambient wallet-store reads and NO wallet-list refetch, so the only async is `fetchPca(accountId)`.
+ * The old inline predicate keyed the daemon branch on the modal's cached `ownerWallet` and the
+ * wallet branch on `connectedWallet` only (no wallet-LIST dependency at all), so its only async was
+ * `fetchPca(deregisterFrom)`, correlated with the execution path. An internal `fetchWalletsBalances()`
+ * would add an UNCORRELATED failure that maps to `undefined` and can disarm the R4 wallet-signing
+ * lock (deviceTotal 0 / no `walletBatchSigning`) while the resolving deregister submitter
+ * independently re-fetches, succeeds, and opens a browser prompt with the lock off — the exact
+ * contract #1468/R4 protects. Keeping the fetch out preserves the old correlation.
  *
  * `undefined` for a missing id, a read failure, or an owner this node can't sign for
  * (external / wrong-network) — byte-identical to the old inline predicate (the `signerKindRef`
@@ -176,19 +177,21 @@ export function resolveOwnerActionSubmitterKind({
  * connected wallet owns it ON THE RIGHT NETWORK (`writesEnabled`). inv-16: this only PLANS the
  * device count — the actual deregister still re-resolves + re-verifies ownership per prompt.
  */
-export async function resolveSignerKindForAccount(
-  accountId?: string,
-  primaryWallet?: string | null,
-): Promise<'daemon' | 'wallet' | undefined> {
+export async function resolveSignerKindForAccount(opts: {
+  accountId?: string;
+  primaryWallet?: string | null;
+  connectedWallet?: string | null;
+  walletWrongNetwork?: boolean;
+}): Promise<'daemon' | 'wallet' | undefined> {
+  const { accountId, primaryWallet, connectedWallet, walletWrongNetwork } = opts;
   if (!accountId) return undefined;
   const snapshot = await fetchPca(accountId).catch(() => null);
   if (!snapshot?.owner) return undefined;
-  const walletState = useWalletStore.getState();
   const access = resolvePcaOwnerAccess({
     owner: snapshot.owner,
-    primaryWallet,
-    connectedWallet: walletState.address,
-    walletWrongNetwork: isWrongNetwork(walletState),
+    primaryWallet: primaryWallet ?? null,
+    connectedWallet,
+    walletWrongNetwork,
   });
   const kind = submitterKindForOwnerMode(access.mode);
   if (kind === 'daemon') return 'daemon';

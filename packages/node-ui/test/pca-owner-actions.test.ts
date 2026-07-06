@@ -264,22 +264,20 @@ describe('submitterKindForOwnerMode', () => {
 });
 
 // #1470 — the folded cross-account signer-kind planner. Pins byte-fidelity to the old inline
-// `ApproveWalletsModal.signerKindForAccount` + the gate-caught correlation contract: the daemon
-// branch uses the CALLER-PASSED primaryWallet (already-loaded wallets[0]), and the wallet branch
-// depends ONLY on the connected wallet — NEITHER re-fetches the wallet list, so a wallet-list blip
-// can't disarm the R4 lock via a planning/execution desync.
+// `ApproveWalletsModal.signerKindForAccount` + the gate-caught correlation contract: ALL
+// classification inputs (primaryWallet / connectedWallet / walletWrongNetwork) are passed
+// EXPLICITLY — NO ambient wallet-store reads and NO wallet-list refetch — so a wallet-list blip
+// can't disarm the R4 lock via a planning/execution desync, and the only async is `fetchPca`.
 describe('resolveSignerKindForAccount (folded signerKindForAccount)', () => {
   it('daemon: owner == passed primaryWallet ⇒ daemon (no fetchWalletsBalances)', async () => {
     mocks.fetchPca.mockResolvedValue({ owner: HOT });
-    setConnected(HW);
-    expect(await resolveSignerKindForAccount('4', HOT)).toBe('daemon');
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: false })).toBe('daemon');
     expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
   });
 
   it('wallet: owner == connected wallet on the right network ⇒ wallet', async () => {
     mocks.fetchPca.mockResolvedValue({ owner: HW });
-    setConnected(HW);
-    expect(await resolveSignerKindForAccount('4', HOT)).toBe('wallet');
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: false })).toBe('wallet');
     expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
   });
 
@@ -290,31 +288,27 @@ describe('resolveSignerKindForAccount (folded signerKindForAccount)', () => {
   // silently disarmed the renew device prompt / R4 lock.
   it('wallet branch does NOT depend on the node wallet list: primaryWallet undefined ⇒ still wallet', async () => {
     mocks.fetchPca.mockResolvedValue({ owner: HW });
-    setConnected(HW);
-    expect(await resolveSignerKindForAccount('4', undefined)).toBe('wallet');
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: undefined, connectedWallet: HW, walletWrongNetwork: false })).toBe('wallet');
     expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
   });
 
   it('wrong network wallet owner ⇒ undefined (not counted as a device prompt)', async () => {
     mocks.fetchPca.mockResolvedValue({ owner: HW });
-    setConnected(HW, { chainId: 1, expectedChainId: 84532 });
-    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: true })).toBeUndefined();
   });
 
   it('external owner ⇒ undefined', async () => {
     mocks.fetchPca.mockResolvedValue({ owner: EXTERNAL });
-    setConnected(HW);
-    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: false })).toBeUndefined();
   });
 
   it('fetchPca read failure ⇒ undefined (correlated with the execution path)', async () => {
     mocks.fetchPca.mockRejectedValue(new Error('read failed'));
-    setConnected(HW);
-    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+    expect(await resolveSignerKindForAccount({ accountId: '4', primaryWallet: HOT, connectedWallet: HW })).toBeUndefined();
   });
 
   it('no accountId ⇒ undefined (no fetch)', async () => {
-    expect(await resolveSignerKindForAccount(undefined, HOT)).toBeUndefined();
+    expect(await resolveSignerKindForAccount({ accountId: undefined, primaryWallet: HOT, connectedWallet: HW })).toBeUndefined();
     expect(mocks.fetchPca).not.toHaveBeenCalled();
   });
 });

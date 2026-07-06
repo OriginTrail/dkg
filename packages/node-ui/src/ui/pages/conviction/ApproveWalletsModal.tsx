@@ -7,6 +7,7 @@ import {
 } from '../../api.js';
 import { useOwnerActionSubmitter, useOwnerActionSubmitterForAccount, resolveSignerKindForAccount } from '../../pca/ownerActions.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
+import { mayTargetWritePromptWallet, resolvePrimaryWalletState } from '../../pca/ownerAccess.js';
 import { resolveWalletBinding, planSelfCoverage, signableOwnersFor } from '../../pca/walletBinding.js';
 import {
   approveBatchReducer,
@@ -25,7 +26,7 @@ import {
   SponsorshipHandshake,
   CopyButton,
 } from '../../components/Pca/index.js';
-import { useWalletStore } from '../../stores/wallet.js';
+import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -83,6 +84,7 @@ export function ApproveWalletsModal({
   const nodeWallets = wb?.wallets ?? [];
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
   const connectedWallet = useWalletStore((s) => s.address);
+  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   // #1375 — the shared owner-access model for THIS account (drives the managed-target display
   // predicate + the signer candidates). The async, per-account cross-account signer classification
   // now lives in `resolveSignerKindForAccount` (a separate re-fetching seam, inv-16 / P4).
@@ -91,7 +93,7 @@ export function ApproveWalletsModal({
   // PCA as external → pin read-only → fail a valid owner approval. Marking it 'loading'/'unreadable'
   // (⇒ mode 'unknown') routes the resolved submitter through the re-fetching path (which self-heals
   // to daemon once wallets[0] is readable).
-  const primaryWalletState: 'loading' | 'unreadable' | 'ready' = wb ? 'ready' : wbError ? 'unreadable' : 'loading';
+  const primaryWalletState = resolvePrimaryWalletState(wb, wbError);
   const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet, primaryWalletState });
   // Item 3 (#1375) — resolve THIS account's owner submitter ONCE from `access`, so the batch's
   // registerAgent (ALWAYS on the TARGET) submits directly with no per-write owner/wallet re-fetch.
@@ -176,12 +178,12 @@ export function ApproveWalletsModal({
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
   // R4 (#1468) + #1469 — arm the batch's device-progress + cancel/dismiss lock whenever the TARGET
-  // write could open a browser-wallet signature. This is now the single `access.mayPromptWallet`
-  // signing-plan flag (owner-access model): the loaded wallet-owned case AND the load window
+  // write could open a browser-wallet signature. `mayTargetWritePromptWallet` is the pure signing-
+  // plan helper OVER the owner-access model: the loaded wallet-owned case AND the load window
   // (mode 'unknown' with a connected wallet whose address is — or may turn out to be — the owner).
   // runApproveBatch sets `walletBatchSigning`/deviceTotal BEFORE the in-flight wallet action, so a
   // wallet-signed approve never runs under the daemon (no-prompt, freely-dismissable) contract.
-  const targetWalletManaged = access.mayPromptWallet;
+  const targetWalletManaged = mayTargetWritePromptWallet(access, snapshot?.owner, connectedWallet);
   const signableOwners = signableOwnersFor(ownerWallet, connectedWallet);
 
   const run = async () => {
@@ -205,7 +207,8 @@ export function ApproveWalletsModal({
         // Pass this node's already-loaded primary wallet (wallets[0]) so the signer-kind planning
         // stays correlated with the OLD inline predicate — no uncorrelated wallets re-fetch that
         // could disarm the R4 lock on a transient blip (gate finding).
-        signerKindForAccount: (id?: string) => resolveSignerKindForAccount(id, ownerWallet),
+        signerKindForAccount: (id?: string) =>
+          resolveSignerKindForAccount({ accountId: id, primaryWallet: ownerWallet, connectedWallet, walletWrongNetwork }),
         probePca: fetchPca,
         describePcaError,
         onApproved,

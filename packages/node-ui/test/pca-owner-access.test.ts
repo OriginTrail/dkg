@@ -25,7 +25,7 @@ vi.mock('../src/ui/web3/walletOwnerActionSubmitter.js', () => ({
   walletOwnerActionSubmitter: () => ({}),
 }));
 
-const { resolvePcaOwnerAccess } = await import('../src/ui/pca/ownerAccess.js');
+const { resolvePcaOwnerAccess, mayTargetWritePromptWallet, resolvePrimaryWalletState } = await import('../src/ui/pca/ownerAccess.js');
 const { resolveOwnerActionSubmitterKind, submitterKindForOwnerMode } = await import('../src/ui/pca/ownerActions.js');
 
 const HOT = `0x${'11'.repeat(20)}`; // this node's primary operational (daemon) wallet
@@ -148,68 +148,86 @@ describe('resolvePcaOwnerAccess — primaryWalletState load model (#1470)', () =
   });
 });
 
-describe('resolvePcaOwnerAccess — mayPromptWallet truth table (#1469 + R4)', () => {
-  it('(i) loaded wallet-owned, right network ⇒ mayPromptWallet true', () => {
+// `mayTargetWritePromptWallet(access, owner, connectedWallet)` is a pure helper OVER the model
+// (not a field on it). Each case builds `access` then asserts the helper's verdict for the same
+// owner/connectedWallet inputs.
+describe('mayTargetWritePromptWallet — truth table (#1469 + R4)', () => {
+  it('(i) loaded wallet-owned, right network ⇒ true', () => {
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('wallet');
     expect(access.writesEnabled).toBe(true);
-    expect(access.mayPromptWallet).toBe(true);
+    expect(mayTargetWritePromptWallet(access, HW, HW)).toBe(true);
   });
 
-  it('(ii) loaded wallet-owned, WRONG network ⇒ mayPromptWallet false (mode wallet, writesEnabled false)', () => {
+  it('(ii) loaded wallet-owned, WRONG network ⇒ false (mode wallet, writesEnabled false)', () => {
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: true });
     expect(access.mode).toBe('wallet');
     expect(access.writesEnabled).toBe(false);
-    expect(access.mayPromptWallet).toBe(false);
+    expect(mayTargetWritePromptWallet(access, HW, HW)).toBe(false);
   });
 
-  it('(iii) daemon-owned (owner==primary, owner!=connected) ⇒ mayPromptWallet false', () => {
+  it('(iii) daemon-owned (owner==primary, owner!=connected) ⇒ false', () => {
     const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('daemon');
-    expect(access.mayPromptWallet).toBe(false);
+    expect(mayTargetWritePromptWallet(access, HOT, HW)).toBe(false);
   });
 
-  it('(iv) #1469: primaryWalletState loading, owner undefined, connectedWallet set ⇒ mayPromptWallet true', () => {
+  it('(iv) #1469: primaryWalletState loading, owner undefined, connectedWallet set ⇒ true', () => {
     const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('wallets-loading');
-    expect(access.mayPromptWallet).toBe(true);
+    expect(mayTargetWritePromptWallet(access, undefined, HW)).toBe(true);
   });
 
-  it('(v) R4: mode unknown (loading), owner == connectedWallet ⇒ mayPromptWallet true', () => {
+  it('(v) R4: mode unknown (loading), owner == connectedWallet ⇒ true', () => {
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
     expect(access.mode).toBe('unknown');
-    expect(access.mayPromptWallet).toBe(true);
+    expect(mayTargetWritePromptWallet(access, HW, HW)).toBe(true);
   });
 
-  it('(vi) unknown (loading) + NO connected wallet ⇒ mayPromptWallet false', () => {
+  it('(vi) unknown (loading) + NO connected wallet ⇒ false', () => {
     const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: null, primaryWalletState: 'loading' });
     expect(access.mode).toBe('unknown');
-    expect(access.mayPromptWallet).toBe(false);
+    expect(mayTargetWritePromptWallet(access, undefined, null)).toBe(false);
   });
 
-  it('(vii) unknown (loading) + owner present but != connectedWallet ⇒ mayPromptWallet false', () => {
+  it('(vii) unknown (loading) + owner present but != connectedWallet ⇒ false', () => {
     const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
     expect(access.mode).toBe('unknown');
-    expect(access.mayPromptWallet).toBe(false);
+    expect(mayTargetWritePromptWallet(access, EXTERNAL, HW)).toBe(false);
   });
 
-  it("(viii) #1469 wallets-loaded-before-snapshot: owner undefined, primaryWalletState 'ready', connectedWallet set ⇒ no-snapshot + mayPromptWallet true", () => {
+  it("(viii) #1469 wallets-loaded-before-snapshot: owner undefined, primaryWalletState 'ready', connectedWallet set ⇒ no-snapshot + true", () => {
     // Distinct code path from (iv): wallets are READY but the PCA snapshot (owner) isn't loaded
     // yet, so classification falls through to the `!owner` → no-snapshot branch. The lock must
     // still arm for the connected wallet (the resolving submitter confirms the owner call-time).
     const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'ready' });
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('no-snapshot');
-    expect(access.mayPromptWallet).toBe(true);
+    expect(mayTargetWritePromptWallet(access, undefined, HW)).toBe(true);
   });
 
-  it('(ix) loaded EXTERNAL-owned (a wallet is connected but is not the owner) ⇒ mayPromptWallet false', () => {
+  it('(ix) loaded EXTERNAL-owned (a wallet is connected but is not the owner) ⇒ false', () => {
     // Locks the `external` branch against a future fall-through: an external owner can never open a
     // wallet prompt (the connected wallet isn't the owner), so the lock must stay disarmed.
     const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('external');
-    expect(access.mayPromptWallet).toBe(false);
+    expect(mayTargetWritePromptWallet(access, EXTERNAL, HW)).toBe(false);
+  });
+});
+
+describe('resolvePrimaryWalletState', () => {
+  it('data present ⇒ ready (even with a stale error)', () => {
+    expect(resolvePrimaryWalletState({ wallets: [HOT] }, null)).toBe('ready');
+    expect(resolvePrimaryWalletState({ wallets: [] }, new Error('stale'))).toBe('ready');
+  });
+  it('no data + error ⇒ unreadable', () => {
+    expect(resolvePrimaryWalletState(null, new Error('balances down'))).toBe('unreadable');
+    expect(resolvePrimaryWalletState(undefined, 'boom')).toBe('unreadable');
+  });
+  it('no data + no error ⇒ loading', () => {
+    expect(resolvePrimaryWalletState(null, null)).toBe('loading');
+    expect(resolvePrimaryWalletState(undefined, undefined)).toBe('loading');
   });
 });
 
