@@ -29,6 +29,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { makeClient, parseArgs, resolveToken } from './lib/dkg-daemon.mjs';
+import { buildProjectOntologyTriples } from './lib/ontology.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,59 +61,12 @@ if (!fs.existsSync(GUIDE_PATH)) {
 
 const ttl = fs.readFileSync(TTL_PATH, 'utf-8');
 const guide = fs.readFileSync(GUIDE_PATH, 'utf-8');
-
-// Ontology entity URI is stable per project so re-imports replace
-// rather than duplicate. Guide is a sub-document via dcterms:references.
-const ontologyUri = `urn:dkg:project:${PROJECT_ID}:ontology`;
-const guideUri = `urn:dkg:project:${PROJECT_ID}:ontology:agent-guide`;
-const nowIso = new Date().toISOString();
-
-const NS = {
-  rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-  rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
-  schema: 'http://schema.org/',
-  dcterms: 'http://purl.org/dc/terms/',
-  xsd: 'http://www.w3.org/2001/XMLSchema#',
-  prov: 'http://www.w3.org/ns/prov#',
-  owl: 'http://www.w3.org/2002/07/owl#',
-};
-
-const escLit = (s) =>
-  String(s)
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\n/g, '\\n')
-    .replace(/\r/g, '\\r')
-    .replace(/\t/g, '\\t');
-
-const lit = (v, dt) => (dt ? `"${escLit(v)}"^^<${dt}>` : `"${escLit(v)}"`);
-
-const triples = [
-  // Ontology entity
-  { subject: ontologyUri, predicate: NS.rdf + 'type', object: NS.owl + 'Ontology' },
-  { subject: ontologyUri, predicate: NS.rdf + 'type', object: NS.prov + 'Entity' },
-  { subject: ontologyUri, predicate: NS.rdfs + 'label', object: lit(`Project ontology — ${PROJECT_ID}`) },
-  { subject: ontologyUri, predicate: NS.schema + 'name', object: lit(`Project ontology — ${PROJECT_ID}`) },
-  { subject: ontologyUri, predicate: NS.dcterms + 'title', object: lit(`Project ontology — ${PROJECT_ID}`) },
-  { subject: ontologyUri, predicate: NS.dcterms + 'description', object: lit(`The active ontology for context graph ${PROJECT_ID}, derived from the '${STARTER}' starter.`) },
-  { subject: ontologyUri, predicate: NS.dcterms + 'created', object: lit(nowIso, NS.xsd + 'dateTime') },
-  { subject: ontologyUri, predicate: NS.dcterms + 'modified', object: lit(nowIso, NS.xsd + 'dateTime') },
-  { subject: ontologyUri, predicate: NS.dcterms + 'source', object: lit(STARTER) },
-  { subject: ontologyUri, predicate: NS.schema + 'encodingFormat', object: lit('text/turtle') },
-  { subject: ontologyUri, predicate: NS.schema + 'text', object: lit(ttl) },
-  { subject: ontologyUri, predicate: NS.dcterms + 'references', object: guideUri },
-
-  // Agent guide as a sub-document
-  { subject: guideUri, predicate: NS.rdf + 'type', object: NS.schema + 'DigitalDocument' },
-  { subject: guideUri, predicate: NS.rdfs + 'label', object: lit(`Agent guide — ${PROJECT_ID} ontology`) },
-  { subject: guideUri, predicate: NS.schema + 'name', object: lit(`Agent guide — ${PROJECT_ID} ontology`) },
-  { subject: guideUri, predicate: NS.dcterms + 'title', object: lit(`Agent guide — ${PROJECT_ID} ontology`) },
-  { subject: guideUri, predicate: NS.dcterms + 'created', object: lit(nowIso, NS.xsd + 'dateTime') },
-  { subject: guideUri, predicate: NS.dcterms + 'modified', object: lit(nowIso, NS.xsd + 'dateTime') },
-  { subject: guideUri, predicate: NS.schema + 'encodingFormat', object: lit('text/markdown') },
-  { subject: guideUri, predicate: NS.schema + 'text', object: lit(guide) },
-  { subject: guideUri, predicate: NS.schema + 'about', object: ontologyUri },
-];
+const { ontologyUri, guideUri, quads: triples } = buildProjectOntologyTriples({
+  contextGraphId: PROJECT_ID,
+  starterSlug: STARTER,
+  ttl,
+  guide,
+});
 
 console.log(
   `[ontology] Produced ${triples.length} triples from ${STARTER} starter:\n` +

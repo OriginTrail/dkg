@@ -42,6 +42,7 @@ export const NS = {
   schema: 'http://schema.org/',
   dcterms: 'http://purl.org/dc/terms/',
   foaf: 'http://xmlns.com/foaf/0.1/',
+  owl: 'http://www.w3.org/2002/07/owl#',
   // Standard PROV-O — used for cross-cutting attribution that any
   // DKG-aware UI can rely on without knowing domain ontologies.
   prov: 'http://www.w3.org/ns/prov#',
@@ -462,6 +463,69 @@ export function lit(value, datatype = null, lang = null) {
   if (lang) return `"${esc}"@${lang}`;
   if (datatype) return `"${esc}"^^<${datatype}>`;
   return `"${esc}"`;
+}
+
+const IRI_OBJECT_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
+
+/**
+ * Object terms sent to `/wm/write` use the daemon JSON contract:
+ * resource objects are raw absolute IRIs, not N-Triples `<iri>` tokens.
+ */
+export function iriObject(value) {
+  const object = String(value);
+  if (!IRI_OBJECT_RE.test(object)) {
+    throw new Error(`Invalid RDF object IRI for /wm/write: ${object}`);
+  }
+  return object;
+}
+
+export function literalObject(value) {
+  return lit(value);
+}
+
+export function typedLiteralObject(value, datatypeIri) {
+  return lit(value, iriObject(datatypeIri));
+}
+
+export function buildProjectOntologyTriples({
+  contextGraphId,
+  starterSlug,
+  ttl,
+  guide,
+  nowIso = new Date().toISOString(),
+}) {
+  if (!contextGraphId) throw new Error('contextGraphId is required');
+  if (!starterSlug) throw new Error('starterSlug is required');
+
+  const ontologyUri = iriObject(`urn:dkg:project:${contextGraphId}:ontology`);
+  const guideUri = iriObject(`${ontologyUri}:agent-guide`);
+
+  const quads = [
+    { subject: ontologyUri, predicate: NS.rdf + 'type', object: iriObject(NS.owl + 'Ontology') },
+    { subject: ontologyUri, predicate: NS.rdf + 'type', object: iriObject(NS.prov + 'Entity') },
+    { subject: ontologyUri, predicate: NS.rdfs + 'label', object: literalObject(`Project ontology — ${contextGraphId}`) },
+    { subject: ontologyUri, predicate: NS.schema + 'name', object: literalObject(`Project ontology — ${contextGraphId}`) },
+    { subject: ontologyUri, predicate: NS.dcterms + 'title', object: literalObject(`Project ontology — ${contextGraphId}`) },
+    { subject: ontologyUri, predicate: NS.dcterms + 'description', object: literalObject(`The active ontology for context graph ${contextGraphId}, derived from the '${starterSlug}' starter.`) },
+    { subject: ontologyUri, predicate: NS.dcterms + 'created', object: typedLiteralObject(nowIso, NS.xsd + 'dateTime') },
+    { subject: ontologyUri, predicate: NS.dcterms + 'modified', object: typedLiteralObject(nowIso, NS.xsd + 'dateTime') },
+    { subject: ontologyUri, predicate: NS.dcterms + 'source', object: literalObject(starterSlug) },
+    { subject: ontologyUri, predicate: NS.schema + 'encodingFormat', object: literalObject('text/turtle') },
+    { subject: ontologyUri, predicate: NS.schema + 'text', object: literalObject(ttl) },
+    { subject: ontologyUri, predicate: NS.dcterms + 'references', object: iriObject(guideUri) },
+
+    { subject: guideUri, predicate: NS.rdf + 'type', object: iriObject(NS.schema + 'DigitalDocument') },
+    { subject: guideUri, predicate: NS.rdfs + 'label', object: literalObject(`Agent guide — ${contextGraphId} ontology`) },
+    { subject: guideUri, predicate: NS.schema + 'name', object: literalObject(`Agent guide — ${contextGraphId} ontology`) },
+    { subject: guideUri, predicate: NS.dcterms + 'title', object: literalObject(`Agent guide — ${contextGraphId} ontology`) },
+    { subject: guideUri, predicate: NS.dcterms + 'created', object: typedLiteralObject(nowIso, NS.xsd + 'dateTime') },
+    { subject: guideUri, predicate: NS.dcterms + 'modified', object: typedLiteralObject(nowIso, NS.xsd + 'dateTime') },
+    { subject: guideUri, predicate: NS.schema + 'encodingFormat', object: literalObject('text/markdown') },
+    { subject: guideUri, predicate: NS.schema + 'text', object: literalObject(guide) },
+    { subject: guideUri, predicate: NS.schema + 'about', object: iriObject(ontologyUri) },
+  ];
+
+  return { ontologyUri, guideUri, quads };
 }
 
 /** Emit-safe triple sink with dedup. */
