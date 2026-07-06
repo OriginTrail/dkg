@@ -414,6 +414,153 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // R4 (#1468) — the LOADING-WINDOW race: when the PCA snapshot loads BEFORE the wallet balances,
+  // the target access is `unknown` (walletsUnknown self-heal), but the resolved submitter still
+  // re-fetches and routes a connected-wallet-owned target through the BROWSER-WALLET signer. The
+  // batch must still arm the wallet-signing lock (device progress + dismiss/cancel guard) so a
+  // real wallet signature never runs under the daemon (no-prompt, freely-dismissable) contract.
+  // Without the targetWalletManaged loading-window pessimism this times out (no device row, lock
+  // never set) even though walletRegisterAgent is about to open a device prompt.
+  it('loading-window (snapshot before wallets): a connected-owner target still arms the wallet-signing lock', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Snapshot resolves immediately as connected-wallet-owned; the wallet balances stay PENDING
+    // through the assertion, so `wb` is undefined and access.mode === 'unknown' at click time.
+    mocks.fetchPca.mockResolvedValue(ownedSnap(CONNECTED_OWNER, { accountId: '8' }));
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    // The wallet write stays in-flight so the device prompt/lock is observable while it pends.
+    let resolveRegister!: (value: unknown) => void;
+    mocks.walletRegisterAgent.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveRegister = resolve; }),
+    );
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    // The lock + device step are armed from the render-time targetWalletManaged, BEFORE the
+    // resolving submitter finishes — proving the loading-window write is treated as wallet-signed.
+    await waitForText(container, 'Confirm on your device');
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(true);
+    // Dismissal is blocked while the wallet action is in flight.
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Now let the balances + the wallet signature complete → the connected wallet actually signed.
+    resolveBalances({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    resolveRegister({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true, txHash: '0xwalletreg' });
+    await waitForText(container, 'approved on-chain');
+    expect(mocks.walletRegisterAgent).toHaveBeenCalledWith('8', ADDR_A); // routed to the WALLET signer
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // never the daemon (no-prompt) path
+    await unmount();
+  });
+
+  // R4 (#1468) — the INVERSE guard: pins the `sameAddress(owner, connectedWallet)` conjunct as
+  // load-bearing. A DAEMON-owned target during the same load window (owner known + != the connected
+  // wallet, wallets still pending) must NOT be falsely marked wallet-managed: no device row, dismiss
+  // stays enabled, and the write self-heals to the DAEMON (pcaAddAgent) once wallets load — never the
+  // browser wallet. Without the conjunct (i.e. arming on `unknown` alone) a daemon approve would be
+  // spuriously locked; this test catches that regression.
+  it('loading-window: a DAEMON-owned target (owner != connected wallet) is NOT falsely locked, self-heals to daemon', async () => {
+    // A wallet IS connected, but it is NOT the owner — the owner is the node's daemon EOA.
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchPca.mockResolvedValue(daemonSnap({ accountId: '8' })); // owner == DEFAULT_NODE_WALLET != CONNECTED_OWNER
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approving'); // batch started; the write is parked on the pending balances
+    // NO false wallet lock for the daemon-owned target during the load window.
+    expect(container.textContent).not.toContain('Confirm on your device');
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(false);
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeNull();
+
+    resolveBalances({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    await waitForText(container, 'approved');
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A); // daemon self-heal, not the wallet
+    expect(mocks.walletRegisterAgent).not.toHaveBeenCalled();
+    await unmount();
+  });
+
+  // #1469 — the SNAPSHOT-load window (sibling of R4's wallets-load window): when the PCA snapshot
+  // (owner) hasn't loaded at click but the WALLETS have and a wallet is connected, the target access
+  // is `unknown` (no-snapshot) and `mayTargetWritePromptWallet` arms on `!owner`. So a connected-owner
+  // target that resolves to the wallet still runs under the wallet-signing lock, never the daemon's
+  // no-prompt / freely-dismissable contract. RED without the fix (targetWalletManaged =
+  // access.mode==='wallet' && access.writesEnabled): the owner-undefined click never arms the lock →
+  // the wallet write opens a device prompt with the lock off / times out. seedBulk enables immediate
+  // sponsor-mode submit while the snapshot is still pending.
+  it('no-snapshot window (wallets before snapshot): a connected-owner target arms the wallet-signing lock before the snapshot loads, then wallet-signs', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Wallets resolve normally; the PCA SNAPSHOT (fetchPca) stays PENDING through the click, so at
+    // submit `snapshot` is undefined ⇒ access.mode 'unknown' (no-snapshot) ⇒ the #1469 lock arm.
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    let resolveSnapshot!: (value: unknown) => void;
+    const snapshotPromise = new Promise((resolve) => { resolveSnapshot = resolve; });
+    mocks.fetchPca.mockImplementation(() => snapshotPromise as any);
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    // The lock + device step arm from the render-time targetWalletManaged (owner undefined +
+    // connected wallet ⇒ mayTargetWritePromptWallet), BEFORE the snapshot re-fetch resolves.
+    await waitForText(container, 'Confirm on your device');
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Resolve the snapshot (owner == connected wallet) → the parked register routes to the WALLET.
+    resolveSnapshot(ownedSnap(CONNECTED_OWNER, { accountId: '8' }));
+    await waitForText(container, 'approved on-chain');
+    expect(mocks.walletRegisterAgent).toHaveBeenCalledWith('8', ADDR_A); // routed to the WALLET signer
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // never the daemon (no-prompt) path
+    await unmount();
+  });
+
   it('wallet-managed renew progress counts only wallet-signed writes, not daemon deregisters', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,
@@ -787,6 +934,58 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     expect(container.textContent).not.toContain('approving…');
     expect(statusOf(container, ADDR_B).textContent?.toLowerCase()).toContain('aborted');
     expect(statusOf(container, ADDR_C).textContent?.toLowerCase()).toContain('aborted');
+    await unmount();
+  });
+
+  // MIXED-OWNER self-coverage (item 3 / #1375 P4) — deregisterSelf frees a wallet from its
+  // OWN-bound prevAccount, which can be owned DIFFERENTLY than the target. It must resolve the
+  // submitter PER-ACCOUNT (the resolving path), NOT reuse the target's resolve-once access-path
+  // submitter. Here the target #8 is DAEMON-owned but ADDR_B's prevAccount #9 is CONNECTED-WALLET
+  // -owned: the deregister must route through the WALLET submitter (owner of #9), never the daemon
+  // (which would revert NotAccountOwner). Guards the P4 regression the resolve-once refactor risked.
+  it('mixed-owner self-coverage: frees a wallet from its wallet-owned prevAccount via the WALLET submitter, while the daemon-owned target registers via the daemon', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Target #8 owner == wallets[0] (ADDR_A) → daemon-owned target (access.submitterKind='daemon').
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [ADDR_A, ADDR_B], balances: [], chainId: '84532', rpcUrl: null });
+    // ADDR_A unbound (registers directly); ADDR_B bound to #9.
+    mocks.pcaAgentAccount.mockImplementation(async (w: string) =>
+      w === ADDR_B ? { agent: w, accountId: '9' } : { agent: w, accountId: null },
+    );
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      // prevAccount #9 is CONNECTED-WALLET-owned + LIVE → own-bound via the connected wallet.
+      if (id === '9') return ownedSnap(CONNECTED_OWNER, { accountId: '9', baseEpochAllowance: '1000000000000000000000' });
+      // Target #8 is daemon-owned (owner == wallets[0] == ADDR_A).
+      const current = ownedSnap(ADDR_A, { accountId: '8' });
+      return key ? { ...current, probedKey: { key, registered: false } } : current;
+    });
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, { accountId: '8', initialMode: 'self', selfCoverage: true, onClose: vi.fn() }),
+    );
+    await waitForText(container, 'slots used');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approved on-chain');
+
+    // THE PIN: ADDR_B is freed from the wallet-owned #9 via the WALLET submitter (resolved for #9),
+    // not the daemon-owned target's access-path submitter.
+    expect(mocks.walletDeregisterAgent).toHaveBeenCalledWith('9', ADDR_B);
+    // The daemon NEVER attempts to deregister from the wallet-owned account (would revert on-chain).
+    expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
+    // Both wallets register on the daemon-owned target via the daemon submitter.
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A);
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_B);
+    // Deregister-from-old precedes register-on-new for the moved wallet.
+    const addBIdx = mocks.pcaAddAgent.mock.calls.findIndex((c) => c[1] === ADDR_B);
+    expect(mocks.walletDeregisterAgent.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.pcaAddAgent.mock.invocationCallOrder[addBIdx]);
     await unmount();
   });
 });

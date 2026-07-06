@@ -156,6 +156,22 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('non-owner: gates top-up, approve, AND renew, while the wallet probe stays enabled (§8A matrix)', async () => {
+    // Guards the section split (#1348): the single ownerWritesEnabled gate must
+    // reach EVERY owner-write control across FundingSection / PublishingWalletsSection /
+    // LifecycleSection — not silently drop on approve or renew — and must NOT gate the probe.
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: ['0xSomeoneElse0000000000000000000000000000'], balances: [], chainId: '84532', rpcUrl: null });
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Owner-only');
+    const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
+    expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    expect(byText('Approve publishing wallet')?.disabled).toBe(true);
+    // The wallet probe is deliberately ungated — available to everyone.
+    expect(byText('Probe')?.disabled).toBe(false);
+    await unmount();
+  });
+
   it('does not render deferred settlement or context-graph controls', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
@@ -194,6 +210,41 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await waitForText(container, "can't confirm ownership");
     expect(container.textContent).not.toContain('isn’t the owner');
     expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(true);
+    await unmount();
+  });
+
+  // #1470 loading-window flash fix — while the wallet balances LOAD, a daemon-owned PCA must show a
+  // neutral "Confirming ownership…" affordance (unknown/loading): NOT a read-only/external
+  // "Owner-only" flash, and NOT a false "Couldn't load"/Retry (they haven't failed, they're
+  // loading). Owner controls stay gated for the brief window, then enable once balances resolve.
+  // RED without the split: old `walletsUnknown = !wb && !!wbError` was FALSE during loading, so a
+  // wallets[0]-undefined daemon PCA misclassified as external → "Owner-only" + read-only.
+  it('loading-window: a daemon-owned PCA reads "Confirming ownership…" (no error/Retry, not Owner-only) while balances load, then enables once ready', async () => {
+    // Snapshot resolves daemon-owned (owner == W0). Balances stay PENDING → wallet list loading.
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    // During the balances load: neutral loading affordance, NOT a false error and NOT a definitive
+    // non-owner; writes gated. (Renew needs no amount input, so its disabled state is a clean gate.)
+    await waitForText(container, 'Confirming ownership');
+    expect(container.textContent).not.toContain('Owner-only');
+    expect(container.textContent).not.toContain("Couldn't load this node's wallets"); // no false failure copy
+    expect(container.textContent).not.toContain("can't confirm ownership");
+    expect(container.textContent).not.toContain('isn’t the owner');
+    expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(false); // no Retry while loading
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    // Balances resolve as this node's wallet (== owner W0) → daemon-owned → owner controls enable.
+    await act(async () => {
+      resolveBalances({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
+    });
+    const started = Date.now();
+    while (Date.now() - started < 1500 && btn(container, '[data-testid="pca-renew-btn"]')?.disabled) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(false);
+    expect(container.textContent).not.toContain('Confirming ownership');
     await unmount();
   });
 
@@ -288,6 +339,34 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  it('M9 — a mined-but-REVERTED pending top-up clears the marker + shows the revert error, never a false success', async () => {
+    // usePendingTopUpReconciliation fund-sensitive recovery branch: a reverted receipt
+    // must NOT present a failed top-up as confirmed, and must free the button (clear pending).
+    const getTransactionReceipt = vi.fn(async ({ hash }: { hash: string }) => {
+      expect(hash).toBe('0xpendingtopup');
+      return { status: 'reverted' };
+    });
+    mocks.publicClientFor.mockReturnValue({ getTransactionReceipt });
+    usePcaStore.setState({
+      topUpPending: {
+        '7': {
+          accountId: '7',
+          ownerEoa: W0,
+          submittedAt: Date.now(),
+          txHash: '0xpendingtopup',
+          tokens: '100',
+          previousTopUpBufferTrac: '12500.0',
+        },
+      },
+    });
+    mocks.fetchWalletsBalances.mockResolvedValue(OWNER_WB);
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'The pending top-up transaction reverted on-chain.');
+    expect(usePcaStore.getState().topUpPending['7']).toBeUndefined();
+    expect(container.textContent).not.toContain('Top-up confirmed on-chain.');
+    await unmount();
+  });
+
   it('wallet top-up action rejection after approval uses step-aware allowance copy', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,
@@ -327,7 +406,14 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
     await waitForText(container, 'Owner wallet matches; switch network before signing owner actions.');
     expect(container.textContent).not.toContain('Connected owner wallet will sign');
+    // T4 (#1468) — the wrong-network gate must reach EVERY owner-write control across the
+    // Funding / PublishingWallets / Lifecycle sections, not just top-up.
+    const byText = (t: string) => Array.from(container.querySelectorAll('button')).find((b) => (b.textContent ?? '').includes(t));
     expect(btn(container, '[data-testid="pca-topup-btn"]').disabled).toBe(true);
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    expect(byText('Approve publishing wallet')?.disabled).toBe(true);
+    // ...but the wallet probe stays available to everyone (deliberately ungated).
+    expect(byText('Probe')?.disabled).toBe(false);
     await unmount();
   });
 

@@ -10,7 +10,7 @@
  * sampling WAL because those files reference chain entities (KC ids,
  * merkle roots, challenge periods) that no longer exist after the chain
  * is redeployed. Without this auto-wipe, every operator has to do it by
- * hand — see docs/TESTNET_RESET.md Phase C for the manual drill.
+ * hand — see docs/archive/internal/TESTNET_RESET.md Phase C for the manual drill.
  *
  * With this hook, the maintainer simply bumps
  * `network/testnet.json#chainResetMarker` to a fresh value as part of the
@@ -39,9 +39,20 @@
  *   installs hit this branch too but have nothing to wipe → no harm.
  * - Persisted == current → no wipe, idempotent.
  * - Persisted != current → wipe + save new marker.
+ * - `DKG_SKIP_CHAIN_RESET_WIPE=1` (dev-loop opt-out) → bypass the wipe
+ *   entirely and DON'T persist the marker, so unsetting it re-triggers the
+ *   wipe next boot. The operator guarantee is untouched: a real operator
+ *   node with the env var unset still wipes by default on a marker change.
+ * - `store.nq` is ALWAYS backed up, not deleted: it is RENAMED to
+ *   `store.nq.pre-wipe-<marker>-<ts>` (marker bounded to 120 chars) so a
+ *   wrongly-triggered wipe is recoverable by moving the file back. The active
+ *   store is still cleared from its live path, so the wipe invariant holds.
+ *   Rotation retains the newest `MAX_STORE_BACKUPS` (3) snapshots, ranked by
+ *   filesystem mtime; the snapshot made this run is always retained.
  *
- * Files wiped: `store.nq`, `store.nq.tmp`, `random-sampling.wal`,
- *              `publish-journal.*` (all variants from publisher-runner).
+ * Files wiped: `store.nq` (always backed up, see above), `store.nq.tmp`,
+ *              `random-sampling.wal`, `publish-journal.*` (all variants from
+ *              publisher-runner).
  *
  * Files preserved: `wallets.json` (operator identity), `auth.token`,
  *              `config.json`, `node-ui.db` (dashboard state),
@@ -51,7 +62,16 @@
  * constant across resets, and `ensureProfile` re-derives the on-chain
  * identityId on the new chain cleanly.
  */
-import { existsSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  rmSync,
+  renameSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint } from '@origintrail-official/dkg-storage';
 
@@ -122,10 +142,24 @@ const SPARQL_SCOPED_DELETE =
 export interface ChainResetWipeResult {
   /** True when a wipe was performed. */
   wiped: boolean;
+  /**
+   * True when a wipe WOULD have run (marker mismatch) but was bypassed
+   * because `skip` was set (`DKG_SKIP_CHAIN_RESET_WIPE=1`). Mutually
+   * exclusive with `wiped`. The marker is deliberately NOT persisted on a
+   * skip, so the wipe re-triggers once the env var is unset.
+   */
+  skipped: boolean;
   /** The marker we had persisted before this boot, or null on first boot / no persisted state. */
   prevMarker: string | null;
   /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
   removedFiles: string[];
+  /**
+   * `store.nq` backup filenames created by renaming it instead of deleting it
+   * (relative to dataDir, `store.nq.pre-wipe-<marker>-<ts>`). Backup is
+   * always-on; this is empty only when the wipe ran with no `store.nq`
+   * present (or the rename failed — then the failure is in `failedFiles`).
+   */
+  backedUpFiles: string[];
   /**
    * Files we attempted to wipe but could not remove. When non-empty, the
    * marker is intentionally not persisted so the wipe retries on next boot.
@@ -164,8 +198,30 @@ export interface ChainResetWipeOptions {
    * so parallel test cases don't race.
    */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Dev-loop opt-out. Sourced from `process.env.DKG_SKIP_CHAIN_RESET_WIPE === '1'`
+   * in production (tests pass it explicitly). When `true` and a wipe WOULD run
+   * (marker mismatch, including first-boot-with-marker), the wipe is bypassed
+   * entirely AND the marker is NOT persisted — so unsetting the env var later
+   * re-triggers the wipe on the next boot. This keeps the operator guarantee
+   * intact (a real operator node with the flag unset still wipes by default)
+   * while letting monorepo developers switch between marker-pinned worktrees
+   * without losing their local `store.nq`. Mirrors the `acceptStoreReset` /
+   * `acceptNetworkSwitch` env-opt-out pattern used by the sibling detectors.
+   */
+  skip?: boolean;
   /** Optional logger. Defaults to no-op so the function is silent in tests by default. */
   log?: (msg: string) => void;
+}
+
+/**
+ * Read the dev-loop opt-out switch. Extracted (and exported) so the
+ * documented user-facing env var `DKG_SKIP_CHAIN_RESET_WIPE=1` is unit
+ * testable without mutating the real `process.env`. `'1'` (exactly) enables
+ * the opt-out; anything else (unset, `'0'`, `'true'`) leaves the wipe on.
+ */
+export function skipChainResetWipe(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.DKG_SKIP_CHAIN_RESET_WIPE === '1';
 }
 
 function loadState(dataDir: string): PersistedNetworkState | null {
@@ -287,12 +343,164 @@ async function performExternalWipe(
   }
 }
 
+const STORE_BACKUP_PREFIX = 'store.nq.pre-wipe-';
+
+/** Number of `store.nq.pre-wipe-*` recovery snapshots retained after rotation. */
+const MAX_STORE_BACKUPS = 3;
+
+/**
+ * Pure rotation policy: given every `store.nq.pre-wipe-*` entry (name + mtime),
+ * return the names to EVICT so that only the newest `max` snapshots remain.
+ *
+ * `keepName` is the backup created THIS run: it is dropped from the candidate
+ * set up front and can never be returned for eviction, so a non-monotonic wall
+ * clock (NTP step-back, VM snapshot/restore) can never evict the fresh recovery
+ * snapshot the wipe just made — that would silently defeat the recoverability
+ * this backup exists for. It occupies one of the `max` slots, so we retain the
+ * newest `max - 1` of the OTHER backups (ranked by mtime DESC; an unreadable
+ * stat is passed in as mtimeMs 0 = oldest, so a broken file is evicted first)
+ * and return the remainder. No filesystem, no logging — a plain-input seam
+ * that is unit-testable in isolation.
+ */
+export function selectBackupsToRotate(
+  entries: { name: string; mtimeMs: number }[],
+  keepName: string,
+  max: number,
+): string[] {
+  const keepOthers = Math.max(0, max - 1);
+  // Clone before sorting so this stays non-mutating even if the filter (which
+  // currently returns a fresh array) is later reordered or removed.
+  return [...entries]
+    .filter((e) => e.name !== keepName)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs) // newest first
+    .slice(keepOthers)
+    .map((e) => e.name);
+}
+
+/**
+ * Rotate `store.nq.pre-wipe-*` backups down to the newest `MAX_STORE_BACKUPS`
+ * snapshots. Side-effectful shell around the pure {@link selectBackupsToRotate}
+ * policy: read the dir, stat each backup (unreadable → mtimeMs 0 = oldest),
+ * then `rmSync` the names the policy selects. Best-effort throughout: any
+ * failure (listing, stat, unlink) is logged as a WARN and swallowed — rotation
+ * must never fail a wipe or a boot, and never contributes to `failedFiles`.
+ * `keepName` (the backup created this run) is always retained by the policy.
+ */
+function rotateStoreBackups(
+  dataDir: string,
+  keepName: string,
+  log: (msg: string) => void,
+): void {
+  try {
+    const entries = readdirSync(dataDir)
+      .filter((f) => f.startsWith(STORE_BACKUP_PREFIX))
+      .map((name) => {
+        // Rank by filesystem mtime (robust to clock steps and to markers that
+        // embed dates). An unreadable stat → mtimeMs 0 = treated oldest, so a
+        // broken backup file is the first to be rotated out.
+        let mtimeMs: number;
+        try {
+          mtimeMs = statSync(join(dataDir, name)).mtimeMs;
+        } catch {
+          mtimeMs = 0;
+        }
+        return { name, mtimeMs };
+      });
+
+    for (const staleName of selectBackupsToRotate(entries, keepName, MAX_STORE_BACKUPS)) {
+      try {
+        rmSync(join(dataDir, staleName), { force: true });
+        log(`  rotated out old store backup: ${staleName}`);
+      } catch (err) {
+        log(`  WARN: failed to rotate out old store backup ${staleName}: ${(err as Error).message}`);
+      }
+    }
+  } catch (err) {
+    log(`  WARN: failed to rotate store backups: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Back up `store.nq` (ALWAYS, never a hard delete) by renaming it — O(1) on the
+ * same filesystem — to `store.nq.pre-wipe-<marker>-<ts>`, so a wrongly-triggered
+ * wipe is recoverable by moving the file back; rotation then bounds disk to
+ * MAX_STORE_BACKUPS snapshots. The active store still leaves its live path, so
+ * the operator wipe invariant holds. A rename failure is treated exactly like a
+ * wipe failure (pushed to `failedFiles`) so the marker isn't persisted and the
+ * wipe retries next boot. Returns the backup/failure entries for the caller to
+ * merge; no-ops (empty arrays) when there is no `store.nq`.
+ */
+function backupStoreNq(
+  dataDir: string,
+  currentMarker: string,
+  log: (msg: string) => void,
+): { backedUpFiles: string[]; failedFiles: Array<{ file: string; error: string }> } {
+  const backedUpFiles: string[] = [];
+  const failedFiles: Array<{ file: string; error: string }> = [];
+
+  const storeAbs = join(dataDir, 'store.nq');
+  if (!existsSync(storeAbs)) {
+    return { backedUpFiles, failedFiles };
+  }
+
+  // Bound the marker portion so the total filename stays well under the
+  // 255-byte path-component limit (ENAMETOOLONG would otherwise make the
+  // rename fail → failedFiles → re-wipe every boot for long markers).
+  // Uniqueness comes from the trailing timestamp, not the marker, so
+  // truncation is safe; the RAW marker still persists in .network-state.json.
+  const sanitizedMarker = String(currentMarker)
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 120);
+  const now = Date.now();
+  // Collision-safe target: renameSync silently OVERWRITES an existing file, so
+  // if this exact name already exists (same truncated marker AND same ms —
+  // unreachable in practice, but a silent-data-loss path on a recovery feature)
+  // we must not clobber the prior backup. Append a counter until the name is
+  // free, so store.nq only leaves its live path onto a guaranteed-unique target.
+  const base = `${STORE_BACKUP_PREFIX}${sanitizedMarker}-${now}`;
+  let backupName = base;
+  for (let n = 1; existsSync(join(dataDir, backupName)); n++) {
+    backupName = `${base}-${n}`;
+  }
+
+  try {
+    renameSync(storeAbs, join(dataDir, backupName));
+    // Stamp the backup's mtime to NOW. `renameSync` preserves store.nq's
+    // CONTENT mtime, which can be far older than this backup's creation (the
+    // #679 dev case: store.nq untouched between quick branch switches). If
+    // rotation ranked by that inherited mtime it could evict a NEWER recovery
+    // snapshot and keep an older one — so we make mtime reflect backup-creation
+    // time. Best-effort: on failure the keepName exemption still protects the
+    // fresh snapshot this run, so a missed stamp never loses today's backup.
+    try {
+      utimesSync(join(dataDir, backupName), new Date(now), new Date(now));
+    } catch (err) {
+      log(`  WARN: could not stamp backup mtime for ${backupName}: ${(err as Error).message}`);
+    }
+    backedUpFiles.push(backupName);
+    log(`  backed up: store.nq → ${backupName}`);
+    rotateStoreBackups(dataDir, backupName, log);
+  } catch (err) {
+    const message = (err as Error).message;
+    failedFiles.push({ file: 'store.nq', error: message });
+    log(`  WARN: failed to back up store.nq → ${backupName}: ${message}`);
+  }
+
+  return { backedUpFiles, failedFiles };
+}
+
 function performWipe(
   dataDir: string,
   walPath: string | undefined,
   log: (msg: string) => void,
-): { removedFiles: string[]; failedFiles: Array<{ file: string; error: string }> } {
+  backup: { currentMarker: string },
+): {
+  removedFiles: string[];
+  backedUpFiles: string[];
+  failedFiles: Array<{ file: string; error: string }>;
+} {
   const removedFiles: string[] = [];
+  const backedUpFiles: string[] = [];
   const failedFiles: Array<{ file: string; error: string }> = [];
 
   // wipeAbs: wipe an absolute path, log under a display label. We log the
@@ -312,7 +520,13 @@ function performWipe(
     }
   };
 
-  wipeAbs(join(dataDir, 'store.nq'), 'store.nq');
+  // store.nq: always backed up (never hard-deleted), delegated to
+  // backupStoreNq which owns the rename + mtime stamp + rotation and reports
+  // its backup/failure entries for us to merge.
+  const storeBackup = backupStoreNq(dataDir, backup.currentMarker, log);
+  backedUpFiles.push(...storeBackup.backedUpFiles);
+  failedFiles.push(...storeBackup.failedFiles);
+
   wipeAbs(join(dataDir, 'store.nq.tmp'), 'store.nq.tmp');
 
   // Random sampling WAL: wipe the resolved runtime path (which the
@@ -323,7 +537,7 @@ function performWipe(
     ? walPath
     : join(dataDir, 'random-sampling.wal');
   const walLabel = walAbs.startsWith(dataDir)
-    ? walAbs.slice(dataDir.length).replace(/^\/+/, '')
+    ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
 
@@ -347,7 +561,7 @@ function performWipe(
   }
 
   for (const f of removedFiles) log(`  removed: ${f}`);
-  return { removedFiles, failedFiles };
+  return { removedFiles, backedUpFiles, failedFiles };
 }
 
 export async function chainResetWipe(
@@ -360,14 +574,29 @@ export async function chainResetWipe(
   // touched so we don't accidentally turn on the protocol later just
   // because some leftover state file made the comparison non-trivial.
   if (opts.currentMarker === undefined) {
-    return { wiped: false, prevMarker: null, removedFiles: [], failedFiles: [] };
+    return { wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   const prev = loadState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
-    return { wiped: false, prevMarker, removedFiles: [], failedFiles: [] };
+    return { wiped: false, skipped: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+  }
+
+  // Dev-loop opt-out. A wipe WOULD run here (marker mismatch, including
+  // first-boot-with-marker), but `DKG_SKIP_CHAIN_RESET_WIPE=1` bypasses it
+  // entirely and — crucially — does NOT persist the marker, so unsetting the
+  // env var re-triggers the wipe on the next boot. This keeps the operator
+  // guarantee intact while letting developers hop between marker-pinned
+  // worktrees without losing their local store. No file wipe, no external
+  // SPARQL wipe, no marker write.
+  if (opts.skip === true) {
+    log(
+      `Chain reset wipe skipped (DKG_SKIP_CHAIN_RESET_WIPE=1): marker ${prevMarker ?? '<none>'} → ${opts.currentMarker}. ` +
+      `Local chain-state preserved; unset the env var to wipe.`,
+    );
+    return { wiped: false, skipped: true, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Mismatch (including "first boot with marker present"): wipe.
@@ -389,10 +618,16 @@ export async function chainResetWipe(
   // persist the marker after every targeted file was removed cleanly; a
   // partial wipe must retry on next boot instead of being masked forever.
   let removedFiles: string[] = [];
+  let backedUpFiles: string[] = [];
   let failedFiles: Array<{ file: string; error: string }> = [];
   let markerPersisted = false;
   try {
-    ({ removedFiles, failedFiles } = performWipe(opts.dataDir, opts.randomSamplingWalPath, log));
+    ({ removedFiles, backedUpFiles, failedFiles } = performWipe(
+      opts.dataDir,
+      opts.randomSamplingWalPath,
+      log,
+      { currentMarker: opts.currentMarker },
+    ));
   } catch (err) {
     const message = (err as Error).message;
     failedFiles.push({ file: '<chain-state-wipe>', error: message });
@@ -445,7 +680,7 @@ export async function chainResetWipe(
     log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
   }
 
-  return { wiped: true, prevMarker, removedFiles, failedFiles };
+  return { wiped: true, skipped: false, prevMarker, removedFiles, backedUpFiles, failedFiles };
 }
 
 // =====================================================================

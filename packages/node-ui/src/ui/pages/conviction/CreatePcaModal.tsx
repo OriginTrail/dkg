@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useFetch } from '../../hooks.js';
 import {
   fetchWalletsBalances,
@@ -9,7 +9,7 @@ import {
   type CreatePcaResult,
   type PcaSnapshot,
 } from '../../api.js';
-import { useOwnerActionSubmitter, type OwnerKey } from '../../pca/ownerActions.js';
+import { useResolvingOwnerActionSubmitter, type OwnerKey } from '../../pca/ownerActions.js';
 import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
 import { useDesignatableNodes } from '../../hooks/useDesignatableNodes.js';
 import { usePrimaryNodeSelection } from '../../hooks/usePrimaryNodeSelection.js';
@@ -21,7 +21,7 @@ import {
   WalletReceiptRevertedError,
   WalletReceiptWaitError,
 } from '../../web3/walletTxError.js';
-import type { WalletTxProgressEvent } from '../../web3/walletOwnerActionSubmitter.js';
+import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import {
   DeviceConfirmProgress,
   DiscountTierLadder,
@@ -31,7 +31,6 @@ import {
   formatPcaTrac,
   discountTierForTrac,
   PrimaryNodePicker,
-  type DeviceConfirmStep,
 } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 
@@ -43,14 +42,6 @@ function pctFromBps(bps: number): string {
 }
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
-
-function initialHardwareCreateSteps(): DeviceConfirmStep[] {
-  return [
-    { id: 'approve', label: 'Approve exact TRAC allowance', state: 'pending' },
-    { id: 'create', label: 'Sign Create PCA', state: 'pending' },
-    { id: 'confirm', label: 'Confirm on-chain receipt', state: 'pending' },
-  ];
-}
 
 /**
  * S2 — Create PCA (single-page, 4 sections for HW owner-key selection; DRIFT-1/2).
@@ -114,65 +105,19 @@ export function CreatePcaModal({
   const walletChainId = useWalletStore((s) => s.chainId);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const hardwareSelected = ownerKey === 'hardware';
-  const [hardwareCreateSteps, setHardwareCreateSteps] = useState<DeviceConfirmStep[]>([]);
-  const [hardwareCreateLabel, setHardwareCreateLabel] = useState<string>('Confirm on your device');
-  const onWalletProgress = useCallback((event: WalletTxProgressEvent) => {
-    setHardwareCreateLabel(() => {
-      if (event.step === 'approve') {
-        if (event.state === 'skipped' || event.state === 'confirmed') return 'Allowance ready — continue to Create PCA';
-        if (event.state === 'failed') return 'Wallet transaction failed';
-        return 'Confirm on your device (1 of 2): approve TRAC';
-      }
-      if (event.state === 'active') return 'Confirm on your device (2 of 2): Create PCA';
-      if (event.state === 'submitted') return 'Waiting for on-chain confirmation';
-      if (event.state === 'confirmed') return 'Create confirmed on-chain';
-      return 'Wallet transaction failed';
-    });
-    setHardwareCreateSteps((prev) => {
-      const next = (prev.length ? prev : initialHardwareCreateSteps()).map((s) => ({ ...s }));
-      const approve = next[0]!;
-      const create = next[1]!;
-      const confirm = next[2]!;
-      if (event.step === 'approve') {
-        if (event.state === 'skipped') {
-          approve.state = 'confirmed';
-          approve.label = 'TRAC allowance already sufficient';
-        } else if (event.state === 'active' || event.state === 'submitted') {
-          approve.state = 'active';
-          approve.txHash = event.txHash;
-        } else if (event.state === 'confirmed') {
-          approve.state = 'confirmed';
-          approve.txHash = event.txHash;
-        } else if (event.state === 'failed') {
-          approve.state = 'failed';
-          approve.txHash = event.txHash;
-          approve.error = describeWalletTxError(event.error, 'approve').message;
-        }
-      } else {
-        if (event.state === 'active') {
-          if (approve.state === 'pending') approve.state = 'confirmed';
-          create.state = 'active';
-        } else if (event.state === 'submitted') {
-          if (approve.state === 'pending') approve.state = 'confirmed';
-          create.state = 'confirmed';
-          create.txHash = event.txHash;
-          confirm.state = 'active';
-        } else if (event.state === 'confirmed') {
-          if (approve.state === 'pending') approve.state = 'confirmed';
-          create.state = 'confirmed';
-          create.txHash = event.txHash;
-          confirm.state = 'confirmed';
-          confirm.txHash = event.txHash;
-        } else if (event.state === 'failed') {
-          create.state = 'failed';
-          create.txHash = event.txHash;
-          create.error = describeWalletTxError(event.error, 'action').message;
-        }
-      }
-      return next;
-    });
-  }, []);
-  const owner = useOwnerActionSubmitter({ ownerKey, onWalletProgress });
+  const createProgress = useWalletTxProgress({
+    labels: {
+      idle: 'Confirm on your device',
+      approveActive: 'Confirm on your device (1 of 2): approve TRAC',
+      approveReady: 'Allowance ready — continue to Create PCA',
+      actionActive: 'Confirm on your device (2 of 2): Create PCA',
+      submitted: 'Waiting for on-chain confirmation',
+      confirmed: 'Create confirmed on-chain',
+      failed: 'Wallet transaction failed',
+    },
+    flow: () => ({ requiresApproval: true, actionLabel: 'Sign Create PCA' }),
+  });
+  const owner = useResolvingOwnerActionSubmitter({ ownerKey, onWalletProgress: createProgress.onProgress });
   const finishCreate = usePcaStore((s) => s.finishCreate);
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
@@ -281,11 +226,9 @@ export function CreatePcaModal({
     setPhase('creating');
     setError(null);
     if (hardwareSelected) {
-      setHardwareCreateSteps(initialHardwareCreateSteps());
-      setHardwareCreateLabel('Confirm on your device (1 of 2): approve TRAC');
+      createProgress.begin('create');
     } else {
-      setHardwareCreateSteps([]);
-      setHardwareCreateLabel('Confirm on your device');
+      createProgress.reset();
     }
     // Set the double-mint guard at SUBMIT — before the await — so an ambiguous
     // failure (network drop / 500 / timeout, or the browser closing) AFTER the
@@ -534,8 +477,8 @@ export function CreatePcaModal({
         )}
         {hardwareSelected && phase === 'creating' && (
           <DeviceConfirmProgress
-            steps={hardwareCreateSteps.length ? hardwareCreateSteps : initialHardwareCreateSteps()}
-            currentLabel={hardwareCreateLabel}
+            steps={createProgress.steps.length ? createProgress.steps : createProgress.initialSteps()}
+            currentLabel={createProgress.currentLabel}
             blockExplorerUrl={explorer}
           />
         )}

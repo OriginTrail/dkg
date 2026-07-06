@@ -95,7 +95,7 @@ export function boundedRetryFetchRequest(
   maxRetries: number = RPC_REQUEST_MAX_RETRIES,
 ): FetchRequest {
   const req = new FetchRequest(url);
-  req.retryFunc = async (_req, _response, attempt) => {
+  req.retryFunc = async (_attemptReq, _response, attempt) => {
     if (attempt >= maxRetries) return false;
     await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
     return true;

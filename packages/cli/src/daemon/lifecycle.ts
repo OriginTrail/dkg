@@ -65,6 +65,7 @@ const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
   MockChainAdapter,
+  mergeRpcUsageWindows,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
@@ -137,6 +138,7 @@ import {
 } from '../config.js';
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -286,7 +288,12 @@ import {
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
-import { chainResetWipe, detectBackendSwitch, detectNetworkSwitch } from './chain-reset-wipe.js';
+import {
+  chainResetWipe,
+  detectBackendSwitch,
+  detectNetworkSwitch,
+  skipChainResetWipe,
+} from './chain-reset-wipe.js';
 import {
   checkExternalStoreReachable,
   checkOrSetStoreIdentity,
@@ -1010,7 +1017,7 @@ export async function runDaemonInner(
   // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
   // detects the change and wipes the now-orphaned chain state.
   // Operator's keystore + dashboard DB + uploaded files are preserved.
-  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  // See docs/archive/internal/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
   // Detect backend switch first. If the operator hand-edited
   // store.backend between boots, refuse to start unless they opt in
   // via DKG_ACCEPT_STORE_RESET=1. The new backend is fresh — any data
@@ -1157,6 +1164,10 @@ export async function runDaemonInner(
   const wipeResult = await chainResetWipe({
     dataDir: dkgDir(),
     currentMarker: network?.chainResetMarker,
+    // Dev-loop opt-out: when set, bypass the wipe entirely and don't persist
+    // the marker (unsetting it re-triggers the wipe). Operator nodes leave it
+    // unset and keep wiping by default on a marker change. See issue #679.
+    skip: skipChainResetWipe(),
     // Honour operator's `randomSampling.walPath` override; the prover
     // writes its WAL there, so a fresh chain reset must wipe that file
     // (not the default ~/.dkg/random-sampling.wal which would be empty).
@@ -1170,7 +1181,8 @@ export async function runDaemonInner(
   });
   if (wipeResult.wiped) {
     log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed ` +
+      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
+      `${wipeResult.backedUpFiles.length} backed up ` +
       `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
     );
     // A DKG-managed external wipe uses DROP ALL, which also removes the
@@ -2431,6 +2443,27 @@ export async function runDaemonInner(
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
 
+  // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
+  // ~$200 of RPC credits in a day with nothing measuring it). The whole
+  // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
+  // The composite source merges EVERY drainable this process owns: the agent
+  // (its chain adapter) plus the async-publisher runtime's per-wallet
+  // adapters — `publisherRuntime` is late-bound, so read the live variable at
+  // each drain. chainId is the EFFECTIVE one (chainBase resolves field-level
+  // inheritance; config.chain?.chainId alone is undefined for configs that
+  // override only rpcUrl).
+  const rpcUsageLogger = new Logger("chain-rpc");
+  const rpcUsageTelemetry = startRpcUsageTelemetry({
+    source: {
+      drainRpcUsage: () => mergeRpcUsageWindows(
+        agent.drainRpcUsage(),
+        publisherRuntime?.drainRpcUsage(),
+      ),
+    },
+    emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
+    chainId: chainBase?.chainId ?? config.chain?.chainId,
+  });
+
   const tracker = new OperationTracker(dashDb);
 
   // Track peer connections
@@ -3258,6 +3291,10 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        // Clears the timer AND performs the final best-effort drain (BEFORE
+        // telemetry stops), so a partial window still reaches Loki — keeps
+        // log-derived request totals exact across process lifecycles.
+        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector.stop();
         // Stops log exporters AND flushes + shuts down the OTel SDK.

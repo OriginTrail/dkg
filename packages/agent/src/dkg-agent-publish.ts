@@ -3389,13 +3389,21 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     const existingOnChainId = await this.getContextGraphOnChainId(contextGraphId);
     if (existingOnChainId) return;
-    const storedOpts = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
+    // #1085 — the publish path has no request-body policy, so it reads the
+    // stored create-time policy + PCA directly from the canonical store reader
+    // and forwards BOTH. Deliberately NOT wrapped in a catch: a stored-read
+    // failure must propagate (fail-loud) rather than silently register the CG
+    // under the default policy — dropping the create-time policy on-chain is
+    // exactly the #1085 regression, and hard to reverse. (The /register route
+    // owns the best-effort fall-back for its own interactive call site, and
+    // applies its own body-wins override.)
+    const { publishPolicy, publishAuthorityAccountId } = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
     try {
       await this.registerContextGraph(contextGraphId, {
         ...(opts?.callerAgentAddress != null ? { callerAgentAddress: opts.callerAgentAddress } : {}),
-        ...(storedOpts.publishPolicy !== undefined ? { publishPolicy: storedOpts.publishPolicy } : {}),
-        ...(storedOpts.publishAuthorityAccountId !== undefined
-          ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
+        ...(publishPolicy !== undefined ? { publishPolicy } : {}),
+        ...(publishAuthorityAccountId !== undefined
+          ? { publishAuthorityAccountId }
           : {}),
       });
     } catch (err: any) {

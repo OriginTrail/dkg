@@ -41,6 +41,12 @@ queued unboundedly.
 - **Resource labels:** `service.name=dkg-node`, `service.instance.id=<name>`, `deployment.environment=<network>`, `dkg.node.role`, `dkg.chain` (matches the traces/metrics resource). Loki sanitizes dots to underscores, so these appear as `service_name`, `service_instance_id`, `deployment_environment`, `dkg_node_role`, `dkg_chain`.
 - **Per-record attributes:** `dkg.operation_id`, `dkg.operation_name`, `dkg.source_operation_id`, `dkg.module`, severity, plus `trace_id`/`span_id` when emitted inside a span.
 - **Body:** the log message, with secrets already redacted.
+- **RPC usage lines:** once per minute (only when RPC activity happened) the node
+  emits one `rpc_usage method=<json-rpc method> count=<n> window_s=60 chain=<id>`
+  line per method — the RAW JSON-RPC request count (the unit your RPC provider
+  bills), counted at the transport level. Each line carries the DELTA for its
+  window, so summing them over any range gives the exact request count. This is
+  what powers the Grafana "RPC requests per node / by method" panels.
 
 ## Traces & metrics (optional)
 Logs go through a hand-rolled OTLP/HTTP exporter; **traces and metrics use the
@@ -61,7 +67,16 @@ Each signal is independent and stays off until it has an endpoint (or set
 traces backend and metrics at a Prometheus/Mimir-backed collector.
 
 ## Viewing
-Point Grafana at your log store and import `production/grafana-dashboard-dkg-node-logs.json`
-(per-node) and/or `production/grafana-dashboard-dkg-fleet-logs.json` (fleet),
-then pick your node and a time range. If your store is Loki < 3.0, front it with
-Grafana Alloy (see `production/RUNBOOK.md`).
+Pick the dashboards that match your Loki version — the query shapes differ:
+
+- **Loki >= 3.0 with native OTLP ingest** (recommended): import
+  `tools/observability/grafana-dashboard-dkg-node-logs.json` (per-node) and/or
+  `tools/observability/grafana-dashboard-dkg-fleet-logs.json` (fleet). These
+  filter severity via OTLP structured metadata (`severity_text`) and will show
+  empty level/error panels on older stores.
+- **Loki < 3.0 behind Grafana Alloy** (legacy path, see
+  `tools/observability/RUNBOOK.md`): import the Alloy-compatible
+  `grafana-dashboard-dkg-node-logs.json` from THIS directory instead — it
+  matches the labels/fields the Alloy bridge produces.
+
+Then pick your node and a time range.

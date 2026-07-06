@@ -25,6 +25,7 @@ import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcEr
 import { rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
+import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
@@ -379,6 +380,8 @@ export class EVMChainAdapterBase {
    * the adapter and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
+  /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
+  protected readonly rpcUsage: RpcUsageTracker;
 
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
@@ -666,8 +669,16 @@ export class EVMChainAdapterBase {
     // single-RPC node keeps the bounded `RPC_REQUEST_MAX_RETRIES` retry (its
     // only resilience; #894) via the default. See `boundedRetryFetchRequest`.
     const perEndpointRetries = this.rpcUrls.length > 1 ? 0 : undefined;
+    // CountingJsonRpcProvider reports every raw JSON-RPC request to the usage
+    // tracker (the PROVIDER-BILLING unit — see rpc-usage.ts). With
+    // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
+    // exact. `this.chainId` is assigned later in this constructor → live thunk.
+    this.rpcUsage = new RpcUsageTracker(() => this.chainId);
+    // One transport factory wires BOTH billing-exact accounting hooks (first
+    // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
+    // see createCountingJsonRpcProvider for the invariant.
     this.providers = this.rpcUrls.map(
-      (url) => new JsonRpcProvider(boundedRetryFetchRequest(url, perEndpointRetries), undefined, {
+      (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
         cacheTimeout: -1,
         polling: true,
         batchMaxCount: 1,
@@ -2779,6 +2790,17 @@ export class EVMChainAdapterBase {
 
   getRpcUrls(): string[] {
     return [...this.rpcUrls];
+  }
+
+  /**
+   * Drain the raw JSON-RPC request counts accumulated since the previous drain
+   * (delta window) — consumed by the daemon's minutely `rpc_usage` telemetry
+   * log line. Part of the optional `ChainAdapter.drainRpcUsage` capability
+   * (the mock adapter implements it as an always-empty window — it has no RPC
+   * transport).
+   */
+  drainRpcUsage(): RpcUsageWindow {
+    return this.rpcUsage.drainWindow();
   }
 
   async getContract(name: string): Promise<Contract> {

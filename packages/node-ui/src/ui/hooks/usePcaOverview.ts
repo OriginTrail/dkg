@@ -8,6 +8,7 @@ import {
 import { usePcaStore } from '../stores/pca.js';
 import { healthForSnapshot, type PcaHealthState } from '../pca/health.js';
 import { classifyCoverage, isPcaSpendable } from '../pca/coverage.js';
+import { eqAddress as eq } from '../pca/address.js';
 
 /** Per-(node wallet) registration probe against one account. `null` = couldn't determine. */
 export interface PcaWalletProbe {
@@ -67,8 +68,6 @@ export interface PcaOverview {
   bestCoveringDiscountBps: number | null;
   covered: boolean;
 }
-
-const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 async function resolveAccount(accountId: string, wallets: string[]): Promise<ResolvedPcaAccount> {
   const blank: ResolvedPcaAccount = {

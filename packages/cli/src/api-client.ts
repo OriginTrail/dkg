@@ -6,6 +6,8 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
+import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -988,14 +990,13 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  async registerPcaAgent(accountId: string, agent: string): Promise<{
-    accountId: string;
-    agent: string;
-    registered: boolean;
-    txHash: string;
-    blockNumber: number;
-  }> {
-    return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+  // The client is the version-skew boundary: it posts, then PARSES + normalizes
+  // the raw JSON (validated at runtime, not just cast) into a stable
+  // `{ registered, advisory }` result — so callers render directly and a
+  // malformed/incoherent wire shape fails loudly here rather than mis-rendering.
+  async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResult> {
+    const raw = await this.post<unknown>(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+    return parseRegisterPcaAgentResult(raw);
   }
 
   async getPcaInfo(accountId: string, probeKey?: string): Promise<{

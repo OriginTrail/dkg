@@ -1,5 +1,6 @@
 import { pcaAgentAccount, fetchPca } from '../api.js';
-import { isPcaDead, hasPcaBudget } from './coverage.js';
+import { isPcaDead, hasPcaBudget } from './pca-primitives.js';
+import { eqAddress as eq } from './address.js';
 
 // Pre-flight wallet-binding probe — READ-ONLY.
 //
@@ -13,12 +14,23 @@ import { isPcaDead, hasPcaBudget } from './coverage.js';
 // so it must NOT be skipped as free. A probe that can't be read is INCONCLUSIVE — never
 // asserted as unbound/ownable/covered (it must not drive a destructive deregister or a false claim).
 
-const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
-
 export type SignableOwnerKind = 'daemon' | 'wallet';
 export type SignableOwner =
   | string
   | { address?: string | null; kind?: SignableOwnerKind };
+
+/**
+ * The candidate owner-signer set for a PCA owner action (T2 / #1468): the node's primary (daemon)
+ * wallet + the connected browser wallet, in daemon→wallet order. Both entries are always present
+ * (addresses may be null) — the binding probe / `normalizeSignableOwners` drops the null-address
+ * ones. Derived at this boundary rather than carried on the owner-access model.
+ */
+export function signableOwnersFor(primaryWallet?: string | null, connectedWallet?: string | null): SignableOwner[] {
+  return [
+    { address: primaryWallet, kind: 'daemon' },
+    { address: connectedWallet, kind: 'wallet' },
+  ];
+}
 
 function normalizeSignableOwners(input?: SignableOwner | SignableOwner[]): Array<{ address: string; kind: SignableOwnerKind }> {
   const items = Array.isArray(input) ? input : input != null ? [input] : [];

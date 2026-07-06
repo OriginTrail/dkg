@@ -651,9 +651,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     if (parsedPcaAccountId.error) {
       return jsonResponse(res, 400, { error: parsedPcaAccountId.error });
     }
-    if (parsedPcaAccountId.value !== undefined && publishPolicy === 1) {
-      return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
-    }
     try {
       // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 round-2):
       // expose `strictEoaCuratorMatch` opt-in on the public registration
@@ -662,9 +659,38 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       // launch deployment shape — see `registerContextGraph` jsdoc),
       // but multi-tenant operators can pass `strictEoaCuratorMatch:true`
       // to require an exact wallet match before registration proceeds.
+      // Effective register-time publishPolicy, resolved inline (like the sibling
+      // PCA routes): an explicit body value wins with no store read; an omitted
+      // policy LAZILY rehydrates the create-time policy from the stored
+      // registration options. Best-effort — a stored-read failure must NOT fail
+      // the registration, so it warns and falls back to the request/default
+      // policy. (The publish auto-register path reads the same store reader
+      // directly and stays FAIL-LOUD: it must never register under the wrong
+      // on-chain policy.) The stored PCA id is not consulted here — pcaAccountId
+      // is explicit-only for /register (validated just below against the
+      // EFFECTIVE policy, which governs on-chain publish authority).
+      let effectivePublishPolicy = publishPolicy;
+      if (publishPolicy === undefined) {
+        try {
+          effectivePublishPolicy = (
+            await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId)
+          ).publishPolicy;
+        } catch (err) {
+          console.warn(
+            `[DKG-Daemon] WARN [register] stored registration-options read failed for contextGraph=${resolvedContextGraphId}; proceeding with request/default policy: ${(err as Error)?.message ?? String(err)}`,
+          );
+          effectivePublishPolicy = publishPolicy;
+        }
+      }
+      // The pcaAccountId request-validation stays at the route boundary:
+      // pcaAccountId is curated-only, so reject it against the EFFECTIVE
+      // (post-rehydration) policy.
+      if (parsedPcaAccountId.value !== undefined && effectivePublishPolicy === 1) {
+        return jsonResponse(res, 400, { error: 'pcaAccountId is only valid for curated context graphs (publishPolicy=0)' });
+      }
       const result = await agent.registerContextGraph(resolvedContextGraphId, {
         accessPolicy,
-        publishPolicy,
+        publishPolicy: effectivePublishPolicy,
         callerAgentAddress: requestAgentAddress,
         publishAuthorityAccountId: parsedPcaAccountId.value,
         ...(strictEoaCuratorMatch === true ? { strictEoaCuratorMatch: true } : {}),

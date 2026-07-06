@@ -25,11 +25,11 @@ import {
 } from '../src/ui/components/Pca/index.js';
 import {
   healthForSnapshot,
-  isPcaExpired,
   PCA_CAP_NEAR_THRESHOLD,
   PCA_EXPIRING_SOON_SECONDS,
   type PcaHealthState,
 } from '../src/ui/pca/health.js';
+import { isPcaExpired } from '../src/ui/pca/pca-primitives.js';
 import { EmptyState } from '../src/ui/components/ContextGraphPrimitives.js';
 
 async function render(node: React.ReactElement): Promise<{
@@ -123,11 +123,28 @@ describe('HealthChip', () => {
     expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('badge-warn');
     expect(HEALTH_CHIP_META.expired.toneClass).toBe('badge-error');
   });
+
+  it('renders the insolvent pill with honest danger copy — "Insolvent" + badge-error (#1349)', async () => {
+    const { container, unmount } = await render(React.createElement(HealthChip, { state: 'insolvent' }));
+    const chip = container.querySelector('.v10-pca-health-chip')!;
+    expect(chip.getAttribute('data-health')).toBe('insolvent');
+    expect(chip.classList.contains('badge-error')).toBe(true);
+    expect(container.querySelector('.v10-pca-health-label')?.textContent).toBe('Insolvent');
+    await unmount();
+  });
 });
 
 describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
   const NOW = 1_000_000; // arbitrary nowSec
-  const base = { expiresAtTimestamp: NOW + 30 * 24 * 3600, fullySwept: false, agentCount: 1 };
+  // Budget fields present (real snapshots always carry them) but with NO
+  // `remainingAllowance` — so the #1349 insolvent gate never fires from this base.
+  const base = {
+    expiresAtTimestamp: NOW + 30 * 24 * 3600,
+    fullySwept: false,
+    agentCount: 1,
+    topUpBuffer: '12500000000000000000000',
+    baseEpochAllowance: '850000000000000000000',
+  };
 
   it('returns healthy for a solvent, far-from-expiry, low-cap account', () => {
     expect(healthForSnapshot(base, NOW)).toBe('healthy');
@@ -159,16 +176,69 @@ describe('healthForSnapshot (single source of truth for S1/S3/S5)', () => {
     ).toBe('healthy');
   });
 
-  it('never derives insolvent in P0 (deferred to P2 — invariant #9)', () => {
-    // No combination of P0 snapshot fields should yield 'insolvent'.
+  it('never derives insolvent WITHOUT a definitive remainingAllowance (invariant #9)', () => {
+    // #1349 — with no `remainingAllowance` (coarse P0, or the daemon fail-softed the
+    // extended read), insolvency is never asserted, even at zero base allowance.
     const states = new Set([
       healthForSnapshot(base, NOW),
       healthForSnapshot({ ...base, fullySwept: true }, NOW),
       healthForSnapshot({ ...base, agentCount: 100 }, NOW),
       healthForSnapshot({ ...base, expiresAtTimestamp: NOW - 5 }, NOW),
       healthForSnapshot({ ...base, expiresAtTimestamp: NOW + 100 }, NOW),
+      // Zero base allowance but remainingAllowance still UNKNOWN → not insolvent.
+      healthForSnapshot({ ...base, topUpBuffer: '0', baseEpochAllowance: '0', extendedRequested: true }, NOW),
     ]);
     expect(states.has('insolvent' as PcaHealthState)).toBe(false);
+  });
+
+  it('derives insolvent from an EXTENDED zero-budget snapshot (#1349)', () => {
+    // remainingAllowance definitively known AND every budget source empty → insolvent.
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '0', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('insolvent');
+  });
+
+  it('does NOT derive insolvent while the top-up buffer still has budget (agrees with coverage)', () => {
+    // hasPcaBudget short-circuits on topUpBuffer > 0 — health and eligibility agree.
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '5000000000000000000', baseEpochAllowance: '0', remainingAllowance: '0', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('healthy');
+  });
+
+  it('expired/swept outrank insolvent; insolvent outranks cap-near and expiring (#1349 precedence)', () => {
+    const zero = { topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '0', extendedRequested: true };
+    // expired / swept win over insolvent
+    expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW - 1 }, NOW)).toBe('expired');
+    expect(healthForSnapshot({ ...base, ...zero, fullySwept: true }, NOW)).toBe('swept');
+    // insolvent wins over cap-near and expiring
+    expect(healthForSnapshot({ ...base, ...zero, agentCount: 100 }, NOW)).toBe('insolvent');
+    expect(healthForSnapshot({ ...base, ...zero, expiresAtTimestamp: NOW + 100 }, NOW)).toBe('insolvent');
+  });
+
+  it('does NOT over-fire insolvent when remainingAllowance is positive (#1349)', () => {
+    // Base + top-up empty, but a definitively-known positive remainingAllowance → healthy.
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '0', baseEpochAllowance: '0', remainingAllowance: '1000000000000000000', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('healthy');
+  });
+
+  it('remainingAllowance=0 supersedes a positive baseEpochAllowance proxy → insolvent (#1349)', () => {
+    // Extended read: the precise remainingAllowance (0) overrides the coarse base proxy (>0).
+    expect(
+      healthForSnapshot(
+        { ...base, topUpBuffer: '0', baseEpochAllowance: '850000000000000000000', remainingAllowance: '0', extendedRequested: true },
+        NOW,
+      ),
+    ).toBe('insolvent');
   });
 
   it('treats a missing/zero expiry as "no expiry data" (never expired/expiring)', () => {
@@ -189,7 +259,7 @@ describe('isPcaExpired (shared liveness primitive — single expiry source, #134
   });
   it('is exactly healthForSnapshot’s expired discriminant', () => {
     // The two stay lockstep: expired-state ⟺ isPcaExpired (the C-live contract).
-    expect(healthForSnapshot({ expiresAtTimestamp: NOW, fullySwept: false, agentCount: 1 }, NOW)).toBe('expired');
+    expect(healthForSnapshot({ expiresAtTimestamp: NOW, fullySwept: false, agentCount: 1, topUpBuffer: '0', baseEpochAllowance: '0' }, NOW)).toBe('expired');
     expect(isPcaExpired({ expiresAtTimestamp: NOW }, NOW)).toBe(true);
   });
 });

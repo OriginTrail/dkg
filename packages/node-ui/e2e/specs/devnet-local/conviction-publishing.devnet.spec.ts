@@ -2,10 +2,57 @@
  * Publisher Conviction NFT (PCA) API smoke against live devnet.
  * Full conviction discount flows live in devnet/conviction-lazy-settle/.
  */
+import type { PcaContracts } from '../../../src/ui/api.js';
+import { numericChainId } from '../../../src/ui/web3/chainId.js';
 import { test, expect } from '../../fixtures/base.js';
 import { devnetApiFetch, waitForDevnetStatus, requireDevnetPrecondition, requireDevnetNode } from '../../helpers/devnet.js';
 
 test.describe.configure({ mode: 'serial' });
+
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const HEX_QUANTITY = /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/;
+
+type PcaRpcError = { code: number; message: string };
+type PcaRpcResponse<T> = { jsonrpc?: '2.0'; id?: number; result?: T; error?: PcaRpcError };
+type PcaRpcMethod =
+  | 'eth_chainId'
+  | 'eth_blockNumber'
+  | 'eth_getBlockByNumber'
+  | 'eth_getTransactionReceipt'
+  | 'eth_getTransactionByHash'
+  | 'eth_sendTransaction';
+
+function hexQuantityToNumber(value: string): number {
+  expect(value).toMatch(HEX_QUANTITY);
+  return Number.parseInt(value.slice(2), 16);
+}
+
+async function getPcaContracts(): Promise<PcaContracts> {
+  const res = await devnetApiFetch('/api/pca/contracts');
+  expect(res.status).toBe(200);
+  return (await res.json()) as PcaContracts;
+}
+
+async function postPcaRpc<T>(id: number, method: PcaRpcMethod, params: unknown[] = []): Promise<PcaRpcResponse<T>> {
+  const res = await devnetApiFetch('/api/pca/rpc', {
+    method: 'POST',
+    body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as PcaRpcResponse<T>;
+}
+
+function expectRpcSuccess<T>(response: PcaRpcResponse<T>): T {
+  expect(response.error).toBeUndefined();
+  expect(response.result).toBeDefined();
+  return response.result as T;
+}
+
+function expectRpcError(response: PcaRpcResponse<unknown>, code: number): PcaRpcError {
+  expect(response.error?.code).toBe(code);
+  expect(response.error?.message).toBeTruthy();
+  return response.error as PcaRpcError;
+}
 
 test.beforeAll(async () => {
   await requireDevnetNode(test, 1);
@@ -22,6 +69,44 @@ test.describe('Conviction NFT (PCA) API', () => {
     } else {
       expect(json.error).toBeTruthy();
     }
+  });
+
+  test('GET /api/pca/contracts exposes HW bootstrap addresses and same-origin RPC only', async () => {
+    const contracts = await getPcaContracts();
+
+    expect(contracts.nft).toMatch(EVM_ADDRESS);
+    expect(contracts.token).toMatch(EVM_ADDRESS);
+    expect(String(contracts.chainId)).toMatch(/\d+$/);
+    expect(contracts.rpcUrls).toEqual(['/api/pca/rpc']);
+    expect(contracts.walletRpcUrls ?? []).not.toContain('/api/pca/rpc');
+    expect(JSON.stringify(contracts)).not.toMatch(/SECRETKEY/i);
+  });
+
+  test('POST /api/pca/rpc forwards receipt-polling reads and rejects wallet-write RPC', async () => {
+    const contracts = await getPcaContracts();
+    const chainId = expectRpcSuccess<string>(await postPcaRpc<string>(1, 'eth_chainId'));
+    expect(hexQuantityToNumber(chainId)).toBe(numericChainId(contracts.chainId));
+
+    const blockNumber = expectRpcSuccess<string>(await postPcaRpc<string>(2, 'eth_blockNumber'));
+    expect(blockNumber).toMatch(HEX_QUANTITY);
+
+    const exactBlock = expectRpcSuccess<unknown>(
+      await postPcaRpc<unknown>(3, 'eth_getBlockByNumber', [blockNumber, true]),
+    );
+    expect(exactBlock).toBeTruthy();
+
+    const missingTxHash = `0x${'ff'.repeat(32)}`;
+    const missingReceipt = expectRpcSuccess<unknown | null>(
+      await postPcaRpc<unknown | null>(4, 'eth_getTransactionReceipt', [missingTxHash]),
+    );
+    const missingTransaction = expectRpcSuccess<unknown | null>(
+      await postPcaRpc<unknown | null>(5, 'eth_getTransactionByHash', [missingTxHash]),
+    );
+    expect(missingReceipt).toBeNull();
+    expect(missingTransaction).toBeNull();
+
+    const writeError = expectRpcError(await postPcaRpc<unknown>(6, 'eth_sendTransaction'), -32601);
+    expect(writeError.message).toContain('PCA RPC method not allowed');
   });
 
   test('publish without PCA registration uses the KA lifecycle path', async () => {
