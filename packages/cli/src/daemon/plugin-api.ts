@@ -10,14 +10,50 @@ export {
 
 import type { RouteRequestContext } from './routes/context.js';
 
-export type PluginRequestContext = Omit<RouteRequestContext, 'requestIdentity'> & {
-  // Optional only at the public plugin boundary so existing route-plugin
-  // fixtures do not take a semver-major break. Internal route groups use
-  // RouteRequestContext from routes/context.ts, where requestIdentity is required.
+type PublicRouteContextFields =
+  | 'req'
+  | 'res'
+  | 'agent'
+  | 'publisherControl'
+  | 'publisherRuntime'
+  | 'config'
+  | 'startedAt'
+  | 'dashDb'
+  | 'opWallets'
+  | 'network'
+  | 'tracker'
+  | 'memoryManager'
+  | 'bridgeAuthToken'
+  | 'nodeVersion'
+  | 'nodeCommit'
+  | 'catchupTracker'
+  | 'extractionRegistry'
+  | 'fileStore'
+  | 'extractionStatus'
+  | 'assertionImportLocks'
+  | 'vectorStore'
+  | 'embeddingProvider'
+  | 'validTokens'
+  | 'apiHost'
+  | 'apiPortRef'
+  | 'routePlugins'
+  | 'admission'
+  | 'url'
+  | 'path'
+  | 'requestAuth'
+  | 'requestToken'
+  | 'requestAgentAddress'
+  | 'emitMemoryGraphChanged'
+  | 'emitNotification';
+
+export type PluginRequestContext = Pick<RouteRequestContext, PublicRouteContextFields> & {
+  // Optional only at the public plugin boundary so existing route-plugin fixtures
+  // do not take a semver-major break. The explicit field list above prevents
+  // future internal-only RouteRequestContext fields from leaking into plugins.
   requestIdentity?: RouteRequestContext['requestIdentity'];
 };
 
-// Preserve the plugin API's historical type name for external plugins.
+// Preserve the plugin API's historical type name for external route plugins.
 export type RequestContext = PluginRequestContext;
 
 export interface RoutePlugin {

@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import type { RouteRequestContext } from '../../../src/daemon/routes/context.js';
-import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
+import type { RequestContext, RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
 
 interface FakeRes {
@@ -86,6 +86,25 @@ describe('handlePluginRoutes', () => {
   });
   afterEach(() => {
     console.error = originalConsoleError;
+  });
+
+  it('keeps the public plugin RequestContext compatible without requestIdentity', async () => {
+    type RequestIdentityOptional = Omit<RequestContext, 'requestIdentity'> extends RequestContext ? true : false;
+    const requestIdentityOptional: RequestIdentityOptional = true;
+    expect(requestIdentityOptional).toBe(true);
+
+    const plugin: RoutePlugin = {
+      name: 'compat',
+      handle(ctx) {
+        const publicCtx: RequestContext = ctx;
+        publicCtx.res.writeHead(204);
+        publicCtx.res.end();
+      },
+    };
+
+    const { ctx, res } = makeCtx([plugin]);
+    await handlePluginRoutes(ctx);
+    expect(res.statusCode).toBe(204);
   });
 
   it('returns without writing when routePlugins is empty', async () => {
