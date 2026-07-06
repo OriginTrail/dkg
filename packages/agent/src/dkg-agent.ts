@@ -1432,9 +1432,11 @@ export class DKGAgent extends DKGAgentBase {
    *
    * Fix: only trust the confirmed-core subset when it can actually
    * satisfy the quorum. Below that, return confirmed cores FIRST
-   * followed by every other connected peer — edge nodes fail fast at
-   * protocol negotiation (no handler registered), so over-asking is
-   * cheap, while under-asking is fatal.
+   * followed by the remaining connected ACK-eligible peers. On configured
+   * public networks the daemon supplies `ackCandidatePeerIds` from the
+   * selected network relays, so stale preferred/bootstrap connections from
+   * another network cannot enter the ACK round. Dev/no-network configs keep
+   * the legacy all-connected fallback.
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
    * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
@@ -1461,6 +1463,7 @@ export class DKGAgent extends DKGAgentBase {
     return selectACKCandidatePeers({
       connectedPeers: peers.map(p => p.toString()),
       selfPeerId: this.peerId,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,

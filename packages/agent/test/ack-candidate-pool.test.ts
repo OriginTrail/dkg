@@ -18,6 +18,7 @@ type AgentInternals = {
     };
   };
   peerId: string;
+  config: { ackCandidatePeerIds?: string[] };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   lastKnownRequiredACKs?: number;
@@ -32,11 +33,13 @@ async function buildAgent(opts: {
   confirmedCores: string[];
   connected: string[];
   lastKnownRequiredACKs?: number;
+  ackCandidatePeerIds?: string[];
 }): Promise<AgentInternals> {
   const agent = await DKGAgent.create({
     name: 'AckPoolProbe',
     store: new OxigraphStore(),
     chainAdapter: new MockChainAdapter(),
+    ackCandidatePeerIds: opts.ackCandidatePeerIds,
   });
   const internals = agent as unknown as AgentInternals;
   internals.node = {
@@ -86,6 +89,17 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
     // 4 confirmed ≥ quorum 4 → trust the confirmed-core subset.
     expect(at.getACKCandidatePeers()).toEqual(CORE);
+  });
+
+  it('with a configured ACK allowlist, below-quorum fallback excludes connected foreign-network peers', async () => {
+    const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
+    const a = await buildAgent({
+      confirmedCores: [CORE[2]],
+      connected: [CORE[2], ...foreign, CORE[0], CORE[1], CORE[3]],
+      ackCandidatePeerIds: CORE,
+    });
+
+    expect(a.getACKCandidatePeers()).toEqual([CORE[2], CORE[0], CORE[1], CORE[3]]);
   });
 
   it('runtime quorum below default (2): 2 confirmed cores already satisfy it', async () => {
