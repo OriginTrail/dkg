@@ -96,7 +96,7 @@ export class HubRotationPoller {
     const head = await this.readProvider(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      { capSingleProvider: true },
+      { policy: 'watchdogPointRead' },
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
@@ -108,7 +108,7 @@ export class HubRotationPoller {
         toBlock: head,
         topics: [binding.topics],
       }),
-      { policy: 'wideLogScan', capSingleProvider: true },
+      { policy: 'watchdogWideLogScan' },
     );
     if (!this.started || generation !== this.generation) return;
 

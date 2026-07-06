@@ -62,18 +62,25 @@ export interface RpcEndpoint {
  * {@link resolveCapMs}.
  *   - `pointRead`           — a single `eth_call` / point provider read.
  *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
+ *   - `watchdogPointRead`   — a background point read that must not wedge a
+ *     one-RPC node.
+ *   - `watchdogWideLogScan` — a background log scan that must not wedge a
+ *     one-RPC node.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
  */
-export type ReadPolicy = 'pointRead' | 'wideLogScan' | 'failOpenFundingRead';
+export type ReadPolicy =
+  | 'pointRead'
+  | 'wideLogScan'
+  | 'watchdogPointRead'
+  | 'watchdogWideLogScan'
+  | 'failOpenFundingRead';
 
 /** Per-read options: a named timeout policy + an optional failover classifier
  *  override (a read whose error shape carries domain meaning). */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
-  /** Opt-in watchdog for background reads that must not wedge even with one RPC endpoint. */
-  capSingleProvider?: boolean;
 }
 
 /**
@@ -106,24 +113,25 @@ export function isContractViewRetryable(err: unknown): boolean {
 /**
  * The timeout-policy matrix — the per-attempt cap each named policy yields:
  *
- *   | policy              | multi-RPC cap            | single-RPC default      | capSingleProvider |
- *   |---------------------|--------------------------|-------------------------|-------------------|
- *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         | RPC_READ_STALL    |
- *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         | RPC_LOG_SCAN      |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)     | RPC_READ_STALL    |
+ *   | policy              | multi-RPC cap            | single-RPC cap          |
+ *   |---------------------|--------------------------|-------------------------|
+ *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
+ *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
+ *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
+ *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894) by default. `capSingleProvider` lets background watcher reads opt
- * into the same per-policy cap for a one-endpoint node without imposing a
- * poll-level deadline over the multi-RPC failover sequence.
+ * to; #894). The watchdog policies are for background reads that must clear
+ * their scheduler gate even on one-RPC nodes, without imposing a poll-level
+ * deadline over a multi-RPC failover sequence.
  */
-export function resolveCapMs(
-  policy: ReadPolicy,
-  providerCount: number,
-  capSingleProvider = false,
-): number | undefined {
-  if (policy === 'failOpenFundingRead') return RPC_READ_STALL_TIMEOUT_MS;
-  if (providerCount <= 1 && !capSingleProvider) return undefined;
+export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
+  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
+    return RPC_READ_STALL_TIMEOUT_MS;
+  }
+  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
+  if (providerCount <= 1) return undefined;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 
@@ -193,7 +201,6 @@ export class RpcFailoverClient {
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
-      opts?.capSingleProvider ?? false,
     );
   }
 
@@ -228,7 +235,6 @@ export class RpcFailoverClient {
             (p) => fn(this.rebindContract(contract, p)),
             opts?.isRetryable ?? isContractViewRetryable,
             opts?.policy ?? 'pointRead',
-            opts?.capSingleProvider ?? false,
           );
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
@@ -509,8 +515,8 @@ export class RpcFailoverClient {
    * `readContract`. The per-attempt `withTimeout` is a hard deadline that ABORTS
    * and fails over a hung backend; the cap comes from the named `policy` via
    * {@link resolveCapMs} (multi-RPC caps each attempt; single-RPC is uncapped for
-   * `pointRead`/`wideLogScan` by default — #894, nothing to fail over to — unless
-   * the caller opts into `capSingleProvider` or uses `failOpenFundingRead`). The
+   * `pointRead`/`wideLogScan` — #894, nothing to fail over to — while watchdog
+   * policies and `failOpenFundingRead` cap even single-RPC attempts). The
    * `endpoints` are read LIVE from the injected thunk so a mid-flight reassignment
    * of the pool is observed.
    */
@@ -519,10 +525,9 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     isRetryable: (err: unknown) => boolean,
     policy: ReadPolicy,
-    capSingleProvider: boolean,
   ): Promise<T> {
     const endpoints = this.getEndpoints();
-    const capMs = resolveCapMs(policy, endpoints.length, capSingleProvider);
+    const capMs = resolveCapMs(policy, endpoints.length);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
