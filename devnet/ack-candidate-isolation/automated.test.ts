@@ -12,7 +12,7 @@
  * mainnet without mutating the shared devnet.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEVNET_DIR,
@@ -99,6 +99,27 @@ describe('ACK candidate isolation on devnet', () => {
     expect(edgeStatus.peerId, 'node5 status must expose a peerId').toEqual(expect.any(String));
     expect(bootstrapIds).not.toContain(edgeStatus.peerId);
     expect(configuredPeerIds.filter((id) => publicTestnetIds.includes(id))).toEqual([]);
+  });
+
+  it('does not install the default public testnet ACK allowlist in the local devnet relay topology', () => {
+    const node1LogPath = join(DEVNET_DIR, 'node1', 'daemon.log');
+    const node5LogPath = join(DEVNET_DIR, 'node5', 'daemon.log');
+    const node1Config = readJson<RuntimeConfig>(join(DEVNET_DIR, 'node1', 'config.json'));
+    expect(existsSync(node1LogPath), 'node1 daemon.log should exist').toBe(true);
+    expect(existsSync(node5LogPath), 'node5 daemon.log should exist').toBe(true);
+    const node1Log = readFileSync(node1LogPath, 'utf8');
+    const node5Log = readFileSync(node5LogPath, 'utf8');
+
+    expect(node1Config.relay).toBe('none');
+    expect(typeof edgeConfig.relay).toBe('string');
+    expect(edgeConfig.relay).toMatch(/^\/ip4\/127\.0\.0\.1\/tcp\//);
+    expect(node1Log).toContain('Relay disabled (config.relay = "none")');
+    for (const log of [node1Log, node5Log]) {
+      expect(log).not.toMatch(/ACK candidate peer allowlist: .*network config/);
+      for (const suffix of UNEXPECTED_TESTNET_SUFFIXES) {
+        expect(log).not.toContain(suffix);
+      }
+    }
   });
 
   it('filters the 4 devnet cores + 3 stale testnet peers ACK fallback back to devnet cores', () => {
