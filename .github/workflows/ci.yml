@@ -157,6 +157,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Test repository scripts
+        run: pnpm run test:scripts
+
       - name: Validate npm metadata points to v10
         run: pnpm check:npm-metadata
 

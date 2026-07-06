@@ -27,8 +27,8 @@
  */
 import path from 'node:path';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildProjectOntologyTriples } from '../packages/core/src/project-ontology-runtime.js';
 import { makeClient, parseArgs, resolveToken } from './lib/dkg-daemon.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,6 +50,48 @@ const ONTOLOGY_DIR = args.dir
 const TTL_PATH = path.join(ONTOLOGY_DIR, 'ontology.ttl');
 const GUIDE_PATH = path.join(ONTOLOGY_DIR, 'agent-guide.md');
 
+function ensureBuiltCoreProjectOntology() {
+  const coreTsconfig = path.join(REPO_ROOT, 'packages/core/tsconfig.json');
+  const coreDistEntry = path.join(REPO_ROOT, 'packages/core/dist/project-ontology.js');
+  if (!fs.existsSync(coreTsconfig) || fs.existsSync(coreDistEntry)) return;
+
+  const tscBin = path.join(REPO_ROOT, 'node_modules/typescript/bin/tsc');
+  if (!fs.existsSync(tscBin)) {
+    console.error(
+      '[ontology] ERROR: @origintrail-official/dkg-core is not built and TypeScript is not installed.\n' +
+      '  Run `pnpm install --frozen-lockfile` and retry, or build core with `pnpm --filter @origintrail-official/dkg-core build`.',
+    );
+    process.exit(1);
+  }
+
+  const result = spawnSync(process.execPath, [tscBin, '-p', coreTsconfig], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    console.error(
+      '[ontology] ERROR: failed to build @origintrail-official/dkg-core before loading project-ontology.\n' +
+      `  stdout:\n${result.stdout || '(empty)'}\n` +
+      `  stderr:\n${result.stderr || '(empty)'}`,
+    );
+    process.exit(result.status ?? 1);
+  }
+}
+
+async function loadProjectOntologyBuilder() {
+  ensureBuiltCoreProjectOntology();
+  try {
+    const module = await import('@origintrail-official/dkg-core/project-ontology');
+    return module.buildProjectOntologyTriples;
+  } catch (err) {
+    console.error(
+      '[ontology] ERROR: failed to load @origintrail-official/dkg-core/project-ontology.\n' +
+      `  underlying: ${err.message}`,
+    );
+    process.exit(1);
+  }
+}
+
 if (!fs.existsSync(TTL_PATH)) {
   console.error(`[ontology] ERROR: ${TTL_PATH} does not exist. Pick a different --starter or --dir.`);
   process.exit(1);
@@ -61,6 +103,7 @@ if (!fs.existsSync(GUIDE_PATH)) {
 
 const ttl = fs.readFileSync(TTL_PATH, 'utf-8');
 const guide = fs.readFileSync(GUIDE_PATH, 'utf-8');
+const buildProjectOntologyTriples = await loadProjectOntologyBuilder();
 const { ontologyUri, guideUri, quads: triples } = buildProjectOntologyTriples({
   contextGraphId: PROJECT_ID,
   starterSlug: STARTER,

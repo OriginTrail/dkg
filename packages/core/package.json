@@ -11,9 +11,9 @@
       "default": "./dist/index.js"
     },
     "./project-ontology": {
-      "types": "./project-ontology.d.ts",
-      "import": "./project-ontology.js",
-      "default": "./project-ontology.js"
+      "types": "./dist/project-ontology.d.ts",
+      "import": "./dist/project-ontology.js",
+      "default": "./dist/project-ontology.js"
     },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
@@ -59,8 +59,6 @@
     "access": "public"
   },
   "files": [
-    "project-ontology.js",
-    "project-ontology.d.ts",
     "dist",
     "README.md",
     "LICENSE"

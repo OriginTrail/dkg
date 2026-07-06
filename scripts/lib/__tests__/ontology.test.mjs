@@ -18,16 +18,33 @@ function copyIfPresent(fromRoot, toRoot, relPath) {
   fs.copyFileSync(source, target);
 }
 
-test('import-ontology dry-run works from source checkout without built core output', () => {
+function symlinkDir(source, target) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.symlinkSync(source, target, 'dir');
+}
+
+test('import-ontology dry-run builds and loads the public core package subpath from source', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ontology-script-'));
   const miniRepo = path.join(tempRoot, 'repo');
   const fixtureDir = path.join(tempRoot, 'ontology-fixture');
 
   try {
+    copyIfPresent(REPO_ROOT, miniRepo, 'package.json');
+    copyIfPresent(REPO_ROOT, miniRepo, 'tsconfig.base.json');
     copyIfPresent(REPO_ROOT, miniRepo, 'scripts/import-ontology.mjs');
     copyIfPresent(REPO_ROOT, miniRepo, 'scripts/lib/dkg-daemon.mjs');
-    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/src/project-ontology-runtime.js');
-    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/src/sparql-safe-runtime.js');
+    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/package.json');
+    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/tsconfig.json');
+    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/src/project-ontology.ts');
+    copyIfPresent(REPO_ROOT, miniRepo, 'packages/core/src/sparql-safe.ts');
+
+    const typescriptPackage = path.join(REPO_ROOT, 'node_modules/typescript');
+    assert.ok(fs.existsSync(typescriptPackage), 'typescript package must be installed to run the source-checkout smoke test');
+    symlinkDir(typescriptPackage, path.join(miniRepo, 'node_modules/typescript'));
+    symlinkDir(
+      path.join(miniRepo, 'packages/core'),
+      path.join(miniRepo, 'node_modules/@origintrail-official/dkg-core'),
+    );
 
     fs.mkdirSync(fixtureDir, { recursive: true });
     fs.writeFileSync(path.join(fixtureDir, 'ontology.ttl'), '@prefix ex: <urn:example:> .\n', 'utf8');
@@ -53,6 +70,10 @@ test('import-ontology dry-run works from source checkout without built core outp
     assert.match(result.stdout, /ontology URI\s+= urn:dkg:project:test-project:ontology/);
     assert.match(result.stdout, /guide URI\s+= urn:dkg:project:test-project:ontology:agent-guide/);
     assert.match(result.stdout, /\[ontology\] --dry-run set; not importing\./);
+    assert.ok(
+      fs.existsSync(path.join(miniRepo, 'packages/core/dist/project-ontology.js')),
+      'dry-run should build the public @origintrail-official/dkg-core/project-ontology entry when dist is absent',
+    );
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
