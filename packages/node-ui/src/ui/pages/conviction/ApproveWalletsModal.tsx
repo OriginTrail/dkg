@@ -176,7 +176,18 @@ export function ApproveWalletsModal({
   );
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
-  const targetWalletManaged = access.mode === 'wallet' && access.writesEnabled;
+  // R4 (#1468) — arm the batch's device-progress + cancel/dismiss lock whenever the TARGET write
+  // could open a browser-wallet signature. `access.mode === 'wallet'` covers the loaded case, but
+  // during the wallet-balances load window the target access is `unknown` (the walletsUnknown
+  // self-heal above), yet the resolved submitter re-fetches and STILL routes the target write to
+  // the wallet signer when the owner is the connected wallet. Counting it managed here makes
+  // runApproveBatch set `walletBatchSigning`/deviceTotal BEFORE that in-flight wallet action —
+  // never run a wallet-signed approve under the daemon (no-prompt, freely-dismissable) contract.
+  // Daemon-owned targets (owner == wallets[0], normally != the connected wallet) are unaffected;
+  // the rare owner==primary==connected case merely shows a device row that confirms instantly.
+  const targetWalletManaged =
+    (access.mode === 'wallet' && access.writesEnabled) ||
+    (access.mode === 'unknown' && sameAddress(snapshot?.owner, connectedWallet));
   const signableOwners = signableOwnersFor(ownerWallet, connectedWallet);
 
   const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {

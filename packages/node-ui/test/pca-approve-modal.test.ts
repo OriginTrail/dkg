@@ -414,6 +414,105 @@ describe('ApproveWalletsModal — per-row mapping', () => {
     await unmount();
   });
 
+  // R4 (#1468) — the LOADING-WINDOW race: when the PCA snapshot loads BEFORE the wallet balances,
+  // the target access is `unknown` (walletsUnknown self-heal), but the resolved submitter still
+  // re-fetches and routes a connected-wallet-owned target through the BROWSER-WALLET signer. The
+  // batch must still arm the wallet-signing lock (device progress + dismiss/cancel guard) so a
+  // real wallet signature never runs under the daemon (no-prompt, freely-dismissable) contract.
+  // Without the targetWalletManaged loading-window pessimism this times out (no device row, lock
+  // never set) even though walletRegisterAgent is about to open a device prompt.
+  it('loading-window (snapshot before wallets): a connected-owner target still arms the wallet-signing lock', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // Snapshot resolves immediately as connected-wallet-owned; the wallet balances stay PENDING
+    // through the assertion, so `wb` is undefined and access.mode === 'unknown' at click time.
+    mocks.fetchPca.mockResolvedValue(ownedSnap(CONNECTED_OWNER, { accountId: '8' }));
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    // The wallet write stays in-flight so the device prompt/lock is observable while it pends.
+    let resolveRegister!: (value: unknown) => void;
+    mocks.walletRegisterAgent.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveRegister = resolve; }),
+    );
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    // The lock + device step are armed from the render-time targetWalletManaged, BEFORE the
+    // resolving submitter finishes — proving the loading-window write is treated as wallet-signed.
+    await waitForText(container, 'Confirm on your device');
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeTruthy();
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(true);
+    // Dismissal is blocked while the wallet action is in flight.
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Now let the balances + the wallet signature complete → the connected wallet actually signed.
+    resolveBalances({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    resolveRegister({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true, txHash: '0xwalletreg' });
+    await waitForText(container, 'approved on-chain');
+    expect(mocks.walletRegisterAgent).toHaveBeenCalledWith('8', ADDR_A); // routed to the WALLET signer
+    expect(mocks.pcaAddAgent).not.toHaveBeenCalled(); // never the daemon (no-prompt) path
+    await unmount();
+  });
+
+  // R4 (#1468) — the INVERSE guard: pins the `sameAddress(owner, connectedWallet)` conjunct as
+  // load-bearing. A DAEMON-owned target during the same load window (owner known + != the connected
+  // wallet, wallets still pending) must NOT be falsely marked wallet-managed: no device row, dismiss
+  // stays enabled, and the write self-heals to the DAEMON (pcaAddAgent) once wallets load — never the
+  // browser wallet. Without the conjunct (i.e. arming on `unknown` alone) a daemon approve would be
+  // spuriously locked; this test catches that regression.
+  it('loading-window: a DAEMON-owned target (owner != connected wallet) is NOT falsely locked, self-heals to daemon', async () => {
+    // A wallet IS connected, but it is NOT the owner — the owner is the node's daemon EOA.
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    mocks.fetchPca.mockResolvedValue(daemonSnap({ accountId: '8' })); // owner == DEFAULT_NODE_WALLET != CONNECTED_OWNER
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    mocks.pcaAddAgent.mockResolvedValue({ accountId: '8', agent: ADDR_A, registered: true, adapterSupported: true });
+
+    const onClose = vi.fn();
+    const { container, unmount } = await render(
+      React.createElement(ApproveWalletsModal, {
+        accountId: '8', initialMode: 'sponsor', seedBulk: ADDR_A, onClose,
+      }),
+    );
+    await waitForText(container, 'Wallet address(es)');
+    await click(container.querySelector('[data-testid="pca-approve-submit"]')!);
+    await waitForText(container, 'approving'); // batch started; the write is parked on the pending balances
+    // NO false wallet lock for the daemon-owned target during the load window.
+    expect(container.textContent).not.toContain('Confirm on your device');
+    expect((container.querySelector('.v10-modal-footer .v10-modal-btn') as HTMLButtonElement).disabled).toBe(false);
+    expect(container.querySelector('button[aria-label="Close disabled while signing"]')).toBeNull();
+
+    resolveBalances({ wallets: [DEFAULT_NODE_WALLET], balances: [], chainId: '84532', rpcUrl: null });
+    await waitForText(container, 'approved');
+    expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', ADDR_A); // daemon self-heal, not the wallet
+    expect(mocks.walletRegisterAgent).not.toHaveBeenCalled();
+    await unmount();
+  });
+
   it('wallet-managed renew progress counts only wallet-signed writes, not daemon deregisters', async () => {
     useWalletStore.setState({
       provider: { request: vi.fn() } as any,
