@@ -410,9 +410,9 @@ describe('HubRotationPoller', () => {
         iface.getEvent('NewAssetStorage')!.topicHash,
       ]);
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getBlockNumber')?.opts)
-        .toEqual({ capSingleProvider: true });
+        .toEqual({ policy: 'watchdogPointRead' });
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getLogs')?.opts)
-        .toEqual({ policy: 'wideLogScan', capSingleProvider: true });
+        .toEqual({ policy: 'watchdogWideLogScan' });
       expect(onContractName.mock.calls.map((call) => call[0])).toEqual([
         'RandomSampling',
         'ContextGraphs',
