@@ -145,12 +145,8 @@ import {
   loadTokens,
   httpAuthGuardResult,
   reconcileValidTokens,
-  type RequestAuthContext,
 } from '../auth.js';
-import {
-  resolveDashboardSseSessionFromAuthContext,
-  type DashboardSseSessionAuthenticator,
-} from './dashboard-sse-session.js';
+import { resolveDashboardSseSessionFromAuthContext } from './dashboard-sse-session.js';
 import {
   DashboardSessionStore,
   DashboardLoginAttemptLimiter,
@@ -166,7 +162,7 @@ import {
   readDashboardCredentialSummary,
   verifyDashboardCredentials,
 } from './dashboard-credentials.js';
-import { createSseHub, type SseDashboardSession } from './sse-hub.js';
+import { createSseHub } from './sse-hub.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -406,11 +402,7 @@ import {
 } from './local-agents.js';
 
 import { handleRequest } from './handle-request.js';
-import {
-  resolveRouteRequestIdentityFromAuthContext,
-  type RouteIdentityAgent,
-  type RouteRequestIdentity,
-} from './route-request-identity.js';
+import { resolveRouteRequestIdentityFromAuthContext } from './route-request-identity.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import {
@@ -420,22 +412,6 @@ import {
 } from './worker/async-promote-worker.js';
 
 type MultiaddrLike = { toString: () => string };
-
-export function resolveLifecycleRouteRequestIdentity(
-  req: IncomingMessage,
-  agent: RouteIdentityAgent,
-  requestAuth: RequestAuthContext | undefined,
-): RouteRequestIdentity {
-  return resolveRouteRequestIdentityFromAuthContext(req, agent, requestAuth);
-}
-
-export function resolveLifecycleDashboardSseSession(
-  req: IncomingMessage,
-  authenticateDashboardSession: DashboardSseSessionAuthenticator,
-  requestAuth: RequestAuthContext | undefined,
-): SseDashboardSession | undefined {
-  return resolveDashboardSseSessionFromAuthContext(req, authenticateDashboardSession, requestAuth);
-}
 
 function stringifyMultiaddrList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -3188,7 +3164,7 @@ export async function runDaemonInner(
 
       // GET /api/events — SSE stream for real-time UI updates
       if (req.method === "GET" && reqUrl.pathname === "/api/events") {
-        const dashboardSession = resolveLifecycleDashboardSseSession(
+        const dashboardSession = resolveDashboardSseSessionFromAuthContext(
           req,
           authenticateDashboardSession,
           authResult.requestAuthContext,
@@ -3277,7 +3253,7 @@ export async function runDaemonInner(
       });
       if (handled) return;
 
-      const requestIdentity = resolveLifecycleRouteRequestIdentity(
+      const requestIdentity = resolveRouteRequestIdentityFromAuthContext(
         req,
         agent,
         authResult.requestAuthContext,

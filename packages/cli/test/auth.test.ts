@@ -24,7 +24,6 @@ import { resolveDashboardSseSession, resolveDashboardSseSessionFromAuthContext }
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
 import { handleRequest } from '../src/daemon/handle-request.js';
 import { resolveRequestPrincipal, resolveRouteRequestIdentity, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
-import { resolveLifecycleDashboardSseSession, resolveLifecycleRouteRequestIdentity } from '../src/daemon/lifecycle.js';
 import {
   DashboardSessionStore,
   type AuthenticatedDashboardSession,
@@ -414,7 +413,7 @@ describe('resolveRouteRequestIdentity', () => {
 });
 
 
-describe('lifecycle auth routing', () => {
+describe('explicit auth-result resolver routing', () => {
   const agent = {
     resolveAgentByToken: (token: string | undefined) => token === 'auth-result-token'
       ? 'did:dkg:agent:auth-result'
@@ -448,17 +447,17 @@ describe('lifecycle auth routing', () => {
     },
   };
 
-  it('threads the authResult context through lifecycle route and SSE identity wiring', () => {
+  it('uses the explicit authResult context for route and SSE identity wiring', () => {
     const req = { headers: { authorization: 'Bearer poison-header' } } as IncomingMessage;
     setRequestAuthContext(req, poisonedRequestContext);
 
-    expect(resolveLifecycleRouteRequestIdentity(req, agent, authResultContext)).toMatchObject({
+    expect(resolveRouteRequestIdentityFromAuthContext(req, agent, authResultContext)).toMatchObject({
       credentialToken: 'auth-result-token',
       principal: { kind: 'agent', agentAddress: 'did:dkg:agent:auth-result-principal' },
       requestAuth: { source: 'dashboard-session' },
     });
 
-    const dashboardSession = resolveLifecycleDashboardSseSession(
+    const dashboardSession = resolveDashboardSseSessionFromAuthContext(
       req,
       () => ({
         sessionId: 'auth-result-session',
