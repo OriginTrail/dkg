@@ -359,26 +359,16 @@ export function isContextGraphChainScanPartialError(
 }
 
 /**
- * ContextGraphNameRegistry scan mode.
+ * Public ContextGraphNameRegistry list options.
  *
- * Public/default calls use `listAll` semantics and never mutate daemon
- * watermarks. Cursor-backed daemon scans are exposed through
+ * Default calls use `listAll` semantics and never mutate daemon watermarks.
+ * The two boolean shapes are retained as legacy compatibility wrappers around
+ * the paged cursor scanner. New cursor-backed daemon scans should use
  * `scanContextGraphRegistryPages`, where callers explicitly acknowledge a page
  * after local apply succeeds.
  */
-export type ContextGraphChainScanOptions =
-  | { mode?: 'listAll' }
-  | {
-      mode: 'incremental';
-      pageBudget?: number;
-    }
-  | {
-      mode: 'seedFull';
-    }
-  | {
-      mode: 'seedFromCursor';
-      pageBudget?: number;
-    }
+export type ContextGraphChainListOptions = { mode?: 'listAll' };
+export type ContextGraphLegacyIncrementalScanOptions =
   | {
       incremental: true;
       pageBudget?: number;
@@ -388,7 +378,11 @@ export type ContextGraphChainScanOptions =
       resumeFromCursor?: boolean;
       pageBudget?: number;
     };
+export type ContextGraphChainScanOptions =
+  | ContextGraphChainListOptions
+  | ContextGraphLegacyIncrementalScanOptions;
 
+/** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
 export type ContextGraphRegistryScanOptions =
   | {
       mode: 'incremental';

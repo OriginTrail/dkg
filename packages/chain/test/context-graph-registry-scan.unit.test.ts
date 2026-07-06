@@ -294,17 +294,103 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
-  it('rejects cursor scan options on the public list method instead of silently list-scanning', async () => {
+  it('keeps legacy public incremental option as a cursor-backed compatibility wrapper', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await adapter.listContextGraphsFromChain(undefined, {
+      incremental: true,
+      pageBudget: 1,
+    });
+
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+    ]);
+    expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000]);
+
+    provider.getCode = seam(async () => {
+      throw new Error('deploy block probing should not run with the legacy incremental cursor');
+    });
+    registry.queryFilter.clear();
+
+    await adapter.listContextGraphsFromChain(undefined, {
+      incremental: true,
+      pageBudget: 1,
+    });
+
+    expect(provider.getCode.calls).toEqual([]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [1_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 1_949],
+    ]);
+    expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000, 1_950]);
+  });
+
+  it('keeps legacy public seed option as a full-scan watermark compatibility wrapper', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const historicalGraphBlock = 10;
+    const registry = makeRegistry({
+      queryFilter: seam(async (_filter: unknown, lo: number, hi: number) =>
+        lo <= historicalGraphBlock && historicalGraphBlock <= hi
+          ? [{ topics: [], data: '0x01', blockNumber: historicalGraphBlock }]
+          : [],
+      ),
+    });
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+
+    const seeded = await adapter.listContextGraphsFromChain(undefined, {
+      seedIncrementalWatermark: true,
+    });
+
+    expect(seeded.map((cg) => cg.blockNumber)).toEqual([historicalGraphBlock]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+      [1_000, 1_999],
+      [2_000, 2_100],
+    ]);
+    expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000, 2_000, 2_101]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_101);
+  });
+
+  it('rejects explicit daemon scan modes on the public list method', async () => {
     const registry = makeRegistry();
     const { adapter } = makeAdapter(registry, 2_100);
 
     await expect(adapter.listContextGraphsFromChain(undefined, {
-      incremental: true,
-    })).rejects.toThrow('scanContextGraphRegistryPages');
-    await expect(adapter.listContextGraphsFromChain(undefined, {
       mode: 'incremental',
-    })).rejects.toThrow('scanContextGraphRegistryPages');
+    } as any)).rejects.toThrow('scanContextGraphRegistryPages');
     expect(registry.queryFilter.calls).toEqual([]);
+  });
+
+  it('does not emit a synthetic empty terminal page for seed scans', async () => {
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    const pageSizes: number[] = [];
+    for await (const page of adapter.scanContextGraphRegistryPages({
+      mode: 'seedFull',
+    })) {
+      pageSizes.push(page.contextGraphs.length);
+      await page.ack();
+    }
+
+    expect(pageSizes).toEqual([0, 0, 0]);
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+      [1_000, 1_999],
+      [2_000, 2_100],
+    ]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_101);
   });
 
   it('can seed the incremental watermark from an explicit successful full scan', async () => {

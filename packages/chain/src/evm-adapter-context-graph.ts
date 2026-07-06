@@ -63,19 +63,10 @@ function buildPublicContextGraphRegistryScanPlan(
   fromBlock: number | undefined,
   options: ContextGraphChainScanOptions | undefined,
 ): ContextGraphRegistryScanPlan {
-  const mode = options && 'mode' in options ? options.mode : undefined;
-  if (options && (
-    ('incremental' in options && options.incremental === true) ||
-    ('seedIncrementalWatermark' in options && options.seedIncrementalWatermark === true) ||
-    mode === 'incremental' ||
-    mode === 'seedFull' ||
-    mode === 'seedFromCursor'
-  )) {
-    throw new Error(
-      'listContextGraphsFromChain cursor scan options are no longer accepted; ' +
-      'use scanContextGraphRegistryPages for cursor-backed daemon scans.',
-    );
-  }
+  const runtimeOptions = options as
+    | (ContextGraphChainScanOptions & { mode?: string })
+    | undefined;
+  const mode = runtimeOptions?.mode;
 
   if (fromBlock !== undefined) {
     return {
@@ -85,6 +76,48 @@ function buildPublicContextGraphRegistryScanPlan(
       allowPartialFailure: false,
       seedAtEnd: false,
     };
+  }
+
+  if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
+    return {
+      mode: 'incremental',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: false,
+      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
+    };
+  }
+
+  if (
+    runtimeOptions &&
+    'seedIncrementalWatermark' in runtimeOptions &&
+    runtimeOptions.seedIncrementalWatermark === true
+  ) {
+    if (runtimeOptions.resumeFromCursor === true) {
+      return {
+        mode: 'seedFromCursor',
+        resumeFromWatermark: true,
+        persistProgress: true,
+        allowPartialFailure: true,
+        seedAtEnd: true,
+        pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
+      };
+    }
+    return {
+      mode: 'seedFull',
+      resumeFromWatermark: false,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+    };
+  }
+
+  if (mode !== undefined && mode !== 'listAll') {
+    throw new Error(
+      'listContextGraphsFromChain accepts only listAll or legacy boolean scan options; ' +
+      'use scanContextGraphRegistryPages for cursor-backed daemon scans.',
+    );
   }
 
   return {
@@ -304,12 +337,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     );
     if (start > head) {
       if (scanPlan.seedAtEnd) {
-        yield {
-          contextGraphs: [],
-          ack: async () => {
-            await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
-          },
-        };
+        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
       }
       return;
     }
@@ -392,15 +420,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       };
       const scannedPages = Math.floor((hi - start) / pageSize) + 1;
       if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return;
-    }
-
-    if (scanPlan.seedAtEnd) {
-      yield {
-        contextGraphs: [],
-        ack: async () => {
-          await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
-        },
-      };
     }
   }
 
