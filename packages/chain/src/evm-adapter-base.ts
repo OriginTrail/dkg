@@ -527,8 +527,6 @@ export class EVMChainAdapterBase {
 
   protected readonly pcaReadCache = new PcaReadCache();
 
-  protected hubRotationListenerStarted = false;
-
   protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
@@ -3132,13 +3130,12 @@ export class EVMChainAdapterBase {
    * rotation detection without four hidden idle log streams.
    */
   protected async startHubRotationListener(): Promise<void> {
-    if (this.hubRotationListenerStarted) return;
+    if (this.hubRotationPoller.isStarted) return;
     try {
       await this.hubRotationPoller.start(
         this.contracts.hub,
         await contractAddress(this.contracts.hub),
       );
-      this.hubRotationListenerStarted = this.hubRotationPoller.isStarted;
     } catch {
       /* provider doesn't support log polling — TTL refresh (RS)
        * and `withHubStaleRetry` (writes) are the fallbacks */
@@ -3215,7 +3212,6 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
-    this.hubRotationListenerStarted = false;
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

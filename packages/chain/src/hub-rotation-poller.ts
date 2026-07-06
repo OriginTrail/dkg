@@ -20,6 +20,15 @@ interface HubRotationBinding {
   topics: string[];
 }
 
+type HubRotationLogWithIdentity = ethers.Log & {
+  blockHash?: unknown;
+  transactionHash?: unknown;
+  index?: unknown;
+  logIndex?: unknown;
+};
+
+type HubRotationScanMode = 'probe' | 'dispatch';
+
 export class HubRotationPoller {
   private readonly readProvider: HubRotationReadProvider;
   private readonly intervalMs: number;
@@ -32,6 +41,7 @@ export class HubRotationPoller {
   private readonly seenLogIds = new Map<string, number>();
   private started = false;
   private startInFlight: Promise<void> | null = null;
+  private generation = 0;
 
   constructor(config: HubRotationPollerConfig) {
     this.readProvider = config.readProvider;
@@ -48,16 +58,34 @@ export class HubRotationPoller {
     if (this.started) return;
     if (this.startInFlight) return this.startInFlight;
 
-    let startPromise!: Promise<void>;
-    startPromise = this.startOnce(hub, hubAddress)
+    this.bind(hub, hubAddress);
+    const generation = ++this.generation;
+    this.started = true;
+    const startPromise = this.seed(generation)
+      .catch(() => { /* optional bootstrap path */ })
       .finally(() => {
         if (this.startInFlight === startPromise) this.startInFlight = null;
+        if (this.inFlight === startPromise) this.inFlight = null;
       });
     this.startInFlight = startPromise;
-    return startPromise;
+    this.inFlight = startPromise;
+
+    this.timer = setInterval(() => {
+      if (this.inFlight) return;
+      const pollPromise = this.pollOnce(generation)
+        .catch(() => { /* optional poller path */ })
+        .finally(() => {
+          if (this.inFlight === pollPromise) this.inFlight = null;
+        });
+      this.inFlight = pollPromise;
+    }, this.intervalMs);
+    if (this.timer.unref) this.timer.unref();
   }
 
   stop(): void {
+    this.generation++;
+    this.startInFlight = null;
+    this.inFlight = null;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -73,37 +101,28 @@ export class HubRotationPoller {
     };
   }
 
-  private async startOnce(hub: Contract, hubAddress: string): Promise<void> {
-    if (this.started) return;
-
-    this.bind(hub, hubAddress);
-    await this.seed();
-    this.timer = setInterval(() => {
-      if (this.inFlight) return;
-      this.inFlight = this.pollOnce()
-        .catch(() => { /* optional poller path */ })
-        .finally(() => { this.inFlight = null; });
-    }, this.intervalMs);
-    if (this.timer.unref) this.timer.unref();
-    this.started = true;
+  async pollOnce(generation = this.generation): Promise<void> {
+    await this.scan(generation, 'dispatch');
   }
 
-  async pollOnce(): Promise<void> {
-    const binding = this.binding;
-    if (!binding || binding.topics.length === 0) return;
+  private async seed(generation: number): Promise<void> {
+    await this.scan(generation, 'probe');
+  }
 
+  private async scan(generation: number, mode: HubRotationScanMode): Promise<void> {
+    const binding = this.binding;
+    if (!binding || binding.topics.length === 0 || generation !== this.generation) return;
+
+    const label = mode === 'probe' ? 'Hub rotation seed' : 'Hub rotation poll';
     const previousLastScannedBlock = this.lastScannedBlock;
     const head = await this.readProvider(
-      'Hub rotation poll getBlockNumber',
+      `${label} getBlockNumber`,
       (provider) => provider.getBlockNumber(),
     );
-    const candidateFromBlock = previousLastScannedBlock == null
-      ? head - this.reorgBufferBlocks
-      : previousLastScannedBlock + 1 - this.reorgBufferBlocks;
-    const recentFromBlock = head - this.reorgBufferBlocks;
-    const fromBlock = Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
+    if (generation !== this.generation) return;
+    const fromBlock = this.scanFromBlock(mode, previousLastScannedBlock, head);
     const logs = await this.readProvider<ethers.Log[]>(
-      'Hub rotation poll getLogs',
+      `${label} getLogs`,
       (provider) => provider.getLogs({
         address: binding.hubAddress,
         fromBlock,
@@ -112,43 +131,38 @@ export class HubRotationPoller {
       }),
       { policy: 'wideLogScan' },
     );
+    if (generation !== this.generation) return;
 
-    for (const log of logs) {
-      const identity = this.logIdentity(log);
-      if (this.seenLogIds.has(identity)) continue;
-      this.rememberLog(identity, log);
-      const contractName = this.contractNameFromLog(binding.hub, log);
-      if (contractName) this.onContractName(contractName);
-    }
+    // Probe mode intentionally does not mark logs as seen; the first buffered
+    // dispatch must still process rotations that landed during adapter init.
+    if (mode === 'dispatch') this.dispatchLogs(binding.hub, logs);
     this.lastScannedBlock = previousLastScannedBlock == null
       ? head
       : Math.max(previousLastScannedBlock, head);
     this.pruneSeenLogs(head);
   }
 
-  private async seed(): Promise<void> {
-    const binding = this.binding;
-    if (!binding || binding.topics.length === 0) return;
-    const head = await this.readProvider(
-      'Hub rotation seed getBlockNumber',
-      (provider) => provider.getBlockNumber(),
-    );
-    const fromBlock = Math.max(0, head - this.reorgBufferBlocks);
-    // Probe log-scan support and position the high-water mark, but do not mark
-    // returned logs as seen. They must remain eligible for the first buffered
-    // post-start poll in case a real rotation landed during adapter init.
-    await this.readProvider<ethers.Log[]>(
-      'Hub rotation seed getLogs',
-      (provider) => provider.getLogs({
-        address: binding.hubAddress,
-        fromBlock,
-        toBlock: head,
-        topics: [binding.topics],
-      }),
-      { policy: 'wideLogScan' },
-    );
-    this.lastScannedBlock = head;
-    this.pruneSeenLogs(head);
+  private scanFromBlock(
+    mode: HubRotationScanMode,
+    previousLastScannedBlock: number | undefined,
+    head: number,
+  ): number {
+    if (mode === 'probe' || previousLastScannedBlock == null) {
+      return Math.max(0, head - this.reorgBufferBlocks);
+    }
+    const candidateFromBlock = previousLastScannedBlock + 1 - this.reorgBufferBlocks;
+    const recentFromBlock = head - this.reorgBufferBlocks;
+    return Math.max(0, Math.min(candidateFromBlock, recentFromBlock));
+  }
+
+  private dispatchLogs(hub: Contract, logs: ethers.Log[]): void {
+    for (const log of logs) {
+      const identity = this.logIdentity(log);
+      if (this.seenLogIds.has(identity)) continue;
+      this.rememberLog(identity, log);
+      const contractName = this.contractNameFromLog(hub, log);
+      if (contractName) this.onContractName(contractName);
+    }
   }
 
   private contractNameFromLog(hub: Contract, log: ethers.Log): string | undefined {
@@ -179,12 +193,7 @@ export class HubRotationPoller {
   }
 
   private logIdentity(log: ethers.Log): string {
-    const maybe = log as ethers.Log & {
-      blockHash?: unknown;
-      transactionHash?: unknown;
-      index?: unknown;
-      logIndex?: unknown;
-    };
+    const maybe = log as HubRotationLogWithIdentity;
     const blockHash = typeof maybe.blockHash === 'string' ? maybe.blockHash : undefined;
     const transactionHash = typeof maybe.transactionHash === 'string' ? maybe.transactionHash : undefined;
     const index = typeof maybe.index === 'number'
