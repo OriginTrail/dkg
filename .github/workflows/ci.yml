@@ -208,6 +208,9 @@ jobs:
           TURBO_TOKEN: ${{ github.event_name == 'push' && secrets.TURBO_TOKEN || '' }}
           TURBO_TEAM: ${{ github.event_name == 'push' && secrets.TURBO_TEAM || '' }}
 
+      - name: Test repository scripts
+        run: pnpm run test:scripts
+
       - name: Package build outputs
         run: |
           set -euo pipefail
