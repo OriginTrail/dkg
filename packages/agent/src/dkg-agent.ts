@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -105,12 +105,13 @@ import {
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
+  selectACKCandidatePeers,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   KA_ID_PRED, RESERVED_UAL_PRED,
-  type CollectedACK, type V10CoreNodeACK, type LiftAuthorityProof, type LiftTransitionType,
+  type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams, type LiftAuthorityProof, type LiftTransitionType,
   type LiftRequest, type LiftRequestAuthorSeal,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
@@ -1435,6 +1436,15 @@ export class DKGAgent extends DKGAgentBase {
    * protocol negotiation (no handler registered), so over-asking is
    * cheap, while under-asking is fatal.
    *
+   * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
+   * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
+   * explicitly advertise V2, but do not make peer-store protocol metadata the
+   * only gate: StorageACK handlers register after identity resolution, often
+   * after peers are already connected, and libp2p identify does not always
+   * refresh the stored protocol list. The actual compatibility gate remains
+   * the V2 wire protocol passed to `sendP2P`; V1-only peers fail negotiation
+   * and cannot silently sign against a public-only root.
+   *
    * Codex review (PR #1107): the quorum threshold here must track the
    * CHAIN's runtime `requiredACKs` (ParametersStorage
    * minimumRequiredSignatures), not the hard-coded default — on networks
@@ -1446,14 +1456,16 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
-  private getACKCandidatePeers(): string[] {
+  private getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
-    const connected = peers.map(p => p.toString()).filter(id => id !== this.peerId);
-    const confirmedCore = connected.filter(id => this.knownCorePeerIds.has(id));
-    const quorum = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    if (confirmedCore.length >= quorum) return confirmedCore;
-    const rest = connected.filter(id => !this.knownCorePeerIds.has(id));
-    return [...confirmedCore, ...rest];
+    return selectACKCandidatePeers({
+      connectedPeers: peers.map(p => p.toString()),
+      selfPeerId: this.peerId,
+      knownCorePeerIds: this.knownCorePeerIds,
+      knownCorePeerIdsV2: this.knownCorePeerIdsV2,
+      requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+      protocol,
+    });
   }
 
   /**
@@ -1496,7 +1508,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1528,27 +1540,7 @@ export class DKGAgent extends DKGAgentBase {
 
     const chain = this.chain;
 
-    return async (
-      merkleRoot: Uint8Array,
-      contextGraphId: string,
-      kaCount: number,
-      rootEntities: string[],
-      publicByteSize: bigint,
-      stagingQuads: Uint8Array | undefined,
-      epochs: number | undefined,
-      tokenAmount: bigint | undefined,
-      swmGraphId: string | undefined,
-      subGraphName: string | undefined,
-      merkleLeafCount: number,
-      isEncryptedPayload?: boolean,
-      // OT-RFC-49 / WS-D — when present, this is a curated publish: the
-      // committed PUBLIC `_catalog` commitment the core rebuilds + verifies
-      // over the inline catalog `stagingQuads` and that lands on-chain.
-      catalogCommitment?: {
-        catalogRoot: Uint8Array;
-        catalogLeafCount: number;
-      },
-    ) => {
+    return async (params: V10ACKProviderParams) => {
       // Fail loud on non-numeric or non-positive CG ids: V10 publish requires
       // a real on-chain context graph and the contract rejects `cgId == 0`
       // with `ZeroContextGraphId`. Reject `<= 0n` (not `=== 0n`) because
@@ -1562,11 +1554,11 @@ export class DKGAgent extends DKGAgentBase {
       // source SWM graph name and is NOT required to be numeric.
       let cgIdBigInt: bigint;
       try {
-        cgIdBigInt = BigInt(contextGraphId);
+        cgIdBigInt = BigInt(params.contextGraphId);
       } catch {
         throw new Error(
           `V10 ACK collection requires a numeric on-chain context graph id; ` +
-          `got '${contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
+          `got '${params.contextGraphId}'. Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
       if (cgIdBigInt <= 0n) {
@@ -1575,9 +1567,9 @@ export class DKGAgent extends DKGAgentBase {
           `Register the CG on-chain via ContextGraphs.createContextGraph first.`,
         );
       }
-      if (!Number.isInteger(merkleLeafCount) || merkleLeafCount < 1) {
+      if (!Number.isInteger(params.merkleLeafCount) || params.merkleLeafCount < 1) {
         throw new Error(
-          `V10 ACK collection requires a positive integer merkleLeafCount; got ${merkleLeafCount}. ` +
+          `V10 ACK collection requires a positive integer merkleLeafCount; got ${params.merkleLeafCount}. ` +
           'Publishers must pass the V10 flat-KC leaf count computed by V10MerkleTree.',
         );
       }
@@ -1623,25 +1615,24 @@ export class DKGAgent extends DKGAgentBase {
       }
 
       const result = await collector.collect({
-        merkleRoot,
+        merkleRoot: params.merkleRoot,
         contextGraphId: cgIdBigInt,
-        contextGraphIdStr: contextGraphId,
+        contextGraphIdStr: params.contextGraphId,
         publisherPeerId: this.peerId,
-        publicByteSize,
-        isPrivate: isEncryptedPayload === true,
-        kaCount,
-        rootEntities,
+        publicByteSize: params.publicByteSize,
+        isPrivate: params.ackMode.kind !== 'public',
+        kaCount: params.kaCount,
+        rootEntities: params.rootEntities,
         chainId: chainIdBig,
         kav10Address,
         requiredACKs,
-        stagingQuads,
-        epochs,
-        tokenAmount,
-        swmGraphId,
-        subGraphName,
-        merkleLeafCount,
-        isEncryptedPayload,
-        catalogCommitment,
+        stagingQuads: params.stagingQuads,
+        epochs: params.epochs,
+        tokenAmount: params.tokenAmount,
+        swmGraphId: params.swmGraphId,
+        subGraphName: params.subGraphName,
+        merkleLeafCount: params.merkleLeafCount,
+        ackMode: params.ackMode,
       });
       return result.acks;
     };
@@ -1675,7 +1666,7 @@ export class DKGAgent extends DKGAgentBase {
         }
         return sendResult.response;
       },
-      getConnectedCorePeers: () => this.getACKCandidatePeers(),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {

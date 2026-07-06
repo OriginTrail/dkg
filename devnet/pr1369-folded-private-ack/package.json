@@ -1,0 +1,17 @@
+{
+  "name": "@origintrail-official/dkg-devnet-pr1369-folded-private-ack",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:devnet": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

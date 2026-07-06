@@ -1,5 +1,6 @@
 import {
   PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
   encodePublishIntent,
   encodeUpdateIntent,
@@ -19,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { QuorumUnmetError, type PeerOutcome } from './ack-errors.js';
+import type { V10ACKMode } from './publisher.js';
 
 /**
  * Why an ACK signer pre-flight rejected a recovered signer. Mirrors
@@ -37,7 +39,7 @@ export interface ACKVerifyResult {
 export interface ACKCollectorDeps {
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: () => string[];
+  getConnectedCorePeers: (protocol?: string) => string[];
   /**
    * Boolean ACK signer pre-flight. Backward-compatible legacy entry
    * point — when only this is provided the rejection log surfaces a
@@ -86,6 +88,35 @@ export interface ACKCollectionResult {
   acks: CollectedACK[];
   merkleRoot: Uint8Array;
   contextGraphId: bigint;
+}
+
+export interface ACKCollectorParams {
+  merkleRoot: Uint8Array;
+  contextGraphId: bigint;
+  contextGraphIdStr: string;
+  publisherPeerId: string;
+  publicByteSize: bigint;
+  isPrivate: boolean;
+  kaCount: number;
+  rootEntities: string[];
+  /** Numeric EVM chain id (e.g. 31337n for hardhat). Required by the H5 prefix in the V10 ACK digest. */
+  chainId: bigint;
+  /** Deployed address of `KnowledgeAssetsV10`. Required by the H5 prefix in the V10 ACK digest. */
+  kav10Address: string;
+  requiredACKs?: number;
+  stagingQuads?: Uint8Array;
+  epochs?: number;
+  tokenAmount?: bigint;
+  /**
+   * Source SWM graph id. Different from `contextGraphIdStr` only on the
+   * remap flow where data lives under one graph name but is published to a
+   * different on-chain numeric id.
+   */
+  swmGraphId?: string;
+  subGraphName?: string;
+  /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
+  merkleLeafCount: number;
+  ackMode?: V10ACKMode;
 }
 
 /**
@@ -158,86 +189,7 @@ export class ACKCollector {
     this.deps = deps;
   }
 
-  async collect(params: {
-    merkleRoot: Uint8Array;
-    contextGraphId: bigint;
-    contextGraphIdStr: string;
-    publisherPeerId: string;
-    publicByteSize: bigint;
-    isPrivate: boolean;
-    kaCount: number;
-    rootEntities: string[];
-    /** Numeric EVM chain id (e.g. 31337n for hardhat). Required by the H5 prefix in the V10 ACK digest. */
-    chainId: bigint;
-    /** Deployed address of `KnowledgeAssetsV10`. Required by the H5 prefix in the V10 ACK digest. */
-    kav10Address: string;
-    requiredACKs?: number;
-    stagingQuads?: Uint8Array;
-    epochs?: number;
-    tokenAmount?: bigint;
-    /**
-     * Source SWM graph id. Different from `contextGraphIdStr` only on the
-     * `publishFromSharedMemory` remap flow where the data lives under one
-     * graph name but is published to a different on-chain numeric id.
-     * Peers use this to locate SWM data; the ACK digest still uses
-     * `contextGraphId`.
-     */
-    swmGraphId?: string;
-    /** Optional sub-graph name suffix appended to the SWM URI. */
-    subGraphName?: string;
-    /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
-    merkleLeafCount: number;
-    /**
-     * OT-RFC-38 / LU-5. When `true`, `stagingQuads` is opaque AEAD ciphertext
-     * (curated-CG payload). Cores skip N-Quad parsing and merkle-root
-     * recompute; verify only that `stagingQuads.length === publicByteSize`.
-     * Defaults to `false` so the existing public-CG inline-quads path is
-     * unchanged.
-     */
-    isEncryptedPayload?: boolean;
-    /**
-     * OT-RFC-38 LU-11 / OT-RFC-39. When set, the publisher has fanned
-     * per-chunk ciphertexts via SWM gossip (one envelope per chunk,
-     * carrying `swmMessageIndex` + the chunked type marker) and the
-     * ACK request goes out on `PROTOCOL_STORAGE_ACK_V2` with empty
-     * `stagingQuads` + populated `ciphertextChunksRoot` /
-     * `ciphertextChunkCount` / `ackProtocolVersion = 2`. Required
-     * when `isEncryptedPayload === true` AND chunked emission was
-     * used; mutually exclusive with non-empty `stagingQuads`.
-     *
-     * **Cluster-wide V2 requirement** (Codex review on PR #715): this
-     * collector unconditionally dispatches chunked ACK requests over
-     * `PROTOCOL_STORAGE_ACK_V2` — there is NO automatic V1 fallback
-     * for cores in the quorum target that don't advertise V2. A core
-     * that only speaks `/dkg/10.0.1/storage-ack` will surface a
-     * libp2p "could not negotiate" send error here, which counts as a
-     * peer-unreachable failure against `requiredACKs`. The
-     * mixed-rc.11-rc.12 cluster case is therefore strictly an
-     * upgrade-window concern (a rc.11 core can't decode LU-11
-     * chunked gossip envelopes either, so it would fail upstream of
-     * this collector even with a V1 fallback). The operational
-     * assumption for rc.12 — and the rc.12 release runbook — is that
-     * every quorum-target core has been upgraded to LU-11 BEFORE the
-     * curator's first chunked publish. The OT-RFC-38 §A.1 host-mode
-     * reconciler converges the cluster within the per-CG window the
-     * curator sets; operators must respect that window before
-     * issuing curated publishes. A per-peer capability probe + V1
-     * downgrade is filed as a follow-up — see TODO(rc.12.1) below.
-     */
-    /**
-     * OT-RFC-49 / WS-D — the curated PUBLIC `_catalog` commitment (REPLACED
-     * the stripped ciphertext-chunks commitment). When present,
-     * `isEncryptedPayload` MUST be `true` and `stagingQuads` carries the
-     * catalog N-quads (plaintext, public). The collector packs
-     * `(catalogRoot, catalogLeafCount)` into the PublishIntent + the ACK
-     * digest; cores rebuild the same root over the inline catalog and DECLINE
-     * `CATALOG_ROOT_MISMATCH` on disagreement.
-     */
-    catalogCommitment?: {
-      catalogRoot: Uint8Array;
-      catalogLeafCount: number;
-    };
-  }): Promise<ACKCollectionResult> {
+  async collect(params: ACKCollectorParams): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
       publisherPeerId, publicByteSize, isPrivate,
@@ -296,7 +248,7 @@ export class ACKCollector {
     chainId: bigint;
     kav10Address: string;
     REQUIRED_ACKS: number;
-    params: Parameters<ACKCollector['collect']>[0];
+    params: ACKCollectorParams;
   }): Promise<ACKCollectionResult> {
     const {
       merkleRoot, contextGraphId, contextGraphIdStr,
@@ -316,12 +268,38 @@ export class ACKCollector {
         `ACK collection failed: V10 publish requires exactly one Knowledge Asset (kaCount=1); got ${params.kaCount}`,
       );
     }
+    const ackMode = params.ackMode ?? { kind: 'public' as const };
+    const privateMerkleRoots = ackMode.kind === 'folded-private'
+      ? ackMode.privateMerkleRoots
+      : [];
+    const catalogCommitment = ackMode.kind === 'curated-catalog'
+      ? ackMode.catalogCommitment
+      : undefined;
+    if (
+      ackMode.kind === 'curated-catalog' &&
+      (ackMode as { privateMerkleRoots?: unknown }).privateMerkleRoots !== undefined
+    ) {
+      throw new Error(
+        'ACKCollector: privateMerkleRoots cannot be combined with curated-catalog ACK mode',
+      );
+    }
+    if (ackMode.kind === 'folded-private' && privateMerkleRoots.length === 0) {
+      throw new Error('ACK collection failed: folded-private ACK mode requires at least one privateMerkleRoot');
+    }
+    for (const [idx, root] of privateMerkleRoots.entries()) {
+      if (root.length !== 32) {
+        throw new Error(
+          `ACK collection failed: privateMerkleRoots[${idx}] must be 32 bytes, got ${root.length}`,
+        );
+      }
+    }
 
     // P2P intent includes staging quads so core nodes can verify inline.
-    // Encrypted inline payloads are gated by this collector's exclusive
-    // use of PROTOCOL_STORAGE_ACK (`/dkg/10.0.1/storage-ack`): pre-LU-5
-    // cores that only speak `/dkg/10.0.0/storage-ack` never receive field
-    // 14 ciphertext and therefore cannot misparse it as plaintext.
+    // Plain public and curated/catalog ACKs stay on PROTOCOL_STORAGE_ACK
+    // (`/dkg/10.0.1/storage-ack`): pre-LU-5 cores that only speak
+    // `/dkg/10.0.0/storage-ack` never receive field 14 ciphertext and
+    // therefore cannot misparse it as plaintext. Folded-private ACKs switch to
+    // V2 below because field 20 must be understood by every quorum peer.
     // `contextGraphId` on the wire is the TARGET numeric id peers will sign
     // the ACK against. `swmGraphId` (optional) is the SOURCE graph where
     // data lives in SWM — only set when the publisher is remapping a named
@@ -330,12 +308,7 @@ export class ACKCollector {
     // commitment AND the inline catalog N-quads (plaintext, public) so the
     // core can rebuild + verify the catalog root self-contained. Surface a
     // mis-wired branch loudly rather than ship a half-formed intent.
-    if (params.catalogCommitment) {
-      if (!params.isEncryptedPayload) {
-        throw new Error(
-          'ACKCollector: catalogCommitment requires isEncryptedPayload=true (curated-CG-only path)',
-        );
-      }
+    if (catalogCommitment) {
       if (!params.stagingQuads || params.stagingQuads.length === 0) {
         throw new Error(
           'ACKCollector: catalogCommitment requires non-empty stagingQuads — ' +
@@ -343,20 +316,24 @@ export class ACKCollector {
           'rebuild and verify the catalog root',
         );
       }
-      if (params.catalogCommitment.catalogLeafCount <= 0) {
+      if (catalogCommitment.catalogLeafCount <= 0) {
         throw new Error(
-          `ACKCollector: catalogCommitment.catalogLeafCount must be positive; got ${params.catalogCommitment.catalogLeafCount}`,
+          `ACKCollector: catalogCommitment.catalogLeafCount must be positive; got ${catalogCommitment.catalogLeafCount}`,
         );
       }
-      if (params.catalogCommitment.catalogRoot.length !== 32) {
+      if (catalogCommitment.catalogRoot.length !== 32) {
         throw new Error(
-          `ACKCollector: catalogCommitment.catalogRoot must be 32 bytes; got ${params.catalogCommitment.catalogRoot.length}`,
+          `ACKCollector: catalogCommitment.catalogRoot must be 32 bytes; got ${catalogCommitment.catalogRoot.length}`,
         );
       }
     }
-    // OT-RFC-49 collapsed the V2 chunked-ciphertext ACK path; the curated
-    // catalog ACK rides the V1 protocol with inline catalog stagingQuads.
-    const ackProtocolId = PROTOCOL_STORAGE_ACK;
+    // Folded-private ACKs require field 20 (`privateMerkleRoots`), so they ride
+    // the V2 storage-ack protocol. This makes mixed-version clusters fail at
+    // protocol/capability selection instead of dialing V1-only cores that would
+    // ignore field 20 and sign/decline against a public-only root.
+    const ackProtocolId = privateMerkleRoots.length > 0
+      ? PROTOCOL_STORAGE_ACK_V2
+      : PROTOCOL_STORAGE_ACK;
     const p2pMsg: PublishIntentMsg = {
       merkleRoot,
       contextGraphId: contextGraphIdStr,
@@ -373,9 +350,12 @@ export class ACKCollector {
         : undefined,
       subGraphName: params.subGraphName,
       merkleLeafCount: params.merkleLeafCount,
-      isEncryptedPayload: params.isEncryptedPayload === true ? true : undefined,
-      catalogRoot: params.catalogCommitment?.catalogRoot,
-      catalogLeafCount: params.catalogCommitment?.catalogLeafCount,
+      isEncryptedPayload: ackMode.kind === 'curated-catalog' ? true : undefined,
+      catalogRoot: catalogCommitment?.catalogRoot,
+      catalogLeafCount: catalogCommitment?.catalogLeafCount,
+      privateMerkleRoots: privateMerkleRoots.length > 0
+        ? [...privateMerkleRoots]
+        : undefined,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
@@ -384,7 +364,7 @@ export class ACKCollector {
     // that decode payloads as FinalizationMessages, causing decode errors.
     log(`[ACKCollector] Collecting ACKs via direct P2P (merkleRoot=${ethers.hexlify(merkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
+    const corePeers = this.deps.getConnectedCorePeers(ackProtocolId);
     if (corePeers.length === 0) {
       // Pre-dial impossibility — wrap in the typed surface but preserve
       // the legacy `ACK collection failed: no connected core peers` text
@@ -409,9 +389,9 @@ export class ACKCollector {
     }
     log(`[ACKCollector] Requesting ACKs from ${corePeers.length} core peers (need ${REQUIRED_ACKS})`);
 
-    const catalogRoot = params.catalogCommitment?.catalogRoot
+    const catalogRoot = catalogCommitment?.catalogRoot
       ?? new Uint8Array(32);
-    const catalogLeafCount = BigInt(params.catalogCommitment?.catalogLeafCount ?? 0);
+    const catalogLeafCount = BigInt(catalogCommitment?.catalogLeafCount ?? 0);
     const ackDigest = computePublishACKDigest(
       chainId,
       kav10Address,
@@ -533,7 +513,7 @@ export class ACKCollector {
 
     log(`[ACKCollector] Collecting UPDATE ACKs via direct P2P (kaId=${kaId}, newMerkleRoot=${ethers.hexlify(newMerkleRoot).slice(0, 18)}...)`);
 
-    const corePeers = this.deps.getConnectedCorePeers();
+    const corePeers = this.deps.getConnectedCorePeers(PROTOCOL_STORAGE_UPDATE_ACK);
     if (corePeers.length === 0) {
       throw new QuorumUnmetError({
         collected: 0,

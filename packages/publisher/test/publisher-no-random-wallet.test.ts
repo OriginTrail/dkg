@@ -25,7 +25,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider } from '../src/publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider, type V10ACKProviderParams } from '../src/publisher.js';
 import { generateConfirmedFullMetadata } from '../src/metadata.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
@@ -167,10 +167,10 @@ interface AckEpochCapture {
 
 function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
   const provider = mockChainStubACKProvider();
-  return async (...args: Parameters<V10ACKProvider>) => {
-    capture.epochs = args[6];
-    capture.tokenAmount = args[7];
-    return provider(...args);
+  return async (params: V10ACKProviderParams) => {
+    capture.epochs = params.epochs;
+    capture.tokenAmount = params.tokenAmount;
+    return provider(params);
   };
 }
 

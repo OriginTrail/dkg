@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { runSyncOnConnect, SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -41,6 +41,68 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('accepts omitted knownCorePeerIdsV2 for backwards-compatible call sites', async () => {
+    const remotePeer = freshPeerIdString();
+    const knownCorePeerIds = new Set<string>();
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC],
+      knownCorePeerIds,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+  });
+
+  it('tracks and evicts V2 ACK capability from populated protocol lists', async () => {
+    const remotePeer = freshPeerIdString();
+    const knownCorePeerIds = new Set<string>();
+    const knownCorePeerIdsV2 = new Set<string>([remotePeer]);
+
+    const emptyIdentifyOutcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [],
+      knownCorePeerIds,
+      knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(emptyIdentifyOutcome).toBe('skipped-no-sync');
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    const v1OnlyOutcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
+      knownCorePeerIds,
+      knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(v1OnlyOutcome).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+  });
+
   it('fires onPeerSkippedNoSync when the peer does not advertise PROTOCOL_SYNC', async () => {
     const remotePeer = freshPeerIdString();
     const skipped: Array<{ peerId: string; protocols: string[] }> = [];

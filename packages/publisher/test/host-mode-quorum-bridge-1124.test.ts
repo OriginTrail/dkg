@@ -136,6 +136,7 @@ const collectArgs = {
   chainId: TEST_CHAIN_ID,
   kav10Address: TEST_KAV10_ADDR,
   merkleLeafCount,
+  ackMode: { kind: 'public' } as const,
 };
 
 describe('#1124 end-state: public-CG quorum is REACHED purely via non-member host-mode cores', () => {

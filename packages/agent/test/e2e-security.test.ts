@@ -483,7 +483,7 @@ describe('Access protocol round-trip', () => {
     const keypairB = await generateEd25519Keypair();
     const accessClient = new AccessClient(messengerFor(routerB), keypairB, nodeB.peerId);
 
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
     const ka = result.kaManifest[0];
     expect(ka).toBeDefined();
     const accessResult = await accessClient.requestAccess(nodeA.peerId, `${result.ual}/${ka!.tokenId}`);

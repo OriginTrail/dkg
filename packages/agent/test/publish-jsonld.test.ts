@@ -170,10 +170,11 @@ describe('publishJsonLd', () => {
         'email': 'carol@example.org',
       },
     });
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
 
     const publicName = await store.query(
-      `ASK { GRAPH <did:dkg:context-graph:split-test> { <http://example.org/Carol> <http://schema.org/name> ?name } }`,
+      `ASK { GRAPH ?g { <http://example.org/Carol> <http://schema.org/name> ?name }
+        FILTER((STRSTARTS(STR(?g), "did:dkg:context-graph:split-test/_verifiable_memory/") && !CONTAINS(STR(?g), "/staging/")) || STR(?g) = "did:dkg:context-graph:split-test") }`,
     );
     expect(publicName.type).toBe('boolean');
     if (publicName.type === 'boolean') expect(publicName.value).toBe(true);

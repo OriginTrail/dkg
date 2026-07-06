@@ -103,7 +103,9 @@ describe('subtractFinalizedExactQuads', () => {
     };
   }
 
-  async function markTentativePublishConfirmed(result: { readonly ual: string; readonly status: string }): Promise<void> {
+  async function ensurePublishConfirmed(result: { readonly ual: string; readonly status: string }): Promise<void> {
+    if (result.status === 'confirmed') return;
+
     expect(result.status).toBe('tentative');
     await store.delete([getTentativeStatusQuad(result.ual, CONTEXT_GRAPH)]);
     await store.insert([getConfirmedStatusQuad(result.ual, CONTEXT_GRAPH)]);
@@ -172,17 +174,9 @@ describe('subtractFinalizedExactQuads', () => {
     expect(result.resolved.quads).toEqual([genreQuad]);
   });
 
-  // RC11 / PR3: private-data publishes are now routed to
-  // `finalizeIntentionalLocalPublish` (tentative status), because
-  // peers cannot see private payloads and so a V10 ACK quorum is
-  // structurally impossible. The subtraction logic gates on
-  // `?kc <dkg:status> "confirmed"`, so already-published private
-  // quads will NEVER be matched on subsequent submissions until
-  // the chain confirms them — which it can't for private-only
-  // publishes today. The public-only variant of this test
-  // ("removes only the exact finalized public quads and keeps the
-  // remainder") still passes and pins the load-bearing subtraction
-  // invariant.
+  // Legacy placeholder from the local-only private publish path. The IRI
+  // round-trip tests below now cover confirmed private subtraction with an
+  // ACK-backed folded public+private publish.
   it.skip('removes exact finalized public and private quads and returns an empty remainder for full no-op', async () => {});
 
   it('removes finalized private IRI-object quads after store round-trip normalization', async () => {
@@ -208,7 +202,7 @@ describe('subtractFinalizedExactQuads', () => {
       privateQuads: validated.resolved.privateQuads,
       publisherPeerId: 'peer-1',
     });
-    await markTentativePublishConfirmed(publishResult);
+    await ensurePublishConfirmed(publishResult);
 
     const result = await subtractFinalizedExactQuads({
       store,
@@ -245,7 +239,7 @@ describe('subtractFinalizedExactQuads', () => {
       privateQuads: validated.resolved.privateQuads,
       publisherPeerId: 'peer-1',
     });
-    await markTentativePublishConfirmed(publishResult);
+    await ensurePublishConfirmed(publishResult);
 
     const result = await subtractFinalizedExactQuads({
       store,

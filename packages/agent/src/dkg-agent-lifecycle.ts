@@ -1287,16 +1287,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
               return ackHandler.handler(data, peerId);
             });
-            // OT-RFC-38 LU-11 / OT-RFC-39 — V2 protocol id. Same
-            // handler instance, distinct libp2p protocol. Publishers
-            // running the chunked emit path negotiate V2 explicitly
-            // so pre-LU-11 cores (V1-only) never see a V2 envelope;
-            // the handler dispatches on `intent.ackProtocolVersion`
-            // internally — V2 envelopes hit the chunked verify
-            // branch, V1 envelopes (if any ever arrive on the V2
-            // protocol id, which spec-conforming clients won't send)
-            // fall through to the legacy single-blob / public-CG
-            // paths.
+            // OT-RFC-38 LU-11 / OT-RFC-39 — V2 protocol id. Same handler
+            // instance, distinct libp2p protocol. Publishers negotiate V2 for
+            // chunked ciphertext commitments and folded-private field-20
+            // commitments, so V1-only cores never receive intents whose new
+            // fields they would silently ignore. The handler dispatches on the
+            // decoded intent shape internally.
             this.messenger.register(PROTOCOL_STORAGE_ACK_V2, async (data, peerIdStr) => {
               const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
               return ackHandler.handler(data, peerId);
@@ -2545,6 +2541,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncingPeers: this.syncingPeers,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
+      knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
@@ -2739,6 +2736,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // with a not-yet-populated list and must not evict a known core.
     if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
       this.knownCorePeerIds.add(peerId);
+    }
+    // V2 is a strict compatibility gate for field-20 folded-private ACKs. Keep
+    // empty-list races non-destructive, but clear stale V2 membership when
+    // identify delivers a populated protocol list without the V2 ACK protocol.
+    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
+      this.knownCorePeerIdsV2.add(peerId);
+    } else if (protocols.length > 0) {
+      this.knownCorePeerIdsV2.delete(peerId);
     }
     if (!this.skippedNoSyncPeers.has(peerId)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;

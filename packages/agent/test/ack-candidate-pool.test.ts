@@ -7,14 +7,22 @@
 // above 3 signatures, a 3-strong confirmed-core subset is still below quorum —
 // returning only it re-introduces `pool_below_quorum`.
 import { describe, it, expect } from 'vitest';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 
 type AgentInternals = {
-  node: { libp2p: { getPeers: () => Array<{ toString(): string }> } };
+  node: {
+    libp2p: {
+      peerId: { toString(): string };
+      getPeers: () => Array<{ toString(): string }>;
+    };
+  };
   peerId: string;
   knownCorePeerIds: Set<string>;
+  knownCorePeerIdsV2: Set<string>;
   lastKnownRequiredACKs?: number;
-  getACKCandidatePeers: () => string[];
+  getACKCandidatePeers: (protocol?: string) => string[];
+  handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
 };
 
 const CORE = ['core-1', 'core-2', 'core-3', 'core-4'];
@@ -32,7 +40,10 @@ async function buildAgent(opts: {
   });
   const internals = agent as unknown as AgentInternals;
   internals.node = {
-    libp2p: { getPeers: () => opts.connected.map((id) => ({ toString: () => id })) },
+    libp2p: {
+      peerId: { toString: () => internals.peerId },
+      getPeers: () => opts.connected.map((id) => ({ toString: () => id })),
+    },
   };
   for (const id of opts.confirmedCores) internals.knownCorePeerIds.add(id);
   internals.lastKnownRequiredACKs = opts.lastKnownRequiredACKs;
@@ -93,8 +104,78 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
     const self = a.peerId;
     a.node = {
-      libp2p: { getPeers: () => [self, ...CORE.slice(0, 3)].map((id) => ({ toString: () => id })) },
+      libp2p: {
+        peerId: { toString: () => self },
+        getPeers: () => [self, ...CORE.slice(0, 3)].map((id) => ({ toString: () => id })),
+      },
     };
     expect(a.getACKCandidatePeers()).not.toContain(self);
+  });
+
+  it('V2 folded-private ACKs prefer advertised V2 peers, then keep enough candidates for wire negotiation', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: [...CORE, ...EDGE],
+      lastKnownRequiredACKs: 4,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+    a.knownCorePeerIdsV2.add(CORE[2]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[2],
+      CORE[1],
+      CORE[3],
+      ...EDGE,
+    ]);
+  });
+
+  it('V2 folded-private ACKs keep fallback candidates even when cached V2 metadata appears quorum-sized', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: [...CORE, ...EDGE],
+      lastKnownRequiredACKs: 2,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+    a.knownCorePeerIdsV2.add(CORE[2]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[2],
+      CORE[1],
+      CORE[3],
+      ...EDGE,
+    ]);
+  });
+
+  it('V2 folded-private ACKs do not let stale identify metadata hide a connected upgraded core', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: CORE,
+      lastKnownRequiredACKs: 3,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+    a.knownCorePeerIdsV2.add(CORE[1]);
+    a.knownCorePeerIdsV2.add(CORE[2]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
+  });
+
+  it('peer:update evicts stale V2 ACK capability only from populated protocol lists', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: CORE,
+      lastKnownRequiredACKs: 4,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+
+    a.handlePeerUpdateForSyncRetry(CORE[0], []);
+    expect(a.knownCorePeerIdsV2.has(CORE[0])).toBe(true);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
+
+    a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_STORAGE_ACK]);
+    expect(a.knownCorePeerIdsV2.has(CORE[0])).toBe(false);
+    expect(a.knownCorePeerIds.has(CORE[0])).toBe(true);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
   });
 });

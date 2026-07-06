@@ -61,6 +61,7 @@
     "test:devnet:pr1388-okf-integration": "vitest run --config devnet/pr1388-okf-integration/vitest.config.ts",
     "test:devnet:ka-lifecycle-cli": "vitest run --config devnet/ka-lifecycle-cli/vitest.config.ts",
     "test:devnet:pr1366-pca-deposit-waiver": "vitest run --config devnet/pr1366-pca-deposit-waiver/vitest.config.ts",
+    "test:devnet:pr1369-folded-private-ack": "vitest run --config devnet/pr1369-folded-private-ack/vitest.config.ts",
     "test:devnet:pr1387-bulk-register-agents": "vitest run --config devnet/pr1387-bulk-register-agents/vitest.config.ts",
     "test:devnet:pr1384-preserve-agents-on-transfer": "vitest run --config devnet/pr1384-preserve-agents-on-transfer/vitest.config.ts",
     "test:devnet:pr1370-admin-op-wallet": "vitest run --config devnet/pr1370-admin-op-wallet/vitest.config.ts",

@@ -71,9 +71,14 @@ export {
   ACKCollector,
   DEFAULT_REQUIRED_ACKS,
   type ACKCollectorDeps,
+  type ACKCollectorParams,
   type CollectedACK,
   type ACKCollectionResult,
 } from './ack-collector.js';
+export {
+  selectACKCandidatePeers,
+  type ACKCandidatePeerSelectionInput,
+} from './ack-peer-selection.js';
 export {
   ACKProviderError,
   RpcPreconditionError,

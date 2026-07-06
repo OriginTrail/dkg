@@ -45,7 +45,6 @@ export const LIFT_JOB_FAILURE_CODES = [
   'tx_submit_timeout',
   'tx_reverted',
   'insufficient_funds',
-  'private_unanchorable',
   'nonce_conflict',
   'inclusion_timeout',
   'finality_timeout',
@@ -102,11 +101,6 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  // GH #1013/#1121: a private payload that cannot reach Verifiable Memory (no
-  // collectable storage ACKs — peers can't see private data) is DETERMINISTIC,
-  // not a transient RPC blip. Terminal/fail_job so the queue stops retrying a
-  // job that can never finalize until encrypted private async publish (#1121).
-  private_unanchorable: { code: 'private_unanchorable', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
@@ -131,7 +125,6 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   tx_submit_timeout: ['broadcast'],
   tx_reverted: ['broadcast'],
   insufficient_funds: ['broadcast'],
-  private_unanchorable: ['broadcast'],
   nonce_conflict: ['broadcast'],
   inclusion_timeout: ['broadcast', 'included'],
   finality_timeout: ['included'],
