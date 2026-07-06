@@ -59,6 +59,7 @@ const { useWalletStore } = await import('../src/ui/stores/wallet.js');
 const W0 = '0x9A3f000000000000000000000000000000000E41D';
 const OLD_AGENT_A = '0xAAa0000000000000000000000000000000000001';
 const OLD_AGENT_B = '0xBbB0000000000000000000000000000000000002';
+const CONNECTED_OWNER = '0xC0FFEE0000000000000000000000000000000abc'; // a wallet-owner != the node primary
 const CONTRACTS = {
   nft: `0x${'11'.repeat(20)}`,
   token: `0x${'22'.repeat(20)}`,
@@ -138,6 +139,8 @@ describe('ConvictionDetailView S2b — renew chain', () => {
     expect(createApprove).toBeTruthy();
     expect(createProps.replacingAccountId).toBe('7');
     expect(createProps.seed?.tokens).toBe('100000.0'); // seeded from this account's committed amount
+    // Daemon-owned (owner == wallets[0], no connected wallet) ⇒ the replacement mints via the daemon.
+    expect(createProps.initialOwnerKey).toBe('hot');
 
     // Simulate the mint's "approve own wallets" success → the renew chain.
     await act(async () => { createApprove.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
@@ -152,6 +155,36 @@ describe('ConvictionDetailView S2b — renew chain', () => {
     // (#7) first; expiry doesn't free them. And the resolve succeeded.
     expect(approveProps.deregisterFrom).toBe('7');
     expect(approveProps.seedAgentsResolved).toBe(true);
+    await unmount();
+  });
+
+  // T7 (#1468) — a WALLET-owned renew must seed the replacement create for the browser wallet
+  // ('hardware'), not the daemon. owner == the connected wallet, and the node's primary wallet
+  // (wallets[0]) is DIFFERENT ⇒ wallet-owned; on the right network so renew is enabled.
+  it('wallet-owned renew opens the replacement create with initialOwnerKey="hardware"', async () => {
+    useWalletStore.setState({
+      provider: { request: vi.fn() } as any,
+      providerInfo: null,
+      address: CONNECTED_OWNER as `0x${string}`,
+      chainId: 84532,
+      expectedChainId: 84532,
+      bootstrap: CONTRACTS,
+    });
+    // wallets[0] = W0 (the node primary) is DIFFERENT from the owner/connected wallet.
+    mocks.fetchWalletsBalances.mockResolvedValue({
+      wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null,
+    });
+    mocks.fetchPca.mockImplementation(async (_id: string, key?: string) =>
+      key ? { ...snap({ owner: CONNECTED_OWNER }), probedKey: { key, registered: true } } : snap({ owner: CONNECTED_OWNER }),
+    );
+
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    await waitForText(container, 'Lifecycle');
+    const renewBtn = container.querySelector('[data-testid="pca-renew-btn"]') as HTMLButtonElement;
+    expect(renewBtn.disabled).toBe(false); // wallet-owned + right network ⇒ owner writes enabled
+    await act(async () => { renewBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(container.querySelector('[data-testid="mock-create-approve"]')).toBeTruthy();
+    expect(createProps.initialOwnerKey).toBe('hardware');
     await unmount();
   });
 

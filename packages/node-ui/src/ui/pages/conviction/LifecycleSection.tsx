@@ -5,21 +5,19 @@ import { useRenewalChaining } from './useRenewalChaining.js';
 import type { PcaHealthState } from '../../pca/health.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
-import type { DetailOwnerMode } from '../../pca/detailOwnerMode.js';
+import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
 
 /** Lifecycle / Renew — re-mint a REPLACEMENT account (deliberately omits refresh; the mint is a NEW id). */
 export function LifecycleSection({
   accountId,
   snapshot,
-  ownerMode,
-  ownerWritesEnabled,
+  access,
   ownerTitle,
   health,
 }: {
   accountId: string;
   snapshot: PcaSnapshot;
-  ownerMode: DetailOwnerMode;
-  ownerWritesEnabled: boolean;
+  access: PcaOwnerAccess;
   ownerTitle?: string;
   health: PcaHealthState;
 }) {
@@ -42,7 +40,7 @@ export function LifecycleSection({
           className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
           data-testid="pca-renew-btn"
           onClick={() => renewal.openRenew()}
-          disabled={!ownerWritesEnabled}
+          disabled={!access.writesEnabled}
           title={ownerTitle}
         >
           Renew — create a replacement PCA
@@ -61,7 +59,7 @@ export function LifecycleSection({
             primaryNodeUnknown: snapshot.primaryNode == null,
           }}
           replacingAccountId={accountId}
-          initialOwnerKey={ownerMode === 'wallet' ? 'hardware' : 'hot'}
+          initialOwnerKey={access.mode === 'wallet' ? 'hardware' : 'hot'}
           onClose={() => renewal.closeRenew()}
           onApproveOwnWallets={renewal.onRenewSuccess}
           onManage={renewal.onManageNew}

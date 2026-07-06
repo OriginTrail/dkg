@@ -16,7 +16,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
   return { ...actual, pcaAgentAccount: mocks.pcaAgentAccount, fetchPca: mocks.fetchPca };
 });
 
-const { resolveWalletBinding, probeWalletBindings, selfCoverageOutlook, planSelfCoverage } = await import('../src/ui/pca/walletBinding.js');
+const { resolveWalletBinding, probeWalletBindings, selfCoverageOutlook, planSelfCoverage, signableOwnersFor } = await import('../src/ui/pca/walletBinding.js');
 
 const OWNER = '0x9A3f000000000000000000000000000000000E41D';
 const SPONSOR = '0x1111111111111111111111111111111111111111';
@@ -29,6 +29,24 @@ const DEAD_NOBUDGET = { expiresAtTimestamp: 9_999_999_999, fullySwept: false, ba
 
 beforeEach(() => { vi.clearAllMocks(); });
 afterEach(() => { vi.clearAllMocks(); });
+
+// T2 (#1468) — the signer-candidate builder now lives at the walletBinding boundary (the
+// owner-access model no longer carries it). daemon primary + connected wallet, in that order.
+describe('signableOwnersFor', () => {
+  it('builds [daemon primary, wallet connected] in order', () => {
+    expect(signableOwnersFor('0xDAEMON', '0xWALLET')).toEqual([
+      { address: '0xDAEMON', kind: 'daemon' },
+      { address: '0xWALLET', kind: 'wallet' },
+    ]);
+  });
+
+  it('keeps both entries even when addresses are null/undefined (normalizers drop them downstream)', () => {
+    expect(signableOwnersFor(undefined, null)).toEqual([
+      { address: undefined, kind: 'daemon' },
+      { address: null, kind: 'wallet' },
+    ]);
+  });
+});
 
 describe('resolveWalletBinding', () => {
   it('UNBOUND when the wallet is an agent on no account', async () => {

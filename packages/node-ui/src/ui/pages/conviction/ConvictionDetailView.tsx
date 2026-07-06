@@ -1,12 +1,12 @@
 import React from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchPca, fetchWalletsBalances, type PcaSnapshot } from '../../api.js';
-import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { useResolvedOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import { useWalletBootstrap } from '../../hooks/useWalletBootstrap.js';
 import { detailDeviceFlow, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
 import { useAgentsStore } from '../../stores/agents.js';
-import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { useWalletStore } from '../../stores/wallet.js';
 import {
   HealthChip,
   WalletRow,
@@ -22,7 +22,9 @@ import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
-import { eqAddress, detailOwnerMode, type DetailOwnerMode } from '../../pca/detailOwnerMode.js';
+import { eqAddress } from '../../pca/address.js';
+import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -44,12 +46,15 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   const nodeStatus = useAgentsStore((s) => s.nodeStatus) as { blockExplorerUrl?: string | null } | null;
   const explorer = nodeStatus?.blockExplorerUrl ?? null;
   const connectedWallet = useWalletStore((s) => s.address);
-  const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const wallets = wb?.wallets ?? [];
   // L3: a transient balances blip (wb null + error) must NOT reclassify
   // owned→not-owner and flicker the owner controls into a definitive "you're not
   // the owner" — show "can't confirm" instead and keep the retry.
   const walletsUnknown = !wb && !!wbError;
+  // #1375 — the single owner-access model. Called before the early returns (Rules of
+  // Hooks); while the snapshot is still loading `owner` is undefined and this render path
+  // returns early below, so the resulting access is never consumed on that path.
+  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: wallets[0], walletsUnknown });
 
   useWalletBootstrap();
 
@@ -67,17 +72,16 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
     );
   }
 
-  const ownerMode: DetailOwnerMode = walletsUnknown
-    ? 'unknown'
-    : detailOwnerMode(snapshot.owner, wallets[0], connectedWallet);
-  const ownerWritesEnabled = ownerMode === 'daemon' || (ownerMode === 'wallet' && !walletWrongNetwork);
   const ownerInPool = wallets.some((w) => eqAddress(w, snapshot.owner));
 
+  // gateReason stays consumer-built for now (model gateReason deferred to a later step): the
+  // exact same branches, re-expressed on access.mode / access.wrongNetwork — identical values
+  // to the old ownerMode / walletWrongNetwork now that both come from the one model.
   const ownerGateReason = walletsUnknown
     ? `Couldn't load this node's wallets - can't confirm ownership of PCA #${accountId}.`
-    : ownerMode === 'wallet' && walletWrongNetwork
+    : access.mode === 'wallet' && access.wrongNetwork
       ? `Wrong network - switch the connected wallet to this node's PCA network to manage PCA #${accountId}.`
-      : ownerMode === 'wallet'
+      : access.mode === 'wallet'
         ? `Connected wallet ${snapshot.owner} owns PCA #${accountId}; device-signed owner actions are enabled.`
         : ownerInPool
           ? `Owner-only - PCA #${accountId} is owned by ${snapshot.owner}, not this node's primary operational wallet, so node-UI can't sign for it.`
@@ -92,9 +96,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
       wallets={wallets}
       ownerTrac={wb?.balances?.find((b) => eqAddress(b.address, snapshot.owner))?.trac}
       explorer={explorer}
-      ownerMode={ownerMode}
-      ownerWritesEnabled={ownerWritesEnabled}
-      walletWrongNetwork={walletWrongNetwork}
+      access={access}
       connectedWallet={connectedWallet}
       ownerOnlyReason={ownerGateReason}
       walletsUnknown={walletsUnknown}
@@ -110,9 +112,7 @@ function DetailBody({
   wallets,
   ownerTrac,
   explorer,
-  ownerMode,
-  ownerWritesEnabled,
-  walletWrongNetwork,
+  access,
   connectedWallet,
   ownerOnlyReason,
   walletsUnknown,
@@ -124,9 +124,7 @@ function DetailBody({
   wallets: string[];
   ownerTrac?: string;
   explorer: string | null;
-  ownerMode: DetailOwnerMode;
-  ownerWritesEnabled: boolean;
-  walletWrongNetwork: boolean;
+  access: PcaOwnerAccess;
   connectedWallet?: string | null;
   ownerOnlyReason: string;
   walletsUnknown: boolean;
@@ -147,23 +145,26 @@ function DetailBody({
     flow: (v) => detailDeviceFlow(v ?? 'topup'),
     describeActionError: (err, v) => describeDetailWalletError(err, v ?? 'topup'),
   });
-  const owner = useOwnerActionSubmitter({
-    accountId,
-    onWalletProgress: ownerMode === 'wallet' ? deviceProgress.onProgress : undefined,
+  const owner = useResolvedOwnerActionSubmitter({
+    // Item 3 (#1375) — resolve the owner submitter ONCE from `access` for THIS account. daemon
+    // pins (server-side); a wallet-owned account re-verifies ownership per write (T1). Wallet
+    // device progress flows through onWalletProgress; the submitter liveness stays per-prompt.
+    access,
+    onWalletProgress: access.mode === 'wallet' ? deviceProgress.onProgress : undefined,
   });
   const health = healthForSnapshot(snapshot);
-  const ownerTitle = ownerWritesEnabled ? undefined : ownerOnlyReason;
+  const ownerTitle = access.writesEnabled ? undefined : ownerOnlyReason;
 
   const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
   const walletSurfaceCopy = connectedWallet
-    ? ownerMode === 'wallet'
-      ? walletWrongNetwork
+    ? access.mode === 'wallet'
+      ? access.wrongNetwork
         ? 'Owner wallet matches; switch network before signing owner actions.'
         : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
-      : ownerMode === 'daemon'
+      : access.mode === 'daemon'
         ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
         : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
-    : ownerMode === 'external'
+    : access.mode === 'external'
       ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
       : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
 
@@ -190,7 +191,7 @@ function DetailBody({
         />
       )}
 
-      {!ownerWritesEnabled && (
+      {!access.writesEnabled && (
         <div className="v10-modal-warning" role="status">
           ⓘ {ownerOnlyReason}{' '}
           {walletsUnknown ? (
@@ -243,8 +244,7 @@ function DetailBody({
         snapshot={snapshot}
         ownerTrac={ownerTrac}
         explorer={explorer}
-        ownerMode={ownerMode}
-        ownerWritesEnabled={ownerWritesEnabled}
+        access={access}
         ownerTitle={ownerTitle}
         owner={owner}
         deviceProgress={deviceProgress}
@@ -255,8 +255,7 @@ function DetailBody({
         snapshot={snapshot}
         wallets={wallets}
         explorer={explorer}
-        ownerMode={ownerMode}
-        ownerWritesEnabled={ownerWritesEnabled}
+        access={access}
         ownerTitle={ownerTitle}
         owner={owner}
         deviceProgress={deviceProgress}
@@ -265,8 +264,7 @@ function DetailBody({
       <LifecycleSection
         accountId={accountId}
         snapshot={snapshot}
-        ownerMode={ownerMode}
-        ownerWritesEnabled={ownerWritesEnabled}
+        access={access}
         ownerTitle={ownerTitle}
         health={health}
       />

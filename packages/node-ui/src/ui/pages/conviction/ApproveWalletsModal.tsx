@@ -5,8 +5,9 @@ import {
   fetchPca,
   describePcaError,
 } from '../../api.js';
-import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
-import { resolveWalletBinding, planSelfCoverage, type SignableOwner } from '../../pca/walletBinding.js';
+import { useResolvedOwnerActionSubmitter, useResolvingOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
+import { resolveWalletBinding, planSelfCoverage, signableOwnersFor } from '../../pca/walletBinding.js';
 import {
   approveBatchReducer,
   initialApproveBatchState,
@@ -25,10 +26,9 @@ import {
   CopyButton,
 } from '../../components/Pca/index.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { eqAddress as sameAddress } from '../../pca/address.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const sameAddress = (a?: string | null, b?: string | null) =>
-  !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
 /**
  * Approve publishing wallets (self · sponsor). Self prefills this node's operational
@@ -77,14 +77,33 @@ export function ApproveWalletsModal({
 }) {
   const { data: wb } = useFetch(fetchWalletsBalances, [], 0);
   const { data: snapshot } = useFetch(() => fetchPca(accountId), [accountId]);
-  const owner = useOwnerActionSubmitter({ accountId });
-  // Renew — the OLD account's owner-action submitter (free the wallet there first).
-  // Resolved separately because the old PCA can have a different owner/signing branch.
-  const deregisterOwner = useOwnerActionSubmitter({ accountId: deregisterFrom });
+  // Renew — the OLD account's owner-action submitter (free the wallet there first). Resolved
+  // separately, via the async re-fetching path, because the old PCA can have a different
+  // owner/signing branch than THIS account.
+  const deregisterOwner = useResolvingOwnerActionSubmitter({ accountId: deregisterFrom });
   const nodeWallets = wb?.wallets ?? [];
   const ownerWallet = nodeWallets[0]; // the daemon EOA — what it can deregister-from
   const connectedWallet = useWalletStore((s) => s.address);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  // #1375 — the shared owner-access model for THIS account (drives the managed-target display
+  // predicate + the signer candidates). The async, per-account signerKindForAccount below
+  // deliberately stays a separate re-fetching seam (inv-16 / P4).
+  // `walletsUnknown` while the wallet balances are still loading: without it, a snapshot that
+  // loads BEFORE the wallets would see owner + an undefined primaryWallet and misclassify a
+  // daemon-owned PCA as external → pin read-only → fail a valid owner approval. Marking it
+  // unknown routes the resolved submitter through the re-fetching path (which self-heals to
+  // daemon once wallets[0] is readable).
+  const access = usePcaOwnerAccess({ owner: snapshot?.owner, primaryWallet: ownerWallet, walletsUnknown: !wb });
+  // Item 3 (#1375) — resolve THIS account's owner submitter ONCE from `access`, so the batch's
+  // registerAgent (ALWAYS on the TARGET) submits directly with no per-write owner/wallet re-fetch.
+  // The wallet branch keeps its per-prompt loadContext / assertStillConnected liveness guards.
+  const owner = useResolvedOwnerActionSubmitter({ access });
+  // Self-coverage's deregisterSelf frees a wallet from its OWN-bound `prevAccountId`, which VARIES
+  // per wallet and can be owned DIFFERENTLY than THIS target (daemon vs connected wallet). So it
+  // must resolve the submitter PER-ACCOUNT (the resolving path, keyed on the passed accountId) —
+  // the access-path `owner` would misroute it to the target's signer → NotAccountOwner revert. No
+  // onWalletProgress: the batch drives its own device prompts.
+  const crossAccountDeregister = useResolvingOwnerActionSubmitter({});
   const agentCount = snapshot?.agentCount ?? 0;
   const cap = Math.max(0, 100 - agentCount);
 
@@ -157,19 +176,19 @@ export function ApproveWalletsModal({
   );
   const addresses = mode === 'self' ? selfSelected : parsed.valid;
   const overCap = addresses.length > cap;
+  // R4 (#1468) — arm the batch's device-progress + cancel/dismiss lock whenever the TARGET write
+  // could open a browser-wallet signature. `access.mode === 'wallet'` covers the loaded case, but
+  // during the wallet-balances load window the target access is `unknown` (the walletsUnknown
+  // self-heal above), yet the resolved submitter re-fetches and STILL routes the target write to
+  // the wallet signer when the owner is the connected wallet. Counting it managed here makes
+  // runApproveBatch set `walletBatchSigning`/deviceTotal BEFORE that in-flight wallet action —
+  // never run a wallet-signed approve under the daemon (no-prompt, freely-dismissable) contract.
+  // Daemon-owned targets (owner == wallets[0], normally != the connected wallet) are unaffected;
+  // the rare owner==primary==connected case merely shows a device row that confirms instantly.
   const targetWalletManaged =
-    !!snapshot?.owner &&
-    !!connectedWallet &&
-    !walletWrongNetwork &&
-    !sameAddress(snapshot.owner, ownerWallet) &&
-    sameAddress(snapshot.owner, connectedWallet);
-  const signableOwners = useMemo<SignableOwner[]>(
-    () => [
-      { address: ownerWallet, kind: 'daemon' },
-      { address: connectedWallet, kind: 'wallet' },
-    ],
-    [connectedWallet, ownerWallet],
-  );
+    (access.mode === 'wallet' && access.writesEnabled) ||
+    (access.mode === 'unknown' && sameAddress(snapshot?.owner, connectedWallet));
+  const signableOwners = signableOwnersFor(ownerWallet, connectedWallet);
 
   const signerKindForAccount = async (id?: string): Promise<'daemon' | 'wallet' | undefined> => {
     if (!id) return undefined;
@@ -191,10 +210,11 @@ export function ApproveWalletsModal({
       { addresses, accountId, mode, selfCoverage, deregisterFrom, targetWalletManaged, signableOwners },
       {
         registerAgent: owner.registerAgent,
-        // Renew — free from the single OLD account; self-coverage — free from the
-        // per-wallet own-bound account. Both submitters resolve owner+network at call time.
+        // Both deregister submitters resolve the owner PER-ACCOUNT at call time (the account they
+        // free VARIES and can be owned differently than the target): renew frees from the single
+        // OLD `deregisterFrom`; self-coverage frees from each wallet's own-bound prevAccount.
         deregisterRenew: deregisterOwner.deregisterAgent,
-        deregisterSelf: owner.deregisterAgent,
+        deregisterSelf: crossAccountDeregister.deregisterAgent,
         resolveWalletBinding,
         planSelfCoverage,
         signerKindForAccount,
