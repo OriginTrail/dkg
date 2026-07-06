@@ -4,8 +4,6 @@ export {
   SqliteProtocolOutboxStore,
   type SqliteProtocolOutboxStoreOptions,
   SqliteSyncCheckpointStore,
-  SqliteChainEventCursorStore,
-  SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
@@ -14,6 +12,10 @@ export {
   buildActivityDigestKey,
   parseActivityDigestKey,
 } from './db.js';
+export {
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+} from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,
   MetricSnapshotRow,

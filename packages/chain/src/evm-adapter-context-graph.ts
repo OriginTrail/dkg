@@ -19,6 +19,100 @@ import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 
+type ContextGraphRegistryScanPlan =
+  | {
+      mode: 'explicitFromBlock' | 'listAll';
+      resumeFromWatermark: false;
+      persistProgress: false;
+      allowPartialFailure: false;
+      seedAtEnd: false;
+      pageBudget?: undefined;
+    }
+  | {
+      mode: 'incremental';
+      resumeFromWatermark: true;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: false;
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+      resumeFromWatermark: false;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: true;
+      pageBudget?: undefined;
+    }
+  | {
+      mode: 'seedFromCursor';
+      resumeFromWatermark: true;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: true;
+      pageBudget?: number;
+    };
+
+function normalizePageBudget(value: number | undefined): number | undefined {
+  return Number.isFinite(value) && (value ?? 0) >= 1
+    ? Math.floor(value ?? 0)
+    : undefined;
+}
+
+function buildContextGraphRegistryScanPlan(
+  fromBlock: number | undefined,
+  options: ContextGraphChainScanOptions | undefined,
+): ContextGraphRegistryScanPlan {
+  if (fromBlock !== undefined) {
+    return {
+      mode: 'explicitFromBlock',
+      resumeFromWatermark: false,
+      persistProgress: false,
+      allowPartialFailure: false,
+      seedAtEnd: false,
+    };
+  }
+
+  if (options?.incremental === true) {
+    return {
+      mode: 'incremental',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: false,
+      pageBudget: normalizePageBudget(options.pageBudget),
+    };
+  }
+
+  if (options?.seedIncrementalWatermark === true) {
+    const cursorResumedSeed = options.resumeFromCursor === true;
+    return cursorResumedSeed
+      ? {
+          mode: 'seedFromCursor',
+          resumeFromWatermark: true,
+          persistProgress: true,
+          allowPartialFailure: true,
+          seedAtEnd: true,
+          pageBudget: normalizePageBudget(options.pageBudget),
+        }
+      : {
+          mode: 'seedFull',
+          resumeFromWatermark: false,
+          persistProgress: true,
+          allowPartialFailure: true,
+          seedAtEnd: true,
+        };
+  }
+
+  return {
+    mode: 'listAll',
+    resumeFromWatermark: false,
+    persistProgress: false,
+    allowPartialFailure: false,
+    seedAtEnd: false,
+  };
+}
+
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
    * Reserve the next authorized signer and return its address. The publisher
@@ -126,22 +220,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return [];
     const eventFilter = registry.filters.NameClaimed();
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const incremental = options?.incremental === true && fromBlock === undefined;
-    const seedIncrementalWatermark =
-      options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
-    const cursorResumedSeed =
-      seedIncrementalWatermark && options?.resumeFromCursor === true;
-    const scanPlan = {
-      resumeFromWatermark: incremental || cursorResumedSeed,
-      persistProgress: incremental || seedIncrementalWatermark,
-      allowPartialFailure: incremental || seedIncrementalWatermark,
-      seedAtEnd: seedIncrementalWatermark,
-      pageBudget: (incremental || cursorResumedSeed) &&
-        Number.isFinite(options?.pageBudget) &&
-        (options?.pageBudget ?? 0) >= 1
-          ? Math.floor(options?.pageBudget ?? 0)
-          : undefined,
-    };
+    const scanPlan = buildContextGraphRegistryScanPlan(fromBlock, options);
     const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
       ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
       : undefined;
@@ -172,7 +251,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (incremental && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
