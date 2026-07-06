@@ -172,6 +172,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'withHubStaleRetryAny',
   'invalidateAllBoundContracts',
   'startHubRotationListener',
+  'applyHubRotationEventName',
   'invalidateRandomSamplingPair',
   'resolveAndAssignRandomSamplingPair',
   'isContractMissingRevert',
