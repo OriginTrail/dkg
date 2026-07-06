@@ -268,17 +268,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
    * not rely on TTL expiry.
    */
   async getIdentityIdForAddress(address: string): Promise<bigint> {
-    if (!ethers.isAddress(address)) return 0n;
-    const checksum = ethers.getAddress(address);
-    const cacheKey = checksum.toLowerCase();
-    return this.identityIdByAddressCache.getOrLoad(cacheKey, cacheKey, async () => {
-      await this.init();
-      const identityStorage = await this.resolveContract('IdentityStorage');
-      const id: bigint = await this.readContract(
-        identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
-      );
-      return BigInt(id);
-    });
+    return this.readIdentityIdForAddress(address);
   }
 
   async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
@@ -320,6 +310,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       if (identityId === 0n) {
         throw new Error('Profile created but no IdentityCreated event found');
       }
+      this.seedIdentityIdForAddress(this.signer.address, identityId);
     }
 
     // Step 2: Stake via V10 path (separate try/catch so profile isn't lost).
@@ -401,7 +392,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
           data: log.data,
         });
         if (parsed?.name === 'IdentityCreated') {
-          return BigInt(parsed.args.identityId);
+          const identityId = BigInt(parsed.args.identityId);
+          this.seedIdentityIdForAddress(this.signer.address, identityId);
+          return identityId;
         }
       } catch { /* not this contract */ }
     }
@@ -413,7 +406,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
           data: log.data,
         });
         if (parsed?.name === 'ProfileCreated') {
-          return BigInt(parsed.args.identityId);
+          const identityId = BigInt(parsed.args.identityId);
+          this.seedIdentityIdForAddress(this.signer.address, identityId);
+          return identityId;
         }
       } catch { /* not this contract */ }
     }

@@ -74,10 +74,7 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
 
-    const identityStorage = await this.getIdentityStorage();
-    const identityId: bigint = await this.readContract(
-      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', this.signer.address,
-    );
+    const identityId = await this.getIdentityId();
 
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
@@ -108,11 +105,13 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       // off the Challenge struct fetched below, so everything stays
       // consistent if the storage layout shifts.
       let contextGraphId = 0n;
+      let challengeIdentityId = identityId;
       const rsIface = rs.interface;
       for (const log of receipt.logs) {
         try {
           const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'ChallengeGenerated') {
+            challengeIdentityId = BigInt(parsed.args.identityId ?? parsed.args[0]);
             contextGraphId = BigInt(parsed.args.contextGraphId);
             break;
           }
@@ -129,12 +128,12 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       }
 
       const challengeRaw = await this.readContract(
-        rss, 'rss.getNodeChallenge', 'getNodeChallenge', identityId,
+        rss, 'rss.getNodeChallenge', 'getNodeChallenge', challengeIdentityId,
       );
       const challenge = this.toNodeChallenge(challengeRaw);
       if (!challenge) {
         throw new Error(
-          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
+          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${challengeIdentityId}) ` +
           'returned an empty struct. This indicates a state inconsistency between ' +
           'RandomSampling and RandomSamplingStorage.',
         );

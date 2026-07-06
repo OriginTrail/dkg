@@ -39,10 +39,25 @@ beforeEach(() => {
 
 describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   const ADDR = '0x00000000000000000000000000000000000000a1';
+  const identityInterface = new Interface([
+    'event IdentityCreated(uint72 indexed identityId, bytes32 indexed operationalKey, bytes32 indexed adminKey)',
+  ]);
+  const profileInterface = new Interface([
+    'event ProfileCreated(uint72 indexed identityId)',
+  ]);
+
+  function identityCreatedLog(identityId: bigint) {
+    const encoded = identityInterface.encodeEventLog(
+      identityInterface.getEvent('IdentityCreated')!,
+      [identityId, ethers.ZeroHash, ethers.ZeroHash],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
 
   function makeIdentityLookupAdapter(values: bigint[]) {
     const a: any = new EVMChainAdapter(minimalConfig());
     a.initialized = true;
+    a.init = async () => { a.initialized = true; };
     a.resolveContract = recorder(async () => ({}));
     let i = 0;
     const readContract = recorder(async () => {
@@ -101,6 +116,196 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     a.clearIdentityIdForAddress(ADDR);
     await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
     expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('coalesces concurrent self getIdentityId reads through the address cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityId()),
+    );
+
+    expect(results.every((value) => value === 42n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][3]).toBe((a as any).signer.address);
+  });
+
+  it('caches positive self getIdentityId results and refreshes them after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityId()).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caches a zero self getIdentityId result only for the short signer TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('repairs a cached self zero when a live signer-address lookup observes a positive identity', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('shares cache entries between getIdentityId and getIdentityIdForAddress for the signer', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).applyHubRotationEventName('IdentityStorage');
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('bulk bound-contract invalidation clears signer identity cache and IdentityStorage binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).invalidateAllBoundContracts();
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile seeds the signer identity cache after IdentityCreated', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(77n)],
+      hash: '0x' + '12'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(77n);
+    await expect(a.getIdentityId()).resolves.toBe(77n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('registerIdentity seeds the signer identity cache after IdentityCreated', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const readContract = recorder(async () => 99n);
+    a.init = async () => undefined;
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.readContract = readContract;
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(88n)],
+      hash: '0x' + '34'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(88n);
+    await expect(a.getIdentityId()).resolves.toBe(88n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+});
+
+describe('EVMChainAdapter random sampling identity lookup', () => {
+  it('createChallenge uses the cached self identity path and reads back by the emitted identity', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const challengeIdentityId = 99n;
+    const cachedIdentityId = 42n;
+    const contextGraphId = 3n;
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(
+      rsInterface.getEvent('ChallengeGenerated')!,
+      [challengeIdentityId, contextGraphId, 11n, 2n, 3n, 4n],
+    );
+    const receipt = {
+      hash: '0x' + '11'.repeat(32),
+      blockNumber: 123,
+      index: 4,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n,
+      knowledgeAssetStorageContract: ethers.ZeroAddress,
+      chunkId: 2n,
+      epoch: 3n,
+      activeProofPeriodStartBlock: 4n,
+      proofingPeriodDurationInBlocks: 5n,
+      solved: false,
+      isCurated: false,
+      challengeLeafCount: 1n,
+      challengeRoot: ethers.ZeroHash,
+    };
+    const rss = { __rss: true };
+    const rs = { interface: rsInterface };
+    const getIdentityId = recorder(async () => cachedIdentityId);
+    const readContract = recorder(async () => challengeRaw);
+    const sendContractTransaction = recorder(async () => receipt as any);
+
+    a.init = async () => undefined;
+    a.getIdentityId = getIdentityId;
+    a.getRandomSampling = async () => ({ rs, rss });
+    a.readContract = readContract;
+    a.sendContractTransaction = sendContractTransaction;
+
+    const result = await a.createChallenge();
+
+    expect(getIdentityId.calls).toHaveLength(1);
+    expect(sendContractTransaction.calls[0][1]).toBe('createChallenge');
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][0]).toBe(rss);
+    expect(readContract.calls[0][1]).toBe('rss.getNodeChallenge');
+    expect(readContract.calls[0][3]).toBe(challengeIdentityId);
+    expect(result.contextGraphId).toBe(contextGraphId);
+    expect(result.challenge.knowledgeAssetId).toBe(11n);
   });
 });
 

@@ -65,6 +65,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  */
 const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapterBase) => void>([
   ['Identity',                   (a) => { (a as any).contracts.identity = undefined; }],
+  ['IdentityStorage',            (a) => { (a as any).invalidateIdentityStorageBinding(); }],
   ['Profile',                    (a) => { (a as any).contracts.profile = undefined; }],
   ['ProfileStorage',             (a) => { (a as any).contracts.profileStorage = undefined; }],
   ['ParametersStorage',          (a) => { (a as any).contracts.parametersStorage = undefined; }],
@@ -513,6 +514,10 @@ export class EVMChainAdapterBase {
 
   protected static readonly IDENTITY_ID_NEGATIVE_TTL_MS = 0;
 
+  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
+
+  protected static readonly SIGNER_IDENTITY_ID_CACHE_KEY = 'signer';
+
   /**
    * OT-RFC-39 — per-process cache for `getIdentityIdForAddress`.
    * Positive hits are memoised with a bounded TTL; negative hits are only
@@ -524,6 +529,20 @@ export class EVMChainAdapterBase {
     ttlMs: (value) => value > 0n
       ? EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS
       : EVMChainAdapterBase.IDENTITY_ID_NEGATIVE_TTL_MS,
+  });
+
+  /**
+   * Signer-only identity cache for `getIdentityId()`.
+   *
+   * Edge nodes commonly have no node-operator identity (`0n`) and fall back to
+   * agent-key signing. A short zero TTL prevents startup sync from repeating the
+   * same self lookup per page while keeping arbitrary-address negative lookups
+   * live and bounding external profile-creation visibility delay.
+   */
+  protected readonly signerIdentityIdCache = new ReadThroughTtlCache<string, bigint>({
+    ttlMs: (value) => value > 0n
+      ? EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS
+      : EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
   });
 
   protected readonly pcaReadCache = new PcaReadCache();
@@ -655,11 +674,47 @@ export class EVMChainAdapterBase {
   protected clearIdentityIdForAddress(address: string): void {
     const cacheKey = ethers.getAddress(address).toLowerCase();
     this.identityIdByAddressCache.invalidate(cacheKey);
+    if (cacheKey === this.signer.address.toLowerCase()) {
+      this.signerIdentityIdCache.invalidate(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY);
+    }
   }
 
   protected seedIdentityIdForAddress(address: string, identityId: bigint): void {
     const cacheKey = ethers.getAddress(address).toLowerCase();
     this.identityIdByAddressCache.seed(cacheKey, identityId);
+    if (cacheKey === this.signer.address.toLowerCase()) {
+      this.signerIdentityIdCache.seed(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY, identityId);
+    }
+  }
+
+  protected invalidateIdentityStorageBinding(): void {
+    this.contracts.identityStorage = undefined;
+    this.identityIdByAddressCache.invalidateAll();
+    this.signerIdentityIdCache.invalidateAll();
+  }
+
+  protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    await this.init();
+    const identityStorage = await this.resolveContract('IdentityStorage');
+    const id: bigint = await this.readContract(
+      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
+    );
+    return BigInt(id);
+  }
+
+  protected async readIdentityIdForAddress(address: string): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    const cacheKey = checksum.toLowerCase();
+    return this.identityIdByAddressCache.getOrLoad(cacheKey, cacheKey, async () => {
+      const identityId = await this.readIdentityIdFromStorage(checksum);
+      if (identityId > 0n && cacheKey === this.signer.address.toLowerCase()) {
+        this.signerIdentityIdCache.seed(EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY, identityId);
+      }
+      return identityId;
+    });
   }
 
   protected static preflightCacheFresh(
@@ -1972,12 +2027,11 @@ export class EVMChainAdapterBase {
   // =====================================================================
 
   async getIdentityId(): Promise<bigint> {
-    await this.init();
-    const identityStorage = await this.getIdentityStorage();
-    const id: bigint = await this.readContract(
-      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', this.signer.address,
+    return this.signerIdentityIdCache.getOrLoad(
+      EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY,
+      EVMChainAdapterBase.SIGNER_IDENTITY_ID_CACHE_KEY,
+      () => this.readIdentityIdForAddress(this.signer.address),
     );
-    return id;
   }
 
   // =====================================================================
@@ -3105,7 +3159,11 @@ export class EVMChainAdapterBase {
    *      See the `randomSamplingPairCache` field comment for the
    *      coupling invariants this path preserves.
    *
-   *   2. Any other name in `BOUND_CONTRACT_INVALIDATORS` → leave the
+   *   2. `IdentityStorage` -> clear the lazy storage binding and the
+   *      dependent identity caches, then force the next public-method
+   *      entry through `init()`.
+   *
+   *   3. Any other name in `BOUND_CONTRACT_INVALIDATORS` → leave the
    *      existing `this.contracts.X` field intact but flip
    *      `this.initialized` back to `false` so the next `await
    *      this.init()` re-resolves every binding fresh from Hub. Keeping
@@ -3118,7 +3176,7 @@ export class EVMChainAdapterBase {
    *      operators were silently stuck on the pre-rotation address
    *      until a daemon restart.
    *
-   *   3. Unknown name → ignored. We deliberately allowlist rather
+   *   4. Unknown name → ignored. We deliberately allowlist rather
    *      than reflexively re-init on any rotation: third-party
    *      deployments may register names we don't bind, and we don't
    *      want a benign rotation of an unrelated contract to thrash
@@ -3156,6 +3214,11 @@ export class EVMChainAdapterBase {
   protected applyHubRotationEventName(name: string): void {
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
+      return;
+    }
+    if (name === 'IdentityStorage') {
+      this.invalidateIdentityStorageBinding();
+      this.initialized = false;
       return;
     }
     if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
