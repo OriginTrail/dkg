@@ -394,17 +394,10 @@ function parseOptionalPcaAccountId(body: Record<string, unknown>): { value?: big
   return { error: 'pcaAccountId must be a positive integer or decimal integer string' };
 }
 
-export interface ContextGraphSignJoinRouteAgent {
-  signJoinRequest(
-    contextGraphId: string,
-    callerAddress: string,
-  ): Promise<{ agentAddress: string }>;
-}
-
 export interface ContextGraphSignJoinRouteContext {
   req: IncomingMessage;
   res: ServerResponse;
-  agent: ContextGraphSignJoinRouteAgent;
+  agent: RequestContext['agent'];
   path: string;
   requestAgentAddress: string;
 }

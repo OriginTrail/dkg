@@ -95,7 +95,9 @@ export interface RequestContext {
   // `requestIdentity` so all auth sources flow through one boundary.
   url: URL;
   path: string;
-  requestIdentity: RouteRequestIdentity;
+  // Optional on the public plugin-facing type so existing plugins that
+  // construct RequestContext fixtures do not take a semver-major break.
+  requestIdentity?: RouteRequestIdentity;
   // Compatibility aliases for route modules that still need token-backed
   // self-calls or node-admin checks. Keep these derived from
   // `requestIdentity`; do not treat them as independent auth models.

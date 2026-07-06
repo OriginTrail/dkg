@@ -1,5 +1,6 @@
 import { expect } from 'vitest';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { SignedAgentDelegation } from '@origintrail-official/dkg-agent';
 import {
   DashboardSessionStore,
   authenticateDashboardSessionRequest,
@@ -38,7 +39,7 @@ export async function startDashboardSessionServer(options: {
   resolvePrincipal?: (token: string) => RequestAuthPrincipal;
   onSessionRevoked?: (sessionId: string) => void;
   corsOrigin?: string | null;
-  signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<{ agentAddress: string }>;
+  signJoinRequest?: (contextGraphId: string, agentAddress: string) => Promise<SignedAgentDelegation>;
   authEnabled?: boolean;
   dashboardLogin?: DashboardLoginOptions;
 } = {}): Promise<{ server: Server; baseUrl: string }> {
@@ -56,8 +57,14 @@ export async function startDashboardSessionServer(options: {
     ],
     nodeName: 'Default Agent',
     nodeFramework: 'node',
-    signJoinRequest: options.signJoinRequest ?? (async (contextGraphId: string, agentAddress: string) =>
-      ({ contextGraphId, agentAddress, signature: 'signed' })),
+    signJoinRequest: options.signJoinRequest ?? (async (contextGraphId: string, agentAddress: string): Promise<SignedAgentDelegation> => ({
+      agentAddress,
+      scope: `test:context-graph:${contextGraphId}:join`,
+      issuedAtMs: 1,
+      expiresAtMs: 2,
+      delegateePeerId: '12D3KooWDashboardSessionTest',
+      signature: 'signed',
+    })),
     peerId: '12D3KooWDashboardSessionTest',
     publisher: { getIdentityId: () => 1n },
   };

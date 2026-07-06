@@ -44,8 +44,11 @@ describe('dashboard route request identity', () => {
 
   it('routes dashboard-cookie agent sessions through requestAgentAddress for sign-join', async () => {
     const signJoinRequest = vi.fn(async (contextGraphId: string, agentAddress: string) => ({
-      contextGraphId,
       agentAddress,
+      scope: `test:context-graph:${contextGraphId}:join`,
+      issuedAtMs: 1,
+      expiresAtMs: 2,
+      delegateePeerId: '12D3KooWDashboardSessionTest',
       signature: 'signed-join',
     }));
     const started = await startServer({ signJoinRequest });
