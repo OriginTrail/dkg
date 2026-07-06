@@ -1,7 +1,7 @@
 import React from 'react';
 import { useFetch } from '../../hooks.js';
 import { fetchPca, fetchWalletsBalances, type PcaSnapshot } from '../../api.js';
-import { useOwnerActionSubmitter } from '../../pca/ownerActions.js';
+import { usePinnedOwnerActionSubmitter } from '../../pca/ownerActions.js';
 import { useWalletTxProgress } from '../../pca/useWalletTxProgress.js';
 import { useWalletBootstrap } from '../../hooks/useWalletBootstrap.js';
 import { detailDeviceFlow, describeDetailWalletError, type DetailDeviceAction } from '../../pca/detailWalletTx.js';
@@ -160,7 +160,7 @@ function DetailBody({
     flow: (v) => detailDeviceFlow(v ?? 'topup'),
     describeActionError: (err, v) => describeDetailWalletError(err, v ?? 'topup'),
   });
-  const owner = useOwnerActionSubmitter({
+  const owner = usePinnedOwnerActionSubmitter({
     // Item 3 (#1375) — resolve the owner submitter ONCE from `access` for THIS account. daemon
     // pins (server-side); a wallet-owned account re-verifies ownership per write (T1). Wallet
     // device progress flows through onWalletProgress; the submitter liveness stays per-prompt.

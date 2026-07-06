@@ -89,21 +89,18 @@ export const readOnlyOwnerActionSubmitter: OwnerActionSubmitter = {
 
 export type OwnerKey = 'hot' | 'hardware';
 
-/** Args for `useOwnerActionSubmitterForAccount` — the per-call RESOLVING submitter (cross-account
+/** Args for `useResolvingOwnerActionSubmitter` — the per-call RESOLVING submitter (cross-account
  *  deregister, create). */
-export interface OwnerActionSubmitterForAccountArgs {
-  /** ADVISORY only — documents the bound account at the call site; routing resolves per the
-   *  accountId PASSED to each method, not this field. */
-  accountId?: string;
+export interface ResolvingOwnerActionSubmitterArgs {
   /** Create-time selector: 'hardware' → browser wallet, else daemon. */
   ownerKey?: OwnerKey;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
   onWalletProgress?: WalletOwnerActionSubmitterDeps['onProgress'];
 }
 
-/** Args for `useOwnerActionSubmitter` — the same-account ACCESS-PINNED submitter (resolve-once from
+/** Args for `usePinnedOwnerActionSubmitter` — the same-account ACCESS-PINNED submitter (resolve-once from
  *  the display access). */
-export interface OwnerActionSubmitterArgs {
+export interface PinnedOwnerActionSubmitterArgs {
   /** The display-resolved owner access for THIS account. */
   access: PcaOwnerAccess;
   /** Optional UI progress hook for browser-wallet approve/action prompts. */
@@ -256,7 +253,7 @@ export async function resolveOwnerActionSubmitterForAccount(
  * the browser wallet (pre-flight walletUnavailableReason), anything else uses the daemon. Shared
  * by both the resolving and the access-path submitters — create never depends on `access`.
  */
-function resolvingCreate(args: OwnerActionSubmitterForAccountArgs): OwnerActionSubmitter['create'] {
+function resolvingCreate(args: ResolvingOwnerActionSubmitterArgs): OwnerActionSubmitter['create'] {
   return async (createArgs) => {
     if (args.ownerKey !== 'hardware') return daemonOwnerActionSubmitter.create(createArgs);
     const reason = walletUnavailableReason();
@@ -266,8 +263,8 @@ function resolvingCreate(args: OwnerActionSubmitterForAccountArgs): OwnerActionS
 }
 
 // Internal (NOT a hook) — the per-call resolving submitter. Exposed to components via
-// `useOwnerActionSubmitterForAccount`, and reused by the pinned submitter's fallback branches.
-function resolvingOwnerActionSubmitter(args: OwnerActionSubmitterForAccountArgs = {}): OwnerActionSubmitter {
+// `useResolvingOwnerActionSubmitter`, and reused by the pinned submitter's fallback branches.
+function resolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return {
     create: resolvingCreate(args),
     async registerAgent(accountId, address) {
@@ -313,23 +310,23 @@ function pinnedOwnerActionSubmitter(
 }
 
 /**
- * `useOwnerActionSubmitterForAccount` — the per-call RESOLVING strategy (T3 / #1468): every manage
+ * `useResolvingOwnerActionSubmitter` — the per-call RESOLVING strategy (T3 / #1468): every manage
  * write re-fetches the PCA owner + re-classifies (via `resolveOwnerActionSubmitterForAccount`, keyed
  * on the accountId PASSED to the method). Use for CROSS-account writes — renew's / self-coverage's
- * deregister from a DIFFERENT account — and for create. The optional `accountId` arg is ADVISORY
- * (routing uses the call-time accountId). This is the security seam; it must NOT be pinned onto
- * React state.
+ * deregister from a DIFFERENT account — and for create. Routing is ENTIRELY per-call (the accountId
+ * each method receives); the hook itself takes no bound account. This is the security seam; it must
+ * NOT be pinned onto React state.
  */
-export function useOwnerActionSubmitterForAccount(args: OwnerActionSubmitterForAccountArgs = {}): OwnerActionSubmitter {
+export function useResolvingOwnerActionSubmitter(args: ResolvingOwnerActionSubmitterArgs = {}): OwnerActionSubmitter {
   return resolvingOwnerActionSubmitter(args);
 }
 
 /**
- * `useOwnerActionSubmitter` — the same-account ACCESS-PINNED strategy (T3 / #1468): resolves the
+ * `usePinnedOwnerActionSubmitter` — the same-account ACCESS-PINNED strategy (T3 / #1468): resolves the
  * signer ONCE from the display `access` for writes on THAT account (the resolve-once win), with the
  * T1 wallet re-verify + the unknown-mode self-heal baked in (see `pinnedOwnerActionSubmitter`).
  * create/settle unchanged.
  */
-export function useOwnerActionSubmitter(args: OwnerActionSubmitterArgs): OwnerActionSubmitter {
+export function usePinnedOwnerActionSubmitter(args: PinnedOwnerActionSubmitterArgs): OwnerActionSubmitter {
   return pinnedOwnerActionSubmitter(args.access, args.onWalletProgress);
 }

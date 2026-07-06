@@ -9,7 +9,7 @@ import {
   type CreatePcaResult,
   type PcaSnapshot,
 } from '../../api.js';
-import { useOwnerActionSubmitterForAccount, type OwnerKey } from '../../pca/ownerActions.js';
+import { useResolvingOwnerActionSubmitter, type OwnerKey } from '../../pca/ownerActions.js';
 import { probeWalletBindings, selfCoverageOutlook } from '../../pca/walletBinding.js';
 import { useDesignatableNodes } from '../../hooks/useDesignatableNodes.js';
 import { usePrimaryNodeSelection } from '../../hooks/usePrimaryNodeSelection.js';
@@ -117,7 +117,7 @@ export function CreatePcaModal({
     },
     flow: () => ({ requiresApproval: true, actionLabel: 'Sign Create PCA' }),
   });
-  const owner = useOwnerActionSubmitterForAccount({ ownerKey, onWalletProgress: createProgress.onProgress });
+  const owner = useResolvingOwnerActionSubmitter({ ownerKey, onWalletProgress: createProgress.onProgress });
   const finishCreate = usePcaStore((s) => s.finishCreate);
   const setCreatePending = usePcaStore((s) => s.setCreatePending);
   const clearCreatePending = usePcaStore((s) => s.clearCreatePending);
