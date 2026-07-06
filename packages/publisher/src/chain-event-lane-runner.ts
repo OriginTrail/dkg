@@ -142,12 +142,6 @@ export class ChainEventLaneRunner {
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
   }
 
-  private scheduleDelayMs(value: number | undefined, fallback: number): number {
-    return Number.isFinite(value) && value! >= 0
-      ? Math.floor(value!)
-      : fallback;
-  }
-
   private stateFor(lane: ChainEventPollerLane): ChainEventPollerLaneState {
     let state = this.laneState.get(lane);
     if (!state) {

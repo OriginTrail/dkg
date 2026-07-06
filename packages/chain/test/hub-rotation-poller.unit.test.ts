@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Contract, ethers } from 'ethers';
 import { HubRotationPoller } from '../src/hub-rotation-poller.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS, RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 
 const HUB_ADDRESS = '0x0000000000000000000000000000000000000001';
 
@@ -47,6 +49,18 @@ function logsInRange(logs: ethers.Log[], filter: { fromBlock: number; toBlock: n
 
 async function flushAsyncWork(turns = 8): Promise<void> {
   for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
+function failoverReadProvider(providers: unknown[]) {
+  const client = new RpcFailoverClient(
+    () => providers.map((provider, index) => ({
+      provider: provider as any,
+      rpcUrl: `https://rpc-${index}.example`,
+    })),
+    async () => { throw new Error('Hub rotation tests must not sign transactions'); },
+    () => 'evm:31337',
+  );
+  return client.read.bind(client);
 }
 
 describe('HubRotationPoller', () => {
@@ -176,6 +190,147 @@ describe('HubRotationPoller', () => {
     }
   });
 
+  it('times out a stalled scheduled log scan and retries the same cursor range', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    const hub = hubContract(iface);
+    const rotation = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_001, '80');
+    let head = 1_000;
+    let getLogsCalls = 0;
+    const provider = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: any) => {
+        getLogsCalls++;
+        if (getLogsCalls === 1) return new Promise<ethers.Log[]>(() => { /* hung RPC */ });
+        return logsInRange([rotation], filter);
+      }),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([provider]),
+      intervalMs: 1_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      await poller.start(hub, HUB_ADDRESS);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS - 1);
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(onContractName).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork();
+
+      head = 1_001;
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushAsyncWork();
+
+      expect(provider.getLogs).toHaveBeenCalledTimes(2);
+      expect(provider.getLogs.mock.calls[1][0]).toMatchObject({
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out a stalled scheduled head read and retries without scanning logs', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    const rotation = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_001, '82');
+    let headCalls = 0;
+    const provider = {
+      getBlockNumber: vi.fn(async () => {
+        headCalls++;
+        if (headCalls === 1) return new Promise<number>(() => { /* hung RPC */ });
+        return 1_001;
+      }),
+      getLogs: vi.fn(async (filter: any) => logsInRange([rotation], filter)),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([provider]),
+      intervalMs: 1_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      await poller.start(hubContract(iface), HUB_ADDRESS);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS - 1);
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await flushAsyncWork();
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await flushAsyncWork();
+
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(2);
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs.mock.calls[0][0]).toMatchObject({
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets read-provider failover reach a healthy backup after a stalled primary log scan', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    const rotation = rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_001, '84');
+    const primary = {
+      getBlockNumber: vi.fn(async () => 1_001),
+      getLogs: vi.fn(async () => new Promise<ethers.Log[]>(() => { /* hung primary */ })),
+    };
+    const backup = {
+      getBlockNumber: vi.fn(async () => 1_001),
+      getLogs: vi.fn(async (filter: any) => logsInRange([rotation], filter)),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: failoverReadProvider([primary, backup]),
+      intervalMs: 1_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      await poller.start(hubContract(iface), HUB_ADDRESS);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(primary.getLogs).toHaveBeenCalledTimes(1);
+      expect(backup.getLogs).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1);
+      await flushAsyncWork();
+
+      expect(backup.getLogs).toHaveBeenCalledTimes(1);
+      expect(onContractName).toHaveBeenCalledWith('ContextGraphs');
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it('coalesces concurrent starts into a single scheduled poller', async () => {
     vi.useFakeTimers({ now: 0 });
     const provider = {
@@ -215,13 +370,17 @@ describe('HubRotationPoller', () => {
       rotationLog(iface, 'NewContract', 'RandomSampling', 1_000, '10'),
       rotationLog(iface, 'ContractChanged', 'ContextGraphs', 1_001, '12'),
     ];
+    const readCalls: Array<{ label: string; opts: unknown }> = [];
     const provider = {
       getBlockNumber: vi.fn(async () => head),
       getLogs: vi.fn(async (filter: any) => logsInRange(logs, filter)),
     };
     const onContractName = vi.fn();
     const poller = new HubRotationPoller({
-      readProvider: async (_label, fn) => fn(provider as any),
+      readProvider: async (label, fn, opts) => {
+        readCalls.push({ label, opts });
+        return fn(provider as any);
+      },
       intervalMs: 30_000,
       reorgBufferBlocks: 50,
       onContractName,
@@ -250,6 +409,10 @@ describe('HubRotationPoller', () => {
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
       ]);
+      expect(readCalls.find((call) => call.label === 'Hub rotation poll getBlockNumber')?.opts)
+        .toEqual({ policy: 'watchdogPointRead' });
+      expect(readCalls.find((call) => call.label === 'Hub rotation poll getLogs')?.opts)
+        .toEqual({ policy: 'watchdogWideLogScan' });
       expect(onContractName.mock.calls.map((call) => call[0])).toEqual([
         'RandomSampling',
         'ContextGraphs',
