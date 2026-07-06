@@ -13,7 +13,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { handleNotificationRoutes } from '../src/daemon/routes/notifications.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
 
 const CALLER = '0xaaaa000000000000000000000000000000000001';
 const OTHER = '0xbbbb000000000000000000000000000000000002';
@@ -67,7 +67,7 @@ function makeCtx(
   dashDb: any,
   body?: unknown,
   agentOverrides: Record<string, unknown> = {},
-): { ctx: RequestContext; res: any } {
+): { ctx: RouteRequestContext; res: any } {
   const res = fakeRes();
   const url = new URL(`http://127.0.0.1${path}`);
   const agent = {
@@ -81,7 +81,7 @@ function makeCtx(
   const ctx = {
     req: fakeReq(method, path, body), res, agent, dashDb,
     path: url.pathname, url, requestToken: TOKEN,
-  } as unknown as RequestContext;
+  } as unknown as RouteRequestContext;
   return { ctx, res };
 }
 

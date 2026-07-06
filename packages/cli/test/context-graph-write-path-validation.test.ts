@@ -34,7 +34,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
 import {
   startLiveDaemon,
   stopLiveDaemon,

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import type { ServerResponse } from 'node:http';
-import type { RequestContext } from '../../../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../../../src/daemon/routes/context.js';
 import type { RoutePlugin } from '../../../src/daemon/plugin-api.js';
 import { handlePluginRoutes } from '../../../src/daemon/routes/plugins.js';
 
@@ -58,7 +58,7 @@ function makeRes(): FakeRes {
 }
 
 function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
-  ctx: RequestContext;
+  ctx: RouteRequestContext;
   res: FakeRes;
 } {
   const ctx = {
@@ -66,7 +66,7 @@ function makeCtx(routePlugins: RoutePlugin[], res = makeRes()): {
     res: res as unknown as ServerResponse,
     routePlugins,
     path: '/api/test',
-  } as unknown as RequestContext;
+  } as unknown as RouteRequestContext;
   return { ctx, res };
 }
 

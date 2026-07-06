@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
 
 const VALID_OBJECT_EVENT_DOC = {
   '@context': {
@@ -54,7 +54,7 @@ function createResponse() {
   return response;
 }
 
-function createRequest(body?: unknown): RequestContext['req'] {
+function createRequest(body?: unknown): RouteRequestContext['req'] {
   const request = body === undefined
     ? new Readable({ read() { this.push(null); } })
     : Readable.from([Buffer.from(JSON.stringify(body))]);
@@ -63,20 +63,20 @@ function createRequest(body?: unknown): RequestContext['req'] {
     url: '/api/epcis/capture',
     headers: {},
   });
-  return request as RequestContext['req'];
+  return request as RouteRequestContext['req'];
 }
 
-function createGetRequest(url: string): RequestContext['req'] {
+function createGetRequest(url: string): RouteRequestContext['req'] {
   const request = new Readable({ read() { this.push(null); } });
   Object.assign(request, {
     method: 'GET',
     url,
     headers: { host: '127.0.0.1' },
   });
-  return request as RequestContext['req'];
+  return request as RouteRequestContext['req'];
 }
 
-function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
+function createContext(overrides: Partial<RouteRequestContext> = {}): RouteRequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
   return {
     req: createRequest(),
@@ -85,28 +85,28 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       publishAsync: async () => {
         throw new Error('publishAsync should not be called when publisher runtime is unavailable');
       },
-    } as unknown as RequestContext['agent'],
-    publisherControl: {} as RequestContext['publisherControl'],
+    } as unknown as RouteRequestContext['agent'],
+    publisherControl: {} as RouteRequestContext['publisherControl'],
     publisherRuntime: null,
     config: {
       epcis: { contextGraphId: 'epcis-test' },
       publisher: { enabled: true },
-    } as RequestContext['config'],
+    } as RouteRequestContext['config'],
     startedAt: 0,
-    dashDb: {} as RequestContext['dashDb'],
-    opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],
-    network: null as RequestContext['network'],
-    tracker: {} as RequestContext['tracker'],
-    memoryManager: {} as RequestContext['memoryManager'],
+    dashDb: {} as RouteRequestContext['dashDb'],
+    opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RouteRequestContext['opWallets'],
+    network: null as RouteRequestContext['network'],
+    tracker: {} as RouteRequestContext['tracker'],
+    memoryManager: {} as RouteRequestContext['memoryManager'],
     bridgeAuthToken: undefined,
     nodeVersion: 'test',
     nodeCommit: 'test',
-    catchupTracker: {} as RequestContext['catchupTracker'],
-    extractionRegistry: {} as RequestContext['extractionRegistry'],
-    fileStore: {} as RequestContext['fileStore'],
+    catchupTracker: {} as RouteRequestContext['catchupTracker'],
+    extractionRegistry: {} as RouteRequestContext['extractionRegistry'],
+    fileStore: {} as RouteRequestContext['fileStore'],
     extractionStatus: new Map(),
     assertionImportLocks: new Map(),
-    vectorStore: {} as RequestContext['vectorStore'],
+    vectorStore: {} as RouteRequestContext['vectorStore'],
     embeddingProvider: null,
     validTokens: new Set(),
     apiHost: '127.0.0.1',
@@ -119,7 +119,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
   };
 }
 
-function responseBody(ctx: RequestContext): Record<string, unknown> {
+function responseBody(ctx: RouteRequestContext): Record<string, unknown> {
   return JSON.parse((ctx.res as unknown as { body: string }).body) as Record<string, unknown>;
 }
 
@@ -140,7 +140,7 @@ describe('EPCIS async capture publisher readiness', () => {
       config: {
         epcis: { contextGraphId: 'epcis-test' },
         publisher: { enabled: false },
-      } as RequestContext['config'],
+      } as RouteRequestContext['config'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -163,13 +163,13 @@ describe('EPCIS async capture publisher readiness', () => {
           published.push({ contextGraphId, content, opts });
           return { captureID: 'capture-route-1' };
         },
-      } as unknown as RequestContext['agent'],
+      } as unknown as RouteRequestContext['agent'],
       publisherRuntime: {
         walletIds: ['0xpublisher'],
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -202,13 +202,13 @@ describe('EPCIS async capture publisher readiness', () => {
           published.push({ contextGraphId, content, opts });
           return { captureID: 'capture-route-2' };
         },
-      } as unknown as RequestContext['agent'],
+      } as unknown as RouteRequestContext['agent'],
       publisherRuntime: {
         walletIds: ['0xpublisher'],
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -239,13 +239,13 @@ describe('EPCIS async capture publisher readiness', () => {
         publishAsync: async () => {
           throw oversized;
         },
-      } as unknown as RequestContext['agent'],
+      } as unknown as RouteRequestContext['agent'],
       publisherRuntime: {
         walletIds: ['0xpublisher'],
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -265,13 +265,13 @@ describe('EPCIS async capture publisher readiness', () => {
       config: {
         epcis: {},
         publisher: { enabled: true },
-      } as RequestContext['config'],
+      } as RouteRequestContext['config'],
       publisherRuntime: {
         walletIds: ['0xpublisher'],
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -294,7 +294,7 @@ describe('EPCIS async capture publisher readiness', () => {
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -316,7 +316,7 @@ describe('EPCIS async capture publisher readiness', () => {
         runner: {},
         publisher: {},
         stop: async () => {},
-      } as unknown as RequestContext['publisherRuntime'],
+      } as unknown as RouteRequestContext['publisherRuntime'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -330,7 +330,7 @@ describe('EPCIS async capture publisher readiness', () => {
 });
 
 describe('EPCIS events query route — per-request CG + sub-graph', () => {
-  function createGetContext(rawUrl: string, overrides: Partial<RequestContext> = {}): RequestContext {
+  function createGetContext(rawUrl: string, overrides: Partial<RouteRequestContext> = {}): RouteRequestContext {
     const url = new URL(rawUrl, 'http://127.0.0.1');
     const queryCalls: Array<{ sparql: string; opts: unknown }> = [];
     const baseAgent = {
@@ -338,7 +338,7 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
         queryCalls.push({ sparql, opts });
         return { bindings: [] };
       },
-    } as unknown as RequestContext['agent'];
+    } as unknown as RouteRequestContext['agent'];
 
     return createContext({
       req: createGetRequest(`${url.pathname}${url.search}`),
@@ -352,14 +352,14 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
   // Capture agent.query SPARQL for assertions. The route plumbs the
   // resolved CG + sub-graph through to the SPARQL builder, so this is
   // the cleanest end-to-end observation point.
-  function captureSparql(): { agent: RequestContext['agent']; calls: Array<{ sparql: string; opts: unknown }> } {
+  function captureSparql(): { agent: RouteRequestContext['agent']; calls: Array<{ sparql: string; opts: unknown }> } {
     const calls: Array<{ sparql: string; opts: unknown }> = [];
     const agent = {
       query: async (sparql: string, opts: unknown) => {
         calls.push({ sparql, opts });
         return { bindings: [] };
       },
-    } as unknown as RequestContext['agent'];
+    } as unknown as RouteRequestContext['agent'];
     return { agent, calls };
   }
 
@@ -434,7 +434,7 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
       config: {
         epcis: {},
         publisher: { enabled: true },
-      } as RequestContext['config'],
+      } as RouteRequestContext['config'],
     });
 
     await handleEpcisRoutes(ctx);

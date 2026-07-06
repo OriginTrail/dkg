@@ -101,7 +101,7 @@ import {
 } from '../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
-import { loadTokens, httpAuthGuard, type RequestAuthContext } from '../auth.js';
+import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
 import {
@@ -331,7 +331,7 @@ import { handleOperationalWalletRoutes } from './routes/operational-wallets.js';
 import { handleNotificationRoutes } from './routes/notifications.js';
 import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
-import { resolveRouteRequestIdentityFromAuthContext } from './route-request-identity.js';
+import type { RouteRequestIdentity } from './route-request-identity.js';
 
 
 export async function handleRequest(
@@ -365,14 +365,13 @@ export async function handleRequest(
   apiPortRef: { value: number },
   routePlugins: RoutePlugin[],
   admission: AdmissionStatsView,
-  requestAuthContext: RequestAuthContext | undefined,
+  requestIdentity: RouteRequestIdentity,
   emitMemoryGraphChanged?: (event: MemoryGraphChangedEvent) => void,
   emitNotification?: (event: NotificationSseEvent) => void,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const path = url.pathname;
 
-  const requestIdentity = resolveRouteRequestIdentityFromAuthContext(req, agent, requestAuthContext);
   const requestAuth = requestIdentity.requestAuth;
   const requestToken = requestIdentity.credentialToken;
   const requestAgentAddress = requestIdentity.principal.agentAddress;

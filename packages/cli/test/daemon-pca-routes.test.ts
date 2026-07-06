@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { NoChainAdapter, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { handlePcaRoutes } from '../src/daemon/routes/pca.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
 
 function fakeRes() {
   const res: any = { statusCode: 0, body: '' };
@@ -46,7 +46,7 @@ function runCtx(
     config: { auth: { enabled: auth?.authEnabled ?? false } },
     requestToken: auth?.requestToken,
     validTokens: auth?.validTokens ?? new Set<string>(),
-  } as unknown as RequestContext;
+  } as unknown as RouteRequestContext;
   return { res, done: handlePcaRoutes(ctx) };
 }
 

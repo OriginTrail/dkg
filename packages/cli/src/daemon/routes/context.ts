@@ -106,12 +106,3 @@ export interface RouteRequestContext {
   /** A5: broadcast a generic `notification` SSE refresh for the bell pane. */
   emitNotification?: (event: NotificationSseEvent) => void;
 }
-
-export type PluginRequestContext = Omit<RouteRequestContext, 'requestIdentity'> & {
-  // Optional on the public plugin-facing type so existing plugins that
-  // construct RequestContext fixtures do not take a semver-major break.
-  requestIdentity?: RouteRequestIdentity;
-};
-
-// Preserve the plugin API's historical type name as a compatibility alias.
-export type RequestContext = PluginRequestContext;

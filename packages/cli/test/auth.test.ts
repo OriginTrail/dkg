@@ -22,6 +22,7 @@ import {
 } from '../src/daemon/dashboard-session-cookie.js';
 import { resolveDashboardSseSession, resolveDashboardSseSessionFromAuthContext } from '../src/daemon/dashboard-sse-session.js';
 import { authenticateDashboardSessionRequest } from '../src/daemon/dashboard-login.js';
+import { handleRequest } from '../src/daemon/handle-request.js';
 import { resolveRequestPrincipal, resolveRouteRequestIdentity, resolveRouteRequestIdentityFromAuthContext } from '../src/daemon/route-request-identity.js';
 import {
   DashboardSessionStore,
@@ -468,6 +469,19 @@ describe('httpAuthGuard', () => {
   const VALID_TOKEN = 'test-secret-token';
   const validTokens = new Set([VALID_TOKEN]);
   const principal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:http-guard' };
+  const poisonPrincipal = { kind: 'agent' as const, agentAddress: 'did:dkg:agent:poison' };
+  const dispatchAgent = {
+    resolveAgentByToken: () => undefined,
+    resolveAgentAddress: () => principal.agentAddress,
+    listLocalAgents: () => [
+      { agentAddress: principal.agentAddress, name: 'Guard Principal', framework: 'test' },
+      { agentAddress: poisonPrincipal.agentAddress, name: 'Poison Principal', framework: 'test' },
+    ],
+    nodeName: 'Guard Principal',
+    nodeFramework: 'test',
+    peerId: '12D3KooWAuthGuardDispatchTest',
+    publisher: { getIdentityId: () => 1n },
+  };
   let server: Server;
   let baseUrl: string;
   let corsOrigin: string | null;
@@ -486,11 +500,16 @@ describe('httpAuthGuard', () => {
       if (!authResult.allowed) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
       const requestAuth = getRequestAuthContext(req) ?? null;
+      const routeIdentity = resolveRouteRequestIdentityFromAuthContext(
+        req,
+        dispatchAgent,
+        authResult.requestAuthContext,
+      );
       if (url.searchParams.get('poisonRequestAuthContext') === '1') {
         setRequestAuthContext(req, {
           source: 'dashboard-session',
           internalCredentialToken: 'poison-token',
-          principal,
+          principal: poisonPrincipal,
           csrf: { required: false, validated: false },
           dashboardSession: {
             sessionId: 'poison-session',
@@ -498,6 +517,39 @@ describe('httpAuthGuard', () => {
             expiresAt: 1,
           },
         });
+      }
+      if (url.pathname === '/api/agent/identity') {
+        await handleRequest(
+          req,
+          res,
+          dispatchAgent as unknown as Parameters<typeof handleRequest>[2],
+          {} as Parameters<typeof handleRequest>[3],
+          null,
+          { nodeRole: 'edge' } as Parameters<typeof handleRequest>[5],
+          Date.now(),
+          {} as Parameters<typeof handleRequest>[7],
+          { wallets: [] } as Parameters<typeof handleRequest>[8],
+          {} as Parameters<typeof handleRequest>[9],
+          {} as Parameters<typeof handleRequest>[10],
+          {} as Parameters<typeof handleRequest>[11],
+          undefined,
+          'test-node-version',
+          'test-node-commit',
+          {} as Parameters<typeof handleRequest>[15],
+          {} as Parameters<typeof handleRequest>[16],
+          {} as Parameters<typeof handleRequest>[17],
+          new Map(),
+          new Map(),
+          {} as Parameters<typeof handleRequest>[20],
+          null,
+          validTokens,
+          '127.0.0.1',
+          { value: 0 },
+          [],
+          { inFlight: 0, max: 0, rejectedTotal: 0 },
+          routeIdentity,
+        );
+        return;
       }
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -691,6 +743,40 @@ describe('httpAuthGuard', () => {
       csrf: { required: false, validated: false },
     });
     expect(body.authResultContext).toEqual(body.requestAuth);
+  });
+
+  it('dispatches route identity from auth result even if request-attached context changes', async () => {
+    const store = new DashboardSessionStore();
+    const created = store.createLoginSession(VALID_TOKEN, 'credential-fingerprint-1');
+    authSources = [
+      createDashboardSessionAuthSource({
+        authenticate: (req) => authenticateDashboardSessionRequest(req, store, {
+          dashboardLogin: {
+            isCredentialFingerprintCurrent: () => true,
+          },
+        }),
+        resolvePrincipal: () => principal,
+        verifyCsrf: () => true,
+      }),
+    ];
+
+    const res = await fetch(`${baseUrl}/api/agent/identity?poisonRequestAuthContext=1`, {
+      headers: {
+        Cookie: `${DASHBOARD_SESSION_COOKIE}=${encodeURIComponent(created.sessionId)}`,
+      },
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      agentAddress: principal.agentAddress,
+      agentDid: `did:dkg:agent:${principal.agentAddress}`,
+      name: 'Guard Principal',
+      framework: 'test',
+      peerId: '12D3KooWAuthGuardDispatchTest',
+      nodeIdentityId: '1',
+    });
+    expect(body.agentAddress).not.toBe(poisonPrincipal.agentAddress);
   });
 
   it('resolves the same principal shape for valid SSE query-token auth', async () => {

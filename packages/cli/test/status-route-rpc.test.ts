@@ -27,7 +27,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import type { RouteRequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
@@ -141,7 +141,7 @@ describe('/api/status selected overlay details', () => {
         // handleRequest; stubbed here because this hand-built ctx drives the full
         // /api/status body, which now surfaces the admission block.
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-      } as unknown as RequestContext);
+      } as unknown as RouteRequestContext);
     });
 
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -202,7 +202,7 @@ describe('/api/status selected overlay details', () => {
           nodeVersion: '0.0.0-test',
           nodeCommit: '',
           admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-        } as unknown as RequestContext);
+        } as unknown as RouteRequestContext);
       });
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       try {
@@ -243,7 +243,7 @@ describe('/api/status selected overlay details', () => {
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-      } as unknown as RequestContext);
+      } as unknown as RouteRequestContext);
     });
 
     const cases = [
