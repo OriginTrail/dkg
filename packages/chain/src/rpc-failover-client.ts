@@ -72,6 +72,8 @@ export type ReadPolicy = 'pointRead' | 'wideLogScan' | 'failOpenFundingRead';
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
+  /** Opt-in watchdog for background reads that must not wedge even with one RPC endpoint. */
+  capSingleProvider?: boolean;
 }
 
 /**
@@ -104,19 +106,24 @@ export function isContractViewRetryable(err: unknown): boolean {
 /**
  * The timeout-policy matrix — the per-attempt cap each named policy yields:
  *
- *   | policy              | multi-RPC cap            | single-RPC cap          |
- *   |---------------------|--------------------------|-------------------------|
- *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
- *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)     |
+ *   | policy              | multi-RPC cap            | single-RPC default      | capSingleProvider |
+ *   |---------------------|--------------------------|-------------------------|-------------------|
+ *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         | RPC_READ_STALL    |
+ *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         | RPC_LOG_SCAN      |
+ *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)     | RPC_READ_STALL    |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894); `failOpenFundingRead` caps EVERY attempt incl. single so a fail-open
- * funding read can never stall publish-signer selection.
+ * to; #894) by default. `capSingleProvider` lets background watcher reads opt
+ * into the same per-policy cap for a one-endpoint node without imposing a
+ * poll-level deadline over the multi-RPC failover sequence.
  */
-export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
+export function resolveCapMs(
+  policy: ReadPolicy,
+  providerCount: number,
+  capSingleProvider = false,
+): number | undefined {
   if (policy === 'failOpenFundingRead') return RPC_READ_STALL_TIMEOUT_MS;
-  if (providerCount <= 1) return undefined;
+  if (providerCount <= 1 && !capSingleProvider) return undefined;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
 
@@ -186,6 +193,7 @@ export class RpcFailoverClient {
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
+      opts?.capSingleProvider ?? false,
     );
   }
 
@@ -220,6 +228,7 @@ export class RpcFailoverClient {
             (p) => fn(this.rebindContract(contract, p)),
             opts?.isRetryable ?? isContractViewRetryable,
             opts?.policy ?? 'pointRead',
+            opts?.capSingleProvider ?? false,
           );
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
@@ -499,20 +508,21 @@ export class RpcFailoverClient {
    * The shared read-family core: one per-endpoint loop backing both `read` and
    * `readContract`. The per-attempt `withTimeout` is a hard deadline that ABORTS
    * and fails over a hung backend; the cap comes from the named `policy` via
-   * {@link resolveCapMs} (multi-RPC caps the attempt; single-RPC is uncapped for
-   * `pointRead`/`wideLogScan` — #894, nothing to fail over to — UNLESS
-   * `failOpenFundingRead`, which caps every attempt). The `endpoints` are read
-   * LIVE from the injected thunk so a mid-flight reassignment of the pool is
-   * observed.
+   * {@link resolveCapMs} (multi-RPC caps each attempt; single-RPC is uncapped for
+   * `pointRead`/`wideLogScan` by default — #894, nothing to fail over to — unless
+   * the caller opts into `capSingleProvider` or uses `failOpenFundingRead`). The
+   * `endpoints` are read LIVE from the injected thunk so a mid-flight reassignment
+   * of the pool is observed.
    */
   private async runAcrossProviders<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
     isRetryable: (err: unknown) => boolean,
     policy: ReadPolicy,
+    capSingleProvider: boolean,
   ): Promise<T> {
     const endpoints = this.getEndpoints();
-    const capMs = resolveCapMs(policy, endpoints.length);
+    const capMs = resolveCapMs(policy, endpoints.length, capSingleProvider);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];

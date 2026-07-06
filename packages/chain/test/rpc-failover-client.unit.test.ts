@@ -93,11 +93,13 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
     expect(resolveCapMs('pointRead', 2)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('pointRead', 4)).toBe(RPC_READ_STALL_TIMEOUT_MS);
     expect(resolveCapMs('pointRead', 1)).toBeUndefined();
+    expect(resolveCapMs('pointRead', 1, true)).toBe(RPC_READ_STALL_TIMEOUT_MS);
   });
 
   it('wideLogScan: multi-RPC caps at RPC_LOG_SCAN_TIMEOUT_MS, single-RPC is uncapped (#894)', () => {
     expect(resolveCapMs('wideLogScan', 2)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
     expect(resolveCapMs('wideLogScan', 1)).toBeUndefined();
+    expect(resolveCapMs('wideLogScan', 1, true)).toBe(RPC_LOG_SCAN_TIMEOUT_MS);
   });
 
   it('failOpenFundingRead: caps EVERY attempt incl. single-RPC at RPC_READ_STALL_TIMEOUT_MS', () => {
@@ -133,6 +135,20 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     await vi.advanceTimersByTimeAsync(6_500);
     expect(await p).toBe('ONLY');
     expect(slowView.calls).toHaveLength(1);
+  });
+
+  it('read SINGLE-RPC pointRead can opt into the per-policy cap for background watchers', async () => {
+    vi.useFakeTimers();
+    const slow = recorder(() => new Promise<string>((r) => { setTimeout(() => r('ONLY'), 5_000); }));
+    const client = makeClient([{ read: slow }], ['https://only.example']);
+
+    const settled = client.read('watcher point read', (pr: any) => pr.read(), { capSingleProvider: true })
+      .then((r: unknown) => r, (e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS + 1_500);
+
+    const outcome: any = await settled;
+    expect(outcome.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
+    expect(slow.calls).toHaveLength(1);
   });
 
   it('readContract MULTI-RPC wideLogScan: a 5s read COMPLETES (the 30s cap, not the 4s point cap)', async () => {

@@ -1,7 +1,5 @@
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type { ReadOpts } from './rpc-failover-client.js';
-import { withTimeout } from './evm-adapter-rpc.js';
-import { RPC_LOG_SCAN_TIMEOUT_MS, RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 export type HubRotationReadProvider = <T>(
   label: string,
@@ -95,14 +93,14 @@ export class HubRotationPoller {
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
     const previousLastScannedBlock = this.lastScannedBlock;
-    const head = await this.readWithTimeout(
+    const head = await this.readProvider(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      RPC_READ_STALL_TIMEOUT_MS,
+      { capSingleProvider: true },
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
-    const logs = await this.readWithTimeout<ethers.Log[]>(
+    const logs = await this.readProvider<ethers.Log[]>(
       'Hub rotation poll getLogs',
       (provider) => provider.getLogs({
         address: binding.hubAddress,
@@ -110,8 +108,7 @@ export class HubRotationPoller {
         toBlock: head,
         topics: [binding.topics],
       }),
-      RPC_LOG_SCAN_TIMEOUT_MS,
-      { policy: 'wideLogScan' },
+      { policy: 'wideLogScan', capSingleProvider: true },
     );
     if (!this.started || generation !== this.generation) return;
 
@@ -120,15 +117,6 @@ export class HubRotationPoller {
       ? head
       : Math.max(previousLastScannedBlock, head);
     this.pruneSeenLogs(head);
-  }
-
-  private readWithTimeout<T>(
-    label: string,
-    fn: (provider: JsonRpcProvider) => Promise<T>,
-    timeoutMs: number,
-    opts?: ReadOpts,
-  ): Promise<T> {
-    return withTimeout(this.readProvider(label, fn, opts), timeoutMs, label);
   }
 
   private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {
