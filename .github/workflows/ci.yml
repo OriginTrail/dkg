@@ -157,9 +157,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Test repository scripts
-        run: pnpm run test:scripts
-
       - name: Validate npm metadata points to v10
         run: pnpm check:npm-metadata
 
@@ -210,6 +207,9 @@ jobs:
           # the code has already cleared branch-protection review.
           TURBO_TOKEN: ${{ github.event_name == 'push' && secrets.TURBO_TOKEN || '' }}
           TURBO_TEAM: ${{ github.event_name == 'push' && secrets.TURBO_TEAM || '' }}
+
+      - name: Test repository scripts
+        run: pnpm run test:scripts
 
       - name: Package build outputs
         run: |
