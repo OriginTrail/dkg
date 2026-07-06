@@ -92,8 +92,8 @@ describe('resolvePcaOwnerAccess — core classification', () => {
 });
 
 describe('resolvePcaOwnerAccess — the two distinct unknown causes', () => {
-  it('wallets-unreadable: walletsUnknown wins even with an owner present', () => {
-    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT, walletsUnknown: true });
+  it("wallets-unreadable: primaryWalletState 'unreadable' wins even with an owner present", () => {
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT, primaryWalletState: 'unreadable' });
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('wallets-unreadable');
     expect(access.writesEnabled).toBe(false);
@@ -112,10 +112,104 @@ describe('resolvePcaOwnerAccess — the two distinct unknown causes', () => {
     expect(access.ownerUnknownCause).toBe('no-snapshot');
   });
 
-  it('walletsUnknown takes precedence over a missing owner (documented ordering)', () => {
-    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, walletsUnknown: true });
+  it("primaryWalletState 'unreadable' takes precedence over a missing owner (documented ordering)", () => {
+    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'unreadable' });
     expect(access.mode).toBe('unknown');
     expect(access.ownerUnknownCause).toBe('wallets-unreadable');
+  });
+});
+
+describe('resolvePcaOwnerAccess — primaryWalletState load model (#1470)', () => {
+  it("'loading' → unknown + cause 'wallets-loading' + writesEnabled false", () => {
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT, primaryWalletState: 'loading' });
+    expect(access.mode).toBe('unknown');
+    expect(access.ownerUnknownCause).toBe('wallets-loading');
+    expect(access.writesEnabled).toBe(false);
+  });
+
+  it("'unreadable' → unknown + cause 'wallets-unreadable'", () => {
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT, primaryWalletState: 'unreadable' });
+    expect(access.mode).toBe('unknown');
+    expect(access.ownerUnknownCause).toBe('wallets-unreadable');
+    expect(access.writesEnabled).toBe(false);
+  });
+
+  it("'ready' with a valid owner/primary → classifies normally (daemon), no unknown cause", () => {
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT, primaryWalletState: 'ready' });
+    expect(access.mode).toBe('daemon');
+    expect(access.ownerUnknownCause).toBeUndefined();
+    expect(access.writesEnabled).toBe(true);
+  });
+
+  it("omitted primaryWalletState behaves as 'ready' (classifies normally)", () => {
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
+    expect(access.mode).toBe('wallet');
+    expect(access.ownerUnknownCause).toBeUndefined();
+  });
+});
+
+describe('resolvePcaOwnerAccess — mayPromptWallet truth table (#1469 + R4)', () => {
+  it('(i) loaded wallet-owned, right network ⇒ mayPromptWallet true', () => {
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
+    expect(access.mode).toBe('wallet');
+    expect(access.writesEnabled).toBe(true);
+    expect(access.mayPromptWallet).toBe(true);
+  });
+
+  it('(ii) loaded wallet-owned, WRONG network ⇒ mayPromptWallet false (mode wallet, writesEnabled false)', () => {
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW, walletWrongNetwork: true });
+    expect(access.mode).toBe('wallet');
+    expect(access.writesEnabled).toBe(false);
+    expect(access.mayPromptWallet).toBe(false);
+  });
+
+  it('(iii) daemon-owned (owner==primary, owner!=connected) ⇒ mayPromptWallet false', () => {
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HW });
+    expect(access.mode).toBe('daemon');
+    expect(access.mayPromptWallet).toBe(false);
+  });
+
+  it('(iv) #1469: primaryWalletState loading, owner undefined, connectedWallet set ⇒ mayPromptWallet true', () => {
+    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
+    expect(access.mode).toBe('unknown');
+    expect(access.ownerUnknownCause).toBe('wallets-loading');
+    expect(access.mayPromptWallet).toBe(true);
+  });
+
+  it('(v) R4: mode unknown (loading), owner == connectedWallet ⇒ mayPromptWallet true', () => {
+    const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
+    expect(access.mode).toBe('unknown');
+    expect(access.mayPromptWallet).toBe(true);
+  });
+
+  it('(vi) unknown (loading) + NO connected wallet ⇒ mayPromptWallet false', () => {
+    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: null, primaryWalletState: 'loading' });
+    expect(access.mode).toBe('unknown');
+    expect(access.mayPromptWallet).toBe(false);
+  });
+
+  it('(vii) unknown (loading) + owner present but != connectedWallet ⇒ mayPromptWallet false', () => {
+    const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'loading' });
+    expect(access.mode).toBe('unknown');
+    expect(access.mayPromptWallet).toBe(false);
+  });
+
+  it("(viii) #1469 wallets-loaded-before-snapshot: owner undefined, primaryWalletState 'ready', connectedWallet set ⇒ no-snapshot + mayPromptWallet true", () => {
+    // Distinct code path from (iv): wallets are READY but the PCA snapshot (owner) isn't loaded
+    // yet, so classification falls through to the `!owner` → no-snapshot branch. The lock must
+    // still arm for the connected wallet (the resolving submitter confirms the owner call-time).
+    const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HW, primaryWalletState: 'ready' });
+    expect(access.mode).toBe('unknown');
+    expect(access.ownerUnknownCause).toBe('no-snapshot');
+    expect(access.mayPromptWallet).toBe(true);
+  });
+
+  it('(ix) loaded EXTERNAL-owned (a wallet is connected but is not the owner) ⇒ mayPromptWallet false', () => {
+    // Locks the `external` branch against a future fall-through: an external owner can never open a
+    // wallet prompt (the connected wallet isn't the owner), so the lock must stay disarmed.
+    const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW });
+    expect(access.mode).toBe('external');
+    expect(access.mayPromptWallet).toBe(false);
   });
 });
 

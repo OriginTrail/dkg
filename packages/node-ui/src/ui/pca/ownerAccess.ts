@@ -33,9 +33,11 @@ export type PcaOwnerMode = 'daemon' | 'wallet' | 'external' | 'unknown';
  * Why the owner couldn't be classified. Kept distinct because the consumers word them
  * differently: `no-snapshot` = the PCA snapshot (owner) isn't loaded (ConvictionOverview's
  * `!owner`); `wallets-unreadable` = the node's own wallet list failed to read, so ownership
- * can't be confirmed (ConvictionDetailView's `walletsUnknown`).
+ * can't be confirmed; `wallets-loading` = the node's wallet list is still loading (the load
+ * window), split out of `wallets-unreadable` so a daemon PCA shows loading (not read-only)
+ * while the balances fetch is in flight.
  */
-export type PcaOwnerUnknownCause = 'no-snapshot' | 'wallets-unreadable';
+export type PcaOwnerUnknownCause = 'no-snapshot' | 'wallets-unreadable' | 'wallets-loading';
 
 export interface PcaOwnerAccessInput {
   /** The on-chain PCA owner. Absent/empty ⇒ `unknown` (`no-snapshot`). */
@@ -46,8 +48,13 @@ export interface PcaOwnerAccessInput {
   connectedWallet?: string | null;
   /** The connected wallet is on a chain other than the node's PCA network (raw fact). */
   walletWrongNetwork?: boolean;
-  /** This node's wallet list failed to read ⇒ `unknown` (`wallets-unreadable`). */
-  walletsUnknown?: boolean;
+  /**
+   * The load state of this node's wallet list (`wallets[0]` = the daemon signer). `'loading'`
+   * ⇒ `unknown` (`wallets-loading`); `'unreadable'` ⇒ `unknown` (`wallets-unreadable`); `'ready'`
+   * (the default when omitted) ⇒ classify the owner normally. Split out of the former
+   * `walletsUnknown` boolean so a daemon PCA shows loading (not read-only) during the fetch.
+   */
+  primaryWalletState?: 'loading' | 'unreadable' | 'ready';
 }
 
 /**
@@ -65,6 +72,15 @@ export interface PcaOwnerAccess {
   writesEnabled: boolean;
   /** Present only when `mode === 'unknown'`; names which read is missing. */
   ownerUnknownCause?: PcaOwnerUnknownCause;
+  /**
+   * The target-write signing plan: could an owner write open a browser-wallet signature? True
+   * when the owner is a loaded wallet on the right network, OR — during a load window (`mode`
+   * still `unknown`) — a wallet is connected and the owner is either not-yet-known (#1469) or
+   * equals the connected wallet (subsumes R4). Safe-direction over-arm; the resolving submitter
+   * refuses read-only / daemon-confirms once the re-fetched owner is known. See
+   * `computeMayPromptWallet`.
+   */
+  mayPromptWallet: boolean;
 }
 
 /**
@@ -78,6 +94,28 @@ export function ownerModeWritesEnabled(mode: PcaOwnerMode, wrongNetwork: boolean
 }
 
 /**
+ * The target-write signing plan — could an owner write open a browser-wallet signature? The
+ * single source `ApproveWalletsModal.targetWalletManaged` reads.
+ *  - Clause 1: a loaded wallet-owned PCA on the right network (`mode === 'wallet' && writesEnabled`).
+ *  - Clause 2: a load window (`mode === 'unknown'` — loading / unreadable / no-snapshot) with a
+ *    connected wallet, when the owner is not-yet-known (`!owner` ⇒ closes #1469) or equals the
+ *    connected wallet (subsumes the R4 fix).
+ * Safe-direction over-arm: NOT gated on wrong-network (render→click network flips are re-checked
+ * call-time by the wallet submitter, inv-16), and the resolving submitter refuses read-only /
+ * daemon-confirms instantly once the re-fetched owner turns out not to be the connected wallet.
+ */
+function computeMayPromptWallet(
+  mode: PcaOwnerMode,
+  owner: string | null | undefined,
+  connectedWallet: string | null | undefined,
+  writesEnabled: boolean,
+): boolean {
+  if (mode === 'wallet' && writesEnabled) return true;
+  if (mode === 'unknown') return !!connectedWallet && (!owner || eqAddress(owner, connectedWallet));
+  return false;
+}
+
+/**
  * The one pure owner-access classifier. Sync, side-effect-free, and the single encoding of
  * inv-17 + the wrong-network gate. Both faces of the model (the sync display hook below and
  * the async re-fetching submitter resolver) reduce to this.
@@ -88,17 +126,39 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
     primaryWallet,
     connectedWallet,
     walletWrongNetwork = false,
-    walletsUnknown = false,
+    primaryWalletState = 'ready',
   } = input;
 
-  // Unknown carve-outs (OUTSIDE inv-17 precedence), causes kept distinct. `walletsUnknown`
-  // is checked FIRST to mirror the detail view, which gates on "couldn't read this node's
-  // wallets" before it ever classifies the owner.
-  if (walletsUnknown) {
-    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'wallets-unreadable' };
+  // Unknown carve-outs (OUTSIDE inv-17 precedence), causes kept distinct. The wallet-list load
+  // state is checked FIRST to mirror the detail view, which gates on "couldn't read / still
+  // reading this node's wallets" before it ever classifies the owner. `'loading'` is split from
+  // `'unreadable'` so a daemon PCA shows loading (not read-only) while the balances fetch runs.
+  if (primaryWalletState === 'loading') {
+    return {
+      mode: 'unknown',
+      wrongNetwork: walletWrongNetwork,
+      writesEnabled: false,
+      ownerUnknownCause: 'wallets-loading',
+      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
+    };
+  }
+  if (primaryWalletState === 'unreadable') {
+    return {
+      mode: 'unknown',
+      wrongNetwork: walletWrongNetwork,
+      writesEnabled: false,
+      ownerUnknownCause: 'wallets-unreadable',
+      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
+    };
   }
   if (!owner) {
-    return { mode: 'unknown', wrongNetwork: walletWrongNetwork, writesEnabled: false, ownerUnknownCause: 'no-snapshot' };
+    return {
+      mode: 'unknown',
+      wrongNetwork: walletWrongNetwork,
+      writesEnabled: false,
+      ownerUnknownCause: 'no-snapshot',
+      mayPromptWallet: computeMayPromptWallet('unknown', owner, connectedWallet, false),
+    };
   }
 
   // inv-17 precedence — byte-for-byte from detailOwnerMode / the async classifier
@@ -115,8 +175,9 @@ export function resolvePcaOwnerAccess(input: PcaOwnerAccessInput): PcaOwnerAcces
 
   const wrongNetwork = walletWrongNetwork;
   const writesEnabled = ownerModeWritesEnabled(mode, wrongNetwork);
+  const mayPromptWallet = computeMayPromptWallet(mode, owner, connectedWallet, writesEnabled);
 
-  return { mode, wrongNetwork, writesEnabled };
+  return { mode, wrongNetwork, writesEnabled, mayPromptWallet };
 }
 
 // The sync display hook `usePcaOwnerAccess` lives in `./usePcaOwnerAccess.ts` so THIS module

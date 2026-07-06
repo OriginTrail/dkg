@@ -213,6 +213,41 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     await unmount();
   });
 
+  // #1470 loading-window flash fix — while the wallet balances LOAD, a daemon-owned PCA must show a
+  // neutral "Confirming ownership…" affordance (unknown/loading): NOT a read-only/external
+  // "Owner-only" flash, and NOT a false "Couldn't load"/Retry (they haven't failed, they're
+  // loading). Owner controls stay gated for the brief window, then enable once balances resolve.
+  // RED without the split: old `walletsUnknown = !wb && !!wbError` was FALSE during loading, so a
+  // wallets[0]-undefined daemon PCA misclassified as external → "Owner-only" + read-only.
+  it('loading-window: a daemon-owned PCA reads "Confirming ownership…" (no error/Retry, not Owner-only) while balances load, then enables once ready', async () => {
+    // Snapshot resolves daemon-owned (owner == W0). Balances stay PENDING → wallet list loading.
+    let resolveBalances!: (value: unknown) => void;
+    mocks.fetchWalletsBalances.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveBalances = resolve; }),
+    );
+    const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));
+    // During the balances load: neutral loading affordance, NOT a false error and NOT a definitive
+    // non-owner; writes gated. (Renew needs no amount input, so its disabled state is a clean gate.)
+    await waitForText(container, 'Confirming ownership');
+    expect(container.textContent).not.toContain('Owner-only');
+    expect(container.textContent).not.toContain("Couldn't load this node's wallets"); // no false failure copy
+    expect(container.textContent).not.toContain("can't confirm ownership");
+    expect(container.textContent).not.toContain('isn’t the owner');
+    expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent === 'Retry')).toBe(false); // no Retry while loading
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(true);
+    // Balances resolve as this node's wallet (== owner W0) → daemon-owned → owner controls enable.
+    await act(async () => {
+      resolveBalances({ wallets: [W0], balances: [{ address: W0, eth: '1', trac: '5', symbol: 'TRAC' }], chainId: '84532', rpcUrl: null });
+    });
+    const started = Date.now();
+    while (Date.now() - started < 1500 && btn(container, '[data-testid="pca-renew-btn"]')?.disabled) {
+      await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    }
+    expect(btn(container, '[data-testid="pca-renew-btn"]').disabled).toBe(false);
+    expect(container.textContent).not.toContain('Confirming ownership');
+    await unmount();
+  });
+
   it('deregister uses a consequence-naming two-step confirm', async () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [W0], balances: [], chainId: '84532', rpcUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionDetailView, { accountId: '7' }));

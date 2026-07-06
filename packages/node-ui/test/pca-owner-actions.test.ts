@@ -51,8 +51,9 @@ const {
   daemonOwnerActionSubmitter,
   resolveOwnerActionSubmitterKind,
   submitterKindForOwnerMode,
-  useResolvingOwnerActionSubmitter,
-  useResolvedOwnerActionSubmitter,
+  useOwnerActionSubmitterForAccount,
+  useOwnerActionSubmitter,
+  resolveSignerKindForAccount,
 } = await import('../src/ui/pca/ownerActions.js');
 const { useWalletStore } = await import('../src/ui/stores/wallet.js');
 const { resolvePcaOwnerAccess } = await import('../src/ui/pca/ownerAccess.js');
@@ -142,31 +143,31 @@ describe('owner submitter resolver', () => {
     mocks.createPca.mockResolvedValue({ accountId: '1' });
     mocks.walletSubmitter.create.mockResolvedValue({ accountId: '2' });
 
-    await expect(useResolvingOwnerActionSubmitter().create({ tokens: '0.5', primaryNode: '41' }))
+    await expect(useOwnerActionSubmitterForAccount().create({ tokens: '0.5', primaryNode: '41' }))
       .resolves.toEqual({ accountId: '1' });
     expect(mocks.createPca).toHaveBeenCalledWith({ tokens: '0.5', primaryNode: '41' });
 
-    await expect(useResolvingOwnerActionSubmitter({ ownerKey: 'hot' }).create({ tokens: '1', primaryNode: '42' }))
+    await expect(useOwnerActionSubmitterForAccount({ ownerKey: 'hot' }).create({ tokens: '1', primaryNode: '42' }))
       .resolves.toEqual({ accountId: '1' });
     expect(mocks.createPca).toHaveBeenCalledWith({ tokens: '1', primaryNode: '42' });
 
     setConnected(HW);
-    await expect(useResolvingOwnerActionSubmitter({ ownerKey: 'hardware' }).create({ tokens: '2', primaryNode: '43' }))
+    await expect(useOwnerActionSubmitterForAccount({ ownerKey: 'hardware' }).create({ tokens: '2', primaryNode: '43' }))
       .resolves.toEqual({ accountId: '2' });
     expect(mocks.walletOwnerActionSubmitter).toHaveBeenCalled();
     expect(mocks.walletSubmitter.create).toHaveBeenCalledWith({ tokens: '2', primaryNode: '43' });
   });
 
   it('create ownerKey hardware fails unavailable without provider or expected chain before wallet signing', async () => {
-    await expect(useResolvingOwnerActionSubmitter({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
+    await expect(useOwnerActionSubmitterForAccount({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     setConnected(HW, { chainId: 1, expectedChainId: 84532 });
-    await expect(useResolvingOwnerActionSubmitter({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
+    await expect(useOwnerActionSubmitterForAccount({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     setConnected(HW, { bootstrap: null });
-    await expect(useResolvingOwnerActionSubmitter({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
+    await expect(useOwnerActionSubmitterForAccount({ ownerKey: 'hardware' }).create({ tokens: '1', primaryNode: '42' }))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     expect(mocks.walletOwnerActionSubmitter).not.toHaveBeenCalled();
@@ -179,7 +180,7 @@ describe('owner submitter resolver', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
     mocks.pcaAddAgent.mockResolvedValue({ registered: true });
 
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).registerAgent('7', AGENT))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).registerAgent('7', AGENT))
       .resolves.toEqual({ registered: true });
 
     expect(mocks.fetchPca).toHaveBeenCalledWith('7');
@@ -193,7 +194,7 @@ describe('owner submitter resolver', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
     mocks.walletSubmitter.topUp.mockResolvedValue({ addedTokens: '10' });
 
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).topUp('7', '10'))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).topUp('7', '10'))
       .resolves.toEqual({ addedTokens: '10' });
 
     expect(mocks.pcaTopUp).not.toHaveBeenCalled();
@@ -205,7 +206,7 @@ describe('owner submitter resolver', () => {
     mocks.fetchPca.mockResolvedValue({ owner: EXTERNAL });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
 
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).deregisterAgent('7', AGENT))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).deregisterAgent('7', AGENT))
       .rejects.toBeInstanceOf(ReadOnlyOwnerActionError);
 
     expect(mocks.pcaRemoveAgent).not.toHaveBeenCalled();
@@ -216,7 +217,7 @@ describe('owner submitter resolver', () => {
     setConnected(HW);
     mocks.fetchPca.mockRejectedValue(new Error('read failed'));
 
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).topUp('7', '10'))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).topUp('7', '10'))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     expect(mocks.pcaTopUp).not.toHaveBeenCalled();
@@ -228,11 +229,11 @@ describe('owner submitter resolver', () => {
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
 
     setConnected(HW, { chainId: 1, expectedChainId: 84532 });
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).registerAgent('7', AGENT))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).registerAgent('7', AGENT))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     setConnected(HW, { provider: null });
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).registerAgent('7', AGENT))
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).registerAgent('7', AGENT))
       .rejects.toBeInstanceOf(OwnerActionUnavailableError);
 
     expect(mocks.walletSubmitter.registerAgent).not.toHaveBeenCalled();
@@ -242,7 +243,7 @@ describe('owner submitter resolver', () => {
     setConnected(HW);
     mocks.pcaSettle.mockResolvedValue({ settled: true });
 
-    await expect(useResolvingOwnerActionSubmitter({ accountId: '7' }).settle('7')).resolves.toEqual({ settled: true });
+    await expect(useOwnerActionSubmitterForAccount({ accountId: '7' }).settle('7')).resolves.toEqual({ settled: true });
 
     expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
     expect(mocks.walletSubmitter.settle).not.toHaveBeenCalled();
@@ -262,16 +263,72 @@ describe('submitterKindForOwnerMode', () => {
   });
 });
 
+// #1470 — the folded cross-account signer-kind planner. Pins byte-fidelity to the old inline
+// `ApproveWalletsModal.signerKindForAccount` + the gate-caught correlation contract: the daemon
+// branch uses the CALLER-PASSED primaryWallet (already-loaded wallets[0]), and the wallet branch
+// depends ONLY on the connected wallet — NEITHER re-fetches the wallet list, so a wallet-list blip
+// can't disarm the R4 lock via a planning/execution desync.
+describe('resolveSignerKindForAccount (folded signerKindForAccount)', () => {
+  it('daemon: owner == passed primaryWallet ⇒ daemon (no fetchWalletsBalances)', async () => {
+    mocks.fetchPca.mockResolvedValue({ owner: HOT });
+    setConnected(HW);
+    expect(await resolveSignerKindForAccount('4', HOT)).toBe('daemon');
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+  });
+
+  it('wallet: owner == connected wallet on the right network ⇒ wallet', async () => {
+    mocks.fetchPca.mockResolvedValue({ owner: HW });
+    setConnected(HW);
+    expect(await resolveSignerKindForAccount('4', HOT)).toBe('wallet');
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+  });
+
+  // THE REGRESSION PIN (gate): the wallet branch keys ONLY on the connected wallet — it must NOT
+  // depend on this node's wallet list. So a wallet-owned old account still classifies 'wallet' even
+  // when the node's primary wallet is unknown (undefined), matching the old inline predicate. A
+  // fresh internal fetchWalletsBalances (removed) would have returned undefined here on a blip and
+  // silently disarmed the renew device prompt / R4 lock.
+  it('wallet branch does NOT depend on the node wallet list: primaryWallet undefined ⇒ still wallet', async () => {
+    mocks.fetchPca.mockResolvedValue({ owner: HW });
+    setConnected(HW);
+    expect(await resolveSignerKindForAccount('4', undefined)).toBe('wallet');
+    expect(mocks.fetchWalletsBalances).not.toHaveBeenCalled();
+  });
+
+  it('wrong network wallet owner ⇒ undefined (not counted as a device prompt)', async () => {
+    mocks.fetchPca.mockResolvedValue({ owner: HW });
+    setConnected(HW, { chainId: 1, expectedChainId: 84532 });
+    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+  });
+
+  it('external owner ⇒ undefined', async () => {
+    mocks.fetchPca.mockResolvedValue({ owner: EXTERNAL });
+    setConnected(HW);
+    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+  });
+
+  it('fetchPca read failure ⇒ undefined (correlated with the execution path)', async () => {
+    mocks.fetchPca.mockRejectedValue(new Error('read failed'));
+    setConnected(HW);
+    expect(await resolveSignerKindForAccount('4', HOT)).toBeUndefined();
+  });
+
+  it('no accountId ⇒ undefined (no fetch)', async () => {
+    expect(await resolveSignerKindForAccount(undefined, HOT)).toBeUndefined();
+    expect(mocks.fetchPca).not.toHaveBeenCalled();
+  });
+});
+
 // Item 3 (#1375) — when the caller passes the display-resolved `access`, the submitter is
 // selected ONCE up-front and the manage writes submit DIRECTLY, with no per-write owner/wallet
 // re-fetch. (The absent-access path above is unchanged; the wallet submitter's per-prompt
 // liveness guards still run on every write — covered by pca-wallet-owner-actions.)
-describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', () => {
+describe('useOwnerActionSubmitter access-path (resolve signer once)', () => {
   it('daemon access submits via the daemon EOA WITHOUT re-fetching owner/wallets', async () => {
     mocks.pcaAddAgent.mockResolvedValue({ registered: true });
     const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: HOT, connectedWallet: HOT });
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).registerAgent('7', AGENT))
+    await expect(useOwnerActionSubmitter({ access }).registerAgent('7', AGENT))
       .resolves.toEqual({ registered: true });
 
     expect(mocks.pcaAddAgent).toHaveBeenCalledWith('7', AGENT);
@@ -288,7 +345,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('wallet');
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).topUp('7', '5'))
+    await expect(useOwnerActionSubmitter({ access }).topUp('7', '5'))
       .resolves.toEqual({ addedTokens: '5' });
 
     // T1: it does NOT pin from the render-time access — it re-fetches the PCA owner first...
@@ -305,7 +362,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
     expect(access.mode).toBe('wallet'); // the stale render-time classification
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).topUp('7', '5'))
+    await expect(useOwnerActionSubmitter({ access }).topUp('7', '5'))
       .rejects.toBeInstanceOf(ReadOnlyOwnerActionError);
 
     // The re-fetch caught the stale owner and returned read-only FIRST — the wallet approve/write
@@ -318,7 +375,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
   it('read-only access throws ReadOnlyOwnerActionError WITHOUT re-fetching or signing', async () => {
     const access = resolvePcaOwnerAccess({ owner: EXTERNAL, primaryWallet: HOT, connectedWallet: HW });
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).deregisterAgent('7', AGENT))
+    await expect(useOwnerActionSubmitter({ access }).deregisterAgent('7', AGENT))
       .rejects.toBeInstanceOf(ReadOnlyOwnerActionError);
 
     expect(mocks.fetchPca).not.toHaveBeenCalled();
@@ -331,7 +388,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     mocks.pcaSettle.mockResolvedValue({ settled: true });
     const access = resolvePcaOwnerAccess({ owner: HW, primaryWallet: HOT, connectedWallet: HW });
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).settle('7')).resolves.toEqual({ settled: true });
+    await expect(useOwnerActionSubmitter({ access }).settle('7')).resolves.toEqual({ settled: true });
 
     expect(mocks.pcaSettle).toHaveBeenCalledWith('7');
     expect(mocks.walletSubmitter.settle).not.toHaveBeenCalled();
@@ -347,7 +404,7 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     const access = resolvePcaOwnerAccess({ owner: undefined, primaryWallet: HOT, connectedWallet: HOT });
     expect(access.mode).toBe('unknown');
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).registerAgent('7', AGENT))
+    await expect(useOwnerActionSubmitter({ access }).registerAgent('7', AGENT))
       .resolves.toEqual({ registered: true });
 
     // Fell back to the resolving path: RE-FETCHED the owner and resolved daemon → registered.
@@ -355,18 +412,18 @@ describe('useResolvedOwnerActionSubmitter access-path (resolve signer once)', ()
     expect(mocks.pcaAddAgent).toHaveBeenCalledWith('7', AGENT);
   });
 
-  it('T5: daemon-owned target whose wallets are STILL LOADING (walletsUnknown) is NOT pinned read-only', async () => {
+  it("T5: daemon-owned target whose wallets are STILL LOADING (primaryWalletState 'loading') is NOT pinned read-only", async () => {
     // The approve modal builds access before fetchWalletsBalances resolves — owner known,
-    // primaryWallet undefined. WITHOUT walletsUnknown that would misclassify a daemon-owned PCA
-    // as external → pin read-only → fail a valid owner approval. With walletsUnknown it is
-    // 'unknown', so the write re-fetches wallets and routes daemon; approval succeeds.
+    // primaryWallet undefined. WITHOUT the loading state that would misclassify a daemon-owned PCA
+    // as external → pin read-only → fail a valid owner approval. With primaryWalletState 'loading'
+    // it is 'unknown', so the write re-fetches wallets and routes daemon; approval succeeds.
     mocks.fetchPca.mockResolvedValue({ owner: HOT });
     mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [HOT] });
     mocks.pcaAddAgent.mockResolvedValue({ registered: true });
-    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: undefined, connectedWallet: HW, walletsUnknown: true });
+    const access = resolvePcaOwnerAccess({ owner: HOT, primaryWallet: undefined, connectedWallet: HW, primaryWalletState: 'loading' });
     expect(access.mode).toBe('unknown'); // NOT 'external' — the fix
 
-    await expect(useResolvedOwnerActionSubmitter({ access }).registerAgent('8', AGENT))
+    await expect(useOwnerActionSubmitter({ access }).registerAgent('8', AGENT))
       .resolves.toEqual({ registered: true });
 
     expect(mocks.pcaAddAgent).toHaveBeenCalledWith('8', AGENT); // daemon, via the re-fetch

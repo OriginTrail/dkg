@@ -11,7 +11,7 @@ import { resolvePcaOwnerAccess, type PcaOwnerAccess } from './ownerAccess.js';
 export function usePcaOwnerAccess(input: {
   owner?: string | null;
   primaryWallet?: string | null;
-  walletsUnknown?: boolean;
+  primaryWalletState?: 'loading' | 'unreadable' | 'ready';
 }): PcaOwnerAccess {
   const connectedWallet = useWalletStore((s) => s.address);
   const walletWrongNetwork = useWalletStore((s) => isWrongNetwork(s));
@@ -20,6 +20,6 @@ export function usePcaOwnerAccess(input: {
     primaryWallet: input.primaryWallet,
     connectedWallet,
     walletWrongNetwork,
-    walletsUnknown: input.walletsUnknown,
+    primaryWalletState: input.primaryWalletState,
   });
 }
