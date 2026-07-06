@@ -12,7 +12,7 @@
  * Both are loaded at build time via Vite's import.meta.glob so the
  * UI bundle has them inline; no runtime fetch needed.
  */
-import { buildProjectOntologyTriples } from '../../../../../scripts/lib/ontology.mjs';
+import { buildProjectOntologyTriples } from '@origintrail-official/dkg-core';
 import { authHeaders } from '../api.js';
 
 // Local POST helper. The api.ts module's `post` is private; re-using

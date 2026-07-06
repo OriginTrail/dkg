@@ -43,6 +43,9 @@ importers:
       '@origintrail-official/dkg':
         specifier: workspace:*
         version: link:packages/cli
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:packages/core
       '@types/node':
         specifier: ^22
         version: 22.19.11

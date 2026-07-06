@@ -28,8 +28,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { buildProjectOntologyTriples } from '@origintrail-official/dkg-core';
 import { makeClient, parseArgs, resolveToken } from './lib/dkg-daemon.mjs';
-import { buildProjectOntologyTriples } from './lib/ontology.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
