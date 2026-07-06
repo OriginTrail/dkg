@@ -19,11 +19,12 @@ export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): 
     const v2Advertised = input.knownCorePeerIdsV2
       ? connected.filter((id) => input.knownCorePeerIdsV2!.has(id))
       : [];
-    if (v2Advertised.length >= input.requiredACKs) return v2Advertised;
     const v2Set = new Set(v2Advertised);
     const remainingConfirmedCore = confirmedCore.filter((id) => !v2Set.has(id));
     const seen = new Set([...v2Advertised, ...remainingConfirmedCore]);
     const rest = connected.filter((id) => !seen.has(id));
+    // Identify metadata can be stale. Prefer advertised V2 peers, but keep
+    // fallback candidates so wire negotiation, not cached metadata, is the gate.
     return [...v2Advertised, ...remainingConfirmedCore, ...rest];
   }
 

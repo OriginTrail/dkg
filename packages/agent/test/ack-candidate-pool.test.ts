@@ -130,7 +130,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     ]);
   });
 
-  it('V2 folded-private ACKs return only V2-advertised peers once they satisfy quorum', async () => {
+  it('V2 folded-private ACKs keep fallback candidates even when cached V2 metadata appears quorum-sized', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: [...CORE, ...EDGE],
@@ -139,7 +139,26 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     a.knownCorePeerIdsV2.add(CORE[0]);
     a.knownCorePeerIdsV2.add(CORE[2]);
 
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([CORE[0], CORE[2]]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[2],
+      CORE[1],
+      CORE[3],
+      ...EDGE,
+    ]);
+  });
+
+  it('V2 folded-private ACKs do not let stale identify metadata hide a connected upgraded core', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: CORE,
+      lastKnownRequiredACKs: 3,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+    a.knownCorePeerIdsV2.add(CORE[1]);
+    a.knownCorePeerIdsV2.add(CORE[2]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
   });
 
   it('peer:update evicts stale V2 ACK capability only from populated protocol lists', async () => {
