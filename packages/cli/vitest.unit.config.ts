@@ -53,6 +53,7 @@ export default defineConfig({
           'test/skill-endpoint.test.ts',
           // R6-B — metric COUNT getter TTL memo. Pure logic, no hardhat.
           'test/metrics-queries.test.ts',
+          'test/rpc-usage-log.test.ts',
           // RFC 120 / plan PR 1 + 2 — Blazegraph support. Pure logic
           // (mocked fetch + in-memory config); cheap to keep in the
           // fast unit lane.

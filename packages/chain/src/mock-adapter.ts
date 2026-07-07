@@ -132,7 +132,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
-    return { byMethod: {}, lifetimeTotal: 0 };
+    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
@@ -479,6 +479,12 @@ export class MockChainAdapter implements ChainAdapter {
     _options?: import('./chain-adapter.js').ContextGraphChainScanOptions,
   ): Promise<import('./chain-adapter.js').ContextGraphOnChain[]> {
     return [];
+  }
+
+  async *scanContextGraphRegistryPages(
+    _options: import('./chain-adapter.js').ContextGraphRegistryScanOptions,
+  ): AsyncIterable<import('./chain-adapter.js').ContextGraphRegistryScanPage> {
+    return;
   }
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {

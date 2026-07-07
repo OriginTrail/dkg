@@ -27,6 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -35,6 +36,379 @@ import { connectable } from './connectable.js';
 // failover-log lines are observed against a clean slate (otReviewAgent #1329).
 beforeEach(() => {
   _resetRpcFailoverStatsForTest();
+});
+
+describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
+  const ADDR = '0x00000000000000000000000000000000000000a1';
+  const ADDR2 = '0x00000000000000000000000000000000000000a2';
+  const identityInterface = new Interface([
+    'event IdentityCreated(uint72 indexed identityId, bytes32 indexed operationalKey, bytes32 indexed adminKey)',
+  ]);
+  const profileInterface = new Interface([
+    'event ProfileCreated(uint72 indexed identityId)',
+  ]);
+
+  function identityCreatedLog(identityId: bigint) {
+    const encoded = identityInterface.encodeEventLog(
+      identityInterface.getEvent('IdentityCreated')!,
+      [identityId, ethers.ZeroHash, ethers.ZeroHash],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
+
+  function profileCreatedLog(identityId: bigint) {
+    const encoded = profileInterface.encodeEventLog(
+      profileInterface.getEvent('ProfileCreated')!,
+      [identityId],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
+
+  function makeIdentityLookupAdapter(values: bigint[]) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => ({}));
+    let i = 0;
+    const readContract = recorder(async () => {
+      const value = values[Math.min(i, values.length - 1)];
+      i++;
+      return value;
+    });
+    a.readContract = readContract;
+    return { a, readContract };
+  }
+
+  it('invalid addresses return 0 without an RPC read', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([1n]);
+    await expect(a.getIdentityIdForAddress('not-an-address')).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+
+  it('coalesces concurrent negative lookups but does not cache the negative result', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityIdForAddress(ADDR)),
+    );
+    expect(results.every((value) => value === 0n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('refreshes positive lookups after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('local registration and removal update the bounded positive cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n]);
+
+    a.seedIdentityIdForAddress(ADDR, 7n);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(0);
+
+    a.clearIdentityIdForAddress(ADDR);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('coalesces concurrent self getIdentityId reads through the address cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityId()),
+    );
+
+    expect(results.every((value) => value === 42n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][3]).toBe((a as any).signer.address);
+  });
+
+  it('caches positive self getIdentityId results and refreshes them after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityId()).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caches a zero self getIdentityId result only for the short signer TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares the short signer zero cache between getIdentityId and getIdentityIdForAddress', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares cache entries between getIdentityId and getIdentityIdForAddress for the signer', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('identity id reads populate the canonical IdentityStorage lazy binding', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const identityStorage = { identityStorage: true };
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => identityStorage);
+    a.readContract = recorder(async (_contract: unknown, _label: string, method: string) => (
+      method === 'getIdentityId' ? 42n : true
+    ));
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(identityStorage);
+
+    await expect(a.isOperationalWalletRegistered(42n, ADDR)).resolves.toBe(true);
+    expect(a.resolveContract.calls).toHaveLength(1);
+    expect(a.readContract.calls).toHaveLength(2);
+    expect(a.readContract.calls[0][0]).toBe(identityStorage);
+    expect(a.readContract.calls[1][0]).toBe(identityStorage);
+  });
+
+  it('identity cache misses refresh IdentityStorage so a missed Hub rotation cannot pin stale zero reads', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
+    const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
+    let resolveCount = 0;
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => {
+      resolveCount += 1;
+      return resolveCount === 1 ? oldIdentityStorage : newIdentityStorage;
+    });
+    a.readContract = recorder(async (contract: unknown) => (
+      contract === oldIdentityStorage ? 0n : 42n
+    ));
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(newIdentityStorage);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+  });
+
+  it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    const init = recorder(async () => { (a as any).initialized = true; });
+    (a as any).init = init;
+    (a as any).applyHubRotationEventName('IdentityStorage');
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    expect((a as any).initialized).toBe(false);
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(init.calls).toHaveLength(1);
+    expect((a as any).initialized).toBe(true);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('bulk bound-contract invalidation clears signer identity cache and IdentityStorage binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).invalidateAllBoundContracts();
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile seeds the signer identity cache after IdentityCreated', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 0n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(77n)],
+      hash: '0x' + '12'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(77n);
+    await expect(a.getIdentityId()).resolves.toBe(77n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile freshly rechecks a cached signer zero before creating a profile', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 55n]);
+    a.sendContractTransaction = recorder(async () => {
+      throw new Error('ensureProfile should not create a duplicate profile');
+    });
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(55n);
+    await expect(a.getIdentityId()).resolves.toBe(55n);
+    expect(readContract.calls).toHaveLength(2);
+    expect(a.sendContractTransaction.calls).toHaveLength(0);
+  });
+
+  it('registerIdentity seeds the signer identity cache after IdentityCreated', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const readContract = recorder(async () => 99n);
+    a.init = async () => undefined;
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.readContract = readContract;
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(88n)],
+      hash: '0x' + '34'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(88n);
+    await expect(a.getIdentityId()).resolves.toBe(88n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+
+  it('registerIdentity seeds the signer identity cache after ProfileCreated fallback', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [profileCreatedLog(89n)],
+      hash: '0x' + '56'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(89n);
+    await expect(a.getIdentityId()).resolves.toBe(89n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+});
+
+describe('EVMChainAdapter random sampling identity lookup', () => {
+  it('createChallenge reads back by the emitted identity without pre-reading signer identity', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const challengeIdentityId = 99n;
+    const cachedIdentityId = 42n;
+    const contextGraphId = 3n;
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(
+      rsInterface.getEvent('ChallengeGenerated')!,
+      [challengeIdentityId, contextGraphId, 11n, 2n, 3n, 4n],
+    );
+    const receipt = {
+      hash: '0x' + '11'.repeat(32),
+      blockNumber: 123,
+      index: 4,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n,
+      knowledgeAssetStorageContract: ethers.ZeroAddress,
+      chunkId: 2n,
+      epoch: 3n,
+      activeProofPeriodStartBlock: 4n,
+      proofingPeriodDurationInBlocks: 5n,
+      solved: false,
+      isCurated: false,
+      challengeLeafCount: 1n,
+      challengeRoot: ethers.ZeroHash,
+    };
+    const rss = { __rss: true };
+    const rs = { interface: rsInterface };
+    const readContract = recorder(async () => challengeRaw);
+    const sendContractTransaction = recorder(async () => receipt as any);
+
+    a.init = async () => undefined;
+    a.getIdentityId = recorder(async () => cachedIdentityId);
+    a.getRandomSampling = async () => ({ rs, rss });
+    a.readContract = readContract;
+    a.sendContractTransaction = sendContractTransaction;
+
+    const result = await a.createChallenge();
+
+    expect(a.getIdentityId.calls).toHaveLength(0);
+    expect(sendContractTransaction.calls[0][1]).toBe('createChallenge');
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][0]).toBe(rss);
+    expect(readContract.calls[0][1]).toBe('rss.getNodeChallenge');
+    expect(readContract.calls[0][3]).toBe(challengeIdentityId);
+    expect(result.contextGraphId).toBe(contextGraphId);
+    expect(result.challenge.knowledgeAssetId).toBe(11n);
+  });
 });
 
 
@@ -51,6 +425,10 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+async function flushAsyncWork(turns = 8): Promise<void> {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
@@ -58,6 +436,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     adminPrivateKey: ADMIN_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
+    staticNetwork: false,
     ...overrides,
   };
 }
@@ -1049,30 +1428,228 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
-    // ethers v6 `Contract.on(...)` is async — providers that reject
-    // filter installation (e.g. HTTP-only endpoints, mocked providers)
-    // must NOT bubble as unhandled rejections, and the listener-started
-    // flag must NOT be flipped if subscription failed (so a future
-    // retry remains possible).
-    const a = new EVMChainAdapter(minimalConfig());
-    const fakeHub = {
-      on: async (_event: string, _cb: (...args: unknown[]) => void) => {
-        throw new Error('provider does not support filter subscriptions');
-      },
+  it('startHubRotationListener validates Hub binding with a startup head baseline but without RPC logs', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => {
+        throw new Error('startup should not read logs');
+      }),
     };
-    (a as any).contracts.hub = fakeHub;
-    (a as any).hubRotationListenerStarted = false;
-    let unhandled: unknown = null;
-    const onRejection = (reason: unknown) => { unhandled = reason; };
-    process.on('unhandledRejection', onRejection);
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+
+    expect(provider.getBlockNumber.calls).toEqual([[]]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(true);
+  });
+
+  it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => []),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      await expect((a as any).startHubRotationListener()).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(unhandled).toBeNull();
-      expect((a as any).hubRotationListenerStarted).toBe(false);
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+      ));
     } finally {
-      process.off('unhandledRejection', onRejection);
+      warnSpy.mockRestore();
+    }
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(false);
+  });
+
+  it('startHubRotationListener uses one startup head baseline while backup reads still work', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+      staticNetwork: true,
+    }));
+    const primaryError = new Error('429 too many requests');
+    (primaryError as any).status = 429;
+    const primaryProvider = {
+      send: recorder(async () => { throw primaryError; }),
+      getBlockNumber: recorder(async () => {
+        throw new Error('primary read should fail before blockNumber');
+      }),
+    };
+    const backupProvider = {
+      send: recorder(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        return '0x7a69';
+      }),
+      getBlockNumber: recorder(async () => 123),
+    };
+    a.primaryProvider = primaryProvider;
+    a.provider = primaryProvider;
+    a.providers = [primaryProvider, backupProvider];
+    a.rpcUrls = ['https://primary.example', 'https://backup.example'];
+    a.contracts.hub = {
+      interface: new ethers.Interface([
+        'event NewContract(string contractName, address newContractAddress)',
+        'event ContractChanged(string contractName, address newContractAddress)',
+        'event NewAssetStorage(string contractName, address newContractAddress)',
+        'event AssetStorageChanged(string contractName, address newContractAddress)',
+      ]),
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    await flushAsyncWork();
+    expect(a.hubRotationPoller.isStarted).toBe(true);
+
+    await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
+      .resolves.toBe(123);
+    expect(primaryProvider.getBlockNumber.calls).toEqual([]);
+    expect(backupProvider.getBlockNumber.calls).toHaveLength(2);
+  });
+
+  it('startHubRotationListener wires Hub rotation names into adapter invalidation without subscriptions', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    let head = 1_000;
+    let includeRotationLog = false;
+    const provider = {
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (_filter: any) => includeRotationLog ? [{
+        blockNumber: 1_001,
+        blockHash: '0x' + '30'.repeat(32),
+        transactionHash: '0x' + '31'.repeat(32),
+        index: 0,
+        topics: changed.topics,
+        data: changed.data,
+      }] : []),
+      destroy: recorder(() => undefined),
+    };
+    const on = recorder(async () => {
+      throw new Error('ethers subscription should not be installed');
+    });
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+      on,
+    };
+    a.contracts.contextGraphs = { stale: true };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.initialized = true;
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      includeRotationLog = true;
+      head = 1_001;
+      await vi.advanceTimersByTimeAsync(30_000);
+      a.destroy();
+
+      expect(on.calls).toEqual([]);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
+        address: '0x0000000000000000000000000000000000000001',
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
+        iface.getEvent('ContractChanged')!.topicHash,
+        iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('AssetStorageChanged')!.topicHash,
+        iface.getEvent('NewAssetStorage')!.topicHash,
+      ]);
+      expect(a.contracts.contextGraphs).toEqual({ stale: true });
+      expect(a.cachedKav10Address).toBeUndefined();
+      expect(a.initialized).toBe(false);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy clears the Hub rotation poll interval', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async (_filter: any) => []),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+
+      a.destroy();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.destroy.calls).toHaveLength(1);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
     }
   });
 
@@ -1624,7 +2201,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
     // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
@@ -1671,7 +2248,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
 
   it('refreshes after the 1h TTL expires', async () => {
     vi.useFakeTimers({ now: 0 });
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let returned = 31337n;
     const getNetwork = recorder(async () => ({ chainId: returned }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
@@ -1696,7 +2273,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
     // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
     // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
@@ -1715,7 +2292,7 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('does NOT cache failures (next call retries the underlying read)', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let attempts = 0;
     const getNetwork = recorder(async () => {
       attempts += 1;
@@ -1734,6 +2311,32 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     // Second call should retry — failure was not memoised.
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(getNetwork.calls).toHaveLength(2);
+  });
+
+  it('abandons timed-out static chain-id validations so the next read retries', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig({ staticNetwork: true }));
+    let calls = 0;
+    const provider = {
+      send: vi.fn(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<never>(() => undefined);
+        }
+        return '0x7a69';
+      }),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+
+    const first = a.getEvmChainId();
+    const firstTimeout = expect(first).rejects.toThrow('configured chainId validation timed out');
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS);
+    await firstTimeout;
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -2585,6 +3188,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     const tracByAddr = funding?.trac ?? new Map<string, bigint>();
     (a as any).provider.getBalance = recorder(async (addr: string) =>
       nativeByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x7a69';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
 
     // R1/#1336: readTracBalance now reads via readContractWith (failOpenFundingRead
     // policy) → rebindContract does `token.connect(p).balanceOf(addr)`, so the
@@ -2772,12 +3379,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
-    // `provider.getNetwork()` is called for chainId; stub it so the update path
-    // doesn't hit the placeholder RPC. R1/#1336: getEvmChainId reads via
-    // readProvider over this.providers[0] (=== this.provider), so MUTATE
-    // getNetwork on the shared object — REPLACING this.provider would orphan
-    // this.providers[0] (and the helper's getBalance mock) and the read would
-    // dial the dead RPC instead.
+    // `getEvmChainId()` validates chainId through this.providers[0]
+    // (=== this.provider), so mutate the shared object — replacing
+    // this.provider would orphan this.providers[0] and the read would dial the
+    // dead placeholder RPC instead.
     (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
 
     const updateParams: any = {
@@ -2827,6 +3432,48 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     // Assert the signer ADDRESS, not object identity (#870 "publish signed by
     // walletB, no mid-flight rotation" invariant is preserved).
     expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
+  });
+
+  it('update path: validates live chain id before approval/signing on static-network providers', async () => {
+    const allowanceByOwner = makeAllowanceByOwner();
+    const { a, walletB, sendSpy, signSpy, tokenWithSigner } =
+      makeMultiWalletV10Adapter(allowanceByOwner, undefined, [], { staticNetwork: true });
+
+    const kaId = 42n;
+    (a as any).contracts.knowledgeAssetStorage = connectable({
+      getLatestMerkleRootPublisher: recorder(async () => walletB.address),
+      getMerkleRoots: recorder(async () => []),
+    });
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x14a34';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+
+    const updateParams: any = {
+      kaId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('umr'))),
+      newByteSize: 100,
+      newMerkleLeafCount: 1,
+      newTokenAmount: 0n,
+      authorAddress: walletB.address,
+      authorR: new Uint8Array(32),
+      authorVS: new Uint8Array(32),
+      authorSchemeVersion: 1,
+      ackSignatures: [{
+        identityId: 1n,
+        r: new Uint8Array(32),
+        vs: new Uint8Array(32),
+      }],
+    };
+
+    await expect(
+      a.updateKnowledgeCollectionV10(updateParams),
+    ).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    expect(tokenWithSigner.allowance.calls).toHaveLength(0);
+    expect(sendSpy.calls).toHaveLength(0);
+    expect(signSpy.calls).toHaveLength(0);
   });
 
 // -----------------------------------------------------------------------------

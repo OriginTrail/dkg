@@ -74,11 +74,6 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
 
-    const identityStorage = await this.getIdentityStorage();
-    const identityId: bigint = await this.readContract(
-      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', this.signer.address,
-    );
-
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
 
@@ -108,33 +103,35 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       // off the Challenge struct fetched below, so everything stays
       // consistent if the storage layout shifts.
       let contextGraphId = 0n;
+      let challengeIdentityId: bigint | undefined;
       const rsIface = rs.interface;
       for (const log of receipt.logs) {
         try {
           const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'ChallengeGenerated') {
+            challengeIdentityId = BigInt(parsed.args.identityId ?? parsed.args[0]);
             contextGraphId = BigInt(parsed.args.contextGraphId);
             break;
           }
         } catch { /* not this contract */ }
       }
-      if (contextGraphId === 0n) {
+      if (contextGraphId === 0n || challengeIdentityId == null) {
         // The picker only emits the event when it actually lands on a CG,
         // so a missing event is a bug — fail loud rather than fall back
         // to "lookup by KC" which V10 doesn't support natively.
         throw new Error(
           'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
-          'cannot route proof builder without contextGraphId.',
+          'cannot route proof builder without identityId and contextGraphId.',
         );
       }
 
       const challengeRaw = await this.readContract(
-        rss, 'rss.getNodeChallenge', 'getNodeChallenge', identityId,
+        rss, 'rss.getNodeChallenge', 'getNodeChallenge', challengeIdentityId,
       );
       const challenge = this.toNodeChallenge(challengeRaw);
       if (!challenge) {
         throw new Error(
-          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
+          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${challengeIdentityId}) ` +
           'returned an empty struct. This indicates a state inconsistency between ' +
           'RandomSampling and RandomSamplingStorage.',
         );

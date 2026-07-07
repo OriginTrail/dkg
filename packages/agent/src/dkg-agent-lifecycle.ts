@@ -1440,6 +1440,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
+        cursorPersistence: this.config.chainEventCursorStore,
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber }) => {
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
 

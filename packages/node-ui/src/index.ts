@@ -12,6 +12,10 @@ export {
   buildActivityDigestKey,
   parseActivityDigestKey,
 } from './db.js';
+export {
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+} from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,
   MetricSnapshotRow,

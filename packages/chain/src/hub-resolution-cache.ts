@@ -3,8 +3,8 @@
  * given Hub-registered contract name). Re-resolves lazily when:
  *   - cache is empty (first call),
  *   - TTL expired (when `ttlMs > 0`), OR
- *   - `invalidate()` was called explicitly (e.g. from a Hub
- *     `ContractChanged` / `NewContract` event listener, or after a
+ *   - `invalidate()` was called explicitly (e.g. from the Hub rotation
+ *     poller observing `ContractChanged` / `NewContract`, or after a
  *     write surfaced `UnauthorizedAccess(Only Contracts in Hub)`).
  *
  * This is the structural fix for the post-rotation stale-address bug:

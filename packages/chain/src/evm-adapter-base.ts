@@ -14,8 +14,13 @@
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
-import { DEFAULT_APPROVAL_POLICY } from './chain-adapter.js';
-import type { ApprovalPolicy, V10PublishParams, OnChainPublishResult, ConvictionReader } from './chain-adapter.js';
+import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.js';
+import type {
+  ApprovalPolicy,
+  V10PublishParams,
+  OnChainPublishResult,
+  ConvictionReader,
+} from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -28,19 +33,21 @@ import { RpcFailoverClient, type ReadOpts } from './rpc-failover-client.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
+import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { PcaReadCache } from './pca-read-cache.js';
+import { HubRotationPoller } from './hub-rotation-poller.js';
+import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 /**
- * Maps a Hub-registered contract name to the function that invalidates
- * the corresponding boot-bound field on `EVMChainAdapter.contracts`.
+ * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
  * Used by:
- *   1. `startHubRotationListener` — when a Hub rotation event fires
- *      for `name`, the listener checks this allowlist, marks the
- *      adapter uninitialised, and leaves the existing handle intact so
- *      in-flight calls that already passed `init()` don't observe a
- *      transient `undefined`.
+ *   1. `startHubRotationListener` — when the Hub rotation poller sees
+ *      `name`, it checks this allowlist, marks the adapter uninitialised,
+ *      and leaves the existing handle intact so in-flight calls that already
+ *      passed `init()` don't observe a transient `undefined`.
  *   2. `invalidateAllBoundContracts` — bulk drop, called by the
  *      write-side self-heal path (`withHubStaleRetry`) when a stale
  *      address surfaces `UnauthorizedAccess(Only Contracts in Hub)`.
@@ -50,30 +57,99 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * which owns side-channel state (in-flight probe, ready flag) that
  * a simple field reset wouldn't touch.
  *
- * Names listed here MUST match what `init()` resolves via
- * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`
- * — keep these in sync when adding/removing bindings in `init()`.
+ * Boot-bound names listed here MUST match contracts that `init()` resolves via
+ * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`. Lazy
+ * names listed here MUST match helpers such as `getIdentityStorage()`.
  */
-const BOUND_CONTRACT_INVALIDATORS = new Map<string, (adapter: EVMChainAdapterBase) => void>([
-  ['Identity',                   (a) => { (a as any).contracts.identity = undefined; }],
-  ['Profile',                    (a) => { (a as any).contracts.profile = undefined; }],
-  ['ProfileStorage',             (a) => { (a as any).contracts.profileStorage = undefined; }],
-  ['ParametersStorage',          (a) => { (a as any).contracts.parametersStorage = undefined; }],
-  ['Staking',                    (a) => { (a as any).contracts.staking = undefined; }],
-  ['Token',                      (a) => { (a as any).contracts.token = undefined; }],
-  ['AskStorage',                 (a) => { (a as any).contracts.askStorage = undefined; }],
-  ['KnowledgeAssets',            (a) => { (a as any).contracts.knowledgeAssets = undefined; }],
-  ['KnowledgeAssetsStorage',     (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; }],
-  ['KnowledgeAssetsLifecycle',   (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; }],
-  ['DKGKnowledgeAssets',         (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; }],
-  ['ContextGraphNameRegistry',   (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; }],
-  ['ContextGraphs',              (a) => { (a as any).contracts.contextGraphs = undefined; }],
-  ['ContextGraphStorage',        (a) => { (a as any).contracts.contextGraphStorage = undefined; }],
-  ['DKGPublishingConvictionNFT', (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; }],
-  ['Chronos',                    (a) => { (a as any).contracts.chronos = undefined; }],
-]);
+type ResettableContractCacheKey = {
+  [K in keyof ContractCache]: undefined extends ContractCache[K] ? K : never
+}[keyof ContractCache];
+
+type HubContractCacheKey = Exclude<ResettableContractCacheKey, undefined>;
+
+type HubBindingInvalidationPolicy =
+  | { contractKey: HubContractCacheKey; invalidateOnRotation?: false }
+  | { special: 'identityStorage'; invalidateOnRotation: true };
+
+const HUB_BINDING_INVALIDATOR_ENTRIES = [
+  ['Identity',                   { contractKey: 'identity' }],
+  ['IdentityStorage',            { special: 'identityStorage', invalidateOnRotation: true }],
+  ['Profile',                    { contractKey: 'profile' }],
+  ['ProfileStorage',             { contractKey: 'profileStorage' }],
+  ['ParametersStorage',          { contractKey: 'parametersStorage' }],
+  ['Staking',                    { contractKey: 'staking' }],
+  ['Token',                      { contractKey: 'token' }],
+  ['AskStorage',                 { contractKey: 'askStorage' }],
+  ['KnowledgeAssets',            { contractKey: 'knowledgeAssets' }],
+  ['KnowledgeAssetsStorage',     { contractKey: 'knowledgeAssetsStorage' }],
+  ['KnowledgeAssetsLifecycle',   { contractKey: 'knowledgeAssetsLifecycle' }],
+  ['DKGKnowledgeAssets',         { contractKey: 'knowledgeAssetStorage' }],
+  ['ContextGraphNameRegistry',   { contractKey: 'contextGraphNameRegistry' }],
+  ['ContextGraphs',              { contractKey: 'contextGraphs' }],
+  ['ContextGraphStorage',        { contractKey: 'contextGraphStorage' }],
+  ['DKGPublishingConvictionNFT', { contractKey: 'dkgPublishingConvictionNFT' }],
+  ['Chronos',                    { contractKey: 'chronos' }],
+] as const satisfies ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]>;
+
+const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
+  HUB_BINDING_INVALIDATOR_ENTRIES,
+);
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
+
+type IdentityIdCacheEntry = {
+  identityId: bigint;
+  ttlMs: number;
+};
+
+class IdentityIdCache {
+  private readonly values = new ReadThroughTtlCache<string, IdentityIdCacheEntry>({
+    ttlMs: (entry) => entry.ttlMs,
+  });
+
+  constructor(
+    private readonly signerCacheKey: string,
+    private readonly positiveTtlMs: number,
+    private readonly signerZeroTtlMs: number,
+  ) {}
+
+  async getOrLoad(
+    address: string,
+    load: (checksumAddress: string) => Promise<bigint>,
+  ): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    const cacheKey = checksum.toLowerCase();
+    const entry = await this.values.getOrLoad(cacheKey, cacheKey, async () => {
+      const identityId = await load(checksum);
+      return this.entry(cacheKey, identityId);
+    });
+    return entry.identityId;
+  }
+
+  seed(address: string, identityId: bigint): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.values.seed(cacheKey, this.entry(cacheKey, identityId));
+  }
+
+  invalidate(address: string): void {
+    const cacheKey = ethers.getAddress(address).toLowerCase();
+    this.values.invalidate(cacheKey);
+  }
+
+  invalidateAll(): void {
+    this.values.invalidateAll();
+  }
+
+  private entry(cacheKey: string, identityId: bigint): IdentityIdCacheEntry {
+    const ttlMs = identityId > 0n
+      ? this.positiveTtlMs
+      : cacheKey === this.signerCacheKey
+        ? this.signerZeroTtlMs
+        : 0;
+    return { identityId, ttlMs };
+  }
+}
 
 /**
  * Upper bound on the pre-10.0.4 KnowledgeAssetCreated fallback scan, in
@@ -110,6 +186,11 @@ export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
 );
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
+
+// Keep generic Hub binding invalidation responsive for read paths while still
+// replacing four hidden ethers subscription pollers with one owned log poller.
+const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
+const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /**
  * Per-backend timeout for a single KnowledgeAssetCreated scan page before
@@ -160,6 +241,25 @@ function normalizeScanPageSize(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 1
     ? Math.floor(value)
     : fallback;
+}
+
+function configuredStaticChainId(config: Pick<EVMAdapterConfig, 'chainId' | 'staticNetwork'>): bigint | undefined {
+  if (config.staticNetwork === false) return undefined;
+  const { chainId } = config;
+  if (!chainId) return undefined;
+  const tail = chainId.includes(':') ? chainId.split(':').pop() : chainId;
+  if (!tail || !/^[0-9]+$/.test(tail)) {
+    return undefined;
+  }
+  try {
+    const numeric = BigInt(tail);
+    if (numeric > 0n) return numeric;
+  } catch {
+    // Fall through to the uniform configuration error below.
+  }
+  throw new Error(
+    `EVMAdapterConfig.chainId must end with a positive decimal chain id when staticNetwork is enabled (got ${chainId}); set staticNetwork: false to use dynamic detection`,
+  );
 }
 
 /**
@@ -346,7 +446,7 @@ async function contractAddress(contract: Contract): Promise<string> {
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
-    return `${this.chainId}:hub=${this.hubAddress.toLowerCase()}`;
+    return buildEvmDeploymentId({ chainId: this.chainId, hubAddress: this.hubAddress });
   }
 
   readonly chainType = 'evm' as const;
@@ -382,6 +482,8 @@ export class EVMChainAdapterBase {
   protected readonly rpcFailover: RpcFailoverClient;
   /** Raw JSON-RPC request accounting (provider-billing unit). See rpc-usage.ts. */
   protected readonly rpcUsage: RpcUsageTracker;
+
+  protected readonly configuredStaticChainId?: bigint;
 
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
@@ -466,22 +568,30 @@ export class EVMChainAdapterBase {
    * has a defensive guard against. Resolving both names atomically
    * inside one cache eliminates that race.
    *
-   * See `HubResolutionCache` for the semantics; the listener
-   * installed in `init()` invalidates this cache on
+   * See `HubResolutionCache` for the semantics; the poller
+   * started in `init()` invalidates this cache on
    * `Hub.ContractChanged` / `Hub.NewContract` for **either** name,
    * and `withHubStaleRetry()` invalidates it when a write surfaces
    * `UnauthorizedAccess(Only Contracts in Hub)`.
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
 
-  /**
-   * OT-RFC-39 — per-process cache for `getIdentityIdForAddress`.
-   * Only positive (non-zero) hits are memoised; see the method body
-   * for the rationale (negative-hit invalidation hazard).
-   */
-  protected readonly identityIdByAddressCache: Map<string, bigint> = new Map();
+  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
 
-  protected hubRotationListenerStarted = false;
+  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
+
+  /**
+   * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
+   * a bounded TTL; arbitrary-address negative hits are only single-flighted so
+   * later external registration is visible immediately. The signer address has
+   * a short zero TTL so fresh edge-node startup sync does not repeat the same
+   * self `0n` lookup per page.
+   */
+  protected identityIdCache!: IdentityIdCache;
+
+  protected readonly pcaReadCache = new PcaReadCache();
+
+  protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
    * Single-flight guard for the best-effort
@@ -556,6 +666,16 @@ export class EVMChainAdapterBase {
 
   protected cachedChainId: { value: bigint; cachedAt: number } | undefined;
 
+  protected readonly configuredStaticChainIdsByProvider = new Map<
+    JsonRpcProvider,
+    { value: bigint; cachedAt: number }
+  >();
+
+  protected readonly configuredStaticChainIdValidationsByProvider = new Map<
+    JsonRpcProvider,
+    Promise<bigint>
+  >();
+
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
   protected cachedMinRequiredSignatures: { value: number; cachedAt: number } | undefined;
@@ -567,11 +687,7 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /**
-   * Next unbuffered block for ContextGraphNameRegistry scans, keyed by lowercase
-   * registry address. Read with a reorg buffer; duplicate delivery is harmless.
-   */
-  protected readonly contextGraphRegistryScanWatermarks: Map<string, number> = new Map();
+  protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -591,10 +707,67 @@ export class EVMChainAdapterBase {
    */
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
+    this.configuredStaticChainIdsByProvider.clear();
+    this.configuredStaticChainIdValidationsByProvider.clear();
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
-    this.contextGraphRegistryScanWatermarks.clear();
+    this.contextGraphRegistryScanCursor.clearMemoryCache();
+  }
+
+  protected clearIdentityIdForAddress(address: string): void {
+    this.identityIdCache.invalidate(address);
+  }
+
+  protected seedIdentityIdForAddress(address: string, identityId: bigint): void {
+    this.identityIdCache.seed(address, identityId);
+  }
+
+  protected invalidateIdentityStorageBinding(): void {
+    this.contracts.identityStorage = undefined;
+    this.identityIdCache.invalidateAll();
+  }
+
+  protected async identityStorageAddressChanged(
+    previous: Contract | undefined,
+    next: Contract,
+  ): Promise<boolean> {
+    if (!previous) return false;
+    if (previous === next) return false;
+    try {
+      return (await contractAddress(previous)).toLowerCase() !== (await contractAddress(next)).toLowerCase();
+    } catch {
+      return true;
+    }
+  }
+
+  protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    await this.init();
+    const previousIdentityStorage = this.contracts.identityStorage;
+    const identityStorage = await this.getIdentityStorage({ refresh: true });
+    const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
+    if (identityStorageChanged) this.identityIdCache.invalidateAll();
+    const id: bigint = await this.readContract(
+      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
+    );
+    const identityId = BigInt(id);
+    if (identityStorageChanged) this.identityIdCache.seed(checksum, identityId);
+    return identityId;
+  }
+
+  protected async readIdentityIdForAddress(address: string): Promise<bigint> {
+    return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
+  }
+
+  protected async refreshIdentityIdForAddress(address: string): Promise<bigint> {
+    if (!ethers.isAddress(address)) return 0n;
+    const checksum = ethers.getAddress(address);
+    this.identityIdCache.invalidate(checksum);
+    const identityId = await this.readIdentityIdFromStorage(checksum);
+    this.identityIdCache.seed(checksum, identityId);
+    return identityId;
   }
 
   protected static preflightCacheFresh(
@@ -677,12 +850,16 @@ export class EVMChainAdapterBase {
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
     // see createCountingJsonRpcProvider for the invariant.
+    this.configuredStaticChainId = configuredStaticChainId(config);
+    const staticNetwork = this.configuredStaticChainId == null
+      ? undefined
+      : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
       (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
         cacheTimeout: -1,
         polling: true,
         batchMaxCount: 1,
-      }),
+      }, staticNetwork),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
@@ -717,7 +894,14 @@ export class EVMChainAdapterBase {
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
+      async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
     );
+    this.hubRotationPoller = new HubRotationPoller({
+      readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
+      intervalMs: HUB_ROTATION_POLL_INTERVAL_MS,
+      reorgBufferBlocks: HUB_ROTATION_REORG_BUFFER_BLOCKS,
+      onContractName: (name) => this.applyHubRotationEventName(name),
+    });
     const providerContext = formatProviderContext(config);
     // PR-8: install the filter-not-found silencer. Without this, RPC
     // nodes that GC filters faster than ethers' polling cadence
@@ -776,12 +960,22 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
+    this.identityIdCache = new IdentityIdCache(
+      this.signer.address.toLowerCase(),
+      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
+      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
+    );
     this.hubAddress = config.hubAddress;
     if (config.tokenAddress && !ethers.isAddress(config.tokenAddress)) {
       throw new Error(`Invalid tokenAddress: ${config.tokenAddress}`);
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
+      chainId: this.chainId,
+      deploymentId: this.deploymentId,
+      store: config.contextGraphRegistryScanCursorStore,
+    });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -870,7 +1064,9 @@ export class EVMChainAdapterBase {
     method: string,
     ...args: unknown[]
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args));
+    return this.rpcFailover.readContract(label, contract, (c) => c[method](...args), {
+      rpcUsageConsumer: label,
+    });
   }
 
   /**
@@ -885,7 +1081,10 @@ export class EVMChainAdapterBase {
     fn: (c: Contract) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.readContract(label, contract, fn, opts);
+    return this.rpcFailover.readContract(label, contract, fn, {
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
+    });
   }
 
   /**
@@ -900,7 +1099,10 @@ export class EVMChainAdapterBase {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.rpcFailover.read(label, fn, opts);
+    return this.rpcFailover.read(label, fn, {
+      ...opts,
+      rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
+    });
   }
 
   /**
@@ -1103,7 +1305,7 @@ export class EVMChainAdapterBase {
    * pre-broadcast — the caller owns the WAL split and broadcasts the single
    * returned tx.
    */
-  protected populateAndSignAcrossProviders(
+  protected async populateAndSignAcrossProviders(
     contract: Contract,
     method: string,
     args: readonly unknown[],
@@ -1618,8 +1820,8 @@ export class EVMChainAdapterBase {
     return ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(address)]));
   }
 
-  protected async getIdentityStorage(): Promise<Contract> {
-    if (!this.contracts.identityStorage) {
+  protected async getIdentityStorage(options: { refresh?: boolean } = {}): Promise<Contract> {
+    if (options.refresh || !this.contracts.identityStorage) {
       this.contracts.identityStorage = await this.resolveContract('IdentityStorage');
     }
     return this.contracts.identityStorage;
@@ -1883,12 +2085,7 @@ export class EVMChainAdapterBase {
   // =====================================================================
 
   async getIdentityId(): Promise<bigint> {
-    await this.init();
-    const identityStorage = await this.getIdentityStorage();
-    const id: bigint = await this.readContract(
-      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', this.signer.address,
-    );
-    return id;
+    return this.readIdentityIdForAddress(this.signer.address);
   }
 
   // =====================================================================
@@ -1930,7 +2127,7 @@ export class EVMChainAdapterBase {
    * address fails loudly instead of reconciling from empty logs.
    */
   async getMaxKaNumberForAuthor(author: string): Promise<bigint> {
-    // Re-resolve contract handles first. The Hub-rotation listener flips
+    // Re-resolve contract handles first. The Hub rotation poller flips
     // `initialized` to false but leaves the old bindings in place, so without
     // this a long-lived adapter keeps querying the PRE-rotation
     // DKGKnowledgeAssets after the 10.0.4 redeploy this getter exists for.
@@ -2113,12 +2310,17 @@ export class EVMChainAdapterBase {
             : eligible;
         let pageError: unknown;
         for (const { provider } of ordered) {
-          let contract = connected.get(provider);
-          if (!contract) {
-            contract = baseContract.connect(provider) as Contract;
-            connected.set(provider, contract);
-          }
           try {
+            await withTimeout(
+              this.ensureConfiguredStaticChainIdValidated(provider),
+              RPC_READ_STALL_TIMEOUT_MS,
+              `${label} chainId validation`,
+            );
+            let contract = connected.get(provider);
+            if (!contract) {
+              contract = baseContract.connect(provider) as Contract;
+              connected.set(provider, contract);
+            }
             const logs = await withTimeout(
               contract.queryFilter(filter as any, lo, hi),
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
@@ -2209,6 +2411,11 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
+        await withTimeout(
+          this.ensureConfiguredStaticChainIdValidated(provider),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `${operationLabel} chainId validation`,
+        );
         const backendHead = await withTimeout(
           provider.getBlockNumber(),
           RPC_READ_STALL_TIMEOUT_MS,
@@ -2245,6 +2452,11 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
+        await withTimeout(
+          this.ensureConfiguredStaticChainIdValidated(provider),
+          RPC_READ_STALL_TIMEOUT_MS,
+          `${operationLabel} chainId validation`,
+        );
         // Bound the probe: these are direct per-backend reads (not via the
         // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
         // stall the whole resolution instead of failing over. A stall rejects and
@@ -2418,9 +2630,48 @@ export class EVMChainAdapterBase {
     if (EVMChainAdapterBase.preflightCacheFresh(this.cachedChainId, now)) {
       return this.cachedChainId!.value;
     }
-    const network = await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork());
-    this.cachedChainId = { value: network.chainId, cachedAt: now };
-    return network.chainId;
+    const chainId = this.configuredStaticChainId == null
+      ? (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId
+      : await this.rpcFailover.read(
+          'validate configured chainId',
+          (p) => this.ensureConfiguredStaticChainIdValidated(p),
+        );
+    this.cachedChainId = { value: chainId, cachedAt: now };
+    return chainId;
+  }
+
+  protected async ensureConfiguredStaticChainIdValidated(provider: JsonRpcProvider): Promise<bigint> {
+    if (this.configuredStaticChainId == null) return 0n;
+    const now = Date.now();
+    const cached = this.configuredStaticChainIdsByProvider.get(provider);
+    if (EVMChainAdapterBase.preflightCacheFresh(cached, now)) {
+      return cached!.value;
+    }
+
+    let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
+    if (!validation) {
+      validation = withTimeout(
+        (async () => {
+          const raw = await provider.send('eth_chainId', []);
+          const live = BigInt(raw);
+          if (live !== this.configuredStaticChainId) {
+            throw new Error(
+              `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+            );
+          }
+          this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
+          this.cachedChainId = { value: live, cachedAt: Date.now() };
+          return live;
+        })(),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'configured chainId validation',
+      ).finally(() => {
+        this.configuredStaticChainIdValidationsByProvider.delete(provider);
+      });
+      this.configuredStaticChainIdValidationsByProvider.set(provider, validation);
+    }
+
+    return validation;
   }
 
   /**
@@ -2900,9 +3151,8 @@ export class EVMChainAdapterBase {
    * Used at write-side call sites that touch any of the redeployable
    * V10 contracts (PCA NFT, ContextGraphs, KnowledgeCollection, etc.)
    * so the FIRST write after a Hub rotation self-heals even when the
-   * event listener never fired (HTTP-only RPC endpoints, dropped
-   * subscriptions, rate-limited filter installs — all of which we
-   * see in the wild on public Base Sepolia / Gnosis Chain RPCs).
+   * low-cadence Hub poller has not observed the rotation yet, or when
+   * the RPC endpoint cannot serve log scans.
    *
    * Idempotency note: the wrapped closure MUST be safe to call twice.
    * That holds for our write paths because the on-chain side either
@@ -2956,7 +3206,7 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Subscribe to Hub rotation events and invalidate the local cache for any
+   * Poll Hub rotation events and invalidate the local cache for any
    * Hub-rotated contract.
    *
    * Two invalidation paths, dispatched by name:
@@ -2967,8 +3217,12 @@ export class EVMChainAdapterBase {
    *      See the `randomSamplingPairCache` field comment for the
    *      coupling invariants this path preserves.
    *
-   *   2. Any other name in `BOUND_CONTRACT_INVALIDATORS` → leave the
-   *      existing `this.contracts.X` field intact but flip
+   *   2. Names in `HUB_BINDING_INVALIDATORS` may clear a lazy slot and
+   *      dependent cache through `invalidateOnRotation`, then use the same
+   *      rotation finalization as boot-bound bindings.
+   *
+   *   3. Any name in `HUB_BINDING_INVALIDATORS` without a rotation invalidator
+   *      leaves the existing `this.contracts.X` field intact but flips
    *      `this.initialized` back to `false` so the next `await
    *      this.init()` re-resolves every binding fresh from Hub. Keeping
    *      the old handle until the next init pass avoids a race where an
@@ -2980,7 +3234,7 @@ export class EVMChainAdapterBase {
    *      operators were silently stuck on the pre-rotation address
    *      until a daemon restart.
    *
-   *   3. Unknown name → ignored. We deliberately allowlist rather
+   *   4. Unknown name → ignored. We deliberately allowlist rather
    *      than reflexively re-init on any rotation: third-party
    *      deployments may register names we don't bind, and we don't
    *      want a benign rotation of an unrelated contract to thrash
@@ -2991,58 +3245,70 @@ export class EVMChainAdapterBase {
    * on the update path it emits both `ContractChanged` AND
    * `NewContract`. Storage bindings resolved through
    * `getAssetStorageAddress(...)` emit the parallel `AssetStorageChanged`
-   * / `NewAssetStorage` events. We listen to all four events so the cache
+   * / `NewAssetStorage` events. We poll all four event topics so the cache
    * invalidates regardless of which Hub set owns the name, and both the
    * RS-pair invalidation and the generic boot-bound invalidation are
    * idempotent so duplicate notifications are harmless.
    *
-   * `Contract.on(...)` is async in ethers v6: a sync `try/catch` would
-   * miss provider rejections (e.g. HTTP-only endpoints that can't
-   * install filter subscriptions) and leave us with an unhandled
-   * rejection. We `await` every subscription and only set
-   * `hubRotationListenerStarted` after all succeed, so a failed
-   * provider can be retried by a future call site if we ever need to
-   * — and meanwhile the TTL refresh path (for RS) and the
-   * `withHubStaleRetry` write-side fallback (for all boot-bound
-   * contracts) still keep stale bindings recoverable without a
-   * working event subscription.
+   * We deliberately avoid `Contract.on(...)` here. With `polling: true`,
+   * ethers implements each subscription as its own steady `eth_getLogs`
+   * poller. One adapter-owned poller with an OR-topic filter preserves
+   * rotation detection without four hidden idle log streams.
    */
   protected async startHubRotationListener(): Promise<void> {
-    if (this.hubRotationListenerStarted) return;
-    const onChange = (name: unknown): void => {
-      if (typeof name !== 'string') return;
-      if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
-        this.invalidateRandomSamplingPair();
-        return;
-      }
-      if (BOUND_CONTRACT_INVALIDATORS.has(name)) {
-        this.invalidatePublishPreflightCache();
-        // Force the next public-method entry through `init()` so it
-        // re-resolves every binding. Do not clear the current handle
-        // here: the callback can fire between a public method's
-        // `await init()` and its first `this.contracts.X` read.
-        this.initialized = false;
-      }
-    };
+    if (this.hubRotationPoller.isStarted) return;
     try {
-      await this.contracts.hub.on('ContractChanged', onChange);
-      await this.contracts.hub.on('NewContract', onChange);
-      await this.contracts.hub.on('AssetStorageChanged', onChange);
-      await this.contracts.hub.on('NewAssetStorage', onChange);
-      this.hubRotationListenerStarted = true;
-    } catch {
-      /* provider doesn't support filter subscriptions — TTL refresh (RS)
-       * and `withHubStaleRetry` (writes) are the fallbacks */
+      await this.hubRotationPoller.start(
+        this.contracts.hub,
+        await contractAddress(this.contracts.hub),
+      );
+    } catch (err) {
+      console.warn(
+        `[chain] Hub rotation poller setup disabled: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
+  protected applyHubRotationEventName(name: string): void {
+    if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
+      this.invalidateRandomSamplingPair();
+      return;
+    }
+    const policy = HUB_BINDING_INVALIDATORS.get(name);
+    if (!policy) return;
+    this.invalidateHubBindingOnRotation(policy);
+    this.finalizeKnownHubRotation();
+  }
+
+  protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
+    if (policy.invalidateOnRotation) this.invalidateHubBinding(policy);
+  }
+
+  protected invalidateHubBinding(policy: HubBindingInvalidationPolicy): void {
+    if ('contractKey' in policy) {
+      this.contracts[policy.contractKey] = undefined;
+      return;
+    }
+    if (policy.special === 'identityStorage') this.invalidateIdentityStorageBinding();
+  }
+
+  protected finalizeKnownHubRotation(): void {
+    this.invalidatePublishPreflightCache();
+    // Force the next public-method entry through `init()` so it re-resolves
+    // every binding. Do not clear boot-bound handles here: the callback can
+    // fire between a public method's `await init()` and its first
+    // `this.contracts.X` read.
+    this.initialized = false;
+  }
+
   /**
-   * Drop every boot-bound contract handle and re-arm `init()`.
+   * Drop every boot-bound contract handle, lazy binding, and dependent cache,
+   * then re-arm `init()`.
    *
    * Used by `withHubStaleRetry` on the write-side self-heal path when
    * a Hub-rotated contract surfaces `UnauthorizedAccess(Only Contracts
-   * in Hub)`: the listener may have missed the rotation event (HTTP-only
-   * RPC, dropped subscription, etc.) so the failing operation can't tell
+   * in Hub)`: the poller may not have observed the rotation yet (HTTP-only
+   * RPC, log-scan failure, etc.) so the failing operation can't tell
    * which specific name was rotated. Resetting everything is the safest
    * fallback — the next `await this.init()` re-resolves all 15+ bindings
    * in a single pass (still under a second on a healthy RPC) and the
@@ -3052,8 +3318,8 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
-    for (const invalidator of BOUND_CONTRACT_INVALIDATORS.values()) {
-      invalidator(this);
+    for (const policy of HUB_BINDING_INVALIDATORS.values()) {
+      this.invalidateHubBinding(policy);
     }
     this.invalidatePublishPreflightCache();
     this.invalidateRandomSamplingPair();
@@ -3090,6 +3356,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.hubRotationPoller.stop();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

@@ -6,7 +6,7 @@
  * evm-adapter.ts. Bodies are a 1:1 move from the original module.
  */
 import { Contract } from 'ethers';
-import type { ApprovalPolicy } from './chain-adapter.js';
+import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -26,10 +26,17 @@ export interface EVMAdapterBaseConfig {
   tokenAddress?: string;
   chainId?: string;
   /**
+   * When true (default), a configured numeric chainId such as `evm:31337`
+   * is passed to ethers as a static network to avoid steady `eth_chainId`
+   * detection calls. Set to false only when a test or caller intentionally
+   * wants dynamic provider network detection.
+   */
+  staticNetwork?: boolean;
+  /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
    * treated as "use default" and intentionally NOT supported as a
-   * "disable periodic refresh" mode: even with the Hub event listener
+   * "disable periodic refresh" mode: even with the Hub rotation poller
    * and the `Only Contracts in Hub` retry wrapper, a missed event on
    * a read-only path (e.g. `getActiveProofPeriodStatus`,
    * `getNodeChallenge`) would leave the adapter pinned to a stale
@@ -68,6 +75,13 @@ export interface EVMAdapterBaseConfig {
    * non-finite or `< 1` value falls back to the default.
    */
   cgRegistryScanPageSize?: number;
+  /**
+   * Optional durable cursor for daemon ContextGraphNameRegistry discovery scans.
+   * The adapter still keeps an in-memory mirror; this store lets process
+   * restarts resume from the last successfully covered prefix instead of
+   * repeating a historical `eth_getLogs` walk.
+   */
+  contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

@@ -521,7 +521,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     const kas = this.contracts.knowledgeAssetStorage;
     const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
-    const evmChainId = BigInt((await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId);
+    const evmChainId = await this.getEvmChainId();
 
     const currentTokenAmount = await this.resolveCurrentTokenAmount(params.kaId);
 
@@ -684,7 +684,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     const ka = this.contracts.knowledgeAssetsLifecycle.connect(signer) as Contract;
 
     const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
-    const evmChainId = (await this.readProvider('getNetwork (chainId)', (p) => p.getNetwork())).chainId;
+    const evmChainId = await this.getEvmChainId();
 
     const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
 

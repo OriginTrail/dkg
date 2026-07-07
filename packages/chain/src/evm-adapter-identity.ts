@@ -88,6 +88,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     for (const address of missing) {
       if (await this.hasOperationalPurpose(identityStorage, identityId, address)) {
         result.registered.push(address);
+        this.seedIdentityIdForAddress(address, identityId);
       }
     }
 
@@ -130,6 +131,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       this.adminSigner,
       'addOperationalWallet',
     );
+    this.seedIdentityIdForAddress(wallet, identityId);
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -208,6 +210,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       this.adminSigner,
       'removeOperationalWallet',
     );
+    this.clearIdentityIdForAddress(wallet);
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,
@@ -257,35 +260,24 @@ export class IdentityMethods extends EVMChainAdapterBase {
   }
 
   /**
-   * OT-RFC-39 — view-only address → identityId lookup. Returns 0n
-   * when the address is not registered as a node operator. Caches
-   * results per-process: `IdentityStorage.identities` is append-only
-   * (operator key rotation goes through a separate slot), so a
-   * memoised hit is safe.
+   * OT-RFC-39 view-only address to identityId lookup.
+   *
+   * Positive results are cached briefly; negative results are only coalesced
+   * while in flight so a later external registration is visible immediately.
+   * Local wallet mutations seed or clear the cache so operator-key changes do
+   * not rely on TTL expiry.
    */
   async getIdentityIdForAddress(address: string): Promise<bigint> {
-    if (!ethers.isAddress(address)) return 0n;
-    const checksum = ethers.getAddress(address);
-    const cached = this.identityIdByAddressCache.get(checksum.toLowerCase());
-    if (cached !== undefined) return cached;
-    await this.init();
-    const identityStorage = await this.resolveContract('IdentityStorage');
-    const id: bigint = await this.readContract(
-      identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
-    );
-    if (id > 0n) {
-      // Only memoise positive hits — a 0n result may flip to non-zero
-      // once the operator registers, and we don't want to lock the
-      // negative answer in for the process lifetime.
-      this.identityIdByAddressCache.set(checksum.toLowerCase(), id);
-    }
-    return id;
+    return this.readIdentityIdForAddress(address);
   }
 
   async ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
     await this.init();
 
     let identityId = await this.getIdentityId();
+    if (identityId === 0n) {
+      identityId = await this.refreshIdentityIdForAddress(this.signer.address);
+    }
 
     // Step 1: Create profile if none exists
     if (identityId === 0n) {
@@ -321,6 +313,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       if (identityId === 0n) {
         throw new Error('Profile created but no IdentityCreated event found');
       }
+      this.seedIdentityIdForAddress(this.signer.address, identityId);
     }
 
     // Step 2: Stake via V10 path (separate try/catch so profile isn't lost).
@@ -402,7 +395,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
           data: log.data,
         });
         if (parsed?.name === 'IdentityCreated') {
-          return BigInt(parsed.args.identityId);
+          const identityId = BigInt(parsed.args.identityId);
+          this.seedIdentityIdForAddress(this.signer.address, identityId);
+          return identityId;
         }
       } catch { /* not this contract */ }
     }
@@ -414,7 +409,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
           data: log.data,
         });
         if (parsed?.name === 'ProfileCreated') {
-          return BigInt(parsed.args.identityId);
+          const identityId = BigInt(parsed.args.identityId);
+          this.seedIdentityIdForAddress(this.signer.address, identityId);
+          return identityId;
         }
       } catch { /* not this contract */ }
     }

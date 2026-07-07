@@ -9,7 +9,8 @@
  * SAFETY BOUNDARY: this module holds NO transaction-safety state — no WAL, no
  * per-wallet serializer, no approval latch. The adapter's tx-orchestration owns
  * all of that and calls into this surface. The module never references the
- * adapter; it is constructed with exactly two capabilities:
+ * adapter; it is constructed with two required capabilities and one optional
+ * per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
  *      `{ provider, rpcUrl }` pair. One object per endpoint keeps the
  *      `provider ↔ rpcUrl` pairing explicit inside every failover loop (not an
@@ -35,6 +36,7 @@ import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
@@ -61,16 +63,27 @@ export interface RpcEndpoint {
  * {@link resolveCapMs}.
  *   - `pointRead`           — a single `eth_call` / point provider read.
  *   - `wideLogScan`         — a multi-thousand-block `eth_getLogs` scan.
+ *   - `watchdogPointRead`   — a background point read that must not wedge a
+ *     one-RPC node.
+ *   - `watchdogWideLogScan` — a background log scan that must not wedge a
+ *     one-RPC node.
  *   - `failOpenFundingRead` — a fail-open funding/allowance read that must never
  *     stall selection (capped on EVERY attempt, including single-RPC).
  */
-export type ReadPolicy = 'pointRead' | 'wideLogScan' | 'failOpenFundingRead';
+export type ReadPolicy =
+  | 'pointRead'
+  | 'wideLogScan'
+  | 'watchdogPointRead'
+  | 'watchdogWideLogScan'
+  | 'failOpenFundingRead';
 
-/** Per-read options: a named timeout policy + an optional failover classifier
- *  override (a read whose error shape carries domain meaning). */
+/** Per-read options: timeout/failover behavior plus an explicit low-cardinality
+ *  telemetry consumer key for `eth_call` attribution. `label` remains a human
+ *  failover/span label and is not implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
+  rpcUsageConsumer?: string;
 }
 
 /**
@@ -82,6 +95,9 @@ export type SignPopulatedFn = (
   signer: Wallet,
   populated: ethers.TransactionRequest,
 ) => Promise<{ signedTx: string; txHash: string }>;
+
+/** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
+export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
 
 /**
  * Failover classifier for CONTRACT VIEW reads (`readContract`'s default): the
@@ -104,14 +120,20 @@ export function isContractViewRetryable(err: unknown): boolean {
  *   |---------------------|--------------------------|-------------------------|
  *   | pointRead           | RPC_READ_STALL (4s)      | uncapped (#894)         |
  *   | wideLogScan         | RPC_LOG_SCAN (30s)       | uncapped (#894)         |
- *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)     |
+ *   | watchdogPointRead   | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
+ *   | watchdogWideLogScan | RPC_LOG_SCAN (30s)       | RPC_LOG_SCAN (30s)     |
+ *   | failOpenFundingRead | RPC_READ_STALL (4s)      | RPC_READ_STALL (4s)    |
  *
  * `pointRead` / `wideLogScan` leave single-RPC uncapped (nothing to fail over
- * to; #894); `failOpenFundingRead` caps EVERY attempt incl. single so a fail-open
- * funding read can never stall publish-signer selection.
+ * to; #894). The watchdog policies are for background reads that must clear
+ * their scheduler gate even on one-RPC nodes, without imposing a poll-level
+ * deadline over a multi-RPC failover sequence.
  */
 export function resolveCapMs(policy: ReadPolicy, providerCount: number): number | undefined {
-  if (policy === 'failOpenFundingRead') return RPC_READ_STALL_TIMEOUT_MS;
+  if (policy === 'failOpenFundingRead' || policy === 'watchdogPointRead') {
+    return RPC_READ_STALL_TIMEOUT_MS;
+  }
+  if (policy === 'watchdogWideLogScan') return RPC_LOG_SCAN_TIMEOUT_MS;
   if (providerCount <= 1) return undefined;
   return policy === 'wideLogScan' ? RPC_LOG_SCAN_TIMEOUT_MS : RPC_READ_STALL_TIMEOUT_MS;
 }
@@ -125,6 +147,7 @@ export class RpcFailoverClient {
     // construct this client BEFORE its own `chainId` field is assigned and still
     // have the label resolve correctly at metric-record time.
     private readonly chainId: () => string,
+    private readonly validateEndpoint?: ValidateEndpointFn,
   ) {}
 
   /**
@@ -176,12 +199,13 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T> {
-    return this.runAcrossProviders(
+    const run = () => this.runAcrossProviders(
       label,
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   /**
@@ -204,7 +228,7 @@ export class RpcFailoverClient {
     // `chain.eth_call` span + RPC metric spanning the whole failover sequence.
     // `dkg.read=label` (e.g. 'token.allowance') rides the SPAN only — kept OFF
     // the metric so its label set stays low-cardinality.
-    return withSpan(
+    const run = () => withSpan(
       'chain.eth_call',
       async () => {
         const metrics = getMetrics();
@@ -229,6 +253,7 @@ export class RpcFailoverClient {
       },
       { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
     );
+    return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
 
   // --- write transport (called by the adapter's tx-orchestration; this layer
@@ -259,8 +284,14 @@ export class RpcFailoverClient {
     const endpoints = this.getEndpoints();
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
-      const rpcSigner = this.rebindSigner(signer, endpoints[i].provider);
+      const endpoint = endpoints[i];
       try {
+        await this.validateEndpointForAttempt(
+          endpoint,
+          RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+          `${label} chainId validation via RPC #${i + 1}`,
+        );
+        const rpcSigner = this.rebindSigner(signer, endpoint.provider);
         const connected = this.rebindContract(contract, rpcSigner) as any;
         const populated = await withTimeout<ethers.TransactionRequest>(
           connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
@@ -349,9 +380,15 @@ export class RpcFailoverClient {
           const endpoints = this.getEndpoints();
           let lastRetryable: unknown;
           for (let i = 0; i < endpoints.length; i += 1) {
-            const provider = endpoints[i].provider;
+            const endpoint = endpoints[i];
+            const provider = endpoint.provider;
             span.addEvent('broadcast.attempt', { attempt: i + 1 });
             try {
+              await this.validateEndpointForAttempt(
+                endpoint,
+                RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
+                `${label} chainId validation via RPC #${i + 1}`,
+              );
               await withTimeout(
                 provider.broadcastTransaction(signedTx),
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
@@ -421,9 +458,15 @@ export class RpcFailoverClient {
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
           for (let i = 0; i < endpoints.length; i += 1) {
-            const provider = endpoints[i].provider;
+            const endpoint = endpoints[i];
+            const provider = endpoint.provider;
             span.addEvent('receipt.attempt', { attempt: i + 1 });
             try {
+              await this.validateEndpointForAttempt(
+                endpoint,
+                RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
+                `receipt lookup chainId validation via RPC #${i + 1}`,
+              );
               const receipt = await withTimeout(
                 provider.getTransactionReceipt(txHash),
                 RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
@@ -476,11 +519,11 @@ export class RpcFailoverClient {
    * The shared read-family core: one per-endpoint loop backing both `read` and
    * `readContract`. The per-attempt `withTimeout` is a hard deadline that ABORTS
    * and fails over a hung backend; the cap comes from the named `policy` via
-   * {@link resolveCapMs} (multi-RPC caps the attempt; single-RPC is uncapped for
-   * `pointRead`/`wideLogScan` — #894, nothing to fail over to — UNLESS
-   * `failOpenFundingRead`, which caps every attempt). The `endpoints` are read
-   * LIVE from the injected thunk so a mid-flight reassignment of the pool is
-   * observed.
+   * {@link resolveCapMs} (multi-RPC caps each attempt; single-RPC is uncapped for
+   * `pointRead`/`wideLogScan` — #894, nothing to fail over to — while watchdog
+   * policies and `failOpenFundingRead` cap even single-RPC attempts). The
+   * `endpoints` are read LIVE from the injected thunk so a mid-flight reassignment
+   * of the pool is observed.
    */
   private async runAcrossProviders<T>(
     label: string,
@@ -492,9 +535,17 @@ export class RpcFailoverClient {
     const capMs = resolveCapMs(policy, endpoints.length);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
+      const endpoint = endpoints[i];
       const isLast = i === endpoints.length - 1;
       try {
-        const attempt = fn(endpoints[i].provider);
+        const attempt = (async () => {
+          await this.validateEndpointForAttempt(
+            endpoint,
+            capMs,
+            `${label} chainId validation via RPC #${i + 1}`,
+          );
+          return fn(endpoint.provider);
+        })();
         return await (capMs == null
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
@@ -532,6 +583,20 @@ export class RpcFailoverClient {
    */
   private rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
     return contract.connect(runner) as Contract;
+  }
+
+  private async validateEndpointForAttempt(
+    endpoint: RpcEndpoint,
+    timeoutMs: number | undefined,
+    timeoutLabel: string,
+  ): Promise<void> {
+    if (!this.validateEndpoint) return;
+    const validation = this.validateEndpoint(endpoint);
+    if (timeoutMs == null) {
+      await validation;
+      return;
+    }
+    await withTimeout(validation, timeoutMs, timeoutLabel);
   }
 
   /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */

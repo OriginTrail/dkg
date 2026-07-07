@@ -37,6 +37,7 @@ interface PendingPublish {
   expectedChainId: string;
   rootEntities: string[];
   createdAt: number;
+  restoredFromJournal: boolean;
 }
 
 /**
@@ -85,6 +86,13 @@ export class PublishHandler {
 
   get hasPendingPublishes(): boolean {
     return this.pendingPublishes.size > 0;
+  }
+
+  get hasRestoredPendingPublishes(): boolean {
+    for (const pending of this.pendingPublishes.values()) {
+      if (pending.restoredFromJournal) return true;
+    }
+    return false;
   }
 
   /**
@@ -328,6 +336,7 @@ export class PublishHandler {
         expectedChainId: request.chainId ?? '',
         rootEntities: manifest.map(m => m.rootEntity),
         createdAt: Date.now(),
+        restoredFromJournal: false,
       });
       this.persistJournal();
 
@@ -509,6 +518,7 @@ export class PublishHandler {
         expectedChainId: entry.expectedChainId,
         rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
+        restoredFromJournal: true,
       });
       restored++;
     }

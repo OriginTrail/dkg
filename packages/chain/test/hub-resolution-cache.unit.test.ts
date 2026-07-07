@@ -3,7 +3,7 @@
  * matter for the live-rotation bug:
  *   - first call resolves and caches,
  *   - TTL expiry forces a re-resolve,
- *   - explicit `invalidate()` (used by the Hub event listener and the
+ *   - explicit `invalidate()` (used by the Hub rotation poller and the
  *     `UnauthorizedAccess(Only Contracts in Hub)` self-invalidation
  *     in the EVM adapter) forces a re-resolve.
  *
@@ -139,7 +139,7 @@ describe('HubResolutionCache', () => {
   it('invalidate() during an in-flight resolve discards the result so it cannot write back the stale value', async () => {
     // Simulates the race the Codex review flagged:
     //   1. tick T0 calls get() — resolver starts, awaiting RPC
-    //   2. Hub rotates RandomSampling; listener calls invalidate()
+    //   2. Hub rotates RandomSampling; poller calls invalidate()
     //   3. tick T0's resolver finally returns the PRE-rotation address
     //   4. without the generation guard, that pre-rotation value
     //      would land in `cached` and the very next get() would
@@ -160,7 +160,7 @@ describe('HubResolutionCache', () => {
     expect(calls).toBe(1);
     expect(cache.peek()).toBeNull();
 
-    // Hub-event-listener equivalent fires while the first resolve is
+    // Hub-rotation-poller equivalent fires while the first resolve is
     // still suspended.
     cache.invalidate();
     expect(cache.peek()).toBeNull();

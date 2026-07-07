@@ -49,6 +49,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     hubAddress: HUB,
     chainId: 'evm:31337',
     allowNoAdminSigner: true,
+    staticNetwork: false,
     ...overrides,
   };
 }
@@ -173,7 +174,9 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
 // poller ranges legitimately >4s) → threw RPC_ENDPOINTS_EXHAUSTED before the
 // publisher poller advanced its cursor → permanent stall. Fix: the named
 // `wideLogScan` policy (RPC_LOG_SCAN_TIMEOUT_MS = 30s) caps MULTI-RPC attempts
-// only; SINGLE-RPC stays uncapped (#894 — nothing to fail over to). The raw
+// only; SINGLE-RPC stays uncapped (#894 — nothing to fail over to). Background
+// watchers that must clear a one-RPC scheduler gate use explicit watchdog
+// policies rather than changing the default read intent. The raw
 // `attemptTimeoutMs` / `multiAttemptTimeoutMs` knobs are gone — callers pick a
 // named ReadPolicy and the module owns the matrix (resolveCapMs). Fake timers
 // throughout — no real 5s/30s sleeps.
