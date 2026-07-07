@@ -474,6 +474,35 @@ describe('EVMChainAdapter PCA read cache', () => {
     expect(adapter.readContract.calls).toHaveLength(2);
   });
 
+  it('does not retain missing account-info results across external account creation', async () => {
+    const adapter = pcaReadCacheAdapter([]) as any;
+    let calls = 0;
+    adapter.readContract = recorder(async () => {
+      calls++;
+      if (calls === 1) {
+        const err = new Error('missing account');
+        (err as { code?: string }).code = 'CALL_EXCEPTION';
+        throw err;
+      }
+      return accountInfoTuple(OWNER, 100n, 0n, 0n);
+    });
+
+    const missingReads = await Promise.all([
+      adapter.getPublishingConvictionAccountInfo(9n),
+      adapter.getPublishingConvictionAccountInfo(9n),
+    ]);
+    expect(missingReads).toEqual([null, null]);
+    expect(adapter.readContract.calls).toHaveLength(1);
+
+    await expect(adapter.getPublishingConvictionAccountInfo(9n))
+      .resolves.toMatchObject({ committedTRAC: 100n });
+    expect(adapter.readContract.calls).toHaveLength(2);
+
+    await expect(adapter.getPublishingConvictionAccountInfo(9n))
+      .resolves.toMatchObject({ committedTRAC: 100n });
+    expect(adapter.readContract.calls).toHaveLength(2);
+  });
+
   it('public agent registration refreshes warmed account-info cache immediately', async () => {
     const adapter = pcaReadCacheAdapter([
       accountInfoTuple(OWNER, 100n, 0n, 0n),

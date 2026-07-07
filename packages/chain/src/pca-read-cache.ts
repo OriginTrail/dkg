@@ -16,7 +16,7 @@ export class PcaReadCache {
   });
 
   private readonly accountInfoCache = new ReadThroughTtlCache<string, V10PublishingConvictionAccountInfo | null>({
-    ttlMs: PcaReadCache.READ_TTL_MS,
+    ttlMs: (value) => (value === null ? 0 : PcaReadCache.READ_TTL_MS),
   });
 
   async getAgentAccountId(
