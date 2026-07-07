@@ -109,11 +109,34 @@ function readNewText(path: string, startOffset: number): string {
   return buffer.toString('utf8');
 }
 
-function parseRpcUsageWindows(node: string, text: string): UsageWindow[] {
+function parseRpcUsageWindows(
+  node: string,
+  text: string,
+): { windows: UsageWindow[]; duplicateLines: string[] } {
   const windows = new Map<string, UsageWindow>();
   const lineRe = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*\brpc_usage method=([A-Za-z0-9_.:-]+) count=(\d+) window_s=(\d+)(?: chain=([A-Za-z0-9_.:-]+))?/gm;
 
+  // rpc_usage lines carry NO per-line id — the payload is just
+  // `rpc_usage method=X count=N window_s=S[ chain=C]` behind a second-resolution
+  // timestamp (see packages/cli/src/daemon/rpc-usage-log.ts). Byte-identical
+  // dedupe is still sound because the daemon emits ONE line per method per
+  // drain and drains are >=60s apart (the shutdown final-drain re-drains an
+  // already-emptied window and emits nothing when idle), so a byte-identical
+  // repeat within one node's chunk is provably a replay artifact of the
+  // daemon.log double-write (shell redirect + in-process tee writing the same
+  // file), never legitimate telemetry. Summing a replayed line doubles the
+  // window and fails the budget with phantom load — count each distinct line
+  // once, but RECORD every filtered duplicate so the suite fails loudly on the
+  // double-write regression itself instead of silently compensating for it.
+  const seenLines = new Set<string>();
+  const duplicateLines: string[] = [];
+
   for (const match of text.matchAll(lineRe)) {
+    if (seenLines.has(match[0])) {
+      duplicateLines.push(match[0]);
+      continue;
+    }
+    seenLines.add(match[0]);
     const [, timestamp, method, countRaw, windowSecondsRaw] = match;
     const windowSeconds = Number(windowSecondsRaw);
     const key = `${node}:${timestamp}`;
@@ -127,7 +150,10 @@ function parseRpcUsageWindows(node: string, text: string): UsageWindow[] {
     window.byMethod[method] = (window.byMethod[method] ?? 0) + Number(countRaw);
   }
 
-  return [...windows.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return {
+    windows: [...windows.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+    duplicateLines,
+  };
 }
 
 function windowTotal(window: UsageWindow): number {
@@ -147,6 +173,8 @@ describe('devnet RPC quiet-window budget', () => {
     const missingTelemetry: string[] = [];
     const activityHints: string[] = [];
     const windowsByNode = new Map<string, UsageWindow[]>();
+    const duplicateLineReports: string[] = [];
+    const duplicateNodes = new Set<string>();
 
     for (const log of logs) {
       const chunk = readNewText(log.path, offsets.get(log.path) ?? 0);
@@ -154,7 +182,11 @@ describe('devnet RPC quiet-window budget', () => {
         activityHints.push(log.node);
       }
 
-      const windows = parseRpcUsageWindows(log.node, chunk);
+      const { windows, duplicateLines } = parseRpcUsageWindows(log.node, chunk);
+      if (duplicateLines.length > 0) {
+        duplicateNodes.add(log.node);
+        duplicateLineReports.push(...duplicateLines.map((line) => `${log.node}: ${line}`));
+      }
       windowsByNode.set(log.node, windows);
       if (windows.length === 0) {
         missingTelemetry.push(log.node);
@@ -179,27 +211,37 @@ describe('devnet RPC quiet-window budget', () => {
       invalidWindowDurations,
       `rpc_usage window_s mismatch: ${invalidWindowDurations.join(', ')}`,
     ).toEqual([]);
+    expect(
+      duplicateLineReports,
+      `duplicated rpc_usage lines detected in ${[...duplicateNodes].join(', ')} — a daemon.log ` +
+        'double-write regression (shell redirect + in-process tee writing the same file); ' +
+        `see scripts/devnet.sh start_node:\n${duplicateLineReports.join('\n')}`,
+    ).toEqual([]);
     expect(evaluated.length, 'not enough post-warmup rpc_usage windows; increase RPC_QUIET_WINDOW_MS').toBeGreaterThanOrEqual(
       MIN_EVALUATED_WINDOWS * EXPECTED_DEVNET_NODES,
     );
 
+    // Collect every violation across every node/window before asserting, so
+    // one over-budget window cannot mask the rest of the fleet's numbers.
+    const violations: string[] = [];
     for (const window of evaluated) {
       const getLogs = window.byMethod.eth_getLogs ?? 0;
       const chainId = window.byMethod.eth_chainId ?? 0;
       const total = windowTotal(window);
       const label = `${window.node} ${window.timestamp} ${JSON.stringify(window.byMethod)}`;
 
-      expect(getLogs, `${label}: eth_getLogs should be idle except slow context discovery`).toBeLessThanOrEqual(MAX_ETH_GETLOGS);
-      expect(chainId, `${label}: static-network providers should suppress steady eth_chainId`).toBeLessThanOrEqual(MAX_ETH_CHAINID);
-      expect(total, `${label}: total quiet-window RPC volume`).toBeLessThanOrEqual(MAX_TOTAL);
+      if (getLogs > MAX_ETH_GETLOGS) violations.push(`${label}: eth_getLogs=${getLogs} > ${MAX_ETH_GETLOGS} (should be idle except slow context discovery)`);
+      if (chainId > MAX_ETH_CHAINID) violations.push(`${label}: eth_chainId=${chainId} > ${MAX_ETH_CHAINID} (static-network providers should suppress steady eth_chainId)`);
+      if (total > MAX_TOTAL) violations.push(`${label}: total=${total} > ${MAX_TOTAL} (quiet-window RPC volume)`);
     }
+    expect(violations, `lane-aware poller budget violations:\n${violations.join('\n')}`).toEqual([]);
   });
 
   it('parses the committed rpc_usage contract shape used by daemon logs', () => {
     const sample = readFileSync(resolve(import.meta.dirname, 'package.json'), 'utf8');
     expect(sample).toContain('dkg-devnet-rpc-quiet-window');
 
-    const windows = parseRpcUsageWindows(
+    const { windows } = parseRpcUsageWindows(
       'node1',
       '2026-07-04 10:00:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=2 window_s=60 chain=hardhat:31337\n' +
       '2026-07-04 10:00:00 system def [chain-rpc] rpc_usage method=eth_chainId count=0 window_s=60 chain=hardhat:31337\n',
@@ -216,7 +258,7 @@ describe('devnet RPC quiet-window budget', () => {
   });
 
   it('reports rpc_usage windows with unexpected durations', () => {
-    const windows = parseRpcUsageWindows(
+    const { windows } = parseRpcUsageWindows(
       'node1',
       '2026-07-04 10:00:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=2 window_s=10 chain=hardhat:31337\n',
     );
@@ -228,7 +270,7 @@ describe('devnet RPC quiet-window budget', () => {
   });
 
   it('reports mixed rpc_usage durations in the same timestamp bucket', () => {
-    const windows = parseRpcUsageWindows(
+    const { windows } = parseRpcUsageWindows(
       'node1',
       '2026-07-04 10:00:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=2 window_s=60 chain=hardhat:31337\n' +
       '2026-07-04 10:00:00 system def [chain-rpc] rpc_usage method=eth_chainId count=0 window_s=10 chain=hardhat:31337\n',
@@ -249,12 +291,12 @@ describe('devnet RPC quiet-window budget', () => {
   });
 
   it('reports nodes that lack post-warmup rpc_usage windows', () => {
-    const node1 = parseRpcUsageWindows(
+    const { windows: node1 } = parseRpcUsageWindows(
       'node1',
       '2026-07-04 10:00:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=2 window_s=60 chain=hardhat:31337\n' +
       '2026-07-04 10:01:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=1 window_s=60 chain=hardhat:31337\n',
     );
-    const node2 = parseRpcUsageWindows(
+    const { windows: node2 } = parseRpcUsageWindows(
       'node2',
       '2026-07-04 10:00:00 system abc [chain-rpc] rpc_usage method=eth_getLogs count=50 window_s=60 chain=hardhat:31337\n',
     );
@@ -267,5 +309,49 @@ describe('devnet RPC quiet-window budget', () => {
       ['node1', 'node2'],
       1,
     )).toEqual(['node2']);
+  });
+});
+
+describe('rpc_usage parser (deterministic)', () => {
+  it('counts a byte-replayed rpc_usage line once and reports the replay in duplicateLines', () => {
+    const line = '2026-01-01 12:00:00 info: rpc_usage method=eth_call count=4 window_s=60 chain=hardhat:31337';
+    const { windows, duplicateLines } = parseRpcUsageWindows('node1', `${line}\n${line}\n`);
+
+    expect(windows).toHaveLength(1);
+    expect(windows[0].byMethod).toEqual({ eth_call: 4 }); // deduped, NOT 8
+    expect(duplicateLines).toEqual([line]);
+  });
+
+  it('counts two distinct same-second lines fully with no duplicates reported', () => {
+    const differentMethod = parseRpcUsageWindows(
+      'node1',
+      '2026-01-01 12:00:00 info: rpc_usage method=eth_call count=4 window_s=60 chain=hardhat:31337\n' +
+      '2026-01-01 12:00:00 info: rpc_usage method=eth_getLogs count=2 window_s=60 chain=hardhat:31337\n',
+    );
+    expect(differentMethod.windows).toHaveLength(1);
+    expect(differentMethod.windows[0].byMethod).toEqual({ eth_call: 4, eth_getLogs: 2 });
+    expect(differentMethod.duplicateLines).toEqual([]);
+
+    const sameMethodDifferentCount = parseRpcUsageWindows(
+      'node1',
+      '2026-01-01 12:00:00 info: rpc_usage method=eth_call count=4 window_s=60 chain=hardhat:31337\n' +
+      '2026-01-01 12:00:00 info: rpc_usage method=eth_call count=1 window_s=60 chain=hardhat:31337\n',
+    );
+    expect(sameMethodDifferentCount.windows).toHaveLength(1);
+    expect(sameMethodDifferentCount.windows[0].byMethod).toEqual({ eth_call: 5 });
+    expect(sameMethodDifferentCount.duplicateLines).toEqual([]);
+  });
+
+  it('keeps identical method+count repeats across 60s-apart windows as legitimate telemetry', () => {
+    const { windows, duplicateLines } = parseRpcUsageWindows(
+      'node1',
+      '2026-01-01 12:00:00 info: rpc_usage method=eth_call count=4 window_s=60 chain=hardhat:31337\n' +
+      '2026-01-01 12:01:00 info: rpc_usage method=eth_call count=4 window_s=60 chain=hardhat:31337\n',
+    );
+
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({ timestamp: '2026-01-01 12:00:00', byMethod: { eth_call: 4 } });
+    expect(windows[1]).toMatchObject({ timestamp: '2026-01-01 12:01:00', byMethod: { eth_call: 4 } });
+    expect(duplicateLines).toEqual([]);
   });
 });

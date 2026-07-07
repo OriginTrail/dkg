@@ -70,8 +70,18 @@ const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const CONTEXT_GRAPH = 'devnet-test';
 const FINDINGS_PATH = join(__dirname, 'FINDINGS.local.md');
 
-const NODE1_API = 'http://127.0.0.1:9201';
-const NODE5_API = 'http://127.0.0.1:9205'; // edge
+// Derive node API URLs from each node's devnet config instead of hardcoding
+// the default ports, so the suite honors an API_PORT_BASE-rebased devnet
+// (needed when another local service occupies the 9201.. range).
+function nodeApiUrl(num: number): string {
+  const configPath = join(DEVNET_DIR, `node${num}`, 'config.json');
+  const apiPort = existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, 'utf8')).apiPort ?? 9200 + num)
+    : 9200 + num;
+  return `http://127.0.0.1:${apiPort}`;
+}
+const NODE1_API = nodeApiUrl(1);
+const NODE5_API = nodeApiUrl(5); // edge
 
 const HUB_ABI = [
   'function getContractAddress(string) view returns (address)',

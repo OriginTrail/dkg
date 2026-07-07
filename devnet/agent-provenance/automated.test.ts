@@ -36,7 +36,7 @@
  * drives the OLD `PublishingConvictionAccount` contract; V10 publish
  * uses `DKGPublishingConvictionNFT`. There is no CLI surface for the
  * NFT yet. Mode (a) here drives the NFT contract directly via JSON-RPC
- * and uses the CLI only for the actual `dkg publish` call. The CLI
+ * and uses the CLI only for the actual `dkg ka` publish flow. The CLI
  * gap is filed as a follow-up task in the DKG.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -44,6 +44,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -350,51 +351,47 @@ function runDkgCli(node: DevnetNode, args: string[], timeoutMs = 60_000): Promis
   });
 }
 
-/** Run `dkg publish` and return the parsed { kaId, status, txHash } it printed. */
+/** Run `dkg ka create --share` + `dkg ka publish` and return the parsed { kaId, status, txHash }
+ *  (status lowercased — every caller here compares via .toLowerCase()). */
+let publishSeq = 0;
+
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
 ): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI (`ka create --share` stages WM -> finalize -> SWM, then
+  // `ka publish` lands SWM -> VM on-chain) — argument arrays + Status:/KA ID:/
+  // Tx hash: stdout parsing live in the shared runKaPublishLifecycle
+  // (../_bootstrap/harness); this suite keeps its own 5-node CLI spawn.
+  const publishArgs: string[] = [];
   if (options.publisherNodeIdentityId !== undefined) {
-    args.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
+    publishArgs.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
   }
-  const result = await runDkgCli(node, args);
-  if (result.code !== 0) {
-    throw new Error(
-      `dkg publish failed (exit ${result.code})\n` +
-      `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
-    );
-  }
-  // Parse the human-readable output. The CLI prints "Status: confirmed",
-  // "KC ID: <n>", "TX hash: 0x..."  (lines vary slightly across statuses).
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
-  const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `cli-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: contextGraph,
+    inputFile: filePath,
+    publishArgs,
+  });
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
   // status to a known success value and require a positive on-chain kaId so an
   // 'unknown'/failed status — or a missing id (e.g. a "KC ID:" → "KA ID:" output
-  // rename that drifts past this regex after the KC→KA transition) — fails
+  // rename that drifts past the helper's regex after the KC→KA transition) — fails
   // loudly here instead of slipping through every caller as a green publish.
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
-  ).toContain(status.toLowerCase());
+    `ka publish status="${result.status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
+  ).toContain(result.status);
   expect(
-    kaId,
-    `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`,
+    result.kaId,
+    `ka publish surfaced no positive "KA ID:" (kaId=${result.kaId})\n${result.raw}`,
   ).toBeGreaterThan(0n);
-  return {
-    status,
-    kaId,
-    txHash: txMatch ? txMatch[1] : undefined,
-    raw: result.stdout,
-  };
+  return result;
 }
 
 async function loadContractAddresses(provider: ethers.JsonRpcProvider, hubAddress: string) {
@@ -649,7 +646,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   //      `hardhat_setStorageAt`. ETH is untouched — daemon can still
   //      pay gas. After this step `sumOpBalances(edge) == 0n`.
   //
-  // Action: edge runs `dkg publish` naming core1 for attribution. The
+  // Action: edge runs the `dkg ka` publish flow naming core1 for attribution. The
   // daemon will pick one of the now-zero-TRAC op wallets as `msg.sender`
   // for `KAV10.publish()`. The conviction branch fires
   // (`agentToAccountId[msg.sender] != 0`, `epochs == lockDurationEpochs`,

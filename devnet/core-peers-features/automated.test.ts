@@ -46,6 +46,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -261,25 +262,33 @@ function makeWitnessFile(name: string): { path: string; subject: string; literal
   return { path, subject, literal };
 }
 
+let publishSeq = 0;
+
 async function publishFromCore(node: DevnetNode, name: string): Promise<{ subject: string; literal: string; kaId?: string; status: string }> {
   const witness = makeWitnessFile(name);
-  const result = await runDkgCli(node, ['publish', CONTEXT_GRAPH, '--file', witness.path]);
-  if (result.code !== 0) {
-    throw new Error(`publish failed (exit ${result.code}) stdout=${result.stdout} stderr=${result.stderr}`);
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1]?.toLowerCase() ?? 'unknown';
-  const kaId = /KC ID:\s*(\d+)/i.exec(result.stdout)?.[1];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI (`ka create --share` then `ka publish`) — argument arrays +
+  // Status:/KA ID: stdout parsing live in the shared runKaPublishLifecycle
+  // (../_bootstrap/harness), which returns status lowercased; this suite keeps
+  // its own CLI spawn (120s timeout).
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `cpf-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: CONTEXT_GRAPH,
+    inputFile: witness.path,
+  });
+  const status = result.status;
+  const kaId = result.kaId !== undefined ? String(result.kaId) : undefined;
   // Greedy publish-outcome gate: exit 0 is not proof of a real publish. Pin a
   // known success status and a positive kaId so a failed/'unknown' status or a
-  // missing "KC ID:" line fails here instead of passing as a green publish.
+  // missing "KA ID:" line fails here instead of passing as a green publish.
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
   ).toContain(status);
   expect(
     BigInt(kaId ?? '0'),
-    `publish surfaced no positive "KC ID:" (kaId="${kaId}")\n${result.stdout}`,
+    `publish surfaced no positive "KA ID:" (kaId="${kaId}")\n${result.raw}`,
   ).toBeGreaterThan(0n);
   return { subject: witness.subject, literal: witness.literal, kaId, status };
 }
@@ -513,7 +522,7 @@ describe('Phase D — Cores host public CGs and fill their own gaps', () => {
     //           event for this ka id, or a `chain-promote action=…` daemon.log
     //           line naming it. This rules out a coincidental non-chain path.
     //    `already` is NOT accepted (it means the KA was present pre-restart).
-    expect(pub.kaId, 'gap publish did not report a KC ID — cannot pin chain-path evidence').toBeTruthy();
+    expect(pub.kaId, 'gap publish did not report a KA ID — cannot pin chain-path evidence').toBeTruthy();
     const kaId = pub.kaId!;
     const chainActions = new Set(['fetch', 'promote', 'core-fill']);
     const filled = await waitFor(

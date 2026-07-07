@@ -40,7 +40,7 @@ sequence per mode, including:
 
 - **Setup** — what fixtures (PCAs, `authorizedKeys`, identities) the
   mode requires before any `publish` call.
-- **Action** — the actual `dkg publish` (or HTTP) call.
+- **Action** — the actual `dkg ka` publish (or HTTP) call.
 - **Assertions** — the on-chain reads + log checks that ratify the
   mode succeeded with the right authorship / attribution / payment
   shape.
@@ -269,7 +269,7 @@ option — explicit `0n` proceeds on-chain.
 - `KnowledgeAssetCreated` event has `author = edge.agent`,
   emitted with `publisherNodeIdentityId = 0` (verifiable via the
   `merkleRoots` accessor: the on-chain attribution field is `0`).
-- `dkg publish` returns `Status: confirmed` (not `tentative`).
+- `dkg ka publish` returns `Status: confirmed` (not `tentative`).
 
 ### Negative case: unauthorized PCA fall-through
 
@@ -284,7 +284,7 @@ option — explicit `0n` proceeds on-chain.
 
 # Action — publish from a fresh wallet not on the allowlist.
 # Use `dkg publisher wallet add <pk>` on node5 first to enroll a
-# fresh signing wallet, then drive `dkg publish`. Do NOT pass that
+# fresh signing wallet, then drive `dkg ka publish`. Do NOT pass that
 # fresh wallet through `node1 pca authorize` — that would defeat
 # the purpose. Verify with `node1 pca info 1 --probe-key <addr>`
 # that `authorized: false` BEFORE the publish.

@@ -646,7 +646,7 @@ while true; do
     rm -f "$DEVNET_DIR/node${RESTART_NODE}/daemon.pid"
     DKG_HOME="$DEVNET_DIR/node${RESTART_NODE}" DKG_NO_BLUE_GREEN=1 \
       node "$CLI_JS" start --foreground \
-      >> "$DEVNET_DIR/node${RESTART_NODE}/daemon.log" 2>&1 &
+      >> "$DEVNET_DIR/node${RESTART_NODE}/console.log" 2>&1 &
     new_pid=$!
     echo "$new_pid" > "$pidfile"
     log "  restarted node ${RESTART_NODE} pid=$new_pid; verifying API readiness..."

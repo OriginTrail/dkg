@@ -6,7 +6,7 @@
  *
  *   - `createAccount` no longer distributes the committed TRAC upfront. It
  *     sits in escrow against per-billing-window budgets.
- *   - Active sink: `coverPublishingCost` (driven through `dkg publish` via
+ *   - Active sink: `coverPublishingCost` (driven through `dkg ka publish` via
  *     a registered agent) distributes `discountedCost` across the published
  *     KC's chain-epoch range and increments `windowSpent[acct][currentWindow]`.
  *   - Passive sink: after a billing window closes, `settle(accountId)`
@@ -26,7 +26,7 @@
  *   "first publish on window 0" assertions racey. We mint a SECOND PCA with
  *   a fresh agent EOA so the windowSpent[acct][0] === 0 precondition holds.
  *
- * Why use direct ABI calls + `dkg publish` (no new HTTP routes)?
+ * Why use direct ABI calls + `dkg ka publish` (no new HTTP routes)?
  *   The node operator's official surface for PCA discount is "publish via
  *   an agent that's registered on the NFT" — there is no `/api/pca` route
  *   for the V10 NFT yet (the existing one drives the legacy V9 contract).
@@ -39,6 +39,7 @@ import { readFileSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -255,11 +256,11 @@ function nquadsFile(name: string): string {
   return p;
 }
 
-async function dkgPublish(node: DevnetNode, file: string): Promise<{ kaId: bigint; txHash: string }> {
+function runCliOnce(node: DevnetNode, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((res, rej) => {
     const child = spawn(
       process.execPath,
-      [join(REPO_ROOT, 'packages/cli/dist/cli.js'), 'publish', CONTEXT_GRAPH, '--file', file],
+      [join(REPO_ROOT, 'packages/cli/dist/cli.js'), ...args],
       {
         cwd: REPO_ROOT,
         env: {
@@ -274,40 +275,45 @@ async function dkgPublish(node: DevnetNode, file: string): Promise<{ kaId: bigin
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      rej(new Error(`dkg publish timeout (90s)\nstdout: ${stdout}\nstderr: ${stderr}`));
+      rej(new Error(`dkg ${args.join(' ')} timeout (90s)\nstdout: ${stdout}\nstderr: ${stderr}`));
     }, 90_000);
     child.stdout?.on('data', (d) => { stdout += d.toString(); });
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code !== 0) {
-        rej(new Error(`dkg publish exit=${code}\nstdout: ${stdout}\nstderr: ${stderr}`));
-        return;
-      }
-      const status = /Status:\s*(\w+)/i.exec(stdout)?.[1]?.toLowerCase() ?? 'unknown';
-      const kcMatch = /KC ID:\s*(\d+)/i.exec(stdout);
-      const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(stdout);
-      if (!kcMatch || !txMatch) {
-        rej(new Error(`could not parse publish output\n${stdout}`));
-        return;
-      }
-      // Greedy publish-outcome gate: exit 0 is not proof of a real publish.
-      // Require a known success status and a positive kaId so a failed/tentative
-      // publish (whose receipt could otherwise drive the CostCovered / lazy-settle
-      // assertions against the wrong tx) is rejected here, not silently accepted.
-      const publishOk = ['confirmed', 'finalized', 'tentative'];
-      if (!publishOk.includes(status)) {
-        rej(new Error(`dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${stdout}`));
-        return;
-      }
-      const kaId = BigInt(kcMatch[1]!);
-      if (kaId <= 0n) {
-        rej(new Error(`dkg publish surfaced non-positive kaId=${kaId}\n${stdout}`));
-        return;
-      }
-      res({ kaId, txHash: txMatch[1]! });
+      res({ code: code ?? -1, stdout, stderr });
     });
   });
+}
+
+let publishSeq = 0;
+
+async function dkgPublish(node: DevnetNode, file: string): Promise<{ kaId: bigint; txHash: string }> {
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI (`ka create --share` then `ka publish`) — the two-step
+  // argument/stdout contract now lives in the shared runKaPublishLifecycle
+  // helper (devnet/_bootstrap/harness.ts); status is returned lowercased.
+  const kaName = `cls-pub-${Date.now().toString(36)}-${++publishSeq}`;
+  const result = await runKaPublishLifecycle((args) => runCliOnce(node, args), {
+    kaName,
+    contextGraphId: CONTEXT_GRAPH,
+    inputFile: file,
+  });
+  if (result.kaId === undefined || !result.txHash) {
+    throw new Error(`could not parse publish output\n${result.raw}`);
+  }
+  // Greedy publish-outcome gate: exit 0 is not proof of a real publish.
+  // Require a known success status and a positive kaId so a failed/tentative
+  // publish (whose receipt could otherwise drive the CostCovered / lazy-settle
+  // assertions against the wrong tx) is rejected here, not silently accepted.
+  const publishOk = ['confirmed', 'finalized', 'tentative'];
+  if (!publishOk.includes(result.status)) {
+    throw new Error(`ka publish status="${result.status}", expected one of ${publishOk.join('/')}\n${result.raw}`);
+  }
+  if (result.kaId <= 0n) {
+    throw new Error(`ka publish surfaced non-positive kaId=${result.kaId}\n${result.raw}`);
+  }
+  return { kaId: result.kaId, txHash: result.txHash };
 }
 
 async function rawTxNonce(provider: ethers.JsonRpcProvider, addr: string): Promise<number> {
@@ -358,7 +364,7 @@ describe('V10 PCA lazy settlement — devnet validation', () => {
   beforeAll(async () => {
     state.s = await loadContracts();
     // Use a CORE node (node 2). Edge nodes don't have an on-chain identity
-    // by default and `dkg publish` short-circuits to status="tentative" with
+    // by default and `dkg ka publish` short-circuits to status="tentative" with
     // kaId=0 — we need an actual on-chain confirmation to assert the active
     // sink (the discounted cost lands in EpochStorage via the conviction
     // path). Node 1 is reserved for RS in the v10-end-to-end run; node 2

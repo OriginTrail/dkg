@@ -454,7 +454,8 @@ stop_node_inline() {
 }
 
 # Re-spawn a single core node using the same invocation devnet.sh
-# uses (DKG_HOME=<node_dir>, foreground, log → daemon.log). Waits for
+# uses (DKG_HOME=<node_dir>, foreground, shell output → console.log;
+# the daemon tees its own stream into daemon.log in-process). Waits for
 # the API to respond. Returns 0 on ready, non-zero on timeout.
 start_node_inline() {
   local n="$1"
@@ -468,7 +469,7 @@ start_node_inline() {
   log "  Spawning node $n..."
   DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
     node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    >> "$node_dir/daemon.log" 2>&1 &
+    >> "$node_dir/console.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$pidf"
   local port; port=$(node_port "$n")

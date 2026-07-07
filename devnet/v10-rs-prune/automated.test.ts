@@ -36,6 +36,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -63,6 +64,7 @@ interface ScenarioState {
   randomSampling: ethers.Contract;
   chronos: ethers.Contract;
   cgName: string;
+  cgCanonicalId: string;
   cgId: bigint;
   liveKaId: bigint;
   floodKaIds: bigint[];
@@ -143,15 +145,21 @@ async function publish(node: DevnetNode, cg: string, name: string, epochs: numbe
     `<${subject}> <https://schema.org/name> "${name}" <did:dkg:context-graph:${cg}> .\n` +
       `<${subject}> <https://schema.org/description> "rs-prune devnet scenario" <did:dkg:context-graph:${cg}> .\n`,
   );
-  const r = await runDkgCli(node, ['publish', cg, '--file', file, '--publish-epochs', String(epochs)]);
-  if (r.code !== 0) {
-    throw new Error(`publish ${name} failed (exit ${r.code})\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
-  }
-  const status = (/Status:\s*(\w+)/i.exec(r.stdout)?.[1] ?? 'unknown').toLowerCase();
-  expect(['confirmed', 'finalized', 'tentative'], `publish ${name} status=${status}\n${r.stdout}`).toContain(status);
-  const kaId = /KC ID:\s*(\d+)/i.exec(r.stdout)?.[1];
-  expect(kaId, `publish ${name} surfaced no KC ID\n${r.stdout}`).toBeTruthy();
-  return BigInt(kaId!);
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI (`ka create --share` then `ka publish`) — the two-step
+  // argument/stdout contract now lives in the shared runKaPublishLifecycle
+  // helper (devnet/_bootstrap/harness.ts); status is returned lowercased.
+  // `name` is already unique per call (live/flood-N), so it doubles as the
+  // KA name.
+  const r = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: name,
+    contextGraphId: cg,
+    inputFile: file,
+    publishArgs: ['--publish-epochs', String(epochs)],
+  });
+  expect(['confirmed', 'finalized', 'tentative'], `ka publish ${name} status=${r.status}\n${r.raw}`).toContain(r.status);
+  expect(r.kaId, `ka publish ${name} surfaced no KA ID\n${r.raw}`).toBeDefined();
+  return r.kaId!;
 }
 
 async function timeWarpSeconds(provider: ethers.JsonRpcProvider, seconds: number): Promise<void> {
@@ -167,7 +175,9 @@ describe('V10 RS prune keeper — flood → expire → prune → reconciler-safe
     }
     const provider = new ethers.JsonRpcProvider(RPC, undefined, { staticNetwork: true });
     const contractsPath = join(REPO_ROOT, 'packages/evm-module/deployments/localhost_contracts.json');
-    const hubAddress: string = JSON.parse(readFileSync(contractsPath, 'utf8')).Hub.evmAddress;
+    // The deploy writes { contracts: { Hub: { evmAddress } } } (schema since the
+    // localhost_contracts.json consolidation) — read through the wrapper.
+    const hubAddress: string = JSON.parse(readFileSync(contractsPath, 'utf8')).contracts.Hub.evmAddress;
     const hub = new ethers.Contract(
       hubAddress,
       ['function getContractAddress(string) view returns (address)', 'function getAssetStorageAddress(string) view returns (address)'],
@@ -199,17 +209,39 @@ describe('V10 RS prune keeper — flood → expire → prune → reconciler-safe
     state.floodKaIds = [];
 
     await ensureIdentity(state.node);
-  }, 120_000);
+
+    // The retired one-shot `dkg publish` auto-created its context graph; the
+    // #1410 `ka` lifecycle requires an existing, ON-CHAIN-registered CG (the
+    // flood publishes to VM). Create + register it once up front.
+    const cgCreate = await runDkgCli(state.node, ['context-graph', 'create', state.cgName, '--name', state.cgName]);
+    if (cgCreate.code !== 0) {
+      throw new Error(`context-graph create failed (exit ${cgCreate.code})\nstdout: ${cgCreate.stdout}\nstderr: ${cgCreate.stderr}`);
+    }
+    // A curated CG's canonical id is "<curatorAddress>/<slug>" — register and
+    // publishes must use the canonical form from create's output. Keep cgName
+    // (the slug) for KA names/filenames: the "/" would break both.
+    const canonicalId = /^\s*ID:\s+(.+)$/m.exec(cgCreate.stdout)?.[1]?.trim();
+    if (!canonicalId) {
+      throw new Error(`could not parse context graph ID from:\n${cgCreate.stdout}`);
+    }
+    state.cgCanonicalId = canonicalId;
+    // Inner CLI timeout must stay below the hook budget (420s) or vitest's
+    // opaque hook timeout fires before this call's pointed error can.
+    const cgRegister = await runDkgCli(state.node, ['context-graph', 'register', state.cgCanonicalId], 240_000);
+    if (cgRegister.code !== 0) {
+      throw new Error(`context-graph register failed (exit ${cgRegister.code})\nstdout: ${cgRegister.stdout}\nstderr: ${cgRegister.stderr}`);
+    }
+  }, 420_000);
 
   it('publishes a live KA + a flood of 1-epoch KAs; both per-CG lists mirror on-chain', async () => {
     const s = state as ScenarioState;
     // Live KA first → it lands at sampling index 0 and is never swapped out.
-    s.liveKaId = await publish(s.node, s.cgName, `${s.cgName}-live`, LIVE_EPOCHS);
+    s.liveKaId = await publish(s.node, s.cgCanonicalId, `${s.cgName}-live`, LIVE_EPOCHS);
     s.cgId = await s.contextGraphStorage.kaToContextGraph(s.liveKaId);
     expect(s.cgId, 'live KA has no CG binding').toBeGreaterThan(0n);
 
     for (let i = 0; i < FLOOD; i++) {
-      const ka = await publish(s.node, s.cgName, `${s.cgName}-flood-${i}`, 1);
+      const ka = await publish(s.node, s.cgCanonicalId, `${s.cgName}-flood-${i}`, 1);
       s.floodKaIds.push(ka);
       expect(await s.contextGraphStorage.kaToContextGraph(ka)).to.equal(s.cgId);
     }
