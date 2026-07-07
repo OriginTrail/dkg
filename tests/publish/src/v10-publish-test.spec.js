@@ -118,7 +118,7 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
         publishSuccess++;
         if (!firstSuccessfulRootEntity) firstSuccessfulRootEntity = rootEntity;
       } catch (error) {
-        logError(error, NODE_NAME, step, errorStats, kaNumber);
+        await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
         failedAssets.push(`KA #${kaNumber} (Publish failed — kaId: ${kaId || 'N/A'})`);
         publishFail++;
 
@@ -153,7 +153,7 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
         console.log(`✅ Asset Query succeeded`);
         assetQuerySuccess++;
       } catch (error) {
-        logError(error, NODE_NAME, step, errorStats, kaNumber);
+        await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
         failedAssets.push(`KA #${kaNumber} (Asset Query failed — kaId: ${kaId})`);
         assetQueryFail++;
       }
@@ -181,7 +181,7 @@ SELECT ?s ?name ?description WHERE {
         console.log(`✅ Global Query succeeded`);
         querySuccess++;
       } catch (error) {
-        logError(error, NODE_NAME, step, errorStats, kaNumber);
+        await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
         failedAssets.push(`KA #${kaNumber} (Global Query failed — kaId: ${kaId})`);
         queryFail++;
       }

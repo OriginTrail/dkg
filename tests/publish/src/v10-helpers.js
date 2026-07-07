@@ -148,7 +148,17 @@ async function httpRequest(method, path, body, { acceptStatuses } = {}) {
   if (DKG_AUTH_TOKEN) headers['Authorization'] = `Bearer ${DKG_AUTH_TOKEN}`;
   const opts = { method, headers };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch(`${DKG_API_URL}${path}`, opts);
+  let res;
+  try {
+    res = await fetch(`${DKG_API_URL}${path}`, opts);
+  } catch (e) {
+    // "TypeError: fetch failed" hides the real transport error in e.cause —
+    // surface it in the message so every log/summary shows the actual reason.
+    const err = new Error(`${method} ${path} on ${DKG_API_URL} got no HTTP response: ${summarizeCause(e) || e.message}`);
+    err.cause = e.cause ?? e;
+    err.network = true;
+    throw err;
+  }
   const data = await res.json().catch(() => ({ error: res.statusText }));
   const ok = acceptStatuses ? acceptStatuses.includes(res.status) : res.ok;
   if (!ok) {
@@ -211,6 +221,143 @@ export async function httpQuery(sparql, contextGraphId, view = 'verifiable-memor
 }
 
 // ---------------------------------------------------------------------------
+// Deep error diagnostics. Node's fetch reports every transport failure as
+// "TypeError: fetch failed" and hides the real reason in `error.cause`
+// (ECONNREFUSED / ETIMEDOUT / ECONNRESET / undici UND_ERR_*). These helpers
+// unwrap the cause chain into a specific message, classify it in operator
+// terms, re-probe the node, and pull the node's OWN server logs from Loki so
+// the Jenkins console shows what the server was doing at failure time.
+// ---------------------------------------------------------------------------
+
+const LOKI_URL = (process.env.V10_LOKI_URL || 'http://100.81.85.62:3100').replace(/\/$/, '');
+const GRAFANA_URL = (process.env.V10_GRAFANA_URL || 'http://100.81.85.62:3000').replace(/\/$/, '');
+const SERVER_LOGS = String(process.env.V10_SERVER_LOGS || 'true').toLowerCase() !== 'false';
+
+// Walk error.cause (and AggregateError.errors) into flat descriptors.
+export function unwrapCauseChain(error) {
+  const out = [];
+  const seen = new Set();
+  const visit = (e, depth) => {
+    if (!e || depth > 6 || seen.has(e)) return;
+    seen.add(e);
+    out.push({
+      name: e.name || 'Error',
+      code: e.code || null,
+      syscall: e.syscall || null,
+      address: e.address || null,
+      port: e.port || null,
+      message: e.message || String(e),
+    });
+    if (Array.isArray(e.errors)) e.errors.forEach((sub) => visit(sub, depth + 1)); // AggregateError
+    if (e.cause) visit(e.cause, depth + 1);
+  };
+  if (error?.cause) visit(error.cause, 0);
+  else if (error && (error.code || Array.isArray(error.errors))) visit(error, 0);
+  return out;
+}
+
+// code → what it actually means for THIS setup, in operator terms.
+const NETWORK_DIAGNOSES = {
+  ECONNREFUSED: (t) => `connection REFUSED at ${t} — the machine is reachable but nothing is listening on that port: the node daemon is DOWN (or listening on a different port).`,
+  ETIMEDOUT: (t) => `connect TIMEOUT to ${t} — no answer from the host at all: the node machine is offline/unreachable, or the VPN (Tailscale) path between the Jenkins agent and the node is down.`,
+  UND_ERR_CONNECT_TIMEOUT: (t) => `connect TIMEOUT to ${t} — no answer from the host at all: the node machine is offline/unreachable, or the VPN (Tailscale) path between the Jenkins agent and the node is down.`,
+  EHOSTUNREACH: (t) => `host UNREACHABLE (${t}) — no network route: VPN (Tailscale) down on the Jenkins agent, or the node dropped off the tailnet.`,
+  ENETUNREACH: (t) => `network UNREACHABLE (${t}) — the Jenkins agent has no route (its VPN/interface is down).`,
+  ECONNRESET: (t) => `connection RESET by ${t} mid-request — the daemon accepted the request and then the socket died: daemon crash/restart or OOM-kill while handling it. The server logs right before this moment are the evidence.`,
+  UND_ERR_SOCKET: (t) => `socket closed by ${t} mid-request — the daemon accepted the request and then the connection died: daemon crash/restart while handling it. Check the server logs right before this moment.`,
+  EPIPE: (t) => `broken pipe to ${t} — connection died while sending the request body.`,
+  ENOTFOUND: (t) => `DNS lookup failed for ${t} — hostname does not resolve on the Jenkins agent.`,
+  EAI_AGAIN: (t) => `transient DNS failure for ${t} on the Jenkins agent.`,
+  UND_ERR_HEADERS_TIMEOUT: (t) => `the node at ${t} ACCEPTED the connection but never sent response headers — daemon wedged/overloaded (request may appear in server logs without a response).`,
+  UND_ERR_BODY_TIMEOUT: (t) => `the node at ${t} started responding but stalled mid-body — daemon wedged/overloaded.`,
+  ABORT_ERR: (t) => `request to ${t} aborted by the test's own timeout — the node did not answer in time (wedged or very slow). Server logs may show the request arriving.`,
+};
+
+// Human summary of the deepest useful cause, e.g. "connect ETIMEDOUT 100.100.87.86:9200".
+export function summarizeCause(error) {
+  const chain = unwrapCauseChain(error);
+  if (!chain.length) return null;
+  const best = chain.find((c) => c.code) || chain[chain.length - 1];
+  const target = best.address ? `${best.address}${best.port ? `:${best.port}` : ''}` : '';
+  return [best.syscall, best.code, target].filter(Boolean).join(' ') || best.message;
+}
+
+export function describeError(error, targetUrl = '') {
+  const chain = unwrapCauseChain(error);
+  const causeLines = chain.map((c) => {
+    const parts = [`${c.name}${c.code ? ` ${c.code}` : ''}`];
+    if (c.syscall) parts.push(`syscall=${c.syscall}`);
+    if (c.address) parts.push(`target=${c.address}${c.port ? `:${c.port}` : ''}`);
+    if (!c.code && c.message) parts.push(c.message);
+    return parts.join(' | ');
+  });
+  const codes = chain.map((c) => c.code).filter(Boolean);
+  const code = codes[0]
+    || (error?.name === 'AbortError' ? 'ABORT_ERR' : null)
+    || (/^timeout after/i.test(error?.message || '') ? 'ABORT_ERR' : null);
+  const best = chain.find((c) => c.code) || {};
+  const target = best.address ? `${best.address}${best.port ? `:${best.port}` : ''}` : (targetUrl || 'the node');
+  const diagnose = code && NETWORK_DIAGNOSES[code];
+  const isNetwork = Boolean(error?.network || (!error?.statusCode && (chain.length || /fetch failed/i.test(error?.message || ''))));
+  return { causeLines, code, diagnosis: diagnose ? diagnose(target) : null, isNetwork };
+}
+
+// Re-check the node's public /api/status RIGHT NOW — distinguishes "node is
+// down" from "one-off blip during that request".
+export async function probeNode(baseUrl) {
+  if (!baseUrl) return null;
+  try {
+    const res = await fetch(`${baseUrl}/api/status`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { alive: false, detail: `HTTP ${res.status} from /api/status` };
+    const d = await res.json().catch(() => ({}));
+    return { alive: true, detail: `/api/status OK (version ${d.version || '?'}, peers ${d.connectedPeers ?? '?'}) — node is UP now, so the failure was transient` };
+  } catch (e) {
+    return { alive: false, detail: `/api/status also failing (${summarizeCause(e) || e.message}) — node API is DOWN right now, not a one-off blip` };
+  }
+}
+
+// Pull the node's own recent WARN/ERROR server logs around the failure from
+// Loki (fail-soft: diagnostics must never break the test itself).
+export async function fetchServerLogs(nodeName, whenMs) {
+  if (!SERVER_LOGS) return null;
+  const q = async (logql, limit) => {
+    const params = new URLSearchParams({
+      query: logql,
+      start: String((whenMs - 10 * 60e3) * 1e6),
+      end: String((whenMs + 60e3) * 1e6),
+      limit: String(limit),
+      direction: 'backward',
+    });
+    const res = await fetch(`${LOKI_URL}/loki/api/v1/query_range?${params}`, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) throw new Error(`Loki HTTP ${res.status}`);
+    const data = await res.json();
+    const entries = (data?.data?.result || []).flatMap((s) =>
+      (s.values || []).map(([ns, line]) => ({
+        ts: new Date(Number(ns) / 1e6).toISOString(),
+        level: s.stream?.severity_text || s.stream?.detected_level || '',
+        line,
+      })));
+    entries.sort((a, b) => (a.ts < b.ts ? -1 : 1));
+    return entries;
+  };
+  try {
+    const errors = await q(`{service_instance_id="${nodeName}"} | severity_text=~\`WARN|ERROR\``, 12);
+    if (errors.length) return { lines: errors, note: `last ${errors.length} WARN/ERROR server log line(s) from ${nodeName} in the 10 min before the failure:` };
+    const any = await q(`{service_instance_id="${nodeName}"}`, 5);
+    if (any.length) {
+      return { lines: any, note: `no WARN/ERROR on the ${nodeName} server in this window — its last activity (any level):` };
+    }
+    return { lines: [], note: `${nodeName} shipped NO server logs at all in this window — the node process/host (or its log pipeline) looks down.` };
+  } catch (e) {
+    return { lines: [], note: `server-log lookup unavailable (${e.message}) — open Grafana link below instead.` };
+  }
+}
+
+export function grafanaLogsLink(nodeName, whenMs) {
+  return `${GRAFANA_URL}/d/dkg-node-logs?var-node=${encodeURIComponent(nodeName)}&from=${whenMs - 15 * 60e3}&to=${whenMs + 5 * 60e3}`;
+}
+
+// ---------------------------------------------------------------------------
 // Error categorization (V10 patterns) + logError (mirrors V9 / V8)
 // ---------------------------------------------------------------------------
 
@@ -252,7 +399,11 @@ export function normalizeErrorMessage(message) {
     .trim();
 }
 
-export function logError(error, nodeName, step, errorStats, kaNumber = null) {
+// diag (optional): { baseUrl } — the failing node's API base URL, enables the
+// live re-probe. Async because it may pull the node's server logs from Loki;
+// all diagnostics are fail-soft and add ~1-8s only on the error path.
+export async function logError(error, nodeName, step, errorStats, kaNumber = null, diag = {}) {
+  const when = Date.now();
   console.log(`\n❌ Error on ${nodeName} during ${step}`);
   console.log(`Type: ${error.name}`);
 
@@ -262,13 +413,41 @@ export function logError(error, nodeName, step, errorStats, kaNumber = null) {
   }
   console.log(`Message: ${cleanMessage}`);
 
+  // --- deep diagnostics: real cause, plain-English meaning, live state ------
+  const desc = describeError(error, diag.baseUrl);
+  for (const line of desc.causeLines) console.log(`Cause: ${line}`);
+  if (error.statusCode) {
+    console.log(`Diagnosis: HTTP ${error.statusCode} returned BY the node — the request reached the server, and the message above is the server's own error. The server logs below cover this request.`);
+  } else if (desc.diagnosis) {
+    console.log(`Diagnosis: ${desc.diagnosis}`);
+  }
+  if (desc.isNetwork && !error.statusCode) {
+    console.log(`Note: transport-level failure — the request never got an HTTP response, so there is no per-request server log entry; the server logs below show what the node was doing at the time instead.`);
+  }
+  try {
+    if (diag.baseUrl) {
+      const probe = await probeNode(diag.baseUrl);
+      if (probe) console.log(`Node probe: ${probe.detail}`);
+    }
+    const serverLogs = await fetchServerLogs(nodeName, when);
+    if (serverLogs) {
+      console.log(`Server logs: ${serverLogs.note}`);
+      for (const l of serverLogs.lines) console.log(`   ${l.ts} [${l.level || '?'}] ${String(l.line).slice(0, 300)}`);
+      console.log(`Grafana (this node, this window): ${grafanaLogsLink(nodeName, when)}`);
+    }
+  } catch { /* diagnostics never fail the test */ }
+
   if (!errorStats[nodeName]) errorStats[nodeName] = {};
 
   const cleanErrorMessage = normalizeErrorMessage(error.message.split('\n')[0]);
   const service = categorizeErrorService(error);
 
-  const aggregatedKey = `${step} — ${error.name}: ${cleanErrorMessage}`;
-  let detailedKey = `${step} — ${error.name}: ${cleanErrorMessage}`;
+  // fold the real network cause into the summary key so the end-of-run error
+  // breakdown says "fetch failed [connect ETIMEDOUT 100.x:9200]" not just
+  // "fetch failed"
+  const causeSuffix = !error.statusCode && desc.code ? ` [${summarizeCause(error) || desc.code}]` : '';
+  const aggregatedKey = `${step} — ${error.name}: ${cleanErrorMessage}${causeSuffix}`;
+  let detailedKey = `${step} — ${error.name}: ${cleanErrorMessage}${causeSuffix}`;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 
   if (!errorStats[nodeName].aggregated) errorStats[nodeName].aggregated = {};

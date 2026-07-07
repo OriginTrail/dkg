@@ -32,6 +32,7 @@ import {
   safeRate,
   formatDuration,
   logError,
+  summarizeCause,
 } from './v10-helpers.js';
 
 const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
@@ -103,7 +104,17 @@ export function makeNodeClient(baseUrl, token) {
     if (token) headers['Authorization'] = `Bearer ${String(token).trim()}`;
     const opts = { method, headers };
     if (body !== undefined) opts.body = JSON.stringify(body);
-    const res = await fetch(`${baseUrl}${path}`, opts);
+    let res;
+    try {
+      res = await fetch(`${baseUrl}${path}`, opts);
+    } catch (e) {
+      // "TypeError: fetch failed" hides the real transport error in e.cause —
+      // surface it in the message so every log/summary shows the actual reason.
+      const err = new Error(`${method} ${path} on ${baseUrl} got no HTTP response: ${summarizeCause(e) || e.message}`);
+      err.cause = e.cause ?? e;
+      err.network = true;
+      throw err;
+    }
     const data = await res.json().catch(() => ({ error: res.statusText }));
     const ok = acceptStatuses ? acceptStatuses.includes(res.status) : res.ok;
     if (!ok) {
@@ -364,7 +375,7 @@ export function defineChainPublishSuite(config) {
             }
             publishSuccess++;
           } catch (error) {
-            logError(error, name, step, errorStats, i + 1);
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             console.log(`❌ Publish failed | No UAL`);
             failedAssets.push(`KA #${i + 1} (Publish failed)`);
             publishFail++;
@@ -397,7 +408,7 @@ export function defineChainPublishSuite(config) {
             console.log(`✅ Query succeeded`);
             querySuccess++;
           } catch (error) {
-            logError(error, name, step, errorStats, i + 1);
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (Query failed)`);
             queryFail++;
           } finally {
@@ -421,7 +432,7 @@ export function defineChainPublishSuite(config) {
             console.log(`✅ VM GET succeeded`);
             vmGetSuccess++;
           } catch (error) {
-            logError(error, name, step, errorStats, i + 1);
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (VM GET failed)`);
             vmGetFail++;
           } finally {
@@ -446,7 +457,7 @@ export function defineChainPublishSuite(config) {
             console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
             queryRemoteSuccess++;
           } catch (error) {
-            logError(error, name, step, errorStats, i + 1);
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (Query Remote (sync) failed)`);
             queryRemoteFail++;
           } finally {
