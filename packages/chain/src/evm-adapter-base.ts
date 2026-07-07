@@ -40,6 +40,19 @@ import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cu
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
+type ContractWriteSender = (
+  contract: Contract,
+  method: string,
+  args: readonly unknown[],
+  signer: Wallet,
+  label: string,
+  opts?: { gasLimitBufferBps?: number },
+) => Promise<ethers.TransactionReceipt>;
+
+type SerializedSignerWriteContext = {
+  sendContractTransaction: ContractWriteSender;
+};
+
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
@@ -1169,6 +1182,7 @@ export class EVMChainAdapterBase {
     kav10Address: string,
     tokenAmount: bigint,
     reapproveLabel: string,
+    approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<{ signedTx: string; txHash: string }> {
     // Per-endpoint populate+sign failover lives in the shared
     // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
@@ -1205,6 +1219,7 @@ export class EVMChainAdapterBase {
             tokenAmount,
             reapproveLabel,
             true,
+            approvalSender,
           );
           continue; // re-run the WHOLE inner per-provider populate loop, allowance now in place
         }
@@ -1265,11 +1280,11 @@ export class EVMChainAdapterBase {
     signer: Wallet,
     label: 'publish' | 'update',
     onBroadcast: ((info: { txHash: string }) => Promise<void> | void) | undefined,
-    buildSignedTx: () => Promise<{ signedTx: string; txHash: string }>,
+    buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {
-    return this.signerTxSerializer.run(signer.address, async () => {
-      const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx();
+    return this.withSerializedSignerWrite(signer, async (ctx) => {
+      const { signedTx, txHash: preBroadcastTxHash } = await buildSignedTx(ctx);
       try {
         await onBroadcast?.({ txHash: preBroadcastTxHash });
       } catch (hookErr) {
@@ -1317,23 +1332,10 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Serialized public entry for a standalone contract write. Acquires the
-   * per-operational-wallet lock (`signerTxSerializer`, keyed by
-   * `signer.address`) for the whole nonce-critical window, then delegates to
-   * {@link sendContractTransactionRaw}. Same-wallet writes now run strictly
-   * serially so their `pending` nonce stays monotonic — this is the dkg#953
-   * fix, previously enforced ONLY on the V10 publish/update path (via
-   * {@link dispatchSerializedV10Write}) and bypassed by every other write
-   * (RS, staking, PCA, identity, context-graph), which called this method
-   * raw. Writes on DIFFERENT wallets stay fully concurrent (distinct keys).
-   *
-   * DEADLOCK CONTRACT: never call this from INSIDE an already-held
-   * `signerTxSerializer.run()` window for the SAME wallet — the inner `run`
-   * chains off the outer tail while the outer body awaits the inner, so both
-   * wedge. In-lock sub-sends (e.g. the allowance `approve` inside
-   * {@link ensureV10ApproveTrac}, which runs inside a
-   * `dispatchSerializedV10Write` build closure) MUST call
-   * {@link sendContractTransactionRaw} directly.
+   * Serialized public entry for a standalone contract write. Same-wallet writes
+   * now run strictly serially so their `pending` nonce stays monotonic; writes
+   * on different wallets stay concurrent. Nested V10 sub-sends receive the
+   * unlocked sender only through `withSerializedSignerWrite`'s scoped context.
    */
   protected async sendContractTransaction(
     contract: Contract,
@@ -1343,20 +1345,34 @@ export class EVMChainAdapterBase {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<ethers.TransactionReceipt> {
-    return this.signerTxSerializer.run(signer.address, () =>
-      this.sendContractTransactionRaw(contract, method, args, signer, label, opts),
+    return this.withSerializedSignerWrite(signer, (ctx) =>
+      ctx.sendContractTransaction(contract, method, args, signer, label, opts),
     );
   }
 
   /**
-   * Unserialized send: populate+sign (per-endpoint failover) → broadcast →
-   * confirm, with NO per-wallet lock. Use directly ONLY for a sub-send that
-   * already runs inside a `signerTxSerializer.run()` window for the same
-   * wallet, where re-acquiring the lock would deadlock (see
-   * {@link sendContractTransaction}). Every other caller must go through the
-   * serialized {@link sendContractTransaction}.
+   * Owns the per-wallet serializer and exposes the unlocked write primitive
+   * only to code already running inside that serializer window.
    */
-  protected async sendContractTransactionRaw(
+  protected async withSerializedSignerWrite<T>(
+    signer: Wallet,
+    fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
+  ): Promise<T> {
+    return this.signerTxSerializer.run(signer.address, () =>
+      fn({
+        sendContractTransaction: (contract, method, args, innerSigner, label, opts) => {
+          if (ethers.getAddress(innerSigner.address) !== ethers.getAddress(signer.address)) {
+            throw new Error(
+              `chain: scoped signer write for ${signer.address} cannot send with ${innerSigner.address}`,
+            );
+          }
+          return this.sendContractTransactionUnlocked(contract, method, args, innerSigner, label, opts);
+        },
+      }),
+    );
+  }
+
+  private async sendContractTransactionUnlocked(
     contract: Contract,
     method: string,
     args: readonly unknown[],
@@ -1423,6 +1439,7 @@ export class EVMChainAdapterBase {
     // stale) on-chain allowance read, then confirms it is visible before
     // returning. See `isTooLowAllowanceError` / `createKnowledgeAssets`.
     force = false,
+    approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<void> {
     if (!this.contracts.token) return;
     const tokenWithSigner = this.contracts.token.connect(signer) as Contract;
@@ -1471,14 +1488,7 @@ export class EVMChainAdapterBase {
           `transferFrom-minimum workaround; not a stuck approval.`,
         );
       }
-      // RAW (unserialized) send: `ensureV10ApproveTrac` executes INSIDE the
-      // `dispatchSerializedV10Write` build closure (publish/update) — i.e.
-      // already holding this wallet's `signerTxSerializer` lock — so the
-      // serialized `sendContractTransaction` would deadlock (inner `run`
-      // chains off the outer tail while the outer awaits it). When called
-      // standalone (e.g. the CG registration-deposit approve), this stays
-      // exactly as before this change (approves were never serialized).
-      await this.sendContractTransactionRaw(
+      await approvalSender(
         tokenWithSigner,
         'approve',
         [kav10Address, target],
@@ -2935,7 +2945,7 @@ export class EVMChainAdapterBase {
       txSigner,
       'publish',
       params.onBroadcast,
-      async () => {
+      async (ctx) => {
         // #953: the initial allowance approve sends its OWN tx on `txSigner`,
         // so it must run INSIDE the per-wallet lock too. If it stayed before
         // the lock, two concurrent same-wallet publishes starting from
@@ -2946,6 +2956,8 @@ export class EVMChainAdapterBase {
           kaAddress,
           params.tokenAmount,
           'approve V10 publish TRAC',
+          false,
+          ctx.sendContractTransaction,
         );
         return this.populateAndSignV10WithAllowanceRecovery(
           txSigner,
@@ -2955,6 +2967,7 @@ export class EVMChainAdapterBase {
           kaAddress,
           params.tokenAmount,
           'approve V10 publish TRAC (forced re-approve, #888)',
+          ctx.sendContractTransaction,
         );
       },
       () => {

@@ -41,27 +41,6 @@ export class KeyedSerializer {
     return result;
   }
 
-  /**
-   * True iff `key` currently has an in-flight OR queued operation.
-   *
-   * ADDITIVE — `run()` semantics are unchanged. `tails` holds a key iff a
-   * caller is between `run()` submission and the cleanup `.then` that removes
-   * the settled tail (line 38-40), so `isActive` is truthful ONLY once every
-   * write for a wallet funnels through `run()` (the universal-serialization
-   * phase). There is a one-microtask lag on becoming-idle (the cleanup `.then`
-   * runs a tick after the last op settles) — this errs on the SAFE side for
-   * an idle-aware picker: it may briefly report a just-freed wallet as busy
-   * (skip it), never a busy wallet as free (double-book it).
-   *
-   * Idle-aware SELECTION is not wired here; it stays behind its own
-   * kill-switch until 100% of sends are serialized, because preferring an
-   * "idle" wallet while raw (unserialized) sends still exist would steer
-   * traffic toward a wallet mid-send. This accessor only exposes the state.
-   */
-  isActive(key: string): boolean {
-    return this.tails.has(key);
-  }
-
   /** Number of keys with an in-flight or queued operation. */
   get activeKeyCount(): number {
     return this.tails.size;

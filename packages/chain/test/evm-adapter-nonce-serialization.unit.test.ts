@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { connectable } from './connectable.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -45,6 +46,7 @@ const neverNull = (): never => {
 };
 const fakeReceipt = (hash: string) =>
   ({ hash, blockNumber: 1, index: 0, status: 1, logs: [] }) as unknown as ethers.TransactionReceipt;
+const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 
 // Minimal V10 publish params that survive `createKnowledgeAssets`'s struct
 // building so execution reaches the allowance-approve step.
@@ -338,8 +340,8 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const events: string[] = [];
-    // Stub the raw leaf the wrapper delegates to (inside the lock).
-    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+    // Stub the unlocked leaf the wrapper delegates to (inside the lock).
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
       events.push(`start:${method}`);
       await tick(10);
       events.push(`end:${method}`);
@@ -364,7 +366,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     const s2 = new ethers.Wallet(OTHER_PK);
     expect(s1.address).not.toBe(s2.address);
     const events: string[] = [];
-    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
       events.push(`start:${method}`);
       await tick(20);
       return fakeReceipt(method);
@@ -379,30 +381,51 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     expect(events.slice(0, 2).sort()).toEqual(['start:m1', 'start:m2']);
   });
 
-  it('sendContractTransactionRaw stays LOCK-FREE so an in-lock sub-send cannot self-deadlock', async () => {
-    // The raw variant is what `ensureV10ApproveTrac` uses for its approve while
-    // already inside `dispatchSerializedV10Write`'s per-wallet lock. If raw
-    // re-acquired the lock it would deadlock. Proof it does not: two concurrent
-    // raw sends on the SAME wallet OVERLAP (no serialization).
+  it('V10 approval uses the scoped in-lock sender and never re-enters the public serializer', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
-    const events: string[] = [];
-    (a as any).populateAndSignAcrossProviders = recorder(
-      async (_c: unknown, method: string) => ({ signedTx: method, txHash: `0x${method}` }),
-    );
-    (a as any).sendSignedTransactionAndWait = recorder(async (tx: string) => {
-      events.push(`start:${tx}`);
-      await tick(15);
-      events.push(`end:${tx}`);
-      return fakeReceipt(tx);
+    const tokenWithSigner = connectable({
+      allowance: recorder(async () => 0n),
+      approve: recorder(() => undefined),
     });
+    (a as any).contracts.token = {
+      connect: recorder(() => tokenWithSigner),
+    };
+    (a as any).readContract = recorder(async () => 0n);
+    const publicSend = recorder(async () => {
+      throw new Error('public serializer re-entered');
+    });
+    const unlockedSend = recorder(async () => fakeReceipt('approve'));
+    (a as any).sendContractTransaction = publicSend;
+    (a as any).sendContractTransactionUnlocked = unlockedSend;
+    (a as any).sendSignedTransactionAndWait = recorder(async (tx: string) => fakeReceipt(tx));
 
-    await Promise.all([
-      (a as any).sendContractTransactionRaw({}, 'x', [], signer, 'x'),
-      (a as any).sendContractTransactionRaw({}, 'y', [], signer, 'y'),
+    await (a as any).dispatchSerializedV10Write(
+      signer,
+      'publish',
+      undefined,
+      async (ctx: any) => {
+        await (a as any).ensureV10ApproveTrac(
+          signer,
+          V10_KA_ADDRESS,
+          1n,
+          'approve V10 publish TRAC',
+          false,
+          ctx.sendContractTransaction,
+        );
+        return { signedTx: 'publish', txHash: '0xpublish' };
+      },
+      neverNull,
+    );
+
+    expect(publicSend.calls).toEqual([]);
+    expect(unlockedSend.calls).toHaveLength(1);
+    expect(unlockedSend.calls[0].slice(1, 5)).toEqual([
+      'approve',
+      [V10_KA_ADDRESS, 1n],
+      signer,
+      'approve V10 publish TRAC',
     ]);
-
-    expect(events.slice(0, 2).sort()).toEqual(['start:x', 'start:y']);
   });
 
   it('a publish (dispatchSerializedV10Write) and an RS-style send SERIALIZE on the same wallet (cross-type #953)', async () => {
@@ -419,7 +442,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       events.push(`done:${tx}`);
       return fakeReceipt(tx);
     });
-    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+    (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
       events.push(`rs-start:${method}`);
       await tick(10);
       events.push(`rs-end:${method}`);
