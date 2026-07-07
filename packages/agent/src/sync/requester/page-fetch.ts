@@ -10,6 +10,22 @@ import {
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
 } from '../durable-session.js';
 
+// Progress-aware deadline (10.0.3 mainnet sync-storm fix). The per-graph
+// budget is SYNC_TOTAL_TIMEOUT_MS / remaining-graphs floored at
+// SYNC_MIN_GRAPH_BUDGET_MS (~10s once a node subscribes to many discovered
+// on-chain CGs). Large system graphs ("agents" is 20k+ triples on mainnet)
+// cannot finish inside that floor, so every attempt hard-aborted at the
+// absolute deadline MID-PROGRESS, retried from a (often superseded)
+// checkpoint, and re-transferred the same pages forever — saturating every
+// responder so badly their StorageACK handlers stopped answering publishers
+// (the v10.0.3 publish outage). A sync that is actively receiving pages must
+// be allowed to finish: each page that lands extends the effective deadline
+// by the grace window below. A STALLED sync (no page inside the grace
+// window past its budget) still times out exactly as before, and the hard
+// cap bounds the total time any single phase can hold its on-connect slot.
+export const SYNC_PROGRESS_GRACE_MS = 15_000;
+export const SYNC_PHASE_HARD_CAP_MS = 600_000;
+
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
   syncSessionId: string;
@@ -221,15 +237,32 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     }
     : undefined;
 
+  // Progress extends the effective deadline (see SYNC_PROGRESS_GRACE_MS):
+  // a phase past its share-based budget but still receiving pages keeps
+  // going until it stalls for a full grace window or hits the scaled hard
+  // cap (8x the phase's own budget, ceilinged by SYNC_PHASE_HARD_CAP_MS).
+  // `lastProgressAt` starts at -Infinity so a phase that never received a
+  // page keeps the EXACT pre-fix budget — the grace only rewards real
+  // progress. The `max(deadline, …)` shape means the extension can only
+  // ever LENGTHEN the caller's window, never shorten it: recovery paths
+  // that pass a far-future deadline are untouched.
+  const budgetMs = Math.max(0, deadline - sessionStartedAt);
+  const hardCapMs = Math.min(SYNC_PHASE_HARD_CAP_MS, 8 * budgetMs);
+  let lastProgressAt = Number.NEGATIVE_INFINITY;
+  const effectiveDeadline = () => Math.max(
+    deadline,
+    Math.min(lastProgressAt + SYNC_PROGRESS_GRACE_MS, sessionStartedAt + hardCapMs),
+  );
+
   try {
     while (true) {
       throwIfAborted(signal);
-      if (Date.now() > deadline) {
+      if (Date.now() > effectiveDeadline()) {
         timedOut = true;
         break;
       }
 
-      const remainingMs = Math.max(0, deadline - Date.now());
+      const remainingMs = Math.max(0, effectiveDeadline() - Date.now());
       const timeoutMs = Math.min(
         syncPageTimeoutMs,
         Math.max(2000, Math.floor(remainingMs / syncRouterAttempts)),
@@ -313,6 +346,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       allQuads.push(...parsed.quads);
       offset += parsed.totalQuads;
+      // A page landed — this sync is alive; extend the effective deadline.
+      lastProgressAt = Date.now();
 
       if (debugSyncProgress) {
         logInfo(
