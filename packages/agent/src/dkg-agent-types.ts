@@ -895,25 +895,20 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
-  /**
-   * Peer IDs to rank first among ACK candidates for the selected
-   * chain/network (typically the network-config relays).
-   *
-   * Never an eligibility gate: this list must not exclude any connected
-   * peer from ACK candidacy (candidates are dialled concurrently, so the
-   * ranking itself is cosmetic today). The authoritative signer check is
-   * chain truth, enforced per collected ACK (operational-key purpose +
-   * active sharding-table membership, i.e. a staked core) and re-verified
-   * on-chain by the publish tx. Hard-gating candidacy on this static list
-   * capped the pool at the 4-6 bundled relays and made ACK quorum
-   * arithmetically unreachable when those specific relays were degraded
-   * or mid-upgrade (2026-07-07 Base/Gnosis mainnet incident). Stale
-   * foreign-network connections cannot produce a chain-valid ACK; they
-   * cost wasted dials, not quorum eligibility. (The identify-confirmed
-   * core shortcut — #1107 — still bounds fan-out, but it can never
-   * exclude connected peers from THIS list.)
-   */
+  /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
+  /**
+   * Peer IDs to rank first among ACK candidates without shrinking the pool
+   * (typically the network-config relays supplied by the bundled daemon).
+   *
+   * The authoritative signer check is chain truth, enforced per collected ACK
+   * (operational-key purpose + active sharding-table membership) and
+   * re-verified on-chain by the publish tx. Hard-gating candidacy on the static
+   * relay list capped the pool at the 4-6 bundled relays and made ACK quorum
+   * arithmetically unreachable when those specific relays were degraded or
+   * mid-upgrade (2026-07-07 Base/Gnosis mainnet incident).
+   */
+  preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
   skills?: Array<{

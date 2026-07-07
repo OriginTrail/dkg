@@ -1560,15 +1560,14 @@ export class DKGAgent extends DKGAgentBase {
    *
    * Fix: only trust the confirmed-core subset when it can actually
    * satisfy the quorum. Below that, return confirmed cores FIRST
-   * followed by the remaining connected ACK-eligible peers. On configured
-   * public networks the daemon supplies `ackCandidatePeerIds` from the
-   * selected network relays; the list ranks candidates but must NEVER
-   * exclude them. Signer validity is enforced per collected ACK against
-   * chain truth (operational key + sharding-table membership), so a stale
-   * foreign-network connection costs a wasted dial, while the former hard
-   * gate capped the pool at the bundled relay list and bricked publishing
-   * when those relays were degraded (2026-07-07 Base/Gnosis mainnet
-   * incident).
+   * followed by the remaining connected ACK-eligible peers. External callers
+   * can still set `ackCandidatePeerIds` as a true allowlist; configured public
+   * networks use `preferredACKPeerIds` for relay ranking without excluding
+   * connected non-relay cores. Signer validity is enforced per collected ACK
+   * against chain truth (operational key + sharding-table membership), so a
+   * stale foreign-network connection costs a wasted dial, while hard-gating on
+   * the bundled relay list bricked publishing when those relays were degraded
+   * (2026-07-07 Base/Gnosis mainnet incident).
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
    * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
@@ -1601,6 +1600,7 @@ export class DKGAgent extends DKGAgentBase {
       connectedPeers: peers.map(p => p.toString()),
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      preferredACKPeerIds: this.config.preferredACKPeerIds,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,

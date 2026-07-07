@@ -101,7 +101,7 @@ describe('ACK candidate isolation on devnet', () => {
     expect(configuredPeerIds.filter((id) => publicTestnetIds.includes(id))).toEqual([]);
   });
 
-  it('does not install the default public testnet ACK allowlist in the local devnet relay topology', () => {
+  it('does not install the default public testnet ACK preference list in the local devnet relay topology', () => {
     const node1LogPath = join(DEVNET_DIR, 'node1', 'daemon.log');
     const node5LogPath = join(DEVNET_DIR, 'node5', 'daemon.log');
     const node1Config = readJson<RuntimeConfig>(join(DEVNET_DIR, 'node1', 'config.json'));
@@ -115,7 +115,7 @@ describe('ACK candidate isolation on devnet', () => {
     expect(edgeConfig.relay).toMatch(/^\/ip4\/127\.0\.0\.1\/tcp\//);
     expect(node1Log).toContain('Relay disabled (config.relay = "none")');
     for (const log of [node1Log, node5Log]) {
-      expect(log).not.toMatch(/ACK candidate peer (allowlist|preference): .*network config/);
+      expect(log).not.toMatch(/ACK candidate peer preference: .*network config/);
       for (const suffix of UNEXPECTED_TESTNET_SUFFIXES) {
         expect(log).not.toContain(suffix);
       }
@@ -151,7 +151,7 @@ describe('ACK candidate isolation on devnet', () => {
       connectedPeerIds,
       selfPeerId,
       knownCorePeerIds: new Set([devnetCoreIds[2]!, staleTestnetIds[0]!]),
-      ackCandidatePeerIds: devnetCoreIds,
+      preferredACKPeerIds: devnetCoreIds,
     });
 
     // Preference ordering, not exclusion: listed devnet cores fill the

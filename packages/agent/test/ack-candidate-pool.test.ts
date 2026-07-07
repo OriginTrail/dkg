@@ -18,7 +18,7 @@ type AgentInternals = {
     };
   };
   peerId: string;
-  config: { ackCandidatePeerIds?: string[] };
+  config: { ackCandidatePeerIds?: string[]; preferredACKPeerIds?: string[] };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   lastKnownRequiredACKs?: number;
@@ -34,12 +34,14 @@ async function buildAgent(opts: {
   connected: string[];
   lastKnownRequiredACKs?: number;
   ackCandidatePeerIds?: string[];
+  preferredACKPeerIds?: string[];
 }): Promise<AgentInternals> {
   const agent = await DKGAgent.create({
     name: 'AckPoolProbe',
     store: new OxigraphStore(),
     chainAdapter: new MockChainAdapter(),
     ackCandidatePeerIds: opts.ackCandidatePeerIds,
+    preferredACKPeerIds: opts.preferredACKPeerIds,
   });
   const internals = agent as unknown as AgentInternals;
   internals.node = {
@@ -91,12 +93,22 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(at.getACKCandidatePeers()).toEqual(CORE);
   });
 
+  it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
+    const a = await buildAgent({
+      confirmedCores: [CORE[0], 'untrusted-peer'],
+      connected: [CORE[0], 'untrusted-peer'],
+      ackCandidatePeerIds: [CORE[0]],
+    });
+
+    expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
+  });
+
   it('a configured ACK preference list orders listed peers first but never excludes connected peers (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
       confirmedCores: [CORE[2]],
       connected: [CORE[2], ...foreign, CORE[0], CORE[1], CORE[3]],
-      ackCandidatePeerIds: CORE,
+      preferredACKPeerIds: CORE,
     });
 
     // Listed peers are preferred within each tier (confirmed cores, then
@@ -120,7 +132,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     const a = await buildAgent({
       confirmedCores: [relays[0], relays[1], ...stakedCores],
       connected: [relays[0], relays[1], ...stakedCores],
-      ackCandidatePeerIds: relays,
+      preferredACKPeerIds: relays,
     });
 
     const out = a.getACKCandidatePeers();
@@ -134,7 +146,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     const a = await buildAgent({
       confirmedCores: [...relays, ...upgraded],
       connected: [...upgraded, ...relays],
-      ackCandidatePeerIds: relays,
+      preferredACKPeerIds: relays,
     });
     for (const id of upgraded) a.knownCorePeerIdsV2.add(id);
 

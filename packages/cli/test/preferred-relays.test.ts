@@ -180,7 +180,7 @@ describe('ACK peer-id extraction from network relays', () => {
 });
 
 describe('resolveACKCandidatePeerIds', () => {
-  it('uses network relay IDs as ACK allowlist when relays are enabled', () => {
+  it('uses network relay IDs as ACK preference list when relays are enabled', () => {
     expect(resolveACKCandidatePeerIds({
       usingNetworkRelays: true,
       networkRelays: [
@@ -224,7 +224,7 @@ describe('orderACKCandidatePeerIds', () => {
       connectedPeerIds: ['self', base[2], ...testnet, base[0], base[1], base[3]],
       selfPeerId: 'self',
       knownCorePeerIds: new Set([base[2], testnet[0]]),
-      ackCandidatePeerIds: base,
+      preferredACKPeerIds: base,
     })).toEqual([
       base[2], testnet[0],
       base[0], base[1], base[3],
@@ -232,7 +232,7 @@ describe('orderACKCandidatePeerIds', () => {
     ]);
   });
 
-  it('preserves legacy all-connected fallback when no ACK allowlist is configured', () => {
+  it('preserves legacy all-connected fallback when no ACK preference list is configured', () => {
     expect(orderACKCandidatePeerIds({
       connectedPeerIds: ['self', 'edge-1', 'edge-2'],
       selfPeerId: 'self',
