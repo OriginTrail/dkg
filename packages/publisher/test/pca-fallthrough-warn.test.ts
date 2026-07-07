@@ -193,6 +193,33 @@ describe('DKGPublisher: warns on silent PCA full-price fall-through (#1411)', ()
     expect(warns[0]).toContain(`accountId=${accountId}`);
   });
 
+  it('WARNS (generic reason, NOT epochs-mismatch) on the explicit path when the lifetime EQUALS the lock but the PCA cannot cover it', async () => {
+    // Guards the `publishEpochs !== pcaLockEpochs` conjunct in the reason ternary:
+    // an explicit lifetime that matches the lock but misses the discount
+    // (underfunded/expired) must yield the generic reason, never the
+    // self-contradictory "publishEpochs=24 does not match lockDurationEpochs=24".
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new PcaProbeChain(wallet);
+    chain.pcaLockDurationEpochs = 24;
+    const { accountId } = await chain.createPublishingConvictionAccount(1n); // underfunded
+    await chain.registerPublishingConvictionAgent(accountId, wallet.address);
+    const publisher = await makePublisher(chain, wallet);
+    const warnSpy = spyPublisherWarn(publisher);
+
+    const result = await publisher.publish({
+      contextGraphId: '1',
+      quads: quads('pca-explicit-match-underfunded'),
+      publishEpochs: 24, // == lock (24), yet no CostCovered → generic reason, not epochs-mismatch
+    });
+
+    expect(result.status).toBe('confirmed');
+    const warns = pcaFallthroughWarns(warnSpy);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('could not cover this publish');
+    expect(warns[0]).not.toContain('does not match'); // matched epochs → NOT the mismatch branch
+    expect(warns[0]).toContain(`accountId=${accountId}`);
+  });
+
   it('does NOT warn when the publish actually drew on the PCA (CostCovered present)', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new PcaProbeChain(wallet);
