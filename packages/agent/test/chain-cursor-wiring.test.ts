@@ -13,7 +13,7 @@ describe('DKGAgent chain cursor wiring', () => {
     agent = undefined;
   });
 
-  it('passes the registry scan cursor store into an EVM adapter built from chainConfig', async () => {
+  it('passes EVM chainConfig fields into the constructed adapter', async () => {
     const registryCursorStore = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
@@ -27,11 +27,15 @@ describe('DKGAgent chain cursor wiring', () => {
         hubAddress: '0x0000000000000000000000000000000000000001',
         operationalKeys: [OPERATIONAL_KEY],
         chainId: 'evm:31337',
+        minPublisherNativeWei: 123n,
+        minPublisherTracWei: 456n,
       },
       contextGraphRegistryScanCursorStore: registryCursorStore,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
+    expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
+    expect((agent as any).chain.minPublisherTracWei).toBe(456n);
   });
 
   it('passes the chain-event lane cursor store into the poller on start', async () => {

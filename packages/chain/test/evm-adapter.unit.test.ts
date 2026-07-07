@@ -3866,6 +3866,13 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
   // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
   describe('selectSigner — generalized funding modes + idle preference', () => {
     const nativeOnly = { kind: 'native-only' as const, nativeFloorWei: 0n };
+    const nativeAndTrac = {
+      kind: 'native+trac' as const,
+      nativeFloorWei: 0n,
+      tracFloorWei: 0n,
+      requiredTracWei: 0n,
+      consultPca: true,
+    };
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
@@ -3888,7 +3895,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       // No wallet is an authorized publisher → publish (rotatable-policy) throws…
       (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
-      await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeOnly }))
+      await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeAndTrac }))
         .rejects.toThrow(/No authorized publisher wallet/);
       // …but rotatable-free ignores that surface and picks from the whole pool.
       const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });

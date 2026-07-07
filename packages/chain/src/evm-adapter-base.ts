@@ -475,23 +475,43 @@ export type FundingMode =
       consultPca: boolean;
     };
 
+export type NativeOnlyFundingMode = Extract<FundingMode, { kind: 'native-only' }>;
+export type NativeAndTracFundingMode = Extract<FundingMode, { kind: 'native+trac' }>;
+
 /**
- * Generalized operational-wallet selection request. Publish routes through the
- * thin `nextAuthorizedSigner` wrapper (`rotatable-policy`); the other classes
- * exist for the funding-aware selection later phases route RS / update through.
+ * Generalized operational-wallet selection request. The discriminant fixes the
+ * eligible-wallet scope and the required funding model together, so invalid
+ * combinations (for example, publish policy selection without a context graph or
+ * with native-only funding) do not compile.
+ *
  * - `rotatable-policy`  → publish: eligible = on-chain authorized publishers
  *                          for `contextGraphId` (whole pool when no ContextGraphs surface).
- * - `rotatable-funded`  → update: eligible = whole pool (no authorized-publisher filter).
+ * - `rotatable-funded`  → update: eligible = whole pool, native+TRAC funding.
  * - `rotatable-free`    → RS / relay / settle: eligible = whole pool, native-only funding.
  */
-export interface SelectSignerSpec {
-  txClass: 'rotatable-policy' | 'rotatable-funded' | 'rotatable-free';
-  funding: FundingMode;
-  /** Required for `rotatable-policy` — the CG whose authorized publishers gate eligibility. */
-  contextGraphId?: bigint;
-  /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
-  preferIdle?: boolean;
-}
+export type SelectSignerSpec =
+  | {
+      txClass: 'rotatable-policy';
+      funding: NativeAndTracFundingMode;
+      /** The CG whose authorized publishers gate publish eligibility. */
+      contextGraphId: bigint;
+      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
+      preferIdle?: boolean;
+    }
+  | {
+      txClass: 'rotatable-funded';
+      funding: NativeAndTracFundingMode;
+      contextGraphId?: never;
+      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
+      preferIdle?: boolean;
+    }
+  | {
+      txClass: 'rotatable-free';
+      funding: NativeOnlyFundingMode;
+      contextGraphId?: never;
+      /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
+      preferIdle?: boolean;
+    };
 
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
@@ -1643,7 +1663,7 @@ export class EVMChainAdapterBase {
         }
         if (eligible.length === 0) {
           throw new Error(
-            `No authorized publisher wallet found in signer pool for context graph ${spec.contextGraphId?.toString()}. ` +
+            `No authorized publisher wallet found in signer pool for context graph ${spec.contextGraphId.toString()}. ` +
             'Ensure at least one configured wallet is permitted by on-chain publish authority.',
           );
         }

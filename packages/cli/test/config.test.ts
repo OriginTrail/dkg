@@ -875,6 +875,34 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
   });
 
+  it('merges publisher funding floors with operator precedence', () => {
+    const inherited = resolveChainConfig(
+      {},
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(inherited?.minPublisherNativeWei).toBe(123n);
+    expect(inherited?.minPublisherTracWei).toBe(456n);
+
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: 789n } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+    expect(overridden?.minPublisherTracWei).toBe(456n);
+  });
+
   it('dedupes primary + backups while preserving operator priority', () => {
     const merged = resolveChainConfig(
       {
