@@ -4,6 +4,30 @@ All notable changes to the DKG V9 node are documented here. The format is based 
 
 ## [Unreleased]
 
+## [10.0.3] - 2026-07-07
+
+Stability and node-operator UX release: Node UI PublishingConviction (PCA) owner-access hardening, folded-private ACK anchoring, reduced node RPC load, the WM→SWM promote fix, and a full repair of the devnet regression lane. **No smart-contract changes — no deployment required** (no Solidity source or ABI changes since 10.0.2).
+
+### Added
+
+- **RPC usage metrics** (#1409) and **reduced DKG node RPC load** across startup and steady-state polling (#1440).
+
+### Changed
+
+- **Node UI — PublishingConviction (PCA) owner-access model** refactor: a centralized owner-access + signer-planning model, an approve reducer/runner, and `ConvictionDetailView` decomposition (#1446, #1453, #1468, #1472; from the #1348 / #1350 / #1375 series).
+
+### Fixed
+
+- **Folded-private ACK anchoring** gated on storage-ack v2, with legacy V10 ACK-provider fallbacks (#1369, #1371).
+- **WM→SWM promote migration** isolated on a dedicated context graph (#1464, #1483).
+- **Base mainnet ACK candidate filtering** by active network relays (#1482).
+- **Devnet UI solc / config** (#1403) and **testnet store preflight resilience** (#1408).
+- **Devnet regression lane repaired** against the #1410 KA-publish CLI unification — a shared `runKaPublishLifecycle` helper, the rpc-quiet-window budget, the `daemon.log` double-write, and 3 flaky/blind spots (#1496).
+
+### Deployment
+
+- **No new contract deployment.** No Solidity source or ABI changes since 10.0.2; existing Base / Gnosis / Base-Sepolia registries recorded via #1405 remain the deploy targets.
+
 ### Fixed — `dkg init` on monorepo checkouts + oxigraph-server default for adapter/MCP setups (#960)
 
 - **V10 publish/update allowance recovery now translates raw ethers custom-error data before `TooLowAllowance` classification** (`packages/chain/src/evm-adapter.ts`): the shared populate-and-sign recovery gate decodes raw provider revert data first, so a fresh node can force one re-approval and retry when RPC allowance reads lag behind a mined TRAC approval.
