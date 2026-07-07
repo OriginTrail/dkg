@@ -2490,6 +2490,11 @@ export class DKGPublisher implements Publisher {
     // of truth so ACK pricing == chain tx pricing. Resolved BEFORE the PCA
     // coercion below so the fundability probe can price the lock-lifetime publish.
     const effectiveByteSize = useEncryptedInline ? stagingByteSize : publicByteSize;
+    // #1411 — remember PCA-agent eligibility (+ lock, for an accurate reason)
+    // so a post-publish check can warn when a registered agent's publish
+    // silently fell through to full-price direct spend (the #1 PCA footgun).
+    let pcaAgentAccountId = 0n;
+    let pcaLockEpochs = 0; // set on the explicit-override probe (drives the reason)
     let publishEpochs = explicitPublishEpochs ?? DEFAULT_PUBLISH_EPOCHS;
     if (
       explicitPublishEpochs === undefined &&
@@ -2500,6 +2505,7 @@ export class DKGPublisher implements Publisher {
     ) {
       try {
         const accountId = await this.chain.getConvictionAgentAccountId(publisherSigner.address);
+        pcaAgentAccountId = accountId; // #1411 — remember eligibility for the post-publish full-price warn
         if (accountId > 0n) {
           const lockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
           if (lockEpochs > 0) {
@@ -2569,6 +2575,25 @@ export class DKGPublisher implements Publisher {
           `PCA epochs probe failed — falling back to publishEpochs=${publishEpochs}: ` +
           `${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+    } else if (
+      explicitPublishEpochs !== undefined &&
+      canAttemptOnChainPublish &&
+      publisherSigner !== undefined &&
+      typeof this.chain.getConvictionAgentAccountId === 'function'
+    ) {
+      // #1411 — an explicit lifetime override SKIPS the coercion block above,
+      // so a registered PCA agent can silently lose the discount and pay full
+      // price. Probe eligibility (+ lock, to distinguish an epochs mismatch
+      // from an underfunded/expired account) so the post-publish check can
+      // warn with an accurate reason. Best-effort — never fail the publish.
+      try {
+        pcaAgentAccountId = await this.chain.getConvictionAgentAccountId(publisherSigner.address);
+        if (pcaAgentAccountId > 0n && typeof this.chain.getConvictionAccountLockDurationEpochs === 'function') {
+          pcaLockEpochs = await this.chain.getConvictionAccountLockDurationEpochs(pcaAgentAccountId);
+        }
+      } catch {
+        /* eligibility unknown → no warn; never fail the publish */
       }
     }
     let precomputedTokenAmount = canAttemptOnChainPublish ? BigInt(publishEpochs) : 0n;
@@ -3349,6 +3374,23 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
+      // #1411 — a registered PCA agent whose publish did NOT draw on the PCA
+      // (no `CostCovered` event → `convictionCostCovered` absent) silently paid
+      // FULL price via direct wallet spend. That silent fall-through is the #1
+      // PCA footgun (`PUBLISHING-CONVICTION-ACCOUNTS.md`); surface it as an
+      // actionable operator warning. Log-only — publish behavior is unchanged.
+      if (pcaAgentAccountId > 0n && !onChainResult.convictionCostCovered) {
+        const reason =
+          explicitPublishEpochs !== undefined && pcaLockEpochs > 0 && publishEpochs !== pcaLockEpochs
+            ? `the explicit publish lifetime (publishEpochs=${publishEpochs}) does not match the account's lock duration (lockDurationEpochs=${pcaLockEpochs}) — the PCA discount requires an exact epoch match`
+            : `the account could not cover this publish's cost (underfunded, expired, or misconfigured lock)`;
+        this.log.warn(
+          ctx,
+          `PCA discount NOT applied: signer ${publisherSigner?.address} is a registered PCA agent ` +
+          `(accountId=${pcaAgentAccountId}) but this publish paid FULL price via direct wallet spend ` +
+          `(no CostCovered event) — ${reason}. Omit the explicit lifetime (or match the lock duration) to use the discount.`,
+        );
+      }
       const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
       if (!this.ownedEntities.has(confirmOwnershipKey)) {
         this.ownedEntities.set(confirmOwnershipKey, new Set());
