@@ -518,6 +518,107 @@ describe('ACKCollector', () => {
     }
   });
 
+  // 2026-07-07 mainnet incident: a core under store load (Blazegraph
+  // `fetch failed`) computed a CORE_TEMPORARILY_UNAVAILABLE decline but the
+  // publisher's send timeout had already aborted the stream, so the reply
+  // read back as ZERO bytes. The old collector fed that empty buffer to
+  // decodeStorageACK → recoverACKSigner → null → terminal INVALID_SIGNATURE,
+  // permanently deselecting a healthy peer on the first blip. An empty reply
+  // is a transport artifact, not a cryptographic verdict.
+  it('treats a zero-length ACK reply as retryable transport, not terminal INVALID_SIGNATURE, and recovers', async () => {
+    const callsByPeer = new Map<string, number>();
+    const EMPTY_BEFORE_ACK = 2; // within the MAX_RETRIES transport budget
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sleep: async () => {}, // collapse backoff
+      sendP2P: async (peerId) => {
+        const n = (callsByPeer.get(peerId) ?? 0) + 1;
+        callsByPeer.set(peerId, n);
+        if (n <= EMPTY_BEFORE_ACK) return new Uint8Array(0); // aborted stream
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const { r, vs } = await signACK(coreWallets[idx], testCGId, merkleRoot, 1, 100n);
+        return encodeStorageACK({
+          merkleRoot,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect({
+      merkleRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
+      ackMode: { kind: 'public' },
+    });
+
+    // Every peer recovered on its 3rd send — impossible if the first empty
+    // reply had been treated as terminal INVALID_SIGNATURE.
+    expect(result.acks).toHaveLength(3);
+    for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
+      expect(callsByPeer.get(peerId)).toBe(EMPTY_BEFORE_ACK + 1);
+    }
+  });
+
+  it('a persistent zero-length reply terminates as bounded TRANSPORT_ERROR, never INVALID_SIGNATURE', async () => {
+    const callsByPeer = new Map<string, number>();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sleep: async () => {},
+      sendP2P: async (peerId) => {
+        callsByPeer.set(peerId, (callsByPeer.get(peerId) ?? 0) + 1);
+        return new Uint8Array(0); // stream aborted on every attempt
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    let caught: Error | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught!.message).toContain('storage_ack_insufficient');
+    // The failure is classified transport, not signature — this is the whole
+    // point of the fix: a store/stream hiccup must not read as a crypto fault.
+    expect(caught!.message).toContain('TRANSPORT_ERROR');
+    expect(caught!.message).not.toContain('INVALID_SIGNATURE');
+    // Bounded by the transport budget (MAX_RETRIES=3 in the source), no hang.
+    for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
+      expect(callsByPeer.get(peerId)).toBe(3);
+    }
+  });
+
   // PR #896 review (🟡): the widened #887 transient-decline budget (~31s)
   // must NOT keep a losing peer dialing after quorum has already formed
   // elsewhere. A peer still mid-retry when the last needed ACK lands must
