@@ -400,6 +400,9 @@ export function normalizeErrorMessage(message) {
   return String(message)
     // drop the ethers v6 "(action=\"estimateGas\", data=..., transaction={...}, ...)" tail
     .replace(/\s*\(action=["'][\s\S]*$/i, '')
+    // drop the ethers v5 "(transaction=\"0x...\", info={...})" tail — same boilerplate,
+    // different shape (e.g. "insufficient funds for intrinsic transaction cost (transaction=...")
+    .replace(/\s*\(transaction=["'][\s\S]*$/i, '')
     .replace(/urn:(?:ka|entity):[A-Za-z0-9_.:-]+/g, '<entity>')
     .replace(/did:dkg:[^\s"'),]+/gi, '<ual>')
     .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<id>')
@@ -450,15 +453,30 @@ export async function logError(error, nodeName, step, errorStats, kaNumber = nul
 
   if (!errorStats[nodeName]) errorStats[nodeName] = {};
 
+  // Summary/dashboard message: SHORT and diagnostic. The full verbose detail
+  // (cause chain, probe, server logs) stays in the console block above; the
+  // aggregated key feeds the end-of-run breakdown AND the Grafana error tables,
+  // where long text doesn't fit. Cap at ~150 chars, word-safe.
+  const compact = (s, n = 150) => {
+    const t = String(s).trim();
+    if (t.length <= n) return t;
+    const cut = t.slice(0, n);
+    const lastSpace = cut.lastIndexOf(' ');
+    return `${cut.slice(0, lastSpace > n - 40 ? lastSpace : n).trimEnd()}…`;
+  };
   const cleanErrorMessage = normalizeErrorMessage(error.message.split('\n')[0]);
   const service = categorizeErrorService(error);
 
   // fold the real network cause into the summary key so the end-of-run error
   // breakdown says "fetch failed [connect ETIMEDOUT 100.x:9200]" not just
-  // "fetch failed"
-  const causeSuffix = !error.statusCode && desc.code ? ` [${summarizeCause(error) || desc.code}]` : '';
-  const aggregatedKey = `${step} — ${error.name}: ${cleanErrorMessage}${causeSuffix}`;
-  let detailedKey = `${step} — ${error.name}: ${cleanErrorMessage}${causeSuffix}`;
+  // "fetch failed" — but ONLY when the message doesn't already carry the cause
+  // (the enriched req() messages do, and "x [x]" reads as noise).
+  const causeText = !error.statusCode && desc.code ? (summarizeCause(error) || desc.code) : '';
+  const causeSuffix = causeText && !cleanErrorMessage.toLowerCase().includes(String(causeText).toLowerCase())
+    ? ` [${causeText}]` : '';
+  const summaryMessage = compact(`${cleanErrorMessage}${causeSuffix}`);
+  const aggregatedKey = `${step} — ${error.name}: ${summaryMessage}`;
+  let detailedKey = `${step} — ${error.name}: ${summaryMessage}`;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 
   if (!errorStats[nodeName].aggregated) errorStats[nodeName].aggregated = {};
