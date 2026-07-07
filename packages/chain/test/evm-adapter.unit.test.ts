@@ -1427,7 +1427,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener validates Hub binding without touching RPC logs', async () => {
+  it('startHubRotationListener validates Hub binding with a startup head baseline but without RPC logs', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const iface = new ethers.Interface([
       'event NewContract(string contractName, address newContractAddress)',
@@ -1436,9 +1436,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       'event AssetStorageChanged(string contractName, address newContractAddress)',
     ]);
     const provider = {
-      getBlockNumber: recorder(async () => {
-        throw new Error('startup should not read block number');
-      }),
+      getBlockNumber: recorder(async () => 1_000),
       getLogs: recorder(async () => {
         throw new Error('startup should not read logs');
       }),
@@ -1453,7 +1451,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     };
     await expect(a.startHubRotationListener()).resolves.toBeUndefined();
 
-    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([[]]);
     expect(provider.getLogs.calls).toEqual([]);
     expect(a.hubRotationPoller.isStarted).toBe(true);
   });
@@ -1493,7 +1491,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.hubRotationPoller.isStarted).toBe(false);
   });
 
-  it('startHubRotationListener does not consume RPC budget while backup reads still work', async () => {
+  it('startHubRotationListener uses one startup head baseline while backup reads still work', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({
       rpcUrl: 'https://primary.example',
       rpcUrls: ['https://backup.example'],
@@ -1535,7 +1533,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
       .resolves.toBe(123);
     expect(primaryProvider.getBlockNumber.calls).toEqual([]);
-    expect(backupProvider.getBlockNumber.calls).toHaveLength(1);
+    expect(backupProvider.getBlockNumber.calls).toHaveLength(2);
   });
 
   it('startHubRotationListener wires Hub rotation names into adapter invalidation without subscriptions', async () => {
@@ -1638,13 +1636,13 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
       await flushAsyncWork();
-      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
       expect(provider.getLogs.calls).toHaveLength(0);
 
       a.destroy();
       await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(provider.getBlockNumber.calls).toHaveLength(0);
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
       expect(provider.getLogs.calls).toHaveLength(0);
       expect(provider.destroy.calls).toHaveLength(1);
       expect(a.hubRotationPoller.isStarted).toBe(false);
