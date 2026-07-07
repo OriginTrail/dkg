@@ -51,7 +51,7 @@ export class HubRotationPoller {
     return this.started;
   }
 
-  async start(hub: Contract, hubAddress: string): Promise<void> {
+  start(hub: Contract, hubAddress: string): void {
     if (this.started) return;
 
     this.bind(hub, hubAddress);
@@ -62,6 +62,8 @@ export class HubRotationPoller {
       this.runExclusive(() => this.pollOnce(generation));
     }, this.intervalMs);
     if (this.timer.unref) this.timer.unref();
+    // Best-effort baseline: keep startup non-blocking while preventing the
+    // first scheduled poll from replaying historical rotation logs.
     this.runExclusive(() => this.recordInitialHead(generation));
   }
 

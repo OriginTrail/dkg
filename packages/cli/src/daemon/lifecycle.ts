@@ -669,12 +669,6 @@ export function orderACKCandidatePeerIds(input: {
   return connected;
 }
 
-export function shouldUseIncrementalChainDiscoveryScan(input: {
-  watermarkSeeded: boolean;
-}): boolean {
-  return input.watermarkSeeded;
-}
-
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 

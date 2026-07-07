@@ -363,18 +363,22 @@ export function isContextGraphChainScanPartialError(
  *
  * Default calls use `listAll` semantics and never mutate daemon watermarks.
  * The two boolean shapes are retained as legacy compatibility wrappers around
- * the paged cursor scanner. New cursor-backed daemon scans should use
+ * the paged cursor scanner. Optional and false values remain accepted for
+ * source compatibility; only an explicit `true` enables legacy cursor-backed
+ * behavior. New cursor-backed daemon scans should use
  * `scanContextGraphRegistryPages`, where callers explicitly acknowledge a page
  * after local apply succeeds.
  */
 export type ContextGraphChainListOptions = { mode?: 'listAll' };
 export type ContextGraphLegacyIncrementalScanOptions =
   | {
-      incremental: true;
+      mode?: never;
+      incremental?: boolean;
       pageBudget?: number;
     }
   | {
-      seedIncrementalWatermark: true;
+      mode?: never;
+      seedIncrementalWatermark?: boolean;
       resumeFromCursor?: boolean;
       pageBudget?: number;
     };

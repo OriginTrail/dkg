@@ -289,7 +289,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
   }
 
-  async _collectContextGraphRegistryScan(
+  private async _collectContextGraphRegistryScan(
     registry: Contract,
     registryAddress: string,
     fromBlock: number | undefined,
@@ -308,7 +308,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     return results;
   }
 
-  async *_iterateContextGraphRegistryScanPages(
+  private async *_iterateContextGraphRegistryScanPages(
     registry: Contract,
     registryAddress: string,
     fromBlock: number | undefined,

@@ -79,7 +79,7 @@ describe('HubRotationPoller', () => {
     });
 
     try {
-      await expect(poller.start(hubContract(), HUB_ADDRESS)).resolves.toBeUndefined();
+      poller.start(hubContract(), HUB_ADDRESS);
       expect(poller.isStarted).toBe(true);
       expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
       expect(provider.getLogs).not.toHaveBeenCalled();
@@ -628,8 +628,8 @@ describe('HubRotationPoller', () => {
       onContractName: vi.fn(),
     });
 
-    await expect(poller.start(hubContract(iface), HUB_ADDRESS))
-      .rejects.toThrow('Hub ABI is missing required rotation event AssetStorageChanged');
+    expect(() => poller.start(hubContract(iface), HUB_ADDRESS))
+      .toThrow('Hub ABI is missing required rotation event AssetStorageChanged');
 
     expect(provider.getBlockNumber).not.toHaveBeenCalled();
     expect(provider.getLogs).not.toHaveBeenCalled();

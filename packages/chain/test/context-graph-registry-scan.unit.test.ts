@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
-import { ContextGraphChainScanPartialError, type ContextGraphOnChain, type ContextGraphRegistryScanOptions } from '../src/chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ContextGraphChainScanOptions, type ContextGraphOnChain, type ContextGraphRegistryScanOptions } from '../src/chain-adapter.js';
 import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   CG_REGISTRY_REORG_BUFFER_BLOCKS,
@@ -328,6 +328,36 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       [1_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 1_949],
     ]);
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000, 1_950]);
+  });
+
+  it('keeps false and computed legacy public options source-compatible as list-all scans', async () => {
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+    });
+    registry.queryFilter.setImpl(async () => []);
+    const incrementalOptions = (incremental: boolean): ContextGraphChainScanOptions => ({
+      incremental,
+      pageBudget: 1,
+    });
+    const seedOptions = (seedIncrementalWatermark: boolean): ContextGraphChainScanOptions => ({
+      seedIncrementalWatermark,
+      resumeFromCursor: true,
+      pageBudget: 1,
+    });
+
+    await adapter.listContextGraphsFromChain(undefined, incrementalOptions(false));
+    await adapter.listContextGraphsFromChain(undefined, seedOptions(false));
+
+    expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
+      [0, 999],
+      [1_000, 1_999],
+      [2_000, 2_100],
+      [0, 999],
+      [1_000, 1_999],
+      [2_000, 2_100],
+    ]);
+    expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBeUndefined();
   });
 
   it('keeps legacy public seed option as a full-scan watermark compatibility wrapper', async () => {
