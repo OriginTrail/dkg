@@ -29,14 +29,18 @@ Rule: a stable release tag (`vX.Y.Z`) should only be created for production-read
 
 ## 3) Package version alignment
 
-Before tagging, ensure package versions reflect intended release channel.
+This is a **single-version monorepo**: every workspace `package.json` moves in lockstep to the release version. Before tagging, bump the `version` field in **all** of them — the root (`dkg-v10`) plus every `packages/*` (~20 files, including the two private packages, so the workspace stays aligned). Internal dependencies use `workspace:*`, which pnpm rewrites to the concrete version at publish time, so a partial bump would ship a skewed dependency graph.
 
-Current process keeps these aligned:
+They are all aligned today, so a scoped find-and-replace is safe:
 
-- `package.json`
-- `packages/cli/package.json`
-- `packages/evm-module/package.json`
-- `packages/mcp-server/package.json`
+```bash
+# review, then bump (macOS sed shown; drop the '' on GNU/Linux)
+grep -rl '"version": "<OLD>"' package.json packages/*/package.json
+sed -i '' 's/"version": "<OLD>"/"version": "<NEW>"/' package.json packages/*/package.json
+git diff --stat   # expect ~20 package.json, version-only
+```
+
+A version-only bump does **not** touch `pnpm-lock.yaml` (the lockfile records only third-party versions), so `pnpm install --frozen-lockfile` stays valid. Do the bump on a branch and land it via a reviewed PR (matches every prior release — e.g. #1497 for 10.0.3). CI hard-gates that the flagship `@origintrail-official/dkg` package version equals the tag.
 
 ## 4) Pre-release tagging workflow
 
@@ -63,41 +67,52 @@ git tag -s v9.0.0-beta.2 -m "DKG v9.0.0 beta 2"
 git push origin v9.0.0-beta.2
 ```
 
-## 5) Publishing to npm
+## 5) Publishing to npm (fully manual)
 
-After pushing a tag, the GitHub Actions release workflow builds, tests, and creates a
-GitHub Release automatically. It also builds and uploads the standalone MarkItDown
-binaries for the currently supported node platforms:
+npm publishing is **fully manual**. There is **no automated npm-publish workflow** — it was removed, because npm's mandatory 2FA/OTP makes token-based CI publishing unworkable and leaving a disabled secret-bearing workflow in the tree is a standing supply-chain liability. The `Release` workflow (`release.yml`) that fires on a tag currently **always fails** at its "structurally signed tag" preflight gate (an `actions/checkout` peeled-ref quirk makes the runner see the annotated tag as a lightweight ref), so it does **not** create a GitHub Release or build the MarkItDown binaries. **Do not wait on CI** — everything below is done by hand.
 
-- `markitdown-linux-x64`
-- `markitdown-darwin-arm64`
-- `markitdown-win32-x64.exe`
+### 5a) Publish the packages
 
-npm publishing is done manually to keep full control.
-
-From a clean `main` checkout at the tagged commit:
+From a clean checkout at the tagged commit:
 
 ```bash
-git checkout v9.0.0-beta.3
+git checkout vX.Y.Z            # detached HEAD at the tag
 pnpm install --frozen-lockfile
-pnpm build
+pnpm build                     # must fully succeed (UI bundle included)
 pnpm -r publish --no-git-checks --tag latest
 ```
 
-npm will prompt for your OTP code. All publishable packages in the monorepo are
-published in one command. Private packages (`@origintrail-official/dkg-evm-module`,
-`@origintrail-official/dkg-network-sim`) are skipped automatically.
+npm prompts for your **OTP** (2FA). All publishable packages publish in one command; the private packages (`@origintrail-official/dkg-evm-module`, `@origintrail-official/dkg-network-sim`) are skipped automatically. `pnpm` skips versions already on the registry, so a re-run after a partial publish is safe. For a prerelease, publish under `--tag rc` / `beta` / `alpha` and **skip 5b**.
 
-The published `@origintrail-official/dkg` package now runs a best-effort postinstall
-step that downloads the current-platform MarkItDown binary from the matching GitHub
-Release into the installed package `bin/` directory (for example
-`node_modules/@origintrail-official/dkg/bin`). Make sure the GitHub Release for the
-same version already exists before publishing to npm.
+### 5b) Move the network dist-tags (production promotion)
 
-Verify after publishing:
+`--tag latest` only sets `latest`. Node auto-update channels + SDK pins follow the `mainnet` (Base / Gnosis / NeuroWeb) and `testnet` dist-tags, which are carried on **every** published package — so move them on all of them, not just the flagship. In zsh:
+
+```zsh
+PKGS=(${(f)"$(node -e 'const fs=require("fs");const files=["package.json",...fs.readdirSync("packages").map(d=>"packages/"+d+"/package.json").filter(f=>fs.existsSync(f))];for(const f of files){try{const p=JSON.parse(fs.readFileSync(f,"utf8"));if(p.name&&p.name.startsWith("@origintrail-official/")&&p.private!==true)console.log(p.name);}catch(e){}}')"})
+OTP=<fresh 2FA code>
+for p in $PKGS; do for t in mainnet testnet; do npm dist-tag add "$p@X.Y.Z" "$t" --otp=$OTP; done; done
+```
+
+One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-run with a fresh code (`npm dist-tag add` is idempotent). Moving `mainnet` is the **production go-live** — do it only after 5a is verified.
+
+### 5c) Create the GitHub Release (manual)
+
+Because `release.yml` does not create it, make the Release by hand from the signed tag, with notes taken from the matching `CHANGELOG.md` section (theme header, npm + channel line, PR-tagged bullets, a `compare/vPREV...vNEW` link):
 
 ```bash
-npm view @origintrail-official/dkg version
+gh release create vX.Y.Z --repo OriginTrail/dkg --verify-tag \
+  --title vX.Y.Z --notes-file <notes.md> --latest
+```
+
+Use `--latest=false` when back-filling an older version so it doesn't steal the "Latest" badge. The MarkItDown binaries are not attached (the workflow that builds them fails); the published `@origintrail-official/dkg` postinstall downloads them best-effort, so `npm i` is unaffected if they're absent.
+
+### 5d) Verify
+
+```bash
+npm view @origintrail-official/dkg version        # X.Y.Z
+npm view @origintrail-official/dkg dist-tags      # latest / mainnet / testnet = X.Y.Z
+gh release view vX.Y.Z --repo OriginTrail/dkg
 ```
 
 ## 6) Node update policy
