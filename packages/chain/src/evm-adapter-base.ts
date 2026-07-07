@@ -558,6 +558,15 @@ export class EVMChainAdapterBase {
    * operational key resolves to identity 0 and reverts — burning the proof
    * period. A wallet is admitted here only once its registration is confirmed,
    * never optimistically.
+   *
+   * This is a same-process cache of on-chain state: seeded/extended on confirmed
+   * registration and PRUNED on a first-party `removeOperationalWallet`. It does
+   * NOT observe out-of-band changes (a removal via another node instance / a
+   * direct admin tx, or a key re-assigned to a different identity) — those go
+   * stale until restart (which re-seeds to currently-registered wallets). Impact
+   * of staleness is bounded: RS may waste one proof attempt on a no-longer-registered
+   * wallet, no fund/safety loss. A durable close (revalidate `getIdentityId(w)`
+   * at selection time via the identityId cache) is a tracked follow-up.
    */
   protected readonly registeredOperationalAddresses = new Set<string>();
 

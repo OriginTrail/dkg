@@ -397,6 +397,9 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     a.getRandomSampling = async () => ({ rs, rss });
     a.readContract = readContract;
     a.sendContractTransaction = sendContractTransaction;
+    // Keep selection deterministic (this test is about the identity read-back,
+    // not wallet rotation) so it doesn't hit a live balance RPC.
+    a.nextRandomSamplingSigner = async () => a.signer;
 
     const result = await a.createChallenge();
 
@@ -408,6 +411,54 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(readContract.calls[0][3]).toBe(challengeIdentityId);
     expect(result.contextGraphId).toBe(contextGraphId);
     expect(result.challenge.knowledgeAssetId).toBe(11n);
+  });
+
+  it('createChallenge signs with the wallet selected by nextRandomSamplingSigner (not hardcoded pool[0])', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(a.signer.address);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = { hash: '0x' + '11'.repeat(32), blockNumber: 1, index: 0, logs: [{ topics: encoded.topics, data: encoded.data }] };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: { interface: rsInterface }, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    // Force selection to the SECOND operational wallet: if createChallenge were
+    // still pinned to this.signer (pool[0]) the send would use it, not w1.
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.createChallenge();
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('createChallenge');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+  });
+
+  it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    const receipt = { hash: '0x' + '22'.repeat(32), blockNumber: 5, index: 0, status: 1, logs: [] };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: {} });
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.submitProof(new Uint8Array([1, 2, 3]), []);
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('submitProof');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
   });
 });
 

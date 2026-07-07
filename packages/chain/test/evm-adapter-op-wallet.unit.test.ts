@@ -156,6 +156,19 @@ describe('EVMChainAdapter.removeOperationalWallet', () => {
     expect(readContract.calls).toHaveLength(2);
   });
 
+  it('prunes the removed wallet from the RS eligibility set (no longer selectable for random sampling)', async () => {
+    const { a } = makeAdapter({ identityId: 5n });
+    // Simulate the wallet having been confirmed-registered earlier.
+    (a as any).registeredOperationalAddresses.add(EXTERNAL.toLowerCase());
+    expect((a as any).registeredOperationalAddresses.has(EXTERNAL.toLowerCase())).toBe(true);
+
+    await a.removeOperationalWallet(EXTERNAL);
+
+    // Pruned → rotatable-free (RS) eligibility can no longer select it, so a
+    // just-decommissioned wallet can't be signed with and revert on-chain.
+    expect((a as any).registeredOperationalAddresses.has(EXTERNAL.toLowerCase())).toBe(false);
+  });
+
   it('REFUSES to remove the bound primary operational wallet, before any tx', async () => {
     const { a, calls } = makeAdapter();
     const primary = (a as any).signer.address as string;
