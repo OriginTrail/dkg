@@ -371,8 +371,11 @@ export function defineChainPublishSuite(config) {
             const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name);
             assert.ok(result, 'Publish returned no result');
             if (result.status !== 'confirmed') {
+              const lifecycleErrors = Array.isArray(result.errors) && result.errors.length
+                              ? ` — lifecycle errors: ${result.errors.map((e) => (e && (e.message || e.error || JSON.stringify(e)))).join(' | ').slice(0, 400)}`
+                              : '';
               throw new Error(
-                `Publish returned "${result.status}" instead of "confirmed" (kaId: ${result.kaId}, httpStatus: ${result.httpStatus})${result.error ? ` — ${result.error}` : ''}`,
+                `Publish returned "${result.status}" instead of "confirmed" (kaId: ${result.kaId}, httpStatus: ${result.httpStatus})${result.error ? ` — ${result.error}` : ''}${lifecycleErrors}`,
               );
             }
             assert.ok(result.kaId !== undefined && result.kaId !== '0', `Publish response missing valid kaId (got ${result.kaId})`);
