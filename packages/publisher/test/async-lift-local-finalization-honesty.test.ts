@@ -1,14 +1,10 @@
 /**
- * Regression test for GH #1013 — "Private publishAsync can finalize locally
- * with provisional UAL but no on-chain provenance".
- * https://github.com/OriginTrail/dkg/issues/1013
- *
- * Fix: a `tentative` publish that skipped chain because a PRIVATE payload had
- * no collectable storage ACKs (`localChainSkipReason: 'private-no-acks'`) must
- * NOT be mapped to `finalized` with a provisional UAL — the caller asked for a
- * VM publish on a chain-registered CG and it never reached chain. It now fails
- * honestly (data is still staged locally under the provisional UAL, surfaced in
- * the error). A genuinely-local publish (`no-chain`) still finalizes(local).
+ * Local async finalization is only honest when there is genuinely no chain path
+ * for the publish. Folded private publishes now collect ACKs and confirm when
+ * V2-capable cores are available, so the remaining local success shape is the
+ * explicit `no-chain` branch (plus legacy results that predate the reason).
+ * A legacy `private-no-acks` result is not honest local success: it targeted
+ * chain finalization but failed before ACK quorum.
  */
 import { describe, expect, it } from 'vitest';
 import { mapPublishResultToLiftJobSuccess } from '../src/async-lift-publish-result.js';
@@ -25,19 +21,7 @@ function baseResult(over: Partial<PublishResult>): PublishResult {
   };
 }
 
-describe('GH #1013 — local async finalization honesty', () => {
-  it('does NOT finalize a private publish that could not reach its chain-registered CG', () => {
-    const res = baseResult({ status: 'tentative', localChainSkipReason: 'private-no-acks' });
-    expect(() => mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' }))
-      .toThrowError(/NOT on chain|could not reach Verifiable Memory/i);
-  });
-
-  it('the failure surfaces the provisional UAL so the local data is recoverable', () => {
-    const res = baseResult({ status: 'tentative', localChainSkipReason: 'private-no-acks' });
-    expect(() => mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' }))
-      .toThrowError(/tmq-provisional-1/);
-  });
-
+describe('local async finalization honesty', () => {
   it('still finalizes(local) for a genuinely no-chain publish', () => {
     const res = baseResult({ status: 'tentative', localChainSkipReason: 'no-chain' });
     const mapped = mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' });
@@ -49,5 +33,15 @@ describe('GH #1013 — local async finalization honesty', () => {
     const res = baseResult({ status: 'tentative', localChainSkipReason: undefined });
     const mapped = mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' });
     expect(mapped.status).toBe('finalized');
+  });
+
+  it('rejects legacy private-no-acks results instead of finalizing them as local success', () => {
+    const res = baseResult({
+      status: 'tentative',
+      localChainSkipReason: 'private-no-acks',
+    } as unknown as Partial<PublishResult>);
+
+    expect(() => mapPublishResultToLiftJobSuccess({ publishResult: res, walletId: 'w1' }))
+      .toThrow(/private-no-acks/);
   });
 });

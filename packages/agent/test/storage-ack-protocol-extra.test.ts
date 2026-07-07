@@ -18,7 +18,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
@@ -38,9 +38,10 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // rc.9 PR-11: bumped to /dkg/10.0.1/* hard cutover (Universal
     // Messenger substrate; receiver dedup + envelope wrap mandatory).
     expect(PROTOCOL_STORAGE_ACK).toBe('/dkg/10.0.1/storage-ack');
+    expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
-  it('agent source registers PROTOCOL_STORAGE_ACK on the messenger substrate', () => {
+  it('agent source registers storage-ack V1 and V2 on the messenger substrate', () => {
     // The DKGAgent god class was split into per-subsystem mixin holders, so
     // the boot-time wiring (incl. this registration) now lives in a sibling
     // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
@@ -54,6 +55,8 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // decode + receiver-side dedup). Pin against the new shape.
     const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
     expect(combined).toMatch(registerRE);
+    const registerV2RE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK_V2\s*,/;
+    expect(combined).toMatch(registerV2RE);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {
@@ -88,15 +91,14 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
   it('protocol id is NOT accidentally registered on a different protocol version', () => {
     // Pins that no code path silently forks to /dkg/9.x or /dkg/11.x
     // storage-ack — such a drift would be invisible to callers but would
-    // break ACK handshakes. We look for any `/dkg/*/storage-ack` that is
-    // not exactly the current PROTOCOL_STORAGE_ACK.
+    // break ACK handshakes. We allow only the V1 and V2 storage-ack constants.
     const files = walk(AGENT_SRC);
     const offenders: string[] = [];
     const re = /['"`](\/dkg\/[^'"`]*?storage-ack)['"`]/g;
     for (const f of files) {
       const src = readFileSync(f, 'utf8');
       for (const m of src.matchAll(re)) {
-        if (m[1] !== PROTOCOL_STORAGE_ACK) {
+        if (m[1] !== PROTOCOL_STORAGE_ACK && m[1] !== PROTOCOL_STORAGE_ACK_V2) {
           offenders.push(`${f}: ${m[1]}`);
         }
       }

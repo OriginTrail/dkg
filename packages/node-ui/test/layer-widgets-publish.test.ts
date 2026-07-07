@@ -111,7 +111,8 @@ describe('PublishVmWidget — B8 confirmed discount badge (#1365 r3)', () => {
     );
     await clickPublish(container);
     await flush();
-    const res = container.querySelector('[data-testid="layer-action-result"]');
+    // #1464 — errors now render under a distinct testid (never the success `layer-action-result`).
+    const res = container.querySelector('[data-testid="layer-action-error"]');
     expect(res?.textContent).toContain('VM publish tx reverted');
     expect(res?.textContent).not.toContain('an assertion');
     await unmount();
@@ -286,6 +287,29 @@ describe('PromoteWidget — promote flow (#1382)', () => {
     expect(apiMocks.knowledgeAssetFinalize).toHaveBeenCalledWith('cg', 'a1', { subGraphName: 'sg1' });
     expect(apiMocks.promoteAssertion).toHaveBeenCalledWith('cg', 'a1', 'all', 'sg1');
     expect(container.querySelector('[data-testid="layer-action-result"]')?.textContent).toContain('Promoted 3 triples to Shared Memory');
+    await unmount();
+  });
+
+  // #1464 — THE MASK: a THROWN promote must render under a DISTINCT `layer-action-error` testid,
+  // never the success `layer-action-result`. Before this split both shared one testid, so the
+  // devnet e2e (which reads `layer-action-result` testid-agnostically and only rejects the literal
+  // "No triples were promoted" no-op string) mistook an "✕ Promote failed…" banner for a
+  // successful promote — then the SWM count stayed 0 and the throw was misdiagnosed as a silent
+  // migration gap (#1464). Deterministic; fails before the testid split (the error was queryable
+  // under layer-action-result), passes after.
+  it('#1464 — a promote FAILURE renders under layer-action-error, never the success layer-action-result', async () => {
+    apiMocks.promoteAssertion.mockRejectedValue(new Error('[promote:resolveKaNumber] devnet SPARQL read timed out'));
+    const { container, unmount } = await render(
+      React.createElement(PromoteWidget, { count: 1, contextGraphId: 'cg' }),
+    );
+    await clickPromote(container);
+    for (let i = 0; i < 30 && !container.querySelector('[data-testid="layer-action-error"]'); i++) await flush();
+    // The error is isolated under its own testid AND carries the (server-tagged) failing step.
+    const err = container.querySelector('[data-testid="layer-action-error"]');
+    expect(err?.textContent).toContain('devnet SPARQL read timed out');
+    expect(err?.textContent).toContain('[promote:resolveKaNumber]');
+    // The success testid must be ABSENT — a testid-agnostic reader can no longer read the error as a result.
+    expect(container.querySelector('[data-testid="layer-action-result"]')).toBeNull();
     await unmount();
   });
 });

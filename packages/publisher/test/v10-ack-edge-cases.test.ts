@@ -142,6 +142,7 @@ function buildCollectParams(overrides: Partial<Parameters<ACKCollector['collect'
     chainId: TEST_CHAIN_ID,
     kav10Address: TEST_KAV10_ADDR,
     merkleLeafCount: testMerkleLeafCount,
+    ackMode: { kind: 'public' },
     ...overrides,
   };
 }

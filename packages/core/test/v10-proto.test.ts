@@ -502,6 +502,25 @@ describe('PublishIntent — LU-11 fields (ciphertextChunksRoot, ciphertextChunkC
     expect(decoded.ciphertextChunkCount ?? 0).toBe(0);
   });
 
+  it('folded-private privateMerkleRoots (field 20) round-trip and default empty', () => {
+    const pub = decodePublishIntent(encodePublishIntent(baseIntent()));
+    expect(pub.privateMerkleRoots ?? []).toHaveLength(0);
+
+    const privateMerkleRoots = [
+      new Uint8Array(32).fill(0x61),
+      new Uint8Array(32).fill(0x62),
+    ];
+    const folded: PublishIntentMsg = {
+      ...baseIntent(),
+      isPrivate: true,
+      privateMerkleRoots,
+    };
+    const decoded = decodePublishIntent(encodePublishIntent(folded));
+    expect(decoded.privateMerkleRoots).toHaveLength(2);
+    expect(new Uint8Array(decoded.privateMerkleRoots![0])).toEqual(privateMerkleRoots[0]);
+    expect(new Uint8Array(decoded.privateMerkleRoots![1])).toEqual(privateMerkleRoots[1]);
+  });
+
   it('ackProtocolVersion constants are stable wire values', () => {
     expect(ACK_PROTOCOL_VERSION_V1_LU5).toBe(1);
     expect(ACK_PROTOCOL_VERSION_V2_LU11).toBe(2);

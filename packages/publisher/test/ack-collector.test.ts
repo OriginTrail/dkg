@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
-import { encodeStorageACK, computePublishACKDigest } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10 } from '../src/merkle.js';
+import {
+  decodePublishIntent,
+  encodeStorageACK,
+  computePublishACKDigest,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK_V2,
+} from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, computePrivateRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
 
 // Test H5 prefix inputs — must match what the collector passes into
@@ -89,6 +95,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -103,6 +110,163 @@ describe('ACKCollector', () => {
       expect(ack.signatureVS.length).toBe(32);
       expect(ack.nodeIdentityId).toBeGreaterThan(0n);
     }
+  });
+
+  it('puts folded-private Merkle roots on the PublishIntent wire', async () => {
+    const privateRoot = computePrivateRootV10([
+      makeQuad('urn:a', 'urn:secret', '"hidden"'),
+    ])!;
+    const foldedRoot = computeFlatKCRootV10(testQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, [privateRoot]);
+    const seenPrivateRoots: Uint8Array[][] = [];
+    const seenProtocols: string[] = [];
+    const requestedProtocols: Array<string | undefined> = [];
+
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (peerId, protocol, data) => {
+        seenProtocols.push(protocol);
+        const decoded = decodePublishIntent(data);
+        seenPrivateRoots.push((decoded.privateMerkleRoots ?? []).map((root) => new Uint8Array(root)));
+
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const wallet = coreWallets[idx];
+        const { r, vs } = await signACK(wallet, testCGId, foldedRoot, 1, 100n, 1n, 0n, foldedLeafCount);
+        return encodeStorageACK({
+          merkleRoot: foldedRoot,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: (protocol?: string) => {
+        requestedProtocols.push(protocol);
+        return protocol === PROTOCOL_STORAGE_ACK_V2
+          ? ['peer-0', 'peer-1', 'peer-2']
+          : ['legacy-peer-0', 'legacy-peer-1', 'legacy-peer-2'];
+      },
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect({
+      merkleRoot: foldedRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount: foldedLeafCount,
+      ackMode: { kind: 'folded-private', privateMerkleRoots: [privateRoot] },
+    });
+
+    expect(result.acks).toHaveLength(3);
+    expect(requestedProtocols).toEqual([PROTOCOL_STORAGE_ACK_V2]);
+    expect(seenProtocols).toEqual([
+      PROTOCOL_STORAGE_ACK_V2,
+      PROTOCOL_STORAGE_ACK_V2,
+      PROTOCOL_STORAGE_ACK_V2,
+    ]);
+    expect(seenPrivateRoots).toHaveLength(3);
+    for (const roots of seenPrivateRoots) {
+      expect(roots).toHaveLength(1);
+      expect(roots[0]).toEqual(privateRoot);
+    }
+  });
+
+  it('keeps public ACKs on the V1 storage-ack protocol', async () => {
+    const seenProtocols: string[] = [];
+    const requestedProtocols: Array<string | undefined> = [];
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (peerId, protocol) => {
+        seenProtocols.push(protocol);
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const wallet = coreWallets[idx];
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1, 100n);
+        return encodeStorageACK({
+          merkleRoot,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: (protocol?: string) => {
+        requestedProtocols.push(protocol);
+        return protocol === PROTOCOL_STORAGE_ACK ? ['peer-0', 'peer-1', 'peer-2'] : [];
+      },
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    const result = await collector.collect({
+      merkleRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
+      ackMode: { kind: 'public' },
+    });
+
+    expect(result.acks).toHaveLength(3);
+    expect(requestedProtocols).toEqual([PROTOCOL_STORAGE_ACK]);
+    expect(seenProtocols).toEqual([
+      PROTOCOL_STORAGE_ACK,
+      PROTOCOL_STORAGE_ACK,
+      PROTOCOL_STORAGE_ACK,
+    ]);
+  });
+
+  it('rejects private roots smuggled into curated catalog ACK mode', async () => {
+    const privateRoot = computePrivateRootV10([
+      makeQuad('urn:a', 'urn:secret', '"hidden"'),
+    ])!;
+    const foldedRoot = computeFlatKCRootV10(testQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(testQuads, [privateRoot]);
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async () => {
+        throw new Error('sendP2P should not be called');
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    await expect(collector.collect({
+      merkleRoot: foldedRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount: foldedLeafCount,
+      stagingQuads: new TextEncoder().encode('<urn:a> <urn:p> <urn:o> .'),
+      ackMode: {
+        kind: 'curated-catalog',
+        catalogCommitment: {
+          catalogRoot: new Uint8Array(32).fill(0x49),
+          catalogLeafCount: 1,
+        },
+        privateMerkleRoots: [privateRoot],
+      } as any,
+    })).rejects.toThrow('privateMerkleRoots cannot be combined with curated-catalog ACK mode');
   });
 
   it('deduplicates by peerId and nodeIdentityId', async () => {
@@ -142,6 +306,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -171,6 +336,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('no connected core peers');
   });
 
@@ -202,6 +368,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('V10 publish requires exactly one Knowledge Asset');
 
     expect(peerListCalls).toBe(0);
@@ -241,6 +408,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
   });
 
@@ -302,6 +470,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -339,6 +508,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
 
     for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
@@ -399,6 +569,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -472,6 +643,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -515,6 +687,7 @@ describe('ACKCollector', () => {
       chainId: TEST_CHAIN_ID,
       kav10Address: TEST_KAV10_ADDR,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     })).rejects.toThrow('storage_ack_insufficient');
   });
 });

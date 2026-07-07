@@ -894,6 +894,15 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * Peer IDs that are eligible ACK candidates for the selected chain/network.
+   *
+   * When set, ACK collection may still use identify-time `knownCorePeerIds`
+   * as a fast path, but the below-quorum fallback must not widen beyond this
+   * set. This keeps stale bootstrap/preferred-relay connections from other
+   * networks out of the StorageACK candidate pool.
+   */
+  ackCandidatePeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
   skills?: Array<{

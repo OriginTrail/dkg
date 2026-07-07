@@ -72,8 +72,10 @@ import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-officia
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
 import {
+  DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
   isSkolemizedUri,
+  selectACKCandidatePeers,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
@@ -602,6 +604,66 @@ export function mergePreferredRelays(input: {
     configCount: configParsed.length,
     preferredCount: preferredInResult.length,
   };
+}
+
+export function extractPeerIdFromMultiaddr(raw: string): string | null {
+  const parts = raw.split('/').filter((part) => part.length > 0);
+  const idx = parts.indexOf('p2p');
+  if (idx < 0) return null;
+  return parts[idx + 1]?.trim() || null;
+}
+
+export function extractPeerIdsFromMultiaddrs(addrs: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of addrs ?? []) {
+    const peerId = extractPeerIdFromMultiaddr(raw);
+    if (!peerId || seen.has(peerId)) continue;
+    seen.add(peerId);
+    out.push(peerId);
+  }
+  return out;
+}
+
+export function resolveACKCandidatePeerIds(input: {
+  usingNetworkRelays: boolean;
+  networkRelays: readonly string[] | undefined;
+}): string[] {
+  if (!input.usingNetworkRelays) return [];
+  return extractPeerIdsFromMultiaddrs(input.networkRelays);
+}
+
+export function orderACKCandidatePeerIds(input: {
+  connectedPeerIds: readonly string[];
+  selfPeerId: string;
+  knownCorePeerIds?: ReadonlySet<string>;
+  ackCandidatePeerIds?: readonly string[];
+}): string[] {
+  const connected = input.connectedPeerIds.filter((id) => id !== input.selfPeerId);
+  const allowedACKPeers = new Set(
+    (input.ackCandidatePeerIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
+  );
+  const eligible = allowedACKPeers.size > 0
+    ? connected.filter((id) => allowedACKPeers.has(id))
+    : connected;
+  const knownCorePeerIds = input.knownCorePeerIds;
+
+  if (allowedACKPeers.size > 0) {
+    const confirmed = knownCorePeerIds
+      ? eligible.filter((id) => knownCorePeerIds.has(id))
+      : [];
+    const rest = knownCorePeerIds
+      ? eligible.filter((id) => !knownCorePeerIds.has(id))
+      : eligible;
+    return [...confirmed, ...rest];
+  }
+
+  if (knownCorePeerIds && knownCorePeerIds.size > 0) {
+    const filtered = connected.filter((id) => knownCorePeerIds.has(id));
+    if (filtered.length > 0) return filtered;
+  }
+
+  return connected;
 }
 
 export function shouldUseIncrementalChainDiscoveryScan(input: {
@@ -1259,6 +1321,7 @@ export async function runDaemonInner(
   // "none" disables relay entirely (used by devnet relay nodes to prevent
   // cross-network leakage into testnet).
   let relayPeers: string[] | undefined;
+  let usingNetworkRelays = false;
   if (config.relay === "none") {
     relayPeers = undefined;
     log(
@@ -1268,7 +1331,17 @@ export async function runDaemonInner(
     relayPeers = [config.relay];
   } else if (network?.relays?.length) {
     relayPeers = network.relays;
+    usingNetworkRelays = true;
     log(`Using relay(s) from network config (${network.networkName})`);
+  }
+  const ackCandidatePeerIds = resolveACKCandidatePeerIds({
+    usingNetworkRelays,
+    networkRelays: network?.relays,
+  });
+  if (ackCandidatePeerIds.length > 0) {
+    log(
+      `ACK candidate peer allowlist: ${ackCandidatePeerIds.length} peer(s) from network config (${network?.networkName ?? "unknown"})`,
+    );
   }
 
   // rc.9 PR-7 — operator-preferred relays. See `mergePreferredRelays`
@@ -1387,6 +1460,7 @@ export async function runDaemonInner(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
+    ackCandidatePeerIds: ackCandidatePeerIds.length > 0 ? ackCandidatePeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     relayServerCapacity: config.relayServerCapacity,
@@ -1836,19 +1910,25 @@ export async function runDaemonInner(
                 }
                 return sendResult.response;
               },
-              getConnectedCorePeers: () => {
+              getConnectedCorePeers: (protocol?: string) => {
                 const allPeers = agent.node.libp2p
                   .getPeers()
-                  .map((p) => p.toString())
-                  .filter((id) => id !== agent.peerId);
+                  .map((p) => p.toString());
                 const knownCorePeerIds = (agent as any).knownCorePeerIds as
                   | Set<string>
                   | undefined;
-                if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-                  const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
-                  if (filtered.length > 0) return filtered;
-                }
-                return allPeers;
+                const knownCorePeerIdsV2 = (agent as any).knownCorePeerIdsV2 as
+                  | Set<string>
+                  | undefined;
+                return selectACKCandidatePeers({
+                  connectedPeers: allPeers,
+                  selfPeerId: agent.peerId,
+                  knownCorePeerIds,
+                  knownCorePeerIdsV2,
+                  requiredACKs: (agent as any).lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+                  protocol,
+                  ackCandidatePeerIds,
+                });
               },
               log,
             }),

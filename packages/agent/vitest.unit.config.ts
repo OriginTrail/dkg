@@ -14,6 +14,7 @@ export default defineConfig({
   test: {
     include: [
       "test/endorse.test.ts",
+      "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",
       "test/imported-artifact.test.ts",

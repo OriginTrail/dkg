@@ -67,6 +67,7 @@ const collectParams = {
   chainId: TEST_CHAIN_ID,
   kav10Address: TEST_KAV10_ADDR,
   merkleLeafCount,
+  ackMode: { kind: 'public' },
 };
 
 describe('quorumOutcomeFromError — classify on the structured prefix, not peer text', () => {

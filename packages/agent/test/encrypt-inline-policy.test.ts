@@ -428,6 +428,66 @@ describe('DKGAgent._publish inline encryption routing', () => {
     })]);
   });
 
+  it('routes direct encrypted private publishes to the publisher without an implicit catalog floor', async () => {
+    const encryptInlinePayload = recorder(async (plaintext: Uint8Array) => plaintext);
+    const encryptInlineChunked = recorder(() => undefined);
+    const publisherError = new Error(
+      'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model.',
+    );
+    const publisherPublish = recorder(async () => {
+      throw publisherError;
+    });
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['private-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '42'),
+      chain: {},
+      peerId: 'peer-1',
+      publisher: {
+        publish: publisherPublish,
+      },
+      broadcastPublish: recorder(async () => undefined),
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => encryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
+    } as any;
+
+    await expect((DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'private-cg',
+      [{ subject: 's', predicate: 'p', object: '"public"', graph: 'g' }],
+      [{ subject: 's', predicate: 'secret', object: '"private"', graph: 'g' }],
+      {
+        subGraphName: 'sg-private',
+        publisherNodeIdentityIdOverride: 0n,
+      },
+    )).rejects.toBe(publisherError);
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'private-cg',
+      'sg-private',
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    const publishArgs = publisherPublish.calls.at(-1)?.[0];
+    expect(publishArgs).toEqual(expect.objectContaining({
+      contextGraphId: 'private-cg',
+      privateQuads: [{ subject: 's', predicate: 'secret', object: '"private"', graph: 'g' }],
+      publishContextGraphId: '42',
+      encryptInlinePayload,
+      encryptInlineChunked,
+    }));
+    expect(publishArgs).not.toHaveProperty('trustedNonManifestCatalogTriples');
+  });
+
   it('keeps caller-supplied mismatched onChainContextGraphId as an explicit policy target', async () => {
     const publisherPublish = recorder(async () => ({
       status: 'confirmed',
