@@ -318,8 +318,16 @@ export async function probeNode(baseUrl) {
 
 // Pull the node's own recent WARN/ERROR server logs around the failure from
 // Loki (fail-soft: diagnostics must never break the test itself).
+// If Loki is unreachable from this runner (e.g. the Jenkins agent has no
+// network route to the telemetry server), remember that after the first
+// attempt and skip straight to the Grafana link — don't pay the connect
+// timeout again on every subsequent error.
+let lokiUnreachable = false;
 export async function fetchServerLogs(nodeName, whenMs) {
   if (!SERVER_LOGS) return null;
+  if (lokiUnreachable) {
+    return { lines: [], note: `Loki not reachable from this runner — open the Grafana link below for the server logs.` };
+  }
   const q = async (logql, limit) => {
     const params = new URLSearchParams({
       query: logql,
@@ -349,7 +357,10 @@ export async function fetchServerLogs(nodeName, whenMs) {
     }
     return { lines: [], note: `${nodeName} shipped NO server logs at all in this window — the node process/host (or its log pipeline) looks down.` };
   } catch (e) {
-    return { lines: [], note: `server-log lookup unavailable (${e.message}) — open Grafana link below instead.` };
+    // network-level failure (timeout/refused) = no route from this runner;
+    // an HTTP error from Loki itself means it IS reachable, so keep trying.
+    if (!/Loki HTTP \d+/.test(e.message)) lokiUnreachable = true;
+    return { lines: [], note: `server-log lookup unavailable (${e.message}) — open the Grafana link below for the server logs.` };
   }
 }
 
