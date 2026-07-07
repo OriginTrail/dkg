@@ -3860,6 +3860,84 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(coverCalls.length).toBe(1); // only walletA's PCA was probed (walletB fundable via own-TRAC)
     expect(coverCalls[0] > 1n).toBe(true); // priced at the REAL publish cost, not the 1-wei liveness probe
   });
+
+  // ── dispatcher Phase 3: the generalized selectSigner seam (RS/relay/update
+  // route through this later). Publish behaviour above is proven byte-identical
+  // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
+  describe('selectSigner — generalized funding modes + idle preference', () => {
+    const nativeOnly = { kind: 'native-only' as const, nativeFloorWei: 0n };
+
+    it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
+      const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // Head walletA: gas but ZERO own-TRAC. Under publish (native+trac) it would
+      // be skipped; under native-only it is fundable, so the head is chosen.
+      nativeByAddr.set(lc(walletA.address), ONE);
+      tracByAddr.set(lc(walletA.address), 0n);
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletA.address);
+    });
+
+    it('native-only still skips a gas-EMPTY wallet', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletB.address);
+    });
+
+    it('rotatable-free selects over the WHOLE pool, ignoring the authorized-publisher filter', async () => {
+      const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // No wallet is an authorized publisher → publish (rotatable-policy) throws…
+      (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+      await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeOnly }))
+        .rejects.toThrow(/No authorized publisher wallet/);
+      // …but rotatable-free ignores that surface and picks from the whole pool.
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletA.address);
+    });
+
+    it('preferIdle biases toward a funded wallet whose per-wallet lock is free', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // Both funded (helper default). Hold walletA (the round-robin head) busy.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
+      } finally { release(); }
+    });
+
+    it('preferIdle is fail-open: when NO funded wallet is idle it returns the first funded (never excludes)', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      let releaseA!: () => void; let releaseB!: () => void;
+      const gA = new Promise<void>((r) => { releaseA = r; });
+      const gB = new Promise<void>((r) => { releaseB = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA);
+      void (a as any).signerTxSerializer.run(walletB.address, () => gB);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
+      } finally { releaseA(); releaseB(); }
+    });
+
+    it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {
+      const prev = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
+      process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = '1';
+      try {
+        const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+        try {
+          const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+          expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen
+        } finally { release(); }
+      } finally {
+        if (prev === undefined) delete process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
+        else process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = prev;
+      }
+    });
+  });
 });
 });
 
