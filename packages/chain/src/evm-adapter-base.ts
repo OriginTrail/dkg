@@ -61,33 +61,39 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_
  * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`. Lazy
  * names listed here MUST match helpers such as `getIdentityStorage()`.
  */
-type HubBindingInvalidationPolicy = {
-  invalidate: (adapter: EVMChainAdapterBase) => void;
-  invalidateOnRotation?: (adapter: EVMChainAdapterBase) => void;
-};
+type ResettableContractCacheKey = {
+  [K in keyof ContractCache]: undefined extends ContractCache[K] ? K : never
+}[keyof ContractCache];
 
-const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>([
-  ['Identity',                   { invalidate: (a) => { (a as any).contracts.identity = undefined; } }],
-  ['IdentityStorage',            {
-    invalidate: (a) => { (a as any).invalidateIdentityStorageBinding(); },
-    invalidateOnRotation: (a) => { (a as any).invalidateIdentityStorageBinding(); },
-  }],
-  ['Profile',                    { invalidate: (a) => { (a as any).contracts.profile = undefined; } }],
-  ['ProfileStorage',             { invalidate: (a) => { (a as any).contracts.profileStorage = undefined; } }],
-  ['ParametersStorage',          { invalidate: (a) => { (a as any).contracts.parametersStorage = undefined; } }],
-  ['Staking',                    { invalidate: (a) => { (a as any).contracts.staking = undefined; } }],
-  ['Token',                      { invalidate: (a) => { (a as any).contracts.token = undefined; } }],
-  ['AskStorage',                 { invalidate: (a) => { (a as any).contracts.askStorage = undefined; } }],
-  ['KnowledgeAssets',            { invalidate: (a) => { (a as any).contracts.knowledgeAssets = undefined; } }],
-  ['KnowledgeAssetsStorage',     { invalidate: (a) => { (a as any).contracts.knowledgeAssetsStorage = undefined; } }],
-  ['KnowledgeAssetsLifecycle',   { invalidate: (a) => { (a as any).contracts.knowledgeAssetsLifecycle = undefined; } }],
-  ['DKGKnowledgeAssets',         { invalidate: (a) => { (a as any).contracts.knowledgeAssetStorage = undefined; } }],
-  ['ContextGraphNameRegistry',   { invalidate: (a) => { (a as any).contracts.contextGraphNameRegistry = undefined; } }],
-  ['ContextGraphs',              { invalidate: (a) => { (a as any).contracts.contextGraphs = undefined; } }],
-  ['ContextGraphStorage',        { invalidate: (a) => { (a as any).contracts.contextGraphStorage = undefined; } }],
-  ['DKGPublishingConvictionNFT', { invalidate: (a) => { (a as any).contracts.dkgPublishingConvictionNFT = undefined; } }],
-  ['Chronos',                    { invalidate: (a) => { (a as any).contracts.chronos = undefined; } }],
-]);
+type HubContractCacheKey = Exclude<ResettableContractCacheKey, undefined>;
+
+type HubBindingInvalidationPolicy =
+  | { contractKey: HubContractCacheKey; invalidateOnRotation?: false }
+  | { special: 'identityStorage'; invalidateOnRotation: true };
+
+const HUB_BINDING_INVALIDATOR_ENTRIES = [
+  ['Identity',                   { contractKey: 'identity' }],
+  ['IdentityStorage',            { special: 'identityStorage', invalidateOnRotation: true }],
+  ['Profile',                    { contractKey: 'profile' }],
+  ['ProfileStorage',             { contractKey: 'profileStorage' }],
+  ['ParametersStorage',          { contractKey: 'parametersStorage' }],
+  ['Staking',                    { contractKey: 'staking' }],
+  ['Token',                      { contractKey: 'token' }],
+  ['AskStorage',                 { contractKey: 'askStorage' }],
+  ['KnowledgeAssets',            { contractKey: 'knowledgeAssets' }],
+  ['KnowledgeAssetsStorage',     { contractKey: 'knowledgeAssetsStorage' }],
+  ['KnowledgeAssetsLifecycle',   { contractKey: 'knowledgeAssetsLifecycle' }],
+  ['DKGKnowledgeAssets',         { contractKey: 'knowledgeAssetStorage' }],
+  ['ContextGraphNameRegistry',   { contractKey: 'contextGraphNameRegistry' }],
+  ['ContextGraphs',              { contractKey: 'contextGraphs' }],
+  ['ContextGraphStorage',        { contractKey: 'contextGraphStorage' }],
+  ['DKGPublishingConvictionNFT', { contractKey: 'dkgPublishingConvictionNFT' }],
+  ['Chronos',                    { contractKey: 'chronos' }],
+] as const satisfies ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]>;
+
+const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
+  HUB_BINDING_INVALIDATOR_ENTRIES,
+);
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
@@ -3266,8 +3272,20 @@ export class EVMChainAdapterBase {
     }
     const policy = HUB_BINDING_INVALIDATORS.get(name);
     if (!policy) return;
-    policy.invalidateOnRotation?.(this);
+    this.invalidateHubBindingOnRotation(policy);
     this.finalizeKnownHubRotation();
+  }
+
+  protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
+    if (policy.invalidateOnRotation) this.invalidateHubBinding(policy);
+  }
+
+  protected invalidateHubBinding(policy: HubBindingInvalidationPolicy): void {
+    if ('contractKey' in policy) {
+      this.contracts[policy.contractKey] = undefined;
+      return;
+    }
+    if (policy.special === 'identityStorage') this.invalidateIdentityStorageBinding();
   }
 
   protected finalizeKnownHubRotation(): void {
@@ -3297,7 +3315,7 @@ export class EVMChainAdapterBase {
    */
   protected invalidateAllBoundContracts(): void {
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
-      policy.invalidate(this);
+      this.invalidateHubBinding(policy);
     }
     this.invalidatePublishPreflightCache();
     this.invalidateRandomSamplingPair();

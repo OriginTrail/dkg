@@ -64,7 +64,7 @@ function failoverReadProvider(providers: unknown[]) {
 }
 
 describe('HubRotationPoller', () => {
-  it('does not touch RPC during startup and stop cancels the scheduled poll', async () => {
+  it('records startup head without log reads and stop cancels the scheduled poll', async () => {
     vi.useFakeTimers({ now: 0 });
     const provider = {
       getBlockNumber: vi.fn(async () => 1_000),
@@ -81,13 +81,13 @@ describe('HubRotationPoller', () => {
     try {
       await expect(poller.start(hubContract(), HUB_ADDRESS)).resolves.toBeUndefined();
       expect(poller.isStarted).toBe(true);
-      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
       expect(provider.getLogs).not.toHaveBeenCalled();
 
       poller.stop();
       await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
       expect(provider.getLogs).not.toHaveBeenCalled();
       expect(onContractName).not.toHaveBeenCalled();
       expect(poller.isStarted).toBe(false);
@@ -129,7 +129,7 @@ describe('HubRotationPoller', () => {
       releasePoll();
       await pendingPoll;
 
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getBlockNumber.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(provider.getLogs).toHaveBeenCalledTimes(1);
       expect(onContractName).not.toHaveBeenCalled();
       expect(poller.isStarted).toBe(false);
@@ -280,8 +280,8 @@ describe('HubRotationPoller', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       await flushAsyncWork();
 
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(2);
-      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(provider.getBlockNumber.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(provider.getLogs.mock.calls.length).toBeGreaterThanOrEqual(1);
       expect(provider.getLogs.mock.calls[0][0]).toMatchObject({
         fromBlock: 951,
         toBlock: 1_001,
@@ -350,11 +350,11 @@ describe('HubRotationPoller', () => {
 
       await Promise.all([firstStart, secondStart]);
 
-      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
       expect(provider.getLogs).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getBlockNumber.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(provider.getLogs).toHaveBeenCalledTimes(1);
     } finally {
       poller.stop();
@@ -391,12 +391,13 @@ describe('HubRotationPoller', () => {
       await flushAsyncWork();
 
       expect(onContractName).not.toHaveBeenCalled();
-      expect(provider.getBlockNumber).not.toHaveBeenCalled();
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
       expect(provider.getLogs).not.toHaveBeenCalled();
 
       head = 1_001;
       await vi.advanceTimersByTimeAsync(30_000);
 
+      expect(provider.getBlockNumber.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(provider.getLogs).toHaveBeenCalledTimes(1);
       expect(provider.getLogs.mock.calls[0][0]).toMatchObject({
         address: HUB_ADDRESS,
@@ -417,6 +418,44 @@ describe('HubRotationPoller', () => {
         'RandomSampling',
         'ContextGraphs',
       ]);
+    } finally {
+      poller.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps post-start rotations visible when the first interval fires after the reorg buffer', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const iface = hubInterface();
+    let head = 1_000;
+    const rotation = rotationLog(iface, 'ContractChanged', 'KnowledgeAssetsLifecycle', 1_001, '18');
+    const provider = {
+      getBlockNumber: vi.fn(async () => head),
+      getLogs: vi.fn(async (filter: any) => logsInRange([rotation], filter)),
+    };
+    const onContractName = vi.fn();
+    const poller = new HubRotationPoller({
+      readProvider: async (_label, fn) => fn(provider as any),
+      intervalMs: 30_000,
+      reorgBufferBlocks: 50,
+      onContractName,
+    });
+
+    try {
+      await poller.start(hubContract(iface), HUB_ADDRESS);
+      await flushAsyncWork();
+      expect(provider.getBlockNumber).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs).not.toHaveBeenCalled();
+
+      head = 1_052;
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(provider.getLogs).toHaveBeenCalledTimes(1);
+      expect(provider.getLogs.mock.calls[0][0]).toMatchObject({
+        fromBlock: 951,
+        toBlock: 1_052,
+      });
+      expect(onContractName).toHaveBeenCalledWith('KnowledgeAssetsLifecycle');
     } finally {
       poller.stop();
       vi.useRealTimers();

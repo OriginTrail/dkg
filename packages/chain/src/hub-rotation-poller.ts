@@ -59,15 +59,10 @@ export class HubRotationPoller {
     this.started = true;
 
     this.timer = setInterval(() => {
-      if (this.inFlight) return;
-      const pollPromise = this.pollOnce(generation)
-        .catch(() => { /* optional poller path */ })
-        .finally(() => {
-          if (this.inFlight === pollPromise) this.inFlight = null;
-        });
-      this.inFlight = pollPromise;
+      this.runExclusive(() => this.pollOnce(generation));
     }, this.intervalMs);
     if (this.timer.unref) this.timer.unref();
+    this.runExclusive(() => this.recordInitialHead(generation));
   }
 
   stop(): void {
@@ -78,6 +73,16 @@ export class HubRotationPoller {
       this.timer = null;
     }
     this.started = false;
+  }
+
+  private runExclusive(work: () => Promise<void>): void {
+    if (this.inFlight) return;
+    const pollPromise = work()
+      .catch(() => { /* optional poller path */ })
+      .finally(() => {
+        if (this.inFlight === pollPromise) this.inFlight = null;
+      });
+    this.inFlight = pollPromise;
   }
 
   private bind(hub: Contract, hubAddress: string): void {
@@ -117,6 +122,19 @@ export class HubRotationPoller {
       ? head
       : Math.max(previousLastScannedBlock, head);
     this.pruneSeenLogs(head);
+  }
+
+  private async recordInitialHead(generation: number): Promise<void> {
+    if (!this.started || generation !== this.generation) return;
+    const head = await this.readProvider(
+      'Hub rotation poll initial getBlockNumber',
+      (provider) => provider.getBlockNumber(),
+      { policy: 'watchdogPointRead' },
+    );
+    if (!this.started || generation !== this.generation) return;
+    this.lastScannedBlock = this.lastScannedBlock == null
+      ? head
+      : Math.max(this.lastScannedBlock, head);
   }
 
   private scanFromBlock(previousLastScannedBlock: number | undefined, head: number): number {

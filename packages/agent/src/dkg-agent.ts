@@ -1214,11 +1214,26 @@ export class DKGAgent extends DKGAgentBase {
       // Also compute expected hash for locally-known context graph IDs
       knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
     }
+    const readDurableContextGraphOnChainId = async (contextGraphId: string): Promise<string | null> => {
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+      const result = await this.store.query(
+        `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+      );
+      if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+      const value = result.bindings[0]?.['id'];
+      return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
+    };
 
     let discovered = 0;
     const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
       for (const p of contextGraphs) {
-        if (knownOnChainIds.has(p.contextGraphId)) continue;
+        if (knownOnChainIds.has(p.contextGraphId)) {
+          if (!p.name) continue;
+          const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
+          if (durableOnChainId === p.contextGraphId) continue;
+          knownOnChainIds.delete(p.contextGraphId);
+        }
 
         if (!p.name) {
           // Hash-only entry (metadata not revealed) — record for dedup but don't
@@ -1244,15 +1259,6 @@ export class DKGAgent extends DKGAgentBase {
           }
         }
 
-        this.setContextGraphSubscription(p.name, {
-          name: p.name,
-          subscribed: true,
-          synced: false,
-          metaSynced: false,
-          onChainId: p.contextGraphId,
-        });
-        this.subscribeToContextGraph(p.name, { trackSyncScope: false });
-
         // Persist the on-chain ID to the ontology graph so the publisher's
         // VM registration guard can find it via RDF (it has no access to
         // the in-memory subscribedContextGraphs map).
@@ -1261,6 +1267,9 @@ export class DKGAgent extends DKGAgentBase {
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
         // (LIMIT-1-nondeterministic) binding.
+        // Keep this durable write before subscription/gossip mutation: cursor
+        // pages are acked after this function returns, and an in-memory onChainId
+        // alone must not make a retry skip the RDF binding.
         await this.store.deleteByPattern({
           graph: ontoGraph,
           subject: cgUri,
@@ -1273,6 +1282,14 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
+        this.setContextGraphSubscription(p.name, {
+          name: p.name,
+          subscribed: true,
+          synced: false,
+          metaSynced: false,
+          onChainId: p.contextGraphId,
+        });
+        this.subscribeToContextGraph(p.name, { trackSyncScope: false });
         this.contextGraphMetaProjection.markDirty(p.name);
         this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — auto-subscribed (synced=false)`);
         knownOnChainIds.add(p.contextGraphId);

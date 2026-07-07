@@ -173,6 +173,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'invalidateAllBoundContracts',
   'startHubRotationListener',
   'applyHubRotationEventName',
+  'invalidateHubBindingOnRotation',
+  'invalidateHubBinding',
+  'finalizeKnownHubRotation',
   'invalidateRandomSamplingPair',
   'resolveAndAssignRandomSamplingPair',
   'isContractMissingRevert',
@@ -189,6 +192,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'pcaWriteAndInvalidate',
   // Identity read-cache helpers are EVM-only: the mock's identity registry is
   // in-memory and its writes are already immediately visible.
+  'invalidateIdentityStorageBinding',
+  'identityStorageAddressChanged',
+  'readIdentityIdFromStorage',
+  'readIdentityIdForAddress',
+  'refreshIdentityIdForAddress',
   'clearIdentityIdForAddress',
   'seedIdentityIdForAddress',
   // The seven V10 Publishing Conviction NFT methods (issue #519 /

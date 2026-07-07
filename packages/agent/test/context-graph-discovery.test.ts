@@ -2549,6 +2549,77 @@ describe('discoverContextGraphsFromChain', () => {
     expect((agent as any).chainContextGraphScanFailure).toBeUndefined();
   }, 15000);
 
+  it('retries cursor pages after partial local apply without acknowledging until RDF binding exists', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000003';
+    const revealed: ContextGraphOnChain = {
+      contextGraphId,
+      name: 'retry-safe-revealed',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          acked += 1;
+        },
+      };
+    };
+
+    const result = await createTestAgent({ chainAdapter: chain });
+    agent = result.agent;
+    await agent.start();
+    const originalInsert = result.store.insert.bind(result.store);
+    let failOnChainIdInsert = true;
+    (result.store as any).insert = async (quads: Parameters<typeof originalInsert>[0]) => {
+      if (
+        failOnChainIdInsert &&
+        quads.some((quad) => quad.predicate === `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`)
+      ) {
+        failOnChainIdInsert = false;
+        throw new Error('transient local on-chain id insert failed');
+      }
+      return originalInsert(quads);
+    };
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .rejects.toThrow('transient local on-chain id insert failed');
+    expect(acked).toBe(0);
+    expect(agent.getSubscribedContextGraphs().get('retry-safe-revealed')).toBeUndefined();
+    (agent as any).setContextGraphSubscription('retry-safe-revealed', {
+      name: 'retry-safe-revealed',
+      subscribed: true,
+      synced: false,
+      metaSynced: false,
+      onChainId: contextGraphId,
+    });
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(1);
+    expect(acked).toBe(1);
+    expect(agent.getSubscribedContextGraphs().get('retry-safe-revealed')?.onChainId)
+      .toBe(contextGraphId);
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri('retry-safe-revealed');
+    const onChainIdBinding = await result.store.query(`
+      ASK WHERE {
+        GRAPH <${ontologyGraph}> {
+          <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${contextGraphId}" .
+        }
+      }
+    `);
+    expect(onChainIdBinding.type).toBe('boolean');
+    if (onChainIdBinding.type === 'boolean') {
+      expect(onChainIdBinding.value).toBe(true);
+    }
+  }, 15000);
+
   it('warns once for repeated chain scan failures and logs recovery', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     let fail = true;
