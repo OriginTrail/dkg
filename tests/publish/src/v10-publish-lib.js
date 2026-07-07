@@ -3,7 +3,9 @@
 // per-chain specs to the V10 node HTTP API, using V10-native operation names.
 //
 // V10 operation vocabulary (what the node actually calls these):
-//   1. publish            -> POST /api/knowledge-assets/publish  (mint to Verifiable Memory)
+//   1. publish            -> POST /api/knowledge-assets (one-call named-KA lifecycle:
+//                            create + wm/write + wm/finalize + swm/share + vm/publish;
+//                            the direct /publish route was removed in v10.0.3, PR #1275)
 //   2. query              -> POST /api/query  view=verifiable-memory  (broad SPARQL read)
 //   3. VM GET            -> POST /api/query  view=verifiable-memory, scoped to the published
 //                            entity, on the SAME node (Verifiable-Memory read-back)
@@ -130,13 +132,30 @@ export function makeNodeClient(baseUrl, token) {
     status: () => req('GET', '/api/status').then((r) => r.data),
     // the node's own operational wallet addresses (it signs publishes with these)
     wallets: () => req('GET', '/api/wallets').then((r) => r.data),
+    // v10.0.3 removed POST /api/knowledge-assets/publish (PR #1275) — publishing
+    // now goes through the named-KA lifecycle. The create route runs the whole
+    // chain in ONE call (create + wm/write + wm/finalize + swm/share + vm/publish)
+    // via alsoShareSwm/alsoPublishVm, and returns kaId/ual/txHash/authorAddress
+    // with status "vm-confirmed". We map that back to the old response shape so
+    // the summary/report code stays unchanged.
     publish: (contextGraphId, quads) =>
       req(
         'POST',
-        '/api/knowledge-assets/publish',
-        { contextGraphId, quads, publishEpochs: PUBLISH_EPOCHS },
-        { acceptStatuses: [200, 207] },
-      ).then((r) => ({ ...r.data, httpStatus: r.status })),
+        '/api/knowledge-assets',
+        {
+          contextGraphId,
+          name: `jenkins-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          quads,
+          alsoShareSwm: true,
+          alsoPublishVm: { publishEpochs: PUBLISH_EPOCHS },
+        },
+        { acceptStatuses: [200, 201, 207] },
+      ).then((r) => ({
+        ...r.data,
+        status: r.data.status === 'vm-confirmed' ? 'confirmed' : r.data.status,
+        publisherAddress: r.data.publisherAddress || r.data.authorAddress,
+        httpStatus: r.status,
+      })),
     query: (sparql, contextGraphId, view = 'verifiable-memory') =>
       req('POST', '/api/query', { sparql, contextGraphId, view }).then((r) => r.data),
     // cross-node read: ask a PEER (by peerId) for a KA's triples. lookup is

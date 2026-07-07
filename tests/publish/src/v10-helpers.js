@@ -198,12 +198,27 @@ export async function httpPublish(contextGraphId, quads) {
   let lastErr;
   for (let attempt = 0; attempt <= LU5_RETRIES; attempt++) {
     try {
+      // v10.0.3 removed POST /api/knowledge-assets/publish (PR #1275): the
+      // named-KA create route now runs the full lifecycle in one call
+      // (create + wm/write + wm/finalize + swm/share + vm/publish) and returns
+      // kaId/ual/txHash/authorAddress with status "vm-confirmed".
       const { status, data } = await httpRequest(
-        'POST', '/api/knowledge-assets/publish',
-        { contextGraphId, quads, publishEpochs: PUBLISH_EPOCHS },
-        { acceptStatuses: [200, 207] },
+        'POST', '/api/knowledge-assets',
+        {
+          contextGraphId,
+          name: `jenkins-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          quads,
+          alsoShareSwm: true,
+          alsoPublishVm: { publishEpochs: PUBLISH_EPOCHS },
+        },
+        { acceptStatuses: [200, 201, 207] },
       );
-      return { ...data, httpStatus: status };
+      return {
+        ...data,
+        status: data.status === 'vm-confirmed' ? 'confirmed' : data.status,
+        publisherAddress: data.publisherAddress || data.authorAddress,
+        httpStatus: status,
+      };
     } catch (err) {
       lastErr = err;
       if (String(err.message || '').includes('access-policy is unknown') && attempt < LU5_RETRIES) {
