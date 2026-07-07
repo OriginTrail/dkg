@@ -2650,18 +2650,22 @@ export class EVMChainAdapterBase {
 
     let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
     if (!validation) {
-      validation = (async () => {
-        const raw = await provider.send('eth_chainId', []);
-        const live = BigInt(raw);
-        if (live !== this.configuredStaticChainId) {
-          throw new Error(
-            `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
-          );
-        }
-        this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
-        this.cachedChainId = { value: live, cachedAt: Date.now() };
-        return live;
-      })().finally(() => {
+      validation = withTimeout(
+        (async () => {
+          const raw = await provider.send('eth_chainId', []);
+          const live = BigInt(raw);
+          if (live !== this.configuredStaticChainId) {
+            throw new Error(
+              `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+            );
+          }
+          this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
+          this.cachedChainId = { value: live, cachedAt: Date.now() };
+          return live;
+        })(),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'configured chainId validation',
+      ).finally(() => {
         this.configuredStaticChainIdValidationsByProvider.delete(provider);
       });
       this.configuredStaticChainIdValidationsByProvider.set(provider, validation);

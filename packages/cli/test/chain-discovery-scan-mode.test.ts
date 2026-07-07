@@ -10,14 +10,17 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('keeps steady-state daemon scans incremental-only', () => {
-    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({ mode: 'incremental', pageBudget: 30 });
+  it('uses a startup recovery scan even when the registry watermark already exists', () => {
+    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({
+      mode: 'seedFull',
+      throwOnChainScanFailure: true,
+    });
   });
 
-  it('keeps the first daemon scan incremental when the watermark is already seeded', () => {
+  it('keeps steady-state daemon scans incremental after startup recovery', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
-      run: 0,
+      run: 1,
       fullScanEvery: 48,
     })).toEqual({ mode: 'incremental', pageBudget: 30 });
   });
@@ -52,6 +55,7 @@ describe('chainDiscoveryScanOptions', () => {
   it('honors a valid custom page budget', () => {
     expect(chainDiscoveryScanOptions({
       watermarkSeeded: true,
+      run: 1,
       pageBudget: 7.9,
     })).toEqual({ mode: 'incremental', pageBudget: 7 });
   });

@@ -699,8 +699,9 @@ export function chainDiscoveryScanOptions(input: {
     ? Math.floor(configuredPageBudget)
     : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
   const run = input.run ?? 0;
+  const startupRecoveryScan = input.watermarkSeeded && run === 0;
   const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
-  if (periodicFullResync) {
+  if (startupRecoveryScan || periodicFullResync) {
     return { mode: 'seedFull', throwOnChainScanFailure: true };
   }
   return input.watermarkSeeded && !periodicFullResync

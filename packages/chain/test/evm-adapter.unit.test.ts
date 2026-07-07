@@ -27,6 +27,7 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -2310,6 +2311,32 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     // Second call should retry — failure was not memoised.
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(getNetwork.calls).toHaveLength(2);
+  });
+
+  it('abandons timed-out static chain-id validations so the next read retries', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig({ staticNetwork: true }));
+    let calls = 0;
+    const provider = {
+      send: vi.fn(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<never>(() => undefined);
+        }
+        return '0x7a69';
+      }),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+
+    const first = a.getEvmChainId();
+    const firstTimeout = expect(first).rejects.toThrow('configured chainId validation timed out');
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS);
+    await firstTimeout;
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(2);
   });
 });
 
