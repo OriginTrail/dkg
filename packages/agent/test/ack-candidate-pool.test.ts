@@ -91,7 +91,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(at.getACKCandidatePeers()).toEqual(CORE);
   });
 
-  it('with a configured ACK allowlist, below-quorum fallback excludes connected foreign-network peers', async () => {
+  it('a configured ACK preference list orders listed peers first but never excludes connected peers (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
       confirmedCores: [CORE[2]],
@@ -99,7 +99,51 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
       ackCandidatePeerIds: CORE,
     });
 
-    expect(a.getACKCandidatePeers()).toEqual([CORE[2], CORE[0], CORE[1], CORE[3]]);
+    // Listed peers are preferred within each tier (confirmed cores, then
+    // rest), but foreign/unlisted peers stay dialable: signer validity is
+    // chain truth (sharding-table membership per collected ACK), and a
+    // hard gate here capped the mainnet pool at the bundled relay list.
+    expect(a.getACKCandidatePeers()).toEqual([
+      CORE[2],
+      CORE[0], CORE[1], CORE[3],
+      ...foreign,
+    ]);
+  });
+
+  it('staked cores outside the preference list can still complete quorum when listed relays are degraded (2026-07-07 incident)', async () => {
+    // Base mainnet shape: preference list = 4 bundled relays, of which only
+    // 2 are connected/healthy; 3 upgraded non-relay staked cores are
+    // connected. The old hard filter returned only [relay-1, relay-2] and
+    // made the 3-ACK quorum arithmetically unreachable.
+    const relays = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
+    const stakedCores = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
+    const a = await buildAgent({
+      confirmedCores: [relays[0], relays[1], ...stakedCores],
+      connected: [relays[0], relays[1], ...stakedCores],
+      ackCandidatePeerIds: relays,
+    });
+
+    const out = a.getACKCandidatePeers();
+    expect(out).toEqual([relays[0], relays[1], ...stakedCores]);
+    expect(out.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('V2 folded-private rounds keep unlisted V2-advertising cores dialable, listed peers first within each tier', async () => {
+    const relays = ['relay-1', 'relay-2'];
+    const upgraded = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
+    const a = await buildAgent({
+      confirmedCores: [...relays, ...upgraded],
+      connected: [...upgraded, ...relays],
+      ackCandidatePeerIds: relays,
+    });
+    for (const id of upgraded) a.knownCorePeerIdsV2.add(id);
+
+    // v2Advertised tier first (none listed → connection order), then the
+    // remaining confirmed cores (both listed).
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      ...upgraded,
+      ...relays,
+    ]);
   });
 
   it('runtime quorum below default (2): 2 confirmed cores already satisfy it', async () => {

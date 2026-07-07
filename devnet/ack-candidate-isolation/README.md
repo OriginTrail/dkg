@@ -4,12 +4,18 @@ Read-only live devnet coverage for ACK candidate isolation.
 
 ## What it proves
 
-An edge node can have a live transport peer set that includes stale relay peers,
-but ACK candidate ordering must still be bounded to the active network's core
-peer IDs. The test uses node5's generated local-devnet core bootstrap peers as
-the active ACK set, injects the known public Base testnet relay IDs as stale
-connected peers, and verifies the candidate ordering returns only the four
-active devnet cores.
+An edge node can have a live transport peer set that includes stale relay
+peers. The configured ACK candidate list must RANK the active network's core
+peer IDs first without excluding any connected peer (a hard exclusion filter
+capped the mainnet pool at the bundled relay list and made ACK quorum
+unreachable in the 2026-07-07 Base/Gnosis incident; chain-side ACK
+verification, not candidacy, is what keeps stale peers out of quorum). The
+test uses node5's generated local-devnet core bootstrap peers as the
+preferred ACK set, injects the known public Base testnet relay IDs as stale
+connected peers, and verifies the ordering places all four active devnet
+cores ahead of the stale non-core peers while keeping everyone dialable. It
+also asserts devnet daemons never install the public-network preference list
+in the first place.
 
 ## Run
 

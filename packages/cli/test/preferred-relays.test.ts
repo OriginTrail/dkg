@@ -212,16 +212,24 @@ describe('resolveACKCandidatePeerIds', () => {
 });
 
 describe('orderACKCandidatePeerIds', () => {
-  it('filters daemon async ACK fallback to active-network candidates when an allowlist is configured', () => {
+  it('orders daemon async ACK candidates preference-first without excluding connected peers (2026-07-07 incident)', () => {
     const base = ['base-core-1', 'base-core-2', 'base-core-3', 'base-core-4'];
     const testnet = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
 
+    // Tiers: confirmed cores (listed first), then the rest (listed first).
+    // Foreign-network peers rank last but stay dialable — the hard filter
+    // this replaces capped the mainnet pool at the bundled relay list and
+    // made ACK quorum unreachable when those relays were degraded.
     expect(orderACKCandidatePeerIds({
       connectedPeerIds: ['self', base[2], ...testnet, base[0], base[1], base[3]],
       selfPeerId: 'self',
       knownCorePeerIds: new Set([base[2], testnet[0]]),
       ackCandidatePeerIds: base,
-    })).toEqual([base[2], base[0], base[1], base[3]]);
+    })).toEqual([
+      base[2], testnet[0],
+      base[0], base[1], base[3],
+      testnet[1], testnet[2],
+    ]);
   });
 
   it('preserves legacy all-connected fallback when no ACK allowlist is configured', () => {

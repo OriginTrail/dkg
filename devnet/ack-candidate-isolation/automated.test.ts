@@ -115,14 +115,14 @@ describe('ACK candidate isolation on devnet', () => {
     expect(edgeConfig.relay).toMatch(/^\/ip4\/127\.0\.0\.1\/tcp\//);
     expect(node1Log).toContain('Relay disabled (config.relay = "none")');
     for (const log of [node1Log, node5Log]) {
-      expect(log).not.toMatch(/ACK candidate peer allowlist: .*network config/);
+      expect(log).not.toMatch(/ACK candidate peer (allowlist|preference): .*network config/);
       for (const suffix of UNEXPECTED_TESTNET_SUFFIXES) {
         expect(log).not.toContain(suffix);
       }
     }
   });
 
-  it('filters the 4 devnet cores + 3 stale testnet peers ACK fallback back to devnet cores', () => {
+  it('orders the 4 devnet cores ahead of 3 stale testnet peers in the ACK fallback (preference, not exclusion)', () => {
     const devnetCoreIds = activeDevnetCoreIds();
     const publicTestnetIds = loadPublicTestnetPeerIds();
     const staleTestnetIds = UNEXPECTED_TESTNET_SUFFIXES.map((suffix) => {
@@ -154,12 +154,25 @@ describe('ACK candidate isolation on devnet', () => {
       ackCandidatePeerIds: devnetCoreIds,
     });
 
+    // Preference ordering, not exclusion: listed devnet cores fill the
+    // first dial slots of each tier; stale testnet peers rank last but stay
+    // dialable (chain-side ACK verification rejects them — a hard filter
+    // here is what capped the mainnet pool at the bundled relay list in the
+    // 2026-07-07 incident). staleTestnetIds[0] sits in the confirmed-core
+    // tier because identify classified it as a core; the chain gate, not
+    // candidacy, is what keeps its ACK out of quorum.
     expect(filtered).toEqual([
       devnetCoreIds[2],
+      staleTestnetIds[0],
       devnetCoreIds[0],
       devnetCoreIds[1],
       devnetCoreIds[3],
+      staleTestnetIds[1],
+      staleTestnetIds[2],
     ]);
-    expect(filtered.filter((id) => staleTestnetIds.includes(id))).toEqual([]);
+    const firstStaleRestIdx = filtered.indexOf(staleTestnetIds[1]!);
+    for (const coreId of devnetCoreIds) {
+      expect(filtered.indexOf(coreId!)).toBeLessThan(firstStaleRestIdx);
+    }
   });
 });

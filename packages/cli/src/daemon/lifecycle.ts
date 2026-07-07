@@ -643,22 +643,32 @@ export function orderACKCandidatePeerIds(input: {
   ackCandidatePeerIds?: readonly string[];
 }): string[] {
   const connected = input.connectedPeerIds.filter((id) => id !== input.selfPeerId);
-  const allowedACKPeers = new Set(
+  const preferredACKPeers = new Set(
     (input.ackCandidatePeerIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
   );
-  const eligible = allowedACKPeers.size > 0
-    ? connected.filter((id) => allowedACKPeers.has(id))
-    : connected;
   const knownCorePeerIds = input.knownCorePeerIds;
 
-  if (allowedACKPeers.size > 0) {
+  if (preferredACKPeers.size > 0) {
+    // Ranking only — never an eligibility gate. Signer validity is chain
+    // truth, enforced per collected ACK (operational key + sharding-table
+    // membership); excluding connected-but-unlisted cores here capped the
+    // pool at the static relay list and made ACK quorum unreachable on
+    // mainnet (2026-07-07 Base/Gnosis incident). Same non-exclusion
+    // contract as `selectACKCandidatePeers` in
+    // @origintrail-official/dkg-publisher (which the daemon actually uses
+    // for ACK rounds — this helper is the devnet-regression surface and
+    // keeps simpler two-tier ordering, no V2/quorum handling).
+    const preferListed = (ids: string[]): string[] => [
+      ...ids.filter((id) => preferredACKPeers.has(id)),
+      ...ids.filter((id) => !preferredACKPeers.has(id)),
+    ];
     const confirmed = knownCorePeerIds
-      ? eligible.filter((id) => knownCorePeerIds.has(id))
+      ? connected.filter((id) => knownCorePeerIds.has(id))
       : [];
     const rest = knownCorePeerIds
-      ? eligible.filter((id) => !knownCorePeerIds.has(id))
-      : eligible;
-    return [...confirmed, ...rest];
+      ? connected.filter((id) => !knownCorePeerIds.has(id))
+      : connected;
+    return [...preferListed(confirmed), ...preferListed(rest)];
   }
 
   if (knownCorePeerIds && knownCorePeerIds.size > 0) {
@@ -1400,7 +1410,7 @@ export async function runDaemonInner(
   });
   if (ackCandidatePeerIds.length > 0) {
     log(
-      `ACK candidate peer allowlist: ${ackCandidatePeerIds.length} peer(s) from network config (${network?.networkName ?? "unknown"})`,
+      `ACK candidate peer preference: ${ackCandidatePeerIds.length} relay peer(s) from network config (${network?.networkName ?? "unknown"}) ranked first; candidacy is not restricted — all connected peers stay eligible`,
     );
   }
 
