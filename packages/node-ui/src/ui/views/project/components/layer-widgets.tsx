@@ -161,7 +161,9 @@ function LayerActionShell({ title, footnote, context, result, error, extras, chi
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
       {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
-      {error && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
+          successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
+      {error && <div data-testid="layer-action-error" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>
@@ -354,7 +356,8 @@ export function LayerWidgetStrip({ layer, entities, entityCount, tripleCount, co
   const [lastAction, setLastAction] = useState<{ ok: boolean; text: string } | null>(null);
   const actionResult = lastAction && (
     <div
-      data-testid="layer-action-result"
+      // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
+      data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
       style={{ fontSize: 11, color: lastAction.ok ? 'var(--text-success)' : 'var(--text-danger)', marginBottom: 8 }}
     >
       {lastAction.ok ? '✓' : '✕'} {lastAction.text}

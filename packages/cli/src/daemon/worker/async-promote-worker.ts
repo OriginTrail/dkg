@@ -144,7 +144,13 @@ export type ClassifiedPromoteError = {
  */
 export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
   const raw = err instanceof Error ? err.message : String(err);
-  const message = (raw ?? '').toLowerCase();
+  // #1464 — strip a leading diagnostic "[promote:<step>] " tag (added by the publisher's
+  // promote step-tagging) BEFORE substring-classifying, so a step LABEL can never inject a
+  // classifier trigger token (e.g. the step "encodeWorkspaceGossipPayload" would otherwise make
+  // every error from it match the "gossip" cap-check). We classify on the ORIGINAL error text;
+  // the tag stays on the operator-facing message. The tag is single (idempotent, innermost wins).
+  const untagged = (raw ?? '').replace(/^\[promote:[^\]]*\]\s*/, '');
+  const message = untagged.toLowerCase();
   const code =
     err && typeof err === 'object' && 'code' in err
       ? String((err as { code?: unknown }).code ?? '').toLowerCase()

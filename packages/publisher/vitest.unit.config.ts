@@ -16,6 +16,7 @@ export default defineConfig({
       'test/async-lift-publish-options.test.ts',
       'test/async-promote-queue.test.ts',
       'test/multi-root-token-rows.test.ts',
+      'test/promote-step-tag.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,
