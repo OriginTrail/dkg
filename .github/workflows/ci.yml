@@ -154,6 +154,20 @@ jobs:
       - name: Test audit-dial-protocol lexer
         run: node --test scripts/audit-dial-protocol.test.mjs
 
+      # Structural guard against god-files. No hand-written source file may
+      # grow past its ratcheted budget, and no NEW file may exceed 800 lines.
+      # High churn x large file was the top regression predictor across v10
+      # rc.8 -> rc.15: dkg-agent.ts (2,069 lines) was edited in 1 of every 6
+      # commits, and the rc.15 "mixin split" relocated its bulk into several
+      # NEW 3,000-line files. See `scripts/audit-file-size.mjs` for the data
+      # and ratchet semantics; per-file budgets live in
+      # `scripts/file-size-baseline.json` and only ever shrink.
+      - name: Audit source file size (ratcheting cap)
+        run: node scripts/audit-file-size.mjs
+
+      - name: Test audit-file-size evaluator
+        run: node --test scripts/audit-file-size.test.mjs
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
