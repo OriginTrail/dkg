@@ -548,6 +548,20 @@ export class EVMChainAdapterBase {
   protected readonly signerTxSerializer = new KeyedSerializer();
 
   /**
+   * Lowercased addresses of operational wallets CONFIRMED registered on-chain
+   * under the node's identity. Seeded with the primary signer (`pool[0]`, the
+   * identity anchor guaranteed registered via `createProfile`) and extended by
+   * `ensureOperationalWalletsRegistered` / `addOperationalWallet`. Used by
+   * `selectSigner` for `rotatable-free` (RS) eligibility, which must fail CLOSED
+   * to registered wallets: `RandomSampling` resolves the node via
+   * `getIdentityId(msg.sender)`, so a signer that is not a registered
+   * operational key resolves to identity 0 and reverts — burning the proof
+   * period. A wallet is admitted here only once its registration is confirmed,
+   * never optimistically.
+   */
+  protected readonly registeredOperationalAddresses = new Set<string>();
+
+  /**
    * Funding-aware publish selection floors. A wallet is "fundable" (preferred
    * by `nextAuthorizedSigner`) when its native balance > `minPublisherNativeWei`
    * AND its TRAC balance > `minPublisherTracWei`. Default `0n` (strictly
@@ -1000,6 +1014,10 @@ export class EVMChainAdapterBase {
     for (const key of config.additionalKeys ?? []) {
       this.signerPool.push(new Wallet(key, this.provider));
     }
+    // The primary signer is the node's identity anchor (a registered operational
+    // key via createProfile), so RS may always fall back to it. Additional
+    // wallets join this set only once their registration is confirmed on-chain.
+    this.registeredOperationalAddresses.add(this.signer.address.toLowerCase());
     if (config.adminPrivateKey) {
       this.adminSigner = new Wallet(config.adminPrivateKey, this.provider);
       const adminAddress = this.adminSigner.address.toLowerCase();
@@ -1619,7 +1637,8 @@ export class EVMChainAdapterBase {
       // Eligibility by class. `rotatable-policy` filters to on-chain authorized
       // publishers for the CG; with no ContextGraphs surface every operational
       // wallet is a candidate (funding-aware over the whole pool, NOT a plain
-      // pick). `rotatable-funded`/`rotatable-free` use the whole pool.
+      // pick). `rotatable-free` (RS) narrows to on-chain-registered operational
+      // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
       let eligible: Wallet[];
       if (spec.txClass === 'rotatable-policy' && this.contracts.contextGraphs) {
         eligible = [];
@@ -1637,6 +1656,14 @@ export class EVMChainAdapterBase {
             'Ensure at least one configured wallet is permitted by on-chain publish authority.',
           );
         }
+      } else if (spec.txClass === 'rotatable-free') {
+        // FAIL CLOSED to registered operational wallets. An unregistered signer
+        // resolves to identity 0 on `RandomSampling` and reverts, burning the
+        // proof period, so a not-yet-confirmed wallet must NOT be selected.
+        // `this.signer` (pool[0]) is always registered, so the fallback is safe
+        // and never empty. See `registeredOperationalAddresses`.
+        eligible = ordered.filter((w) => this.registeredOperationalAddresses.has(w.address.toLowerCase()));
+        if (eligible.length === 0) eligible = [this.signer];
       } else {
         eligible = ordered;
       }
@@ -1675,6 +1702,25 @@ export class EVMChainAdapterBase {
         consultPca: true,
       },
       preferIdle: false,
+    });
+  }
+
+  /**
+   * Thin random-sampling wrapper over {@link selectSigner}: pick a REGISTERED
+   * operational wallet to sign the next `createChallenge` / `submitProof`.
+   * `rotatable-free` because RS moves zero value (native gas only — the contract
+   * has no TRAC transfer) and its score accrues to the node's identity via
+   * `getIdentityId(msg.sender)` regardless of WHICH registered operational
+   * wallet signs. `preferIdle` biases toward a wallet whose per-wallet lock is
+   * free so a deadline-bound proof does not queue behind an in-flight publish on
+   * the primary wallet (the wallet-#0 head-of-line contention this rotation
+   * removes). Eligibility fails closed to the primary signer (see selectSigner).
+   */
+  protected async nextRandomSamplingSigner(): Promise<Wallet> {
+    return this.selectSigner({
+      txClass: 'rotatable-free',
+      funding: { kind: 'native-only', nativeFloorWei: this.minPublisherNativeWei },
+      preferIdle: true,
     });
   }
 

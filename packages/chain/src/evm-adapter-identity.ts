@@ -55,6 +55,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       const existingIdentityId = onChainIds[i];
       if (existingIdentityId === identityId) {
         result.alreadyRegistered.push(address);
+        // Confirmed registered under this identity → eligible for RS rotation.
+        this.registeredOperationalAddresses.add(address.toLowerCase());
       } else if (existingIdentityId === 0n) {
         missing.push(address);
       } else {
@@ -89,6 +91,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       if (await this.hasOperationalPurpose(identityStorage, identityId, address)) {
         result.registered.push(address);
         this.seedIdentityIdForAddress(address, identityId);
+        // Confirmed just-registered → eligible for RS rotation.
+        this.registeredOperationalAddresses.add(address.toLowerCase());
       }
     }
 
@@ -132,6 +136,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
       'addOperationalWallet',
     );
     this.seedIdentityIdForAddress(wallet, identityId);
+    // Newly registered on-chain → eligible for RS rotation.
+    if (receipt.status === 1) this.registeredOperationalAddresses.add(wallet.toLowerCase());
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,

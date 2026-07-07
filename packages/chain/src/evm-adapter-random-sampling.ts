@@ -77,13 +77,18 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
 
+      // Rotate across registered operational wallets (native-only, prefer idle)
+      // instead of pinning wallet #0 — the score accrues to the node identity
+      // regardless of which registered wallet signs (getIdentityId(msg.sender)).
+      const signer = await this.nextRandomSamplingSigner();
+
       let receipt: ethers.TransactionReceipt;
       try {
         receipt = await this.sendContractTransaction(
           rs,
           'createChallenge',
           [],
-          this.signer,
+          signer,
           'create random-sampling challenge',
           // createChallenge's gas depends on per-block randomness (weighted
           // CG draw + `blockhash` entropy in `_deriveChallengeSeed`). The
@@ -160,13 +165,18 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     return this.withHubStaleRetry(async () => {
       const { rs } = await this.getRandomSampling();
 
+      // Same identity-scoped rotation as createChallenge: submitProof may be
+      // signed by a different registered wallet than the one that created the
+      // challenge — the on-chain challenge slot is keyed by identity, not signer.
+      const signer = await this.nextRandomSamplingSigner();
+
       let receipt: ethers.TransactionReceipt;
       try {
         receipt = await this.sendContractTransaction(
           rs,
           'submitProof',
           [contentHex, proofHex],
-          this.signer,
+          signer,
           'submit random-sampling proof',
         );
       } catch (err) {

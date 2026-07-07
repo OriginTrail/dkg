@@ -3866,9 +3866,18 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
   // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
   describe('selectSigner — generalized funding modes + idle preference', () => {
     const nativeOnly = { kind: 'native-only' as const, nativeFloorWei: 0n };
+    // rotatable-free eligibility fails CLOSED to REGISTERED operational wallets
+    // (Phase 4). These tests exercise the funding/idle logic, so mark the whole
+    // pool registered; the fail-closed gate itself is covered separately below.
+    const registerPool = (a: any) => {
+      for (const w of (a.signerPool as ethers.Wallet[])) {
+        a.registeredOperationalAddresses.add(w.address.toLowerCase());
+      }
+    };
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // Head walletA: gas but ZERO own-TRAC. Under publish (native+trac) it would
       // be skipped; under native-only it is fundable, so the head is chosen.
       nativeByAddr.set(lc(walletA.address), ONE);
@@ -3879,24 +3888,44 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     it('native-only still skips a gas-EMPTY wallet', async () => {
       const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
       expect(chosen.address).toBe(walletB.address);
     });
 
-    it('rotatable-free selects over the WHOLE pool, ignoring the authorized-publisher filter', async () => {
+    it('rotatable-free ignores the authorized-publisher filter (registered pool, not auth-gated)', async () => {
       const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // No wallet is an authorized publisher → publish (rotatable-policy) throws…
       (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
       await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeOnly }))
         .rejects.toThrow(/No authorized publisher wallet/);
-      // …but rotatable-free ignores that surface and picks from the whole pool.
+      // …but rotatable-free never consults that surface — it picks from the
+      // registered pool regardless of publish authority.
       const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
       expect(chosen.address).toBe(walletA.address);
     });
 
+    it('rotatable-free FAILS CLOSED: an UNREGISTERED funded+idle wallet is never selected', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // Only pool[0] (walletA) is registered (constructor seed); walletB is NOT.
+      // Make walletA gas-poor AND busy, walletB abundantly funded AND idle — yet
+      // walletB must NOT be picked (unregistered → identity 0 → on-chain revert).
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
+        expect(chosen.address).not.toBe(walletB.address);
+      } finally { release(); }
+    });
+
     it('preferIdle biases toward a funded wallet whose per-wallet lock is free', async () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
@@ -3909,6 +3938,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     it('preferIdle is fail-open: when NO funded wallet is idle it returns the first funded (never excludes)', async () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
@@ -3925,6 +3955,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = '1';
       try {
         const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
         void (a as any).signerTxSerializer.run(walletA.address, () => gate);
