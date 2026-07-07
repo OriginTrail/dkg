@@ -421,11 +421,25 @@ export async function logError(error, nodeName, step, errorStats, kaNumber = nul
   console.log(`\n❌ Error on ${nodeName} during ${step}`);
   console.log(`Type: ${error.name}`);
 
-  let cleanMessage = error.message;
-  if (cleanMessage.includes('Transaction has been reverted') || cleanMessage.includes('VM Exception')) {
-    cleanMessage = cleanMessage.split('\n')[0];
-  }
+  // Displayed message: first line, minus the ethers boilerplate tails
+  // ("(action=...)" / "(transaction=\"0x...\", info={...})" — hundreds of chars
+  // of calldata hex that say nothing). The USEFUL numbers inside (have/want)
+  // are re-surfaced as a readable Diagnosis line below.
+  let cleanMessage = error.message
+    .replace(/\s*\((?:action|transaction)=["'][\s\S]*$/i, '')
+    .split('\n')[0];
   console.log(`Message: ${cleanMessage}`);
+
+  // insufficient-gas special case: pull "have X want Y" out of the raw ethers
+  // blob and print it as ETH so the operator sees the wallet state at a glance.
+  const fundsMatch = /have (\d+) want (\d+)/.exec(error.message);
+  if (/insufficient funds/i.test(error.message) && fundsMatch) {
+    const toEth = (wei) => (Number(wei) / 1e18).toFixed(8).replace(/0+$/, '0');
+    console.log(
+      `Diagnosis: the signing wallet holds ${toEth(fundsMatch[1])} ETH but this tx needs ${toEth(fundsMatch[2])} ETH — ` +
+      `the node rotated onto a DRAINED operational wallet. Top up the node's wallets (PCA covers TRAC only, never gas).`,
+    );
+  }
 
   // --- deep diagnostics: real cause, plain-English meaning, live state ------
   const desc = describeError(error, diag.baseUrl);
