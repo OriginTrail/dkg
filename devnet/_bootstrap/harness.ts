@@ -258,6 +258,7 @@ export interface PublishResult {
 }
 
 const PUBLISH_OK = ['confirmed', 'finalized', 'tentative'];
+let publishSeq = 0;
 
 export async function publishViaCli(
   node: DevnetNode,
@@ -265,7 +266,17 @@ export async function publishViaCli(
   filePath: string,
   options: { publisherNodeIdentityId?: bigint; extraArgs?: string[] } = {},
 ): Promise<PublishResult> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
+  // then `ka publish` performs the on-chain SWM -> VM publish.
+  const kaName = `harness-pub-${Date.now().toString(36)}-${++publishSeq}`;
+  const created = await runDkgCli(node, ['ka', 'create', kaName, '--context-graph-id', contextGraph, '--input-file', filePath, '--share']);
+  if (created.code !== 0) {
+    throw new Error(
+      `ka create --share failed (exit ${created.code})\nstdout: ${created.stdout}\nstderr: ${created.stderr}`,
+    );
+  }
+  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
   }
@@ -273,18 +284,18 @@ export async function publishViaCli(
   const result = await runDkgCli(node, args);
   if (result.code !== 0) {
     throw new Error(
-      `dkg publish failed (exit ${result.code})\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      `ka publish failed (exit ${result.code})\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
     );
   }
   const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
+  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
+  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
   expect(
     PUBLISH_OK,
-    `dkg publish status="${status}", expected one of ${PUBLISH_OK.join('/')}\n${result.stdout}`,
+    `ka publish status="${status}", expected one of ${PUBLISH_OK.join('/')}\n${result.stdout}`,
   ).toContain(status.toLowerCase());
-  expect(kaId, `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`).toBeGreaterThan(0n);
+  expect(kaId, `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`).toBeGreaterThan(0n);
   return { status, kaId, txHash: txMatch ? txMatch[1] : undefined, raw: result.stdout };
 }
 

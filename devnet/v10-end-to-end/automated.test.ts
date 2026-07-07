@@ -226,6 +226,8 @@ function runDkgCli(
   });
 }
 
+let publishSeq = 0;
+
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
@@ -237,7 +239,23 @@ async function publishViaCli(
   txHash?: string;
   raw: string;
 }> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
+  // then `ka publish` performs the on-chain SWM -> VM publish.
+  const kaName = `cli-pub-${Date.now().toString(36)}-${++publishSeq}`;
+  const created = await runDkgCli(node, [
+    'ka', 'create', kaName,
+    '--context-graph-id', contextGraph,
+    '--input-file', filePath,
+    '--share',
+  ]);
+  if (created.code !== 0) {
+    throw new Error(
+      `ka create --share failed (exit ${created.code})\n` +
+        `stdout: ${created.stdout}\nstderr: ${created.stderr}`,
+    );
+  }
+  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push(
       '--publisher-node-identity-id',
@@ -247,13 +265,13 @@ async function publishViaCli(
   const result = await runDkgCli(node, args);
   if (result.code !== 0) {
     throw new Error(
-      `dkg publish failed (exit ${result.code})\n` +
+      `ka publish failed (exit ${result.code})\n` +
         `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
     );
   }
   const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
+  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
+  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
@@ -264,11 +282,11 @@ async function publishViaCli(
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `ka publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
   ).toContain(status.toLowerCase());
   expect(
     kaId,
-    `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`,
+    `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`,
   ).toBeGreaterThan(0n);
   return {
     status,

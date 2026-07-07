@@ -2470,7 +2470,7 @@ else
     echo "--- 30c: restart Node1 (fresh libp2p instance, empty peerStore) ---"
     DKG_HOME="$DEVNET_DIR/node1" DKG_NO_BLUE_GREEN=1 \
       node "$CLI_JS" start --foreground \
-      >> "$DEVNET_DIR/node1/daemon.log" 2>&1 &
+      >> "$DEVNET_DIR/node1/console.log" 2>&1 &
     NEW_PID=$!
     echo "$NEW_PID" > "$PIDFILE"
     ok "Node1 restart launched (PID $NEW_PID)"
@@ -3567,7 +3567,7 @@ except Exception:
         # end with the node still down and no failure signal).
         DKG_HOME="$RECIPIENT_DIR" DKG_NO_BLUE_GREEN=1 \
           node "$CLI_JS" start --foreground \
-          >> "$RECIPIENT_DIR/daemon.log" 2>&1 &
+          >> "$RECIPIENT_DIR/console.log" 2>&1 &
         NEW_PID=$!
         echo "$NEW_PID" > "$RECIPIENT_PIDFILE"
         cleanup_ready=0
@@ -3589,7 +3589,7 @@ except Exception:
       echo "--- 37d: restart recipient (substrate should drain on connection re-establishment) ---"
       DKG_HOME="$RECIPIENT_DIR" DKG_NO_BLUE_GREEN=1 \
         node "$CLI_JS" start --foreground \
-        >> "$RECIPIENT_DIR/daemon.log" 2>&1 &
+        >> "$RECIPIENT_DIR/console.log" 2>&1 &
       NEW_PID=$!
       echo "$NEW_PID" > "$RECIPIENT_PIDFILE"
       ok "Recipient restart launched (PID $NEW_PID)"

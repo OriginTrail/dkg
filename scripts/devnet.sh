@@ -672,9 +672,16 @@ start_node() {
   # RANDOM operational keys and the staking step (cmd_start) re-reads
   # wallets[0].privateKey directly, so the daemon must NOT migrate it to an
   # encrypted keystore (GH #11). Production daemons omit this and auto-migrate.
+  # Redirect console output to console.log, NOT daemon.log: the daemon already
+  # tees its full log stream into $DKG_HOME/daemon.log in-process (lifecycle.ts
+  # stdout/stderr tee). Pointing the shell redirect at the SAME file wrote every
+  # byte through two independent fds (one positional, one append), which left
+  # byte-replayed duplicate tail segments in daemon.log — and doubled the
+  # rpc_usage telemetry counts the rpc-quiet-window suite sums. console.log
+  # still captures pre-tee output from an early crash.
   DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
     node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    > "$node_dir/daemon.log" 2>&1 &
+    > "$node_dir/console.log" 2>&1 &
   local node_pid=$!
   echo "$node_pid" > "$pidfile"
 
@@ -708,7 +715,7 @@ start_node() {
   done
 
   if [ "$ready" = false ]; then
-    log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log)"
+    log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log and $node_dir/console.log)"
   fi
 
   # Save THIS node's multiaddr so (a) node 1 serves as the universal relay and

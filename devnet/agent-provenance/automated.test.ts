@@ -36,7 +36,7 @@
  * drives the OLD `PublishingConvictionAccount` contract; V10 publish
  * uses `DKGPublishingConvictionNFT`. There is no CLI surface for the
  * NFT yet. Mode (a) here drives the NFT contract directly via JSON-RPC
- * and uses the CLI only for the actual `dkg publish` call. The CLI
+ * and uses the CLI only for the actual `dkg ka` publish flow. The CLI
  * gap is filed as a follow-up task in the DKG.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -350,29 +350,47 @@ function runDkgCli(node: DevnetNode, args: string[], timeoutMs = 60_000): Promis
   });
 }
 
-/** Run `dkg publish` and return the parsed { kaId, status, txHash } it printed. */
+/** Run `dkg ka create --share` + `dkg ka publish` and return the parsed { kaId, status, txHash }. */
+let publishSeq = 0;
+
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
 ): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
+  // then `ka publish` performs the on-chain SWM -> VM publish.
+  const kaName = `cli-pub-${Date.now().toString(36)}-${++publishSeq}`;
+  const created = await runDkgCli(node, [
+    'ka', 'create', kaName,
+    '--context-graph-id', contextGraph,
+    '--input-file', filePath,
+    '--share',
+  ]);
+  if (created.code !== 0) {
+    throw new Error(
+      `ka create --share failed (exit ${created.code})\n` +
+      `stdout: ${created.stdout}\nstderr: ${created.stderr}`,
+    );
+  }
+  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
   }
   const result = await runDkgCli(node, args);
   if (result.code !== 0) {
     throw new Error(
-      `dkg publish failed (exit ${result.code})\n` +
+      `ka publish failed (exit ${result.code})\n` +
       `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
     );
   }
   // Parse the human-readable output. The CLI prints "Status: confirmed",
-  // "KC ID: <n>", "TX hash: 0x..."  (lines vary slightly across statuses).
+  // "KA ID: <n>", "Tx hash: 0x..."  (lines vary slightly across statuses).
   const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
+  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
+  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
@@ -383,11 +401,11 @@ async function publishViaCli(
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `ka publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
   ).toContain(status.toLowerCase());
   expect(
     kaId,
-    `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`,
+    `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`,
   ).toBeGreaterThan(0n);
   return {
     status,
@@ -649,7 +667,7 @@ describe('Agent provenance — automated 5-node devnet validation', () => {
   //      `hardhat_setStorageAt`. ETH is untouched — daemon can still
   //      pay gas. After this step `sumOpBalances(edge) == 0n`.
   //
-  // Action: edge runs `dkg publish` naming core1 for attribution. The
+  // Action: edge runs the `dkg ka` publish flow naming core1 for attribution. The
   // daemon will pick one of the now-zero-TRAC op wallets as `msg.sender`
   // for `KAV10.publish()`. The conviction branch fires
   // (`agentToAccountId[msg.sender] != 0`, `epochs == lockDurationEpochs`,

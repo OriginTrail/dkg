@@ -113,7 +113,16 @@ function parseRpcUsageWindows(node: string, text: string): UsageWindow[] {
   const windows = new Map<string, UsageWindow>();
   const lineRe = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*\brpc_usage method=([A-Za-z0-9_.:-]+) count=(\d+) window_s=(\d+)(?: chain=([A-Za-z0-9_.:-]+))?/gm;
 
+  // Every legitimate rpc_usage emission carries a unique operation UUID, so a
+  // byte-identical line can only be a log-replay artifact (e.g. the historical
+  // shell-redirect + in-process-tee double-write of daemon.log). Summing a
+  // replayed line doubles the window and fails the budget with phantom load —
+  // count each distinct line once.
+  const seenLines = new Set<string>();
+
   for (const match of text.matchAll(lineRe)) {
+    if (seenLines.has(match[0])) continue;
+    seenLines.add(match[0]);
     const [, timestamp, method, countRaw, windowSecondsRaw] = match;
     const windowSeconds = Number(windowSecondsRaw);
     const key = `${node}:${timestamp}`;
@@ -183,16 +192,20 @@ describe('devnet RPC quiet-window budget', () => {
       MIN_EVALUATED_WINDOWS * EXPECTED_DEVNET_NODES,
     );
 
+    // Collect every violation across every node/window before asserting, so
+    // one over-budget window cannot mask the rest of the fleet's numbers.
+    const violations: string[] = [];
     for (const window of evaluated) {
       const getLogs = window.byMethod.eth_getLogs ?? 0;
       const chainId = window.byMethod.eth_chainId ?? 0;
       const total = windowTotal(window);
       const label = `${window.node} ${window.timestamp} ${JSON.stringify(window.byMethod)}`;
 
-      expect(getLogs, `${label}: eth_getLogs should be idle except slow context discovery`).toBeLessThanOrEqual(MAX_ETH_GETLOGS);
-      expect(chainId, `${label}: static-network providers should suppress steady eth_chainId`).toBeLessThanOrEqual(MAX_ETH_CHAINID);
-      expect(total, `${label}: total quiet-window RPC volume`).toBeLessThanOrEqual(MAX_TOTAL);
+      if (getLogs > MAX_ETH_GETLOGS) violations.push(`${label}: eth_getLogs=${getLogs} > ${MAX_ETH_GETLOGS} (should be idle except slow context discovery)`);
+      if (chainId > MAX_ETH_CHAINID) violations.push(`${label}: eth_chainId=${chainId} > ${MAX_ETH_CHAINID} (static-network providers should suppress steady eth_chainId)`);
+      if (total > MAX_TOTAL) violations.push(`${label}: total=${total} > ${MAX_TOTAL} (quiet-window RPC volume)`);
     }
+    expect(violations, `lane-aware poller budget violations:\n${violations.join('\n')}`).toEqual([]);
   });
 
   it('parses the committed rpc_usage contract shape used by daemon logs', () => {

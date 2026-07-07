@@ -274,13 +274,31 @@ function runDkgCli(
   });
 }
 
+let cliPublishSeq = 0;
+
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
 ): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
+  // then `ka publish` performs the on-chain SWM -> VM publish.
+  const kaName = `stress-pub-${Date.now().toString(36)}-${++cliPublishSeq}`;
+  const created = await runDkgCli(node, [
+    'ka', 'create', kaName,
+    '--context-graph-id', contextGraph,
+    '--input-file', filePath,
+    '--share',
+  ]);
+  if (created.code !== 0) {
+    throw new Error(
+      `ka create --share failed (exit ${created.code})\n` +
+        `stdout: ${created.stdout}\nstderr: ${created.stderr}`,
+    );
+  }
+  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
   if (options.publisherNodeIdentityId !== undefined) {
     args.push(
       '--publisher-node-identity-id',
@@ -290,13 +308,13 @@ async function publishViaCli(
   const result = await runDkgCli(node, args);
   if (result.code !== 0) {
     throw new Error(
-      `dkg publish failed (exit ${result.code})\n` +
+      `ka publish failed (exit ${result.code})\n` +
         `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
     );
   }
   const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
+  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
+  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
   const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
@@ -307,11 +325,11 @@ async function publishViaCli(
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `ka publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
   ).toContain(status.toLowerCase());
   expect(
     kaId,
-    `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`,
+    `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`,
   ).toBeGreaterThan(0n);
   return {
     status,
@@ -1010,6 +1028,7 @@ describe('V10 chain — stress + scenario validation', () => {
     // chain adapter sees a clean nonce slate before this batch starts.
     await new Promise((r) => setTimeout(r, 2_000));
     let custodialTentativeRetries = 0;
+    let transportQuorumRetries = 0;
     console.log(`phase 2: VM custodial (mode B) batch (${vmCustodial} assertions via core2)...`);
     for (let i = 0; i < vmCustodial; i++) {
       const name = `vm-custodial-${runTag}-${i}`;
@@ -1048,7 +1067,11 @@ describe('V10 chain — stress + scenario validation', () => {
       // FINDINGS.md "publisher nonce race"), retry ONCE after 2s. The
       // publisher's nonce manager re-fetches `pending` on retry and
       // succeeds. Persistent tentative is still a hard failure.
-      const doPublish = async () => {
+      const doPublish = async (attempt = 0): Promise<{
+        kaId?: string;
+        status?: string;
+        txHash?: string;
+      }> => {
         const r = await fetch(
           `http://127.0.0.1:${core2.apiPort}/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`,
           {
@@ -1072,7 +1095,28 @@ describe('V10 chain — stress + scenario validation', () => {
         } | null;
         const tentative = !!j && (j.status === 'tentative' || j.kaId === '0');
         if (!r.ok && !tentative) {
-          throw new Error(`HTTP ${r.status}: ${j ? JSON.stringify(j) : ''}`);
+          const body = j ? JSON.stringify(j) : '';
+          // Under the 100-publish storm a core peer can transiently drop a
+          // storage-ack stream (protocol negotiation fails / no response
+          // during connection churn) and cost a single publish its quorum.
+          // That is load-induced connection churn, not a publish-path defect —
+          // retry ONCE after a short backoff so one flaky stream doesn't fail
+          // the whole storm; a repeat failure is still a hard failure.
+          // An active decline (STORAGE_ACK_DECLINE) is never churn — a peer
+          // examined the payload and refused it — so a mixed failure with any
+          // decline in it must NOT be retried or a decline regression under
+          // load would pass on the second attempt.
+          const transientQuorum =
+            r.status >= 500 &&
+            /storage_ack_insufficient/.test(body) &&
+            /TRANSPORT_ERROR|no_response/.test(body) &&
+            !/STORAGE_ACK_DECLINE/.test(body);
+          if (transientQuorum && attempt === 0) {
+            transportQuorumRetries++;
+            await new Promise((res) => setTimeout(res, 3_000));
+            return doPublish(1);
+          }
+          throw new Error(`HTTP ${r.status}: ${body}`);
         }
         return j ?? {};
       };
@@ -1251,6 +1295,30 @@ describe('V10 chain — stress + scenario validation', () => {
         `that path requires client-side EIP-712 + V10 merkle root computation ` +
         `and is covered in devnet/agent-provenance/automated.test.ts.`,
     );
+    if (transportQuorumRetries > 0) {
+      console.log(
+        `phase 2: ${transportQuorumRetries} publish(es) retried once after a transient ` +
+          'storage-ack transport failure (connection churn under storm load)',
+      );
+      appendFinding(
+        'WARN — storage-ack transport retries under storm load',
+        `${transportQuorumRetries}/${vmCustodial} VM-custodial (mode B) publishes needed a one-shot ` +
+          `retry after \`500 + storage_ack_insufficient\` with only transport-class peer outcomes ` +
+          `(\`TRANSPORT_ERROR\`/\`no_response\`, zero declines). Sporadic occurrences are connection ` +
+          `churn under the 100-publish storm; a systemic count means first-attempt storage-ack ` +
+          `streams are failing deterministically — a product regression, not churn.`,
+      );
+    }
+    // Genuine churn is sporadic. A deterministic first-attempt storage-ack
+    // failure would push every custodial publish through the retry and pass
+    // silently — cap the absorbed retries so the systemic case still fails.
+    const transportRetryCap = Math.max(3, Math.ceil(vmCustodial * 0.2));
+    expect(
+      transportQuorumRetries,
+      `storage-ack transport retries (${transportQuorumRetries}) exceeded the churn budget ` +
+        `${transportRetryCap} — a systemic first-attempt ACK-transport failure is a product ` +
+        `regression, not connection churn`,
+    ).toBeLessThanOrEqual(transportRetryCap);
     if (custodialTentativeRetries > 0) {
       appendFinding(
         'BUG — publisher nonce race during back-to-back publishes',

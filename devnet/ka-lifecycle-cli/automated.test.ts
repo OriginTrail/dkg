@@ -21,7 +21,7 @@
  *   pnpm run build
  *   DEVNET_ENABLE_PUBLISHER=1 ./scripts/devnet.sh start 6
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -410,6 +410,29 @@ beforeAll(async () => {
   }
   await ensureAllIdentities(detected, 4);
   const node = detected.nodes[1]!;
+
+  // Fail fast when the devnet was booted WITHOUT the async publisher runtime —
+  // otherwise every VM-publish test enqueues a publisher job that can never
+  // run and burns its full 300s timeout instead of failing with a cause.
+  // devnet.sh writes publisher.enabled=true unconditionally; what actually
+  // gates runtime startup is a non-empty publisher-wallets.json (only written
+  // under DEVNET_ENABLE_PUBLISHER=1 — without it the daemon logs "Publisher
+  // startup skipped: No publisher wallets configured" and boots without a runner).
+  const nodeConfig = JSON.parse(readFileSync(join(node.home, 'config.json'), 'utf8'));
+  let publisherWallets: unknown[] = [];
+  try {
+    publisherWallets = JSON.parse(readFileSync(join(node.home, 'publisher-wallets.json'), 'utf8'))?.wallets ?? [];
+  } catch {
+    // ENOENT / bad JSON → runtime never started
+  }
+  if (nodeConfig?.publisher?.enabled !== true || !Array.isArray(publisherWallets) || publisherWallets.length === 0) {
+    throw new Error(
+      'Devnet publisher runtime is not running (node1 publisher-wallets.json is missing/empty — ' +
+        'the daemon skips publisher startup even though config.json says enabled:true). ' +
+        'The async VM-publish tests cannot finalize. Reboot with: ' +
+        './scripts/devnet.sh clean && DEVNET_ENABLE_PUBLISHER=1 ./scripts/devnet.sh start 6',
+    );
+  }
 
   const slug = unique('ka-lifecycle-cli');
   const created = await runDkgCli(

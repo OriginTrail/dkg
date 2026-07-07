@@ -86,17 +86,14 @@
  *      (packages/cli/src/daemon/routes/context-graph.ts:727; body validated by
  *      validateSubGraphName). Equivalent CLI: `dkg context-graph create-sub-graph
  *      <cg> <sg>` (positional, commands/context-graph.ts:265).
- *   2. Stage the KA into the sub-graph — `dkg shared-memory write <cg> -f <file>
- *      --name <name> --sub-graph-name <sg>` (commands/shared-memory.ts:114-124:
- *      `-f/--file`, `--name`, `--sub-graph-name` are all real options; create →
- *      append batches into the named assertion).
- *   3. Publish it on-chain — `dkg shared-memory publish <cg> --name <name>
- *      --sub-graph-name <sg>` (commands/shared-memory.ts:180-237: finalize →
- *      promote → publishFromFinalizedAssertion, i.e. land on VM/chain). Prints
- *      `Status:` + `KC ID:` we parse for the kaId.
- *   NB the one-shot `dkg publish` does NOT support sub-graphs (no
- *   --sub-graph-name on `publish` in the harness `publishViaCli`), hence the
- *   write→publish lifecycle.
+ *   2. Stage the KA into the sub-graph — `dkg ka create <name> -c <cg>
+ *      --input-file <file> --share --sub-graph-name <sg>` (the #1410 KA
+ *      lifecycle CLI; addSubGraphOption is applied to ka create/publish in
+ *      commands/knowledge-asset.ts, so sub-graph routing rides the same flag).
+ *   3. Publish it on-chain — `dkg ka publish <name> -c <cg> --sub-graph-name
+ *      <sg>` (SWM → VM/chain). Prints `Status:` + `KA ID:` we parse for the
+ *      kaId. (The pre-#1410 `dkg shared-memory write/publish` commands this
+ *      suite originally drove were removed with the rest of the legacy verbs.)
  *
  * ISOLATION (this suite runs against ONE shared 6-node devnet, in sequence with
  * the rest of the 10.0.2 sweep):
@@ -274,11 +271,10 @@ describe('PR #1385 — RS extraction reads named sub-graph KAs (live 6-node devn
       ).toBe(true);
 
       // ── 2. Stage the KA INTO the sub-graph ───────────────────────────────────
-      // `dkg shared-memory write <cg> -f <file> --name <name> --sub-graph-name <sg>`
-      // (commands/shared-memory.ts:114-124). The n-quads file is labelled with the
-      // PARENT CG graph URI — sub-graph routing is the API param, NOT the file's
-      // graph label (write loads quads against the default CG graph + passes
-      // subGraphName separately). makeNquadsFile's contract, mirrored here.
+      // `dkg ka create <name> -c <cg> --input-file <file> --share --sub-graph-name <sg>`
+      // (#1410 KA lifecycle CLI: WM → finalize → SWM). The n-quads file is
+      // labelled with the PARENT CG graph URI — sub-graph routing is the
+      // --sub-graph-name flag, NOT the file's graph label.
       const g = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
       const file = writeNquads(import.meta.dirname, name, [
         `<${s.subject}> <${PRED}> "${OBJECT_VALUE}" <${g}>`,
@@ -288,13 +284,14 @@ describe('PR #1385 — RS extraction reads named sub-graph KAs (live 6-node devn
       const write = await runDkgCli(
         node,
         [
-          'shared-memory',
-          'write',
-          CONTEXT_GRAPH,
-          '-f',
-          file,
-          '--name',
+          'ka',
+          'create',
           name,
+          '--context-graph-id',
+          CONTEXT_GRAPH,
+          '--input-file',
+          file,
+          '--share',
           '--sub-graph-name',
           s.subGraphName,
         ],
@@ -302,51 +299,36 @@ describe('PR #1385 — RS extraction reads named sub-graph KAs (live 6-node devn
       );
       expect(
         write.code,
-        `shared-memory write failed (exit ${write.code})\nstdout: ${write.stdout}\nstderr: ${write.stderr}`,
+        `ka create --share failed (exit ${write.code})\nstdout: ${write.stdout}\nstderr: ${write.stderr}`,
       ).toBe(0);
 
       // ── 3. Publish it on-chain ───────────────────────────────────────────────
-      // `dkg shared-memory publish <cg> --name <name> --sub-graph-name <sg>`
-      // (commands/shared-memory.ts:180; finalize → promote → publish-to-VM). Prints
-      // `Status:` + `KC ID:` we parse — same surface publishViaCli parses.
+      // `dkg ka publish <name> -c <cg> --sub-graph-name <sg>` (SWM → VM/chain).
+      // Prints `Status:` + `KA ID:` we parse — same surface publishViaCli parses.
       const publish = await runDkgCli(
         node,
         [
-          'shared-memory',
+          'ka',
           'publish',
-          CONTEXT_GRAPH,
-          '--name',
           name,
+          '--context-graph-id',
+          CONTEXT_GRAPH,
           '--sub-graph-name',
           s.subGraphName,
         ],
         120_000,
       );
-      // NOTE: `dkg shared-memory publish --sub-graph-name` currently exits 1 on a
-      // cosmetic POST-success error ("Cannot read properties of undefined
-      // (reading 'length')") even though the on-chain publish confirms (Status:
-      // confirmed + KC ID + merkle root are printed, "Promoted: N quads"). We
-      // therefore assert success from stdout, not the exit code, and surface the
-      // anomaly. If stdout shows no confirmation, THEN treat the non-zero exit as
-      // a real failure.
+      expect(
+        publish.code,
+        `ka publish failed (exit ${publish.code})\nstdout: ${publish.stdout}\nstderr: ${publish.stderr}`,
+      ).toBe(0);
       const status = (/Status:\s*(\w+)/i.exec(publish.stdout)?.[1] ?? 'unknown').toLowerCase();
-      if (publish.code !== 0) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `#1385: sub-graph 'shared-memory publish' exited ${publish.code} despite Status=${status} — ` +
-            `cosmetic CLI post-success error (worth a follow-up). stderr: ${publish.stderr.slice(0, 200)}`,
-        );
-        expect(
-          /Status:\s*(confirmed|finalized|tentative)/i.test(publish.stdout) && /KC ID:\s*\d+/i.test(publish.stdout),
-          `sub-graph publish exited ${publish.code} AND stdout shows no confirmation — real failure\nstdout: ${publish.stdout}\nstderr: ${publish.stderr}`,
-        ).toBe(true);
-      }
       expect(
         ['confirmed', 'finalized', 'tentative'],
         `sub-graph publish status="${status}"\n${publish.stdout}`,
       ).toContain(status);
-      const kaIdStr = /KC ID:\s*(\d+)/i.exec(publish.stdout)?.[1];
-      expect(kaIdStr, `sub-graph publish surfaced no "KC ID:"\n${publish.stdout}`).toBeTruthy();
+      const kaIdStr = /K[AC] ID:\s*(\d+)/i.exec(publish.stdout)?.[1];
+      expect(kaIdStr, `sub-graph publish surfaced no "KA ID:"\n${publish.stdout}`).toBeTruthy();
       s.kaId = BigInt(kaIdStr!);
       expect(s.kaId, 'sub-graph KA id must be positive').toBeGreaterThan(0n);
       // eslint-disable-next-line no-console
