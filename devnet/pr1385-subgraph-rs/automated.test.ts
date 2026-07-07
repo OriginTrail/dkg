@@ -113,6 +113,7 @@ import {
   detectDevnet,
   ensureAllIdentities,
   runDkgCli,
+  runKaPublishLifecycle,
   writeNquads,
   queryNode,
   postJson,
@@ -270,66 +271,36 @@ describe('PR #1385 — RS extraction reads named sub-graph KAs (live 6-node devn
         `sub-graph register failed (${reg.status}): ${JSON.stringify(reg.json)}`,
       ).toBe(true);
 
-      // ── 2. Stage the KA INTO the sub-graph ───────────────────────────────────
-      // `dkg ka create <name> -c <cg> --input-file <file> --share --sub-graph-name <sg>`
-      // (#1410 KA lifecycle CLI: WM → finalize → SWM). The n-quads file is
-      // labelled with the PARENT CG graph URI — sub-graph routing is the
-      // --sub-graph-name flag, NOT the file's graph label.
+      // ── 2+3. Stage the KA INTO the sub-graph, then publish it on-chain ──────
+      // #1410 KA lifecycle CLI (`ka create --share`: WM → finalize → SWM, then
+      // `ka publish`: SWM → VM/chain) via the shared runKaPublishLifecycle
+      // helper (devnet/_bootstrap/harness.ts), which owns the argument arrays
+      // and the `Status:`/`KA ID:` stdout parsing (status lowercased). We pass
+      // --sub-graph-name on BOTH steps. The n-quads file is labelled with the
+      // PARENT CG graph URI — sub-graph routing is the --sub-graph-name flag,
+      // NOT the file's graph label.
       const g = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
       const file = writeNquads(import.meta.dirname, name, [
         `<${s.subject}> <${PRED}> "${OBJECT_VALUE}" <${g}>`,
         `<${s.subject}> <https://schema.org/name> "${name}" <${g}>`,
       ]);
 
-      const write = await runDkgCli(
-        node,
-        [
-          'ka',
-          'create',
-          name,
-          '--context-graph-id',
-          CONTEXT_GRAPH,
-          '--input-file',
-          file,
-          '--share',
-          '--sub-graph-name',
-          s.subGraphName,
-        ],
-        120_000,
+      const result = await runKaPublishLifecycle(
+        (args) => runDkgCli(node, args, 120_000),
+        {
+          kaName: name,
+          contextGraphId: CONTEXT_GRAPH,
+          inputFile: file,
+          createArgs: ['--sub-graph-name', s.subGraphName],
+          publishArgs: ['--sub-graph-name', s.subGraphName],
+        },
       );
-      expect(
-        write.code,
-        `ka create --share failed (exit ${write.code})\nstdout: ${write.stdout}\nstderr: ${write.stderr}`,
-      ).toBe(0);
-
-      // ── 3. Publish it on-chain ───────────────────────────────────────────────
-      // `dkg ka publish <name> -c <cg> --sub-graph-name <sg>` (SWM → VM/chain).
-      // Prints `Status:` + `KA ID:` we parse — same surface publishViaCli parses.
-      const publish = await runDkgCli(
-        node,
-        [
-          'ka',
-          'publish',
-          name,
-          '--context-graph-id',
-          CONTEXT_GRAPH,
-          '--sub-graph-name',
-          s.subGraphName,
-        ],
-        120_000,
-      );
-      expect(
-        publish.code,
-        `ka publish failed (exit ${publish.code})\nstdout: ${publish.stdout}\nstderr: ${publish.stderr}`,
-      ).toBe(0);
-      const status = (/Status:\s*(\w+)/i.exec(publish.stdout)?.[1] ?? 'unknown').toLowerCase();
       expect(
         ['confirmed', 'finalized', 'tentative'],
-        `sub-graph publish status="${status}"\n${publish.stdout}`,
-      ).toContain(status);
-      const kaIdStr = /K[AC] ID:\s*(\d+)/i.exec(publish.stdout)?.[1];
-      expect(kaIdStr, `sub-graph publish surfaced no "KA ID:"\n${publish.stdout}`).toBeTruthy();
-      s.kaId = BigInt(kaIdStr!);
+        `sub-graph publish status="${result.status}"\n${result.raw}`,
+      ).toContain(result.status);
+      expect(result.kaId, `sub-graph publish surfaced no "KA ID:"\n${result.raw}`).toBeDefined();
+      s.kaId = result.kaId!;
       expect(s.kaId, 'sub-graph KA id must be positive').toBeGreaterThan(0n);
       // eslint-disable-next-line no-console
       console.log(

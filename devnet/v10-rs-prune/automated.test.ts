@@ -36,6 +36,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -145,22 +146,20 @@ async function publish(node: DevnetNode, cg: string, name: string, epochs: numbe
       `<${subject}> <https://schema.org/description> "rs-prune devnet scenario" <did:dkg:context-graph:${cg}> .\n`,
   );
   // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
-  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
-  // then `ka publish` performs the on-chain SWM -> VM publish. `name` is
-  // already unique per call (live/flood-N), so it doubles as the KA name.
-  const created = await runDkgCli(node, ['ka', 'create', name, '--context-graph-id', cg, '--input-file', file, '--share']);
-  if (created.code !== 0) {
-    throw new Error(`ka create --share ${name} failed (exit ${created.code})\nstdout: ${created.stdout}\nstderr: ${created.stderr}`);
-  }
-  const r = await runDkgCli(node, ['ka', 'publish', name, '--context-graph-id', cg, '--publish-epochs', String(epochs)]);
-  if (r.code !== 0) {
-    throw new Error(`ka publish ${name} failed (exit ${r.code})\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
-  }
-  const status = (/Status:\s*(\w+)/i.exec(r.stdout)?.[1] ?? 'unknown').toLowerCase();
-  expect(['confirmed', 'finalized', 'tentative'], `ka publish ${name} status=${status}\n${r.stdout}`).toContain(status);
-  const kaId = /K[AC] ID:\s*(\d+)/i.exec(r.stdout)?.[1];
-  expect(kaId, `ka publish ${name} surfaced no KA ID\n${r.stdout}`).toBeTruthy();
-  return BigInt(kaId!);
+  // lifecycle CLI (`ka create --share` then `ka publish`) — the two-step
+  // argument/stdout contract now lives in the shared runKaPublishLifecycle
+  // helper (devnet/_bootstrap/harness.ts); status is returned lowercased.
+  // `name` is already unique per call (live/flood-N), so it doubles as the
+  // KA name.
+  const r = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: name,
+    contextGraphId: cg,
+    inputFile: file,
+    publishArgs: ['--publish-epochs', String(epochs)],
+  });
+  expect(['confirmed', 'finalized', 'tentative'], `ka publish ${name} status=${r.status}\n${r.raw}`).toContain(r.status);
+  expect(r.kaId, `ka publish ${name} surfaced no KA ID\n${r.raw}`).toBeDefined();
+  return r.kaId!;
 }
 
 async function timeWarpSeconds(provider: ethers.JsonRpcProvider, seconds: number): Promise<void> {

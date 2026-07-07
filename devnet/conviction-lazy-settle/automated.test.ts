@@ -39,6 +39,7 @@ import { readFileSync, existsSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -289,37 +290,30 @@ let publishSeq = 0;
 
 async function dkgPublish(node: DevnetNode, file: string): Promise<{ kaId: bigint; txHash: string }> {
   // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
-  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
-  // then `ka publish` performs the on-chain SWM -> VM publish.
+  // lifecycle CLI (`ka create --share` then `ka publish`) — the two-step
+  // argument/stdout contract now lives in the shared runKaPublishLifecycle
+  // helper (devnet/_bootstrap/harness.ts); status is returned lowercased.
   const kaName = `cls-pub-${Date.now().toString(36)}-${++publishSeq}`;
-  const created = await runCliOnce(node, ['ka', 'create', kaName, '--context-graph-id', CONTEXT_GRAPH, '--input-file', file, '--share']);
-  if (created.code !== 0) {
-    throw new Error(`ka create --share exit=${created.code}\nstdout: ${created.stdout}\nstderr: ${created.stderr}`);
-  }
-  const result = await runCliOnce(node, ['ka', 'publish', kaName, '--context-graph-id', CONTEXT_GRAPH]);
-  if (result.code !== 0) {
-    throw new Error(`ka publish exit=${result.code}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
-  }
-  const { stdout } = result;
-  const status = /Status:\s*(\w+)/i.exec(stdout)?.[1]?.toLowerCase() ?? 'unknown';
-  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(stdout);
-  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(stdout);
-  if (!kcMatch || !txMatch) {
-    throw new Error(`could not parse publish output\n${stdout}`);
+  const result = await runKaPublishLifecycle((args) => runCliOnce(node, args), {
+    kaName,
+    contextGraphId: CONTEXT_GRAPH,
+    inputFile: file,
+  });
+  if (result.kaId === undefined || !result.txHash) {
+    throw new Error(`could not parse publish output\n${result.raw}`);
   }
   // Greedy publish-outcome gate: exit 0 is not proof of a real publish.
   // Require a known success status and a positive kaId so a failed/tentative
   // publish (whose receipt could otherwise drive the CostCovered / lazy-settle
   // assertions against the wrong tx) is rejected here, not silently accepted.
   const publishOk = ['confirmed', 'finalized', 'tentative'];
-  if (!publishOk.includes(status)) {
-    throw new Error(`ka publish status="${status}", expected one of ${publishOk.join('/')}\n${stdout}`);
+  if (!publishOk.includes(result.status)) {
+    throw new Error(`ka publish status="${result.status}", expected one of ${publishOk.join('/')}\n${result.raw}`);
   }
-  const kaId = BigInt(kcMatch[1]!);
-  if (kaId <= 0n) {
-    throw new Error(`ka publish surfaced non-positive kaId=${kaId}\n${stdout}`);
+  if (result.kaId <= 0n) {
+    throw new Error(`ka publish surfaced non-positive kaId=${result.kaId}\n${result.raw}`);
   }
-  return { kaId, txHash: txMatch[1]! };
+  return { kaId: result.kaId, txHash: result.txHash };
 }
 
 async function rawTxNonce(provider: ethers.JsonRpcProvider, addr: string): Promise<number> {

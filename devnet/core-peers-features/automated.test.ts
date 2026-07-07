@@ -46,6 +46,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -266,30 +267,28 @@ let publishSeq = 0;
 async function publishFromCore(node: DevnetNode, name: string): Promise<{ subject: string; literal: string; kaId?: string; status: string }> {
   const witness = makeWitnessFile(name);
   // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
-  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
-  // then `ka publish` performs the on-chain SWM -> VM publish.
-  const kaName = `cpf-pub-${Date.now().toString(36)}-${++publishSeq}`;
-  const created = await runDkgCli(node, ['ka', 'create', kaName, '--context-graph-id', CONTEXT_GRAPH, '--input-file', witness.path, '--share']);
-  if (created.code !== 0) {
-    throw new Error(`ka create --share failed (exit ${created.code}) stdout=${created.stdout} stderr=${created.stderr}`);
-  }
-  const result = await runDkgCli(node, ['ka', 'publish', kaName, '--context-graph-id', CONTEXT_GRAPH]);
-  if (result.code !== 0) {
-    throw new Error(`ka publish failed (exit ${result.code}) stdout=${result.stdout} stderr=${result.stderr}`);
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1]?.toLowerCase() ?? 'unknown';
-  const kaId = /K[AC] ID:\s*(\d+)/i.exec(result.stdout)?.[1];
+  // lifecycle CLI (`ka create --share` then `ka publish`) — argument arrays +
+  // Status:/KA ID: stdout parsing live in the shared runKaPublishLifecycle
+  // (../_bootstrap/harness), which returns status lowercased; this suite keeps
+  // its own CLI spawn (120s timeout).
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `cpf-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: CONTEXT_GRAPH,
+    inputFile: witness.path,
+  });
+  const status = result.status;
+  const kaId = result.kaId !== undefined ? String(result.kaId) : undefined;
   // Greedy publish-outcome gate: exit 0 is not proof of a real publish. Pin a
   // known success status and a positive kaId so a failed/'unknown' status or a
   // missing "KA ID:" line fails here instead of passing as a green publish.
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
   ).toContain(status);
   expect(
     BigInt(kaId ?? '0'),
-    `publish surfaced no positive "KA ID:" (kaId="${kaId}")\n${result.stdout}`,
+    `publish surfaced no positive "KA ID:" (kaId="${kaId}")\n${result.raw}`,
   ).toBeGreaterThan(0n);
   return { subject: witness.subject, literal: witness.literal, kaId, status };
 }

@@ -257,6 +257,64 @@ export interface PublishResult {
   raw: string;
 }
 
+export interface KaLifecycleOptions {
+  kaName: string;
+  contextGraphId: string;
+  inputFile: string;
+  /** Extra args appended to `ka create` (e.g. --sub-graph-name). */
+  createArgs?: string[];
+  /** Extra args appended to `ka publish` (e.g. --publish-epochs, --publisher-node-identity-id). */
+  publishArgs?: string[];
+}
+
+/**
+ * The two-step #1410 KA publish lifecycle (`ka create --share` stages WM ->
+ * finalize -> SWM, then `ka publish` lands SWM -> VM on-chain) with its output
+ * parsing, in ONE place. `runCli` abstracts how a suite spawns the CLI — each
+ * suite keeps its own node/env/timeout mechanics — while this helper owns the
+ * argument contract and the stdout contract (`Status:`, `KA ID:`, `Tx hash:`).
+ * Throws on a non-zero exit of either step. Status/kaId ASSERTIONS stay with
+ * callers: accepted statuses differ per scenario (e.g. tentative-tolerant
+ * suites). `status` is returned lowercased; `kaId` is undefined when no
+ * "KA ID:" line was printed.
+ */
+export async function runKaPublishLifecycle(
+  runCli: (args: string[]) => Promise<CliResult>,
+  opts: KaLifecycleOptions,
+): Promise<PublishResult> {
+  const created = await runCli([
+    'ka', 'create', opts.kaName,
+    '--context-graph-id', opts.contextGraphId,
+    '--input-file', opts.inputFile,
+    '--share',
+    ...(opts.createArgs ?? []),
+  ]);
+  if (created.code !== 0) {
+    throw new Error(
+      `ka create --share ${opts.kaName} failed (exit ${created.code})\nstdout: ${created.stdout}\nstderr: ${created.stderr}`,
+    );
+  }
+  const published = await runCli([
+    'ka', 'publish', opts.kaName,
+    '--context-graph-id', opts.contextGraphId,
+    ...(opts.publishArgs ?? []),
+  ]);
+  if (published.code !== 0) {
+    throw new Error(
+      `ka publish ${opts.kaName} failed (exit ${published.code})\nstdout: ${published.stdout}\nstderr: ${published.stderr}`,
+    );
+  }
+  const status = (/Status:\s*(\w+)/i.exec(published.stdout)?.[1] ?? 'unknown').toLowerCase();
+  const kaMatch = /K[AC] ID:\s*(\d+)/i.exec(published.stdout);
+  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(published.stdout);
+  return {
+    status,
+    kaId: kaMatch ? BigInt(kaMatch[1]!) : undefined,
+    txHash: txMatch?.[1],
+    raw: published.stdout,
+  };
+}
+
 const PUBLISH_OK = ['confirmed', 'finalized', 'tentative'];
 let publishSeq = 0;
 
@@ -266,37 +324,23 @@ export async function publishViaCli(
   filePath: string,
   options: { publisherNodeIdentityId?: bigint; extraArgs?: string[] } = {},
 ): Promise<PublishResult> {
-  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
-  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
-  // then `ka publish` performs the on-chain SWM -> VM publish.
-  const kaName = `harness-pub-${Date.now().toString(36)}-${++publishSeq}`;
-  const created = await runDkgCli(node, ['ka', 'create', kaName, '--context-graph-id', contextGraph, '--input-file', filePath, '--share']);
-  if (created.code !== 0) {
-    throw new Error(
-      `ka create --share failed (exit ${created.code})\nstdout: ${created.stdout}\nstderr: ${created.stderr}`,
-    );
-  }
-  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
+  const publishArgs: string[] = [];
   if (options.publisherNodeIdentityId !== undefined) {
-    args.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
+    publishArgs.push('--publisher-node-identity-id', String(options.publisherNodeIdentityId));
   }
-  if (options.extraArgs) args.push(...options.extraArgs);
-  const result = await runDkgCli(node, args);
-  if (result.code !== 0) {
-    throw new Error(
-      `ka publish failed (exit ${result.code})\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
-    );
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
-  const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
+  if (options.extraArgs) publishArgs.push(...options.extraArgs);
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `harness-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: contextGraph,
+    inputFile: filePath,
+    publishArgs,
+  });
   expect(
     PUBLISH_OK,
-    `ka publish status="${status}", expected one of ${PUBLISH_OK.join('/')}\n${result.stdout}`,
-  ).toContain(status.toLowerCase());
-  expect(kaId, `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`).toBeGreaterThan(0n);
-  return { status, kaId, txHash: txMatch ? txMatch[1] : undefined, raw: result.stdout };
+    `ka publish status="${result.status}", expected one of ${PUBLISH_OK.join('/')}\n${result.raw}`,
+  ).toContain(result.status);
+  expect(result.kaId, `ka publish surfaced no positive "KA ID:" (kaId=${result.kaId})\n${result.raw}`).toBeGreaterThan(0n);
+  return result;
 }
 
 // ───────────────────────────── n-quads files ─────────────────────────────

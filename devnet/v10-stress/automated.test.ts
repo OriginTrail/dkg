@@ -59,6 +59,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -282,40 +283,25 @@ async function publishViaCli(
   filePath: string,
   options: { publisherNodeIdentityId?: bigint } = {},
 ): Promise<{ status: string; kaId?: bigint; txHash?: string; raw: string }> {
-  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
-  // lifecycle CLI: `ka create --share` stages the KA (WM -> finalize -> SWM),
-  // then `ka publish` performs the on-chain SWM -> VM publish.
+  // Thin wrapper over the shared #1410 two-step lifecycle helper (`ka create
+  // --share` stages WM -> finalize -> SWM, then `ka publish` lands SWM -> VM
+  // on-chain). The harness owns the arg arrays + stdout parsing (and returns
+  // `status` lowercased); this suite keeps its own kaName scheme, CLI runner
+  // (with its timeouts) and the greedy publish-outcome gate below.
   const kaName = `stress-pub-${Date.now().toString(36)}-${++cliPublishSeq}`;
-  const created = await runDkgCli(node, [
-    'ka', 'create', kaName,
-    '--context-graph-id', contextGraph,
-    '--input-file', filePath,
-    '--share',
-  ]);
-  if (created.code !== 0) {
-    throw new Error(
-      `ka create --share failed (exit ${created.code})\n` +
-        `stdout: ${created.stdout}\nstderr: ${created.stderr}`,
-    );
-  }
-  const args = ['ka', 'publish', kaName, '--context-graph-id', contextGraph];
+  const publishArgs: string[] = [];
   if (options.publisherNodeIdentityId !== undefined) {
-    args.push(
+    publishArgs.push(
       '--publisher-node-identity-id',
       String(options.publisherNodeIdentityId),
     );
   }
-  const result = await runDkgCli(node, args);
-  if (result.code !== 0) {
-    throw new Error(
-      `ka publish failed (exit ${result.code})\n` +
-        `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
-    );
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /K[AC] ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /Tx hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
-  const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName,
+    contextGraphId: contextGraph,
+    inputFile: filePath,
+    publishArgs,
+  });
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
   // status to a known success value and require a positive on-chain kaId so an
@@ -325,18 +311,57 @@ async function publishViaCli(
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `ka publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
-  ).toContain(status.toLowerCase());
+    `ka publish status="${result.status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
+  ).toContain(result.status);
   expect(
-    kaId,
-    `ka publish surfaced no positive "KA ID:" (kaId=${kaId})\n${result.stdout}`,
+    result.kaId,
+    `ka publish surfaced no positive "KA ID:" (kaId=${result.kaId})\n${result.raw}`,
   ).toBeGreaterThan(0n);
-  return {
-    status,
-    kaId,
-    txHash: txMatch ? txMatch[1] : undefined,
-    raw: result.stdout,
-  };
+  return result;
+}
+
+// ───────────────────────── storm retry policy ─────────────────────────────
+// Phase 2's 100-publish storm absorbs a bounded amount of load-induced
+// flakiness. The classification lives in these module-scope functions (not
+// inline in the publish loop) so the policy is deterministic-testable — see
+// the `storm retry policy (deterministic)` describe at the end of this file.
+
+/**
+ * Transport-only quorum miss under storm load = connection churn, retryable.
+ * Under the 100-publish storm a core peer can transiently drop a storage-ack
+ * stream (protocol negotiation fails / no response during connection churn)
+ * and cost a single publish its quorum. That is load-induced connection
+ * churn, not a publish-path defect. An active decline (STORAGE_ACK_DECLINE)
+ * is never churn — a peer examined the payload and refused it — so a mixed
+ * failure with any decline in it must NOT be retried, or a decline
+ * regression under load would pass on the second attempt.
+ */
+function isTransientQuorumFailure(status: number, body: string): boolean {
+  return (
+    status >= 500 &&
+    /storage_ack_insufficient/.test(body) &&
+    /TRANSPORT_ERROR|no_response/.test(body) &&
+    !/STORAGE_ACK_DECLINE/.test(body)
+  );
+}
+
+/**
+ * Churn budget for the storm's absorbed transport retries. Genuine churn is
+ * sporadic; a deterministic first-attempt storage-ack failure would push
+ * every custodial publish through the one-shot retry and pass silently —
+ * capping the absorbed retries keeps the systemic case a hard failure.
+ */
+function stormTransportRetryCap(publishCount: number): number {
+  return Math.max(3, Math.ceil(publishCount * 0.2));
+}
+
+/**
+ * A publish response is "tentative" when the daemon says so explicitly or
+ * returns the kaId="0" sentinel (publisher nonce race — see FINDINGS.md
+ * "publisher nonce race"). Tentative outcomes get one delayed retry.
+ */
+function isTentativePublish(j: { status?: string; kaId?: string } | null): boolean {
+  return !!j && (j.status === 'tentative' || j.kaId === '0');
 }
 
 async function loadContractAddresses(
@@ -1093,24 +1118,13 @@ describe('V10 chain — stress + scenario validation', () => {
           status?: string;
           txHash?: string;
         } | null;
-        const tentative = !!j && (j.status === 'tentative' || j.kaId === '0');
+        const tentative = isTentativePublish(j);
         if (!r.ok && !tentative) {
           const body = j ? JSON.stringify(j) : '';
-          // Under the 100-publish storm a core peer can transiently drop a
-          // storage-ack stream (protocol negotiation fails / no response
-          // during connection churn) and cost a single publish its quorum.
-          // That is load-induced connection churn, not a publish-path defect —
-          // retry ONCE after a short backoff so one flaky stream doesn't fail
-          // the whole storm; a repeat failure is still a hard failure.
-          // An active decline (STORAGE_ACK_DECLINE) is never churn — a peer
-          // examined the payload and refused it — so a mixed failure with any
-          // decline in it must NOT be retried or a decline regression under
-          // load would pass on the second attempt.
-          const transientQuorum =
-            r.status >= 500 &&
-            /storage_ack_insufficient/.test(body) &&
-            /TRANSPORT_ERROR|no_response/.test(body) &&
-            !/STORAGE_ACK_DECLINE/.test(body);
+          // Retry ONCE after a short backoff so one flaky stream doesn't fail
+          // the whole storm; a repeat failure is still a hard failure. See
+          // isTransientQuorumFailure for what qualifies as retryable churn.
+          const transientQuorum = isTransientQuorumFailure(r.status, body);
           if (transientQuorum && attempt === 0) {
             transportQuorumRetries++;
             await new Promise((res) => setTimeout(res, 3_000));
@@ -1122,7 +1136,7 @@ describe('V10 chain — stress + scenario validation', () => {
       };
 
       let publishJson = await doPublish();
-      if (publishJson.status === 'tentative' || publishJson.kaId === '0') {
+      if (isTentativePublish(publishJson)) {
         custodialTentativeRetries++;
         if (i === 0) {
           console.log(
@@ -1309,10 +1323,9 @@ describe('V10 chain — stress + scenario validation', () => {
           `streams are failing deterministically — a product regression, not churn.`,
       );
     }
-    // Genuine churn is sporadic. A deterministic first-attempt storage-ack
-    // failure would push every custodial publish through the retry and pass
-    // silently — cap the absorbed retries so the systemic case still fails.
-    const transportRetryCap = Math.max(3, Math.ceil(vmCustodial * 0.2));
+    // Cap the absorbed retries so the systemic case still fails — see
+    // stormTransportRetryCap for the churn-budget rationale.
+    const transportRetryCap = stormTransportRetryCap(vmCustodial);
     expect(
       transportQuorumRetries,
       `storage-ack transport retries (${transportQuorumRetries}) exceeded the churn budget ` +
@@ -1964,3 +1977,78 @@ async function ensurePcaAccountForOpWallets(
   }
   return accountId;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Storm retry policy — deterministic coverage.
+//
+// The phase-2 storm only exercises isTransientQuorumFailure when the live
+// devnet happens to drop a storage-ack stream, so the retry classification is
+// pinned here against representative /vm/publish failure bodies. This block
+// is intentionally OUTSIDE the main describe (whose beforeAll boots the
+// devnet state): the tests are pure functions of their inputs and must pass
+// regardless of devnet availability.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('storm retry policy (deterministic)', () => {
+  /** Representative /vm/publish quorum-failure body carrying per-peer outcomes. */
+  const quorumBody = (peerOutcomes: string[]) =>
+    JSON.stringify({
+      error: 'storage_ack_insufficient',
+      message: `storage ack quorum not reached (peer outcomes: ${peerOutcomes.join(', ')})`,
+      outcomes: peerOutcomes,
+    });
+
+  it('retries a 500 quorum miss whose only peer failures are TRANSPORT_ERROR', () => {
+    expect(isTransientQuorumFailure(500, quorumBody(['TRANSPORT_ERROR']))).toBe(true);
+  });
+
+  it('retries a 500 quorum miss whose only peer failures are no_response', () => {
+    expect(isTransientQuorumFailure(500, quorumBody(['no_response']))).toBe(true);
+  });
+
+  it('never retries a mixed failure containing an active decline', () => {
+    expect(
+      isTransientQuorumFailure(
+        500,
+        quorumBody(['TRANSPORT_ERROR', 'STORAGE_ACK_DECLINE:NO_DATA_IN_SWM']),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not retry a quorum miss without a transport-class marker', () => {
+    expect(
+      isTransientQuorumFailure(
+        500,
+        JSON.stringify({
+          error: 'storage_ack_insufficient',
+          message: 'storage ack quorum not reached',
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not retry a 5xx body that is not a storage-ack quorum failure', () => {
+    expect(
+      isTransientQuorumFailure(
+        502,
+        JSON.stringify({ error: 'bad_gateway', message: 'upstream TRANSPORT_ERROR' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not retry below 500 even with transport-only quorum markers', () => {
+    expect(isTransientQuorumFailure(400, quorumBody(['TRANSPORT_ERROR']))).toBe(false);
+  });
+
+  it('stormTransportRetryCap floors at 3 and scales at 20% of the batch', () => {
+    expect(stormTransportRetryCap(1)).toBe(3);
+    expect(stormTransportRetryCap(25)).toBe(5);
+    expect(stormTransportRetryCap(100)).toBe(20);
+  });
+
+  it('isTentativePublish detects explicit tentative and the kaId="0" sentinel', () => {
+    expect(isTentativePublish({ status: 'tentative' })).toBe(true);
+    expect(isTentativePublish({ kaId: '0' })).toBe(true);
+    expect(isTentativePublish({ status: 'confirmed', kaId: '7' })).toBe(false);
+    expect(isTentativePublish(null)).toBe(false);
+  });
+});
