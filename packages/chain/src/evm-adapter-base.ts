@@ -1316,7 +1316,47 @@ export class EVMChainAdapterBase {
     return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
   }
 
+  /**
+   * Serialized public entry for a standalone contract write. Acquires the
+   * per-operational-wallet lock (`signerTxSerializer`, keyed by
+   * `signer.address`) for the whole nonce-critical window, then delegates to
+   * {@link sendContractTransactionRaw}. Same-wallet writes now run strictly
+   * serially so their `pending` nonce stays monotonic — this is the dkg#953
+   * fix, previously enforced ONLY on the V10 publish/update path (via
+   * {@link dispatchSerializedV10Write}) and bypassed by every other write
+   * (RS, staking, PCA, identity, context-graph), which called this method
+   * raw. Writes on DIFFERENT wallets stay fully concurrent (distinct keys).
+   *
+   * DEADLOCK CONTRACT: never call this from INSIDE an already-held
+   * `signerTxSerializer.run()` window for the SAME wallet — the inner `run`
+   * chains off the outer tail while the outer body awaits the inner, so both
+   * wedge. In-lock sub-sends (e.g. the allowance `approve` inside
+   * {@link ensureV10ApproveTrac}, which runs inside a
+   * `dispatchSerializedV10Write` build closure) MUST call
+   * {@link sendContractTransactionRaw} directly.
+   */
   protected async sendContractTransaction(
+    contract: Contract,
+    method: string,
+    args: readonly unknown[],
+    signer: Wallet,
+    label: string,
+    opts?: { gasLimitBufferBps?: number },
+  ): Promise<ethers.TransactionReceipt> {
+    return this.signerTxSerializer.run(signer.address, () =>
+      this.sendContractTransactionRaw(contract, method, args, signer, label, opts),
+    );
+  }
+
+  /**
+   * Unserialized send: populate+sign (per-endpoint failover) → broadcast →
+   * confirm, with NO per-wallet lock. Use directly ONLY for a sub-send that
+   * already runs inside a `signerTxSerializer.run()` window for the same
+   * wallet, where re-acquiring the lock would deadlock (see
+   * {@link sendContractTransaction}). Every other caller must go through the
+   * serialized {@link sendContractTransaction}.
+   */
+  protected async sendContractTransactionRaw(
     contract: Contract,
     method: string,
     args: readonly unknown[],
@@ -1431,7 +1471,14 @@ export class EVMChainAdapterBase {
           `transferFrom-minimum workaround; not a stuck approval.`,
         );
       }
-      await this.sendContractTransaction(
+      // RAW (unserialized) send: `ensureV10ApproveTrac` executes INSIDE the
+      // `dispatchSerializedV10Write` build closure (publish/update) — i.e.
+      // already holding this wallet's `signerTxSerializer` lock — so the
+      // serialized `sendContractTransaction` would deadlock (inner `run`
+      // chains off the outer tail while the outer awaits it). When called
+      // standalone (e.g. the CG registration-deposit approve), this stays
+      // exactly as before this change (approves were never serialized).
+      await this.sendContractTransactionRaw(
         tokenWithSigner,
         'approve',
         [kav10Address, target],

@@ -329,3 +329,114 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     ).rejects.toThrow('null receipt for 0xPRE');
   });
 });
+
+describe('sendContractTransaction — universal per-wallet serialization (Phase 1: dkg#953 across tx types)', () => {
+  it('serializes concurrent SAME-wallet standalone sends (RS/staking/PCA now hold the lock too)', async () => {
+    // Before Phase 1 these calls hit `sendContractTransaction` raw — no lock —
+    // so two same-wallet sends could read the same pending nonce. Now the
+    // public wrapper acquires `signerTxSerializer.run(signer.address, ...)`.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const events: string[] = [];
+    // Stub the raw leaf the wrapper delegates to (inside the lock).
+    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+      events.push(`start:${method}`);
+      await tick(10);
+      events.push(`end:${method}`);
+      return fakeReceipt(method);
+    });
+
+    await Promise.all([
+      (a as any).sendContractTransaction({}, 'createChallenge', [], signer, 'createChallenge'),
+      (a as any).sendContractTransaction({}, 'submitProof', [], signer, 'submitProof'),
+    ]);
+
+    // No overlap: the first fully completes before the second starts.
+    expect(events).toEqual([
+      'start:createChallenge', 'end:createChallenge',
+      'start:submitProof', 'end:submitProof',
+    ]);
+  });
+
+  it('runs standalone sends on DIFFERENT wallets concurrently', async () => {
+    const a = new EVMChainAdapter(minimalConfig());
+    const s1 = new ethers.Wallet(DEPLOYER_PK);
+    const s2 = new ethers.Wallet(OTHER_PK);
+    expect(s1.address).not.toBe(s2.address);
+    const events: string[] = [];
+    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+      events.push(`start:${method}`);
+      await tick(20);
+      return fakeReceipt(method);
+    });
+
+    await Promise.all([
+      (a as any).sendContractTransaction({}, 'm1', [], s1, 'm1'),
+      (a as any).sendContractTransaction({}, 'm2', [], s2, 'm2'),
+    ]);
+
+    // Both started before either finished → genuinely concurrent (distinct keys).
+    expect(events.slice(0, 2).sort()).toEqual(['start:m1', 'start:m2']);
+  });
+
+  it('sendContractTransactionRaw stays LOCK-FREE so an in-lock sub-send cannot self-deadlock', async () => {
+    // The raw variant is what `ensureV10ApproveTrac` uses for its approve while
+    // already inside `dispatchSerializedV10Write`'s per-wallet lock. If raw
+    // re-acquired the lock it would deadlock. Proof it does not: two concurrent
+    // raw sends on the SAME wallet OVERLAP (no serialization).
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const events: string[] = [];
+    (a as any).populateAndSignAcrossProviders = recorder(
+      async (_c: unknown, method: string) => ({ signedTx: method, txHash: `0x${method}` }),
+    );
+    (a as any).sendSignedTransactionAndWait = recorder(async (tx: string) => {
+      events.push(`start:${tx}`);
+      await tick(15);
+      events.push(`end:${tx}`);
+      return fakeReceipt(tx);
+    });
+
+    await Promise.all([
+      (a as any).sendContractTransactionRaw({}, 'x', [], signer, 'x'),
+      (a as any).sendContractTransactionRaw({}, 'y', [], signer, 'y'),
+    ]);
+
+    expect(events.slice(0, 2).sort()).toEqual(['start:x', 'start:y']);
+  });
+
+  it('a publish (dispatchSerializedV10Write) and an RS-style send SERIALIZE on the same wallet (cross-type #953)', async () => {
+    // The actual Phase-1 win: RS create/submit used to bypass the per-wallet
+    // lock, so a publish rotated onto wallet #0 and a concurrent RS tx could
+    // read the same pending nonce. Now BOTH funnel through the one
+    // `signerTxSerializer` keyed by address → their send windows never interleave.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const events: string[] = [];
+    (a as any).sendSignedTransactionAndWait = recorder(async (tx: string) => {
+      events.push(`send:${tx}`);
+      await tick(10);
+      events.push(`done:${tx}`);
+      return fakeReceipt(tx);
+    });
+    (a as any).sendContractTransactionRaw = recorder(async (_c: unknown, method: string) => {
+      events.push(`rs-start:${method}`);
+      await tick(10);
+      events.push(`rs-end:${method}`);
+      return fakeReceipt(method);
+    });
+    const publishBuild = async () => { await tick(2); return { signedTx: 'pub', txHash: '0xpub' }; };
+
+    await Promise.all([
+      (a as any).dispatchSerializedV10Write(signer, 'publish', undefined, publishBuild, neverNull),
+      (a as any).sendContractTransaction({}, 'submitProof', [], signer, 'submitProof'),
+    ]);
+
+    // Whichever wins the lock, its whole window completes before the other's
+    // begins — no interleaving of the publish window and the RS window.
+    const pubBlock = ['send:pub', 'done:pub'];
+    const rsBlock = ['rs-start:submitProof', 'rs-end:submitProof'];
+    const pubFirst = events[0] === 'send:pub';
+    expect(events).toEqual(pubFirst ? [...pubBlock, ...rsBlock] : [...rsBlock, ...pubBlock]);
+  });
+});

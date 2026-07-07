@@ -2653,6 +2653,9 @@ function makeV10Adapter(approvalPolicy?: ApprovalPolicy, allowance: bigint = 0n)
   (a as any).contracts.token = tokenRoot;
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
+  // ensureV10ApproveTrac's approve is a RAW sub-send (it runs inside the
+  // per-wallet lock on the publish/update path); capture it at the same spy.
+  (a as any).sendContractTransactionRaw = sendSpy;
   const signer = new ethers.Wallet(DEPLOYER_PK);
   return { a, signer, tokenRoot, tokenWithSigner, sendSpy };
 }
@@ -2803,6 +2806,7 @@ describe('ensureV10ApproveTrac — per-publish (default) approval gate', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
+    (a as any).sendContractTransactionRaw = sendSpy;
     (a as any).contracts.token = undefined;
     const signer = new ethers.Wallet(DEPLOYER_PK);
 
@@ -3099,7 +3103,9 @@ describe('ensureV10ApproveTrac — call-site invariants (publish vs update)', ()
     const a = new EVMChainAdapter(minimalConfig());
     const { tokenRoot } = makeStubToken(0n);
     (a as any).contracts.token = tokenRoot;
-    (a as any).sendContractTransaction = recorder(async () => {
+    // ensureV10ApproveTrac's approve is a RAW sub-send (in-lock on the
+    // publish path); make that path throw so the propagation is exercised.
+    (a as any).sendContractTransactionRaw = recorder(async () => {
       throw new Error('approve broadcast failed');
     });
     const signer = new ethers.Wallet(DEPLOYER_PK);
@@ -3233,6 +3239,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
 
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
+    (a as any).sendContractTransactionRaw = sendSpy;
 
     // Stop the publish/update flow right after the approval gate by throwing
     // a sentinel at the signing step. We only need to observe the signer
@@ -3910,6 +3917,9 @@ function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
   (a as any).contracts.token = tokenRoot;
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
+  // ensureV10ApproveTrac's approve is a RAW sub-send (it runs inside the
+  // per-wallet lock on the publish/update path); capture it at the same spy.
+  (a as any).sendContractTransactionRaw = sendSpy;
   const signer = new ethers.Wallet(DEPLOYER_PK);
   return { a, signer, tokenWithSigner, sendSpy };
 }
