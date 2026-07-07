@@ -443,6 +443,43 @@ async function contractAddress(contract: Contract): Promise<string> {
   throw new Error('DKGKnowledgeAssets address is unavailable from the resolved contract handle.');
 }
 
+/**
+ * Per-tx-type funding requirement for operational-wallet selection. A
+ * discriminated union so "native-only" (RS challenge/proof, relay, settle —
+ * gas only, no TRAC transfer) is UNREPRESENTABLE-AS-TRAC-GATED: applying a
+ * publish TRAC floor to a gas-only tx would wrongly reject a valid,
+ * gas-funded, zero-TRAC wallet. `native+trac` (publish/update) additionally
+ * requires own-TRAC to cover the publish above the operator floor, with an
+ * optional Publishing Conviction Account (PCA) fallback.
+ */
+export type FundingMode =
+  | { kind: 'native-only'; nativeFloorWei: bigint }
+  | {
+      kind: 'native+trac';
+      nativeFloorWei: bigint;
+      tracFloorWei: bigint;
+      requiredTracWei: bigint;
+      consultPca: boolean;
+    };
+
+/**
+ * Generalized operational-wallet selection request. Publish routes through the
+ * thin `nextAuthorizedSigner` wrapper (`rotatable-policy`); the other classes
+ * exist for the funding-aware selection later phases route RS / update through.
+ * - `rotatable-policy`  → publish: eligible = on-chain authorized publishers
+ *                          for `contextGraphId` (whole pool when no ContextGraphs surface).
+ * - `rotatable-funded`  → update: eligible = whole pool (no authorized-publisher filter).
+ * - `rotatable-free`    → RS / relay / settle: eligible = whole pool, native-only funding.
+ */
+export interface SelectSignerSpec {
+  txClass: 'rotatable-policy' | 'rotatable-funded' | 'rotatable-free';
+  funding: FundingMode;
+  /** Required for `rotatable-policy` — the CG whose authorized publishers gate eligibility. */
+  contextGraphId?: bigint;
+  /** Soft, fail-open bias toward a funded wallet whose per-wallet lock is free. Default false. */
+  preferIdle?: boolean;
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -522,10 +559,20 @@ export class EVMChainAdapterBase {
 
   /**
    * Kill-switch (env `DKG_DISABLE_FUNDED_WALLET_SELECTION=1`): when set,
-   * `nextAuthorizedSigner` reverts to the pre-funding-aware behaviour
-   * (first authorized wallet in round-robin order, no balance reads).
+   * `selectSigner` reverts to the pre-funding-aware behaviour
+   * (first eligible wallet in round-robin order, no balance reads).
    */
   protected readonly fundedWalletSelectionDisabled: boolean;
+
+  /**
+   * Independent kill-switch (env `DKG_DISABLE_IDLE_AWARE_SELECTION=1`): when
+   * set, `selectSigner` never applies the idle-aware preference even for specs
+   * that request `preferIdle`. Separate from the funding kill-switch so idle
+   * biasing can be disabled without losing funding-awareness. Idle preference
+   * is a soft, fail-open bias (prefer a funded wallet whose per-wallet lock is
+   * currently free); it is OFF for publish (`preferIdle: false`) until soaked.
+   */
+  protected readonly idleAwareSelectionDisabled: boolean;
 
   /**
    * Short-TTL per-wallet funding cache (lowercased address → native+TRAC wei).
@@ -980,6 +1027,7 @@ export class EVMChainAdapterBase {
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
     this.fundedWalletSelectionDisabled = process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION === '1';
+    this.idleAwareSelectionDisabled = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION === '1';
 
     this.contracts = {
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
@@ -1542,22 +1590,20 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Pick the operational wallet that signs the next publish tx. Among the
-   * wallets the on-chain ContextGraphs contract authorizes for this context
-   * graph (round-robin order from `signerIndex`), PREFER one that is funded
-   * (native gas AND TRAC above the configured floors, or a covering PCA agent)
-   * so a publish is never routed to an authorized-but-empty wallet — the
-   * unfunded-wallet publish-failure this selector exists to fix. When the
-   * ContextGraphs auth surface is unavailable, every operational wallet is a
-   * candidate — still funding-aware over the full pool, NOT a plain pick. When
-   * no candidate is fundable, falls back to the best-funded one (the publish
-   * then surfaces an actionable InsufficientPublisherFundsError rather than a
-   * raw revert). The DKG_DISABLE_FUNDED_WALLET_SELECTION kill-switch is the only
-   * path that reverts to a plain round-robin pick (the first authorized wallet).
-   * Selection is serialized via `signerSelectionQueue` so concurrent publishes
-   * advance the `signerIndex` cursor coherently.
+   * Generalized operational-wallet selector. Orders the pool round-robin from
+   * `signerIndex`, narrows to the `spec.txClass` eligibility set, then PREFERS a
+   * funded wallet (per `spec.funding`) — optionally an idle one — so a write is
+   * never routed to an eligible-but-empty wallet. When no candidate is fundable
+   * it falls back to the best-funded one (the caller then surfaces an actionable
+   * error rather than a raw revert). `DKG_DISABLE_FUNDED_WALLET_SELECTION` is the
+   * only path that reverts to a plain round-robin pick (the first eligible
+   * wallet, no balance reads). Serialized via `signerSelectionQueue` so
+   * concurrent selections advance the `signerIndex` cursor coherently.
+   *
+   * `nextAuthorizedSigner` is the thin publish wrapper over this; RS / update /
+   * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
-  protected async nextAuthorizedSigner(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<Wallet> {
+  protected async selectSigner(spec: SelectSignerSpec): Promise<Wallet> {
     const previousSelection = this.signerSelectionQueue;
     let releaseSelection!: () => void;
     this.signerSelectionQueue = new Promise<void>((resolve) => { releaseSelection = resolve; });
@@ -1570,34 +1616,34 @@ export class EVMChainAdapterBase {
         ordered.push(this.signerPool[(start + i) % this.signerPool.length]);
       }
 
-      // Filter to on-chain authorized publishers. With no ContextGraphs
-      // surface, every operational wallet is a candidate (was: a single
-      // round-robin pick; now funding-aware over the whole pool).
-      let authorized: Wallet[];
-      if (!this.contracts.contextGraphs) {
-        authorized = ordered;
-      } else {
-        authorized = [];
+      // Eligibility by class. `rotatable-policy` filters to on-chain authorized
+      // publishers for the CG; with no ContextGraphs surface every operational
+      // wallet is a candidate (funding-aware over the whole pool, NOT a plain
+      // pick). `rotatable-funded`/`rotatable-free` use the whole pool.
+      let eligible: Wallet[];
+      if (spec.txClass === 'rotatable-policy' && this.contracts.contextGraphs) {
+        eligible = [];
         for (const signer of ordered) {
           if (await this.readContract(
             this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
-            'isAuthorizedPublisher', contextGraphId, signer.address,
+            'isAuthorizedPublisher', spec.contextGraphId, signer.address,
           )) {
-            authorized.push(signer);
+            eligible.push(signer);
           }
         }
-      }
-
-      if (authorized.length === 0) {
-        throw new Error(
-          `No authorized publisher wallet found in signer pool for context graph ${contextGraphId.toString()}. ` +
-          'Ensure at least one configured wallet is permitted by on-chain publish authority.',
-        );
+        if (eligible.length === 0) {
+          throw new Error(
+            `No authorized publisher wallet found in signer pool for context graph ${spec.contextGraphId?.toString()}. ` +
+            'Ensure at least one configured wallet is permitted by on-chain publish authority.',
+          );
+        }
+      } else {
+        eligible = ordered;
       }
 
       const chosen = this.fundedWalletSelectionDisabled
-        ? authorized[0]
-        : await this.selectFundedSigner(authorized, requiredTracWei);
+        ? eligible[0]
+        : await this.selectFundedSigner(eligible, spec.funding, spec.preferIdle ?? false);
 
       // Advance the cursor just past the chosen wallet so the next selection
       // rotates — preserving cross-wallet nonce concurrency (#953) when more
@@ -1611,59 +1657,121 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Among `authorized` wallets (already in round-robin order), return the first
-   * that is fundable (native > floor AND TRAC > floor). Balance reads are
-   * short-TTL cached, run in parallel, and FAIL OPEN (a read error / timeout
-   * counts the wallet as fundable) so a flaky RPC never blocks a publish. When
-   * none is fundable, return the best-funded wallet (max native, then max TRAC)
-   * so the publish still attempts and the contract gives the real verdict.
+   * Thin publish wrapper over {@link selectSigner}: pick the operational wallet
+   * that signs the next publish tx among the CG's on-chain authorized
+   * publishers, funding-aware over native gas AND own-TRAC (or a covering PCA
+   * agent). Idle preference is OFF for publish until soaked. Behaviour is
+   * unchanged from the pre-`selectSigner` implementation.
    */
-  protected async selectFundedSigner(authorized: Wallet[], requiredTracWei: bigint): Promise<Wallet> {
-    const fundings = await Promise.all(authorized.map((s) => this.getWalletFunding(s.address)));
+  protected async nextAuthorizedSigner(contextGraphId: bigint, requiredTracWei: bigint = 0n): Promise<Wallet> {
+    return this.selectSigner({
+      txClass: 'rotatable-policy',
+      contextGraphId,
+      funding: {
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei,
+        consultPca: true,
+      },
+      preferIdle: false,
+    });
+  }
+
+  /**
+   * Among `candidates` (already in round-robin order), return the first that is
+   * fundable per `funding` — or, when `preferIdle` and idle-aware selection is
+   * enabled, the first fundable wallet whose per-wallet lock is currently free.
+   * Balance reads are short-TTL cached, run in parallel, and FAIL OPEN (a read
+   * error / timeout counts the wallet as fundable) so a flaky RPC never blocks a
+   * write. When none is fundable, return the best-funded wallet (max native,
+   * then max TRAC) so the write still attempts and the contract gives the real
+   * verdict.
+   */
+  protected async selectFundedSigner(
+    candidates: Wallet[],
+    funding: FundingMode,
+    preferIdle: boolean,
+  ): Promise<Wallet> {
+    const fundings = await Promise.all(candidates.map((s) => this.getWalletFunding(s.address)));
     // Fundability is own-balance first (cheap), with a Publishing Conviction
-    // Account (PCA) fallback: a registered+covering PCA agent wallet pays the
-    // publish from its conviction account, NOT its own TRAC (the contract only
-    // `transferFrom`s the wallet on the direct-spend branch). Such a wallet
-    // legitimately holds gas + zero own-TRAC, so without this fallback the
-    // funding gate would skip it and lose the conviction discount.
+    // Account (PCA) fallback for `native+trac`: a registered+covering PCA agent
+    // wallet pays the publish from its conviction account, NOT its own TRAC, so
+    // it legitimately holds gas + zero own-TRAC (`native-only` specs never
+    // consult the PCA).
     const fundable = await Promise.all(
-      authorized.map((s, i) => this.isWalletPublishFundable(s.address, fundings[i], requiredTracWei)),
+      candidates.map((s, i) => this.isWalletFundable(s.address, fundings[i], funding)),
     );
-    for (let i = 0; i < authorized.length; i += 1) {
-      if (fundable[i]) return authorized[i];
+    const fundableIdx: number[] = [];
+    for (let i = 0; i < candidates.length; i += 1) {
+      if (fundable[i]) fundableIdx.push(i);
+    }
+    if (fundableIdx.length > 0) {
+      // Idle preference is a SOFT, fail-open bias: among funded candidates,
+      // prefer one whose per-wallet send lock is currently free so a
+      // deadline-bound write doesn't queue behind a slow in-flight send. Falls
+      // straight through to the first funded candidate when none is idle or the
+      // preference is off — so it can never EXCLUDE a wallet, only reorder.
+      if (preferIdle && !this.idleAwareSelectionDisabled) {
+        const idle = fundableIdx.find((i) => !this.signerTxSerializer.isActive(candidates[i].address));
+        if (idle !== undefined) return candidates[idle];
+      }
+      return candidates[fundableIdx[0]];
     }
     let bestIdx = 0;
-    for (let i = 1; i < authorized.length; i += 1) {
+    for (let i = 1; i < candidates.length; i += 1) {
       const a = fundings[i];
       const b = fundings[bestIdx];
       const an = a.native ?? -1n;
       const bn = b.native ?? -1n;
       if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) bestIdx = i;
     }
-    return authorized[bestIdx];
+    return candidates[bestIdx];
   }
 
   /**
-   * The single fundability predicate: native gas above the floor AND own-TRAC
-   * covers the publish (above the operator floor AND `>= requiredTracWei`, the
-   * publish cost — `0n` when the cost is unknown, so only the floor applies), OR
-   * the wallet is a registered, covering PCA agent (publish paid from its
-   * conviction account, not its own TRAC). A `null` metric (read failed / no
+   * The single fundability predicate, parameterized by {@link FundingMode}:
+   * native gas above the floor, AND — for `native+trac` — own-TRAC covers the
+   * write (above the operator floor AND `>= requiredTracWei`, the cost — `0n`
+   * when unknown, so only the floor applies), OR the wallet is a registered,
+   * covering PCA agent (when `consultPca`). `native-only` (RS / relay / settle)
+   * gates on gas ALONE — it never applies a TRAC floor, so a valid gas-funded
+   * zero-TRAC wallet is not wrongly rejected. A `null` metric (read failed / no
    * token contract) is treated as satisfied so selection FAILS OPEN. The PCA
    * conviction reads run only when own-TRAC is short, so a normally funded
    * wallet pays no extra RPC.
+   */
+  protected async isWalletFundable(
+    address: string,
+    f: { native: bigint | null; trac: bigint | null },
+    funding: FundingMode,
+  ): Promise<boolean> {
+    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
+    if (!nativeOk) return false; // even a PCA agent needs gas
+    if (funding.kind === 'native-only') return true;
+    const ownTracOk = f.trac === null
+      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
+    if (ownTracOk) return true;
+    return funding.consultPca ? this.isConvictionFundedAgent(address, funding.requiredTracWei) : false;
+  }
+
+  /**
+   * Thin publish wrapper over {@link isWalletFundable} preserving the original
+   * `isWalletPublishFundable(address, f, requiredTracWei)` shape used by the
+   * error-enrichment path. Native+TRAC with the operator floors and PCA fallback.
    */
   protected async isWalletPublishFundable(
     address: string,
     f: { native: bigint | null; trac: bigint | null },
     requiredTracWei: bigint,
   ): Promise<boolean> {
-    const nativeOk = f.native === null || f.native > this.minPublisherNativeWei;
-    if (!nativeOk) return false; // even a PCA agent needs gas
-    const ownTracOk = f.trac === null
-      || (f.trac > this.minPublisherTracWei && f.trac >= requiredTracWei);
-    if (ownTracOk) return true;
-    return this.isConvictionFundedAgent(address, requiredTracWei);
+    return this.isWalletFundable(address, f, {
+      kind: 'native+trac',
+      nativeFloorWei: this.minPublisherNativeWei,
+      tracFloorWei: this.minPublisherTracWei,
+      requiredTracWei,
+      consultPca: true,
+    });
   }
 
   /**
