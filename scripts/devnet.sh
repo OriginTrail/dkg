@@ -43,6 +43,11 @@ UI_PORT="${UI_PORT:-5173}"
 UI_NODE_ID="${UI_NODE_ID:-1}"
 UI_PIDFILE="$DEVNET_DIR/node-ui.pid"
 UI_LOGFILE="$DEVNET_DIR/node-ui.log"
+# Devnet-only Hardhat config (solc 0.8.24 + cancun; the full WHY lives in the
+# config file itself). The `hardhat node` and `hardhat deploy` commands MUST
+# stay on the same config -- a split would compile with one solc but execute on
+# another hardfork -- so the path is defined ONCE here and reused by both.
+HARDHAT_CONFIG="hardhat.devnet.config.ts"
 NUM_OP_WALLETS=3
 # Hardhat block interval (ms). Without interval mining, Hardhat only mines
 # when a tx arrives → block.number / block.timestamp freeze the moment the
@@ -147,7 +152,22 @@ start_hardhat() {
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
   rm -f "$DEVNET_DIR/hardhat/deployed"
 
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
+  # Focused smoke check for the devnet config itself: compile with it DIRECTLY
+  # before booting anything. A typo in the config, a base-config shape drift
+  # (the config asserts its single-compiler expectation and throws), or a
+  # solc-0.8.24/cancun regression fails right here with the compiler's own
+  # message -- instead of surfacing minutes later as an opaque UI-e2e boot
+  # failure. Hardhat caches compilation, so re-runs cost ~a second.
+  log "Validating devnet Hardhat config (compile smoke check)..."
+  if ! npx hardhat compile --config "$HARDHAT_CONFIG" > "$DEVNET_DIR/hardhat/compile.log" 2>&1; then
+    log "ERROR: devnet Hardhat config failed to compile -- see $DEVNET_DIR/hardhat/compile.log"
+    tail -20 "$DEVNET_DIR/hardhat/compile.log" >&2
+    exit 1
+  fi
+
+  # --config "$HARDHAT_CONFIG" (defined up top): devnet-only solc 0.8.24 + cancun.
+  # The full rationale lives in packages/evm-module/hardhat.devnet.config.ts.
+  npx hardhat node --port "$HARDHAT_PORT" --no-deploy --config "$HARDHAT_CONFIG" \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
   local hh_pid=$!
   echo "$hh_pid" > "$pidfile"
@@ -205,7 +225,7 @@ deploy_contracts() {
   log "Deploying contracts to local Hardhat node..."
   cd "$REPO_ROOT/packages/evm-module"
   RPC_LOCALHOST="http://127.0.0.1:$HARDHAT_PORT" \
-    npx hardhat deploy --network localhost \
+    npx hardhat deploy --network localhost --config "$HARDHAT_CONFIG" \
     > "$DEVNET_DIR/hardhat/deploy.log" 2>&1
 
   # Extract Hub address from deployment log

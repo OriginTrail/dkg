@@ -588,11 +588,13 @@ jobs:
       # observable step — so the devnet boot inside Playwright's `webServer`
       # reuses cached artifacts and stays well inside the webServer timeout
       # (and a compile failure is localised to this step, not buried in a
-      # webServer timeout). devnet.sh shells out to the DEFAULT hardhat config
-      # (`npx hardhat node` / `hardhat deploy --network localhost`), so compile
-      # with the same default config here.
+      # webServer timeout). devnet.sh now compiles + boots with the DEVNET
+      # hardhat config (`--config hardhat.devnet.config.ts`: solc 0.8.24 +
+      # cancun), so warm the SAME config here — otherwise this step compiles the
+      # default 0.8.20/london bytecode and the real devnet-config compile moves
+      # back into the webServer boot (otReviewAgent #1403 P2).
       - name: Compile EVM contracts (for the devnet boot)
-        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile
+        run: pnpm --filter @origintrail-official/dkg-evm-module exec hardhat compile --config hardhat.devnet.config.ts
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
       - name: "node-ui real-node Playwright e2e (boots + tears down a live devnet)"
