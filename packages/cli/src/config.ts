@@ -157,6 +157,9 @@ export interface NetworkConfig {
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
     cgRegistryScanPageSize?: number;
+    /** Network-level per-chain funding floors (wei). See `ChainConfig.minPublisher*Wei`. */
+    minPublisherNativeWei?: bigint;
+    minPublisherTracWei?: bigint;
   };
   faucet?: {
     url: string;
@@ -258,6 +261,17 @@ export interface ChainConfig {
    * Defaults to the EVM adapter's 2,000-block common provider cap.
    */
   cgRegistryScanPageSize?: number;
+  /**
+   * Funding floors for funding-aware operational-wallet selection (wei of the
+   * native gas token / TRAC). A wallet is preferred for a publish only when its
+   * native balance > `minPublisherNativeWei` AND its own-TRAC covers the publish
+   * above `minPublisherTracWei`; below the floor it is deprioritized (best-funded
+   * fallback still sends). Both default to `0n` (only strictly-empty wallets are
+   * skipped) — per-chain non-zero native defaults are supplied by the network
+   * overlay. Threaded straight to `EVMAdapterConfig.minPublisher*Wei`.
+   */
+  minPublisherNativeWei?: bigint;
+  minPublisherTracWei?: bigint;
 }
 
 export type ResolvedChainConfig = Partial<Omit<ChainConfig, 'approvalPolicy'>> & {
@@ -1250,6 +1264,12 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  // Funding floors: local config wins, else the network overlay's per-chain
+  // default (both default 0n downstream in the adapter when unset).
+  const minPublisherNativeWei = cfg?.minPublisherNativeWei ?? net?.minPublisherNativeWei;
+  if (minPublisherNativeWei !== undefined) merged.minPublisherNativeWei = minPublisherNativeWei;
+  const minPublisherTracWei = cfg?.minPublisherTracWei ?? net?.minPublisherTracWei;
+  if (minPublisherTracWei !== undefined) merged.minPublisherTracWei = minPublisherTracWei;
   if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
   return merged;
 }
