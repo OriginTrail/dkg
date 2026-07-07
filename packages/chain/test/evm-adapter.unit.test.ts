@@ -460,6 +460,65 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(sendSpy.calls[0][1]).toBe('submitProof');
     expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
   });
+
+  // ── self-heal for STALE eligibility: an out-of-band removed wallet that
+  // lingers in registeredOperationalAddresses reverts ProfileDoesntExist; the
+  // RS send evicts it and retries once on the primary signer (pool[0]).
+  const profileDoesntExistError = () => {
+    const iface = new Interface(['error ProfileDoesntExist(uint72 identityId)']);
+    const e: any = new Error('execution reverted: unknown custom error');
+    e.data = iface.encodeErrorResult('ProfileDoesntExist', [0n]); // enrichEvmError reads e.data
+    return e;
+  };
+
+  it('sendRandomSamplingTx self-heals a ProfileDoesntExist revert: evicts the stale wallet, retries on pool[0]', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w0 = a.signer;              // pool[0], the always-registered identity anchor
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(w0.address);
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase()); // stale: in-set but removed on-chain
+    a.nextRandomSamplingSigner = async () => w1;                    // rotation picks the stale wallet
+    const okReceipt = { hash: '0xok', status: 1 } as any;
+    const sendSpy = recorder(async (_c: any, _m: any, _args: any, signer: any) => {
+      if (signer.address === w1.address) throw profileDoesntExistError();
+      return okReceipt;
+    });
+    a.sendContractTransaction = sendSpy;
+    const clearSpy = recorder(() => undefined);
+    a.clearIdentityIdForAddress = clearSpy;
+
+    const result = await a.sendRandomSamplingTx({}, 'createChallenge', [], 'label');
+
+    expect(result).toBe(okReceipt);
+    expect(sendSpy.calls).toHaveLength(2);            // w1 (reverts) → retry w0
+    expect(sendSpy.calls[0][3]).toBe(w1);
+    expect(sendSpy.calls[1][3]).toBe(w0);             // retried on the primary anchor
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(false); // evicted
+    expect(clearSpy.calls).toHaveLength(1);           // stale cached identityId dropped
+  });
+
+  it('sendRandomSamplingTx does NOT retry a non-ProfileDoesntExist revert (propagates, no eviction)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase());
+    a.nextRandomSamplingSigner = async () => w1;
+    const sendSpy = recorder(async () => { throw new Error('This challenge is no longer active'); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow('no longer active');
+    expect(sendSpy.calls).toHaveLength(1);            // no retry
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(true); // not evicted
+  });
+
+  it('sendRandomSamplingTx does NOT self-heal when the PRIMARY signer reverts (nothing safer to retry)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig()); // single wallet → pool[0] only
+    a.nextRandomSamplingSigner = async () => a.signer;
+    const sendSpy = recorder(async () => { throw profileDoesntExistError(); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow();
+    expect(sendSpy.calls).toHaveLength(1);            // primary revert → no retry loop
+  });
 });
 
 
