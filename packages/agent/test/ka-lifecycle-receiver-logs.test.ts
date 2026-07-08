@@ -321,6 +321,49 @@ describe('KA receiver lifecycle logs', () => {
     );
   });
 
+  it('logs SWM validation pass lifecycle by assetUal', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+      lifecycleLogOptions: {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+    const entries = captureLogs();
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-validation-lifecycle-pass',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle validation pass" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    await handler.handle(msg, PUBLISHER_PEER_ID);
+
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=swm_validation_passed'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('outcome=accepted'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('rootEntityCount=1'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('statementCount=1'),
+    );
+  });
+
   it('threads SWM assetUal onto retryable catch outcomes after request identity is decoded', async () => {
     class FailingSwmStore extends OxigraphStore {
       override async insert(quads: Parameters<OxigraphStore['insert']>[0]): Promise<void> {
