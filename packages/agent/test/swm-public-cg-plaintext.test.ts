@@ -22,6 +22,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
 // the real impl, replacing the DI-seam spies on this file's agent-like stub.
@@ -293,7 +294,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       // Override with a hung read so the bounded race trips the timeout path.
       agentLike.chain.getContextGraphNameHash = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike, cgId);
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(7_000); // #1337: past the 6.5s policy-read budget (was 3_000 for the old 2.5s)
       await expect(pending).resolves.toBe(false);
       expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
     } finally {
@@ -417,7 +418,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       // Liveness probe hangs (never resolves / never rejects) instead of failing.
       agentLike.chain.isContextGraphActiveOnChain = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike);
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(7_000); // #1337: past the 6.5s policy-read budget (was 3_000 for the old 2.5s)
       await expect(pending).resolves.toBe(false);
       expect(agentLike.log.warn.calls).toContainEqual([
         expect.anything(),
@@ -437,7 +438,7 @@ describe('DKGAgent.isContextGraphPublicOnChain', () => {
       // Liveness resolves (live), but the policy read hangs.
       agentLike.chain.getContextGraphAccessPolicy = recorder(() => new Promise(() => {}));
       const pending = isPublic(agentLike);
-      await vi.advanceTimersByTimeAsync(3_000);
+      await vi.advanceTimersByTimeAsync(7_000); // #1337: past the 6.5s policy-read budget (was 3_000 for the old 2.5s)
       await expect(pending).resolves.toBe(false);
       expect(agentLike.log.warn.calls).toContainEqual([
         expect.anything(),
@@ -591,5 +592,22 @@ describe('DKGAgent publish-inline gating respects on-chain public policy', () =>
     await expect(resolveInline(agentLike, '42')).rejects.toThrow(/publish access-policy is unknown/);
     expect((agentLike.chain.isContextGraphActiveOnChain as any).calls).toEqual([]);
     expect((agentLike.chain.getContextGraphAccessPolicy as any).calls).toEqual([]);
+  });
+});
+
+// #1337: the isContextGraphPublicOnChain policy-read race must span at least one
+// multi-RPC failover hop, else a degraded primary fail-closes (encrypt) before
+// the chain adapter can fail over to a healthy backup. The adapter caps each
+// read attempt at RPC_READ_STALL_TIMEOUT_MS (4_000ms in dkg-chain) before moving
+// to the next endpoint, so the policy budget must exceed it. Static + non-flaky;
+// red if the constant is reverted to the old 2.5s.
+describe('CHAIN_POLICY_READ_TIMEOUT_MS failover-hop budget (#1337)', () => {
+  // Keep in sync with RPC_READ_STALL_TIMEOUT_MS in
+  // packages/chain/src/evm-adapter-constants.ts (not re-exported from the chain
+  // package index, so mirrored here rather than imported).
+  const RPC_READ_STALL_TIMEOUT_MS = 4_000;
+
+  it('spans at least one RPC failover hop (> the adapter per-attempt cap)', () => {
+    expect(CHAIN_POLICY_READ_TIMEOUT_MS).toBeGreaterThan(RPC_READ_STALL_TIMEOUT_MS);
   });
 });

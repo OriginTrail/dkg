@@ -291,14 +291,24 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
 
 /**
  * #884 review — bound the on-chain liveness / access-policy reads on the
- * share/promote/publish hot path (`isContextGraphPublicOnChain`). Mirrors
- * `CHAIN_RPC_FALLBACK_TIMEOUT_MS` in `DKGAgent.getContextGraphOnChainPolicy`:
- * if the RPC layer HANGS (rather than rejecting), the helper must still
- * resolve so the caller fails closed to "not public / not known" instead of
- * blocking the request indefinitely. 2.5s stays well under the daemon-ready
- * budget while allowing a single slow eth_call hop under normal load.
+ * share/promote/publish hot path (`isContextGraphPublicOnChain`). If the RPC
+ * layer HANGS (rather than rejecting), the helper must still resolve so the
+ * caller fails closed to "not public / not known" instead of blocking the
+ * request indefinitely.
+ *
+ * #1337 — sized to span ONE multi-RPC failover hop. The chain adapter caps
+ * each read attempt at `RPC_READ_STALL_TIMEOUT_MS` (4_000ms in dkg-chain)
+ * before failing over to the next endpoint, so the old 2.5s budget fired
+ * BEFORE a degraded primary could fail over to a healthy backup — the policy
+ * read fail-closed and never benefited from failover. 6.5s = one 4s hop cap +
+ * a ~2.5s healthy backup read, so a stalled primary fails over and resolves
+ * instead of fail-closing. Still well under the ~45s daemon-ready budget, and
+ * a genuinely-hung chain is bounded: fail-closed is the safe direction and the
+ * policy is cached for `ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS` (60s), so at most
+ * one slow cold read per CG per minute. Healthy primaries answer well under
+ * 2.5s and are unaffected.
  */
-export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
+export const CHAIN_POLICY_READ_TIMEOUT_MS = 6_500;
 
 // ── SWM sender-key ────────────────────────────────────────────────────
 /** Shared operation context for pending sender-key drain logging. */
