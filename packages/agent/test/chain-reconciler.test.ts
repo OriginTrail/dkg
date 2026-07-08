@@ -196,6 +196,41 @@ describe('reconcileContextGraph — sweep', () => {
       kaId: '7',
     }));
   });
+
+  it('emits assetUal lifecycle sweep decisions for a published KA ordinal', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      action: string;
+      result: string;
+      localCgId: string;
+      onChainCgId: string;
+      ordinal: number;
+      kaId?: string;
+    }> = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      reconcileOrdinal: async () => ({
+        status: 'already',
+        blockNumber: 12,
+        assetUal: ASSET_UAL,
+        kaId: '7',
+      } as never),
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    } as Partial<ChainReconcilerDeps>);
+    const state = createCursorState(0);
+
+    await reconcileContextGraph(deps, state, 'published-cg', 77n);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      action: 'sweep',
+      result: 'scanned',
+      localCgId: 'published-cg',
+      onChainCgId: '77',
+      ordinal: 0,
+      kaId: '7',
+    }));
+  });
 });
 
 describe('ReconcileCoalescer', () => {
