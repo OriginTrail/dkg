@@ -2233,6 +2233,26 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     await this.saveSwmSenderKeyState();
 
+    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(decrypted.plaintext);
+    if (assetUal) {
+      logKaLifecycleEvent(this.log, ctx, {
+        assetUal,
+        stage: 'sender_key',
+        event: 'sender_key_payload_decrypted',
+        role: 'receiver',
+        localPeerId: this.peerId,
+        localNodeIdentityId: this.identityId.toString(),
+        metadata: {
+          contextGraphId,
+          subGraphName: message.subGraphName,
+          senderAgentAddress,
+          epochId: message.epochId,
+          messageIndex,
+          membershipHash: message.membershipHash,
+        },
+      });
+    }
+
     this.log.info(
       ctx,
       `SWM sender-key broadcast receive success: senderAgent=${senderAgentAddress} ` +
@@ -2248,6 +2268,28 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       messageIndex,
     });
     return decrypted.plaintext;
+  }
+
+  async resolveKaLifecycleAssetUalFromWorkspacePlaintext(this: DKGAgent, plaintext: Uint8Array): Promise<string | undefined> {
+    try {
+      const request = decodeWorkspacePublishRequest(plaintext);
+      return this.resolveKaLifecycleAssetUalFromIdentity(request.agentAddress, request.kaNumber);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async resolveKaLifecycleAssetUalFromIdentity(this: DKGAgent, agentAddress?: string, kaNumber?: string): Promise<string | undefined> {
+    if (!agentAddress || !kaNumber) return undefined;
+    try {
+      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+        ? await this.chain.getDKGKnowledgeAssetsAddress()
+        : await this.chain.getKnowledgeAssetsLifecycleAddress();
+      const kaId = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(kaNumber);
+      return buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+    } catch {
+      return undefined;
+    }
   }
 
   isSwmSenderKeyPayloadDebugLoggingEnabled(this: DKGAgent): boolean {
