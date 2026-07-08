@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { DKGNode } from '../src/node.js';
+import { DKGNode, nodeHasDirectPublicAddress } from '../src/node.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { TypedEventBus } from '../src/event-bus.js';
@@ -988,4 +988,156 @@ describe('Circuit Relay', () => {
       expect(finalReservedPids.has(pid as string)).toBe(true);
     }
   }, 25000);
+
+  it('publicly-reachable node keeps relay-target connections despite 0 reservations (PR #1508)', async () => {
+    // 2026-07-07 Gnosis mainnet incident: a public Core Node advertises a
+    // direct public self-address, so libp2p never forms a `/p2p-circuit`
+    // self-addr for it and `haveAnyReservation` stays false forever. The
+    // pre-#1508 watchdog read that as "reservation lost everywhere" and
+    // `close()` + redialed every relay-target connection on each tick past
+    // the grace window — permanent churn against the very sibling cores
+    // that StorageACK streams run over (aborting in-flight ACK replies the
+    // publisher then mislabeled INVALID_SIGNATURE).
+    //
+    // Gate under test: `reservationGateSatisfied` is also satisfied by
+    // `nodeIsPubliclyReachable` (`nodeHasDirectPublicAddress` over the
+    // node's self-addrs). Deleting that gate from `watchdogTick` must make
+    // THIS test fail — the classifier-only tests in
+    // relay-public-reachability.test.ts stay green without it.
+    //
+    // Harness wrinkle: test nodes listen on loopback, which the classifier
+    // rightly treats as non-public. We reproduce the mainnet self-addr
+    // shape via `announceAddresses`: when announce addrs are configured,
+    // libp2p's AddressManager returns ONLY those from `getMultiaddrs()`,
+    // handing the watchdog exactly what the incident node saw — one direct
+    // public self-addr, ZERO /p2p-circuit self-addrs, transport to the
+    // relay target up. The announced addr is RFC 5737 TEST-NET-3
+    // (public-classified, guaranteed unroutable) and is never dialed.
+    const relay = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      enableRelayServer: true,
+    });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+      announceAddresses: ['/ip4/203.0.113.7/tcp/9090'],
+    });
+    nodes.push(edge);
+    await edge.start();
+
+    // start() awaits the relay-target dial, but poll briefly anyway so a
+    // slow accept can't flake the precondition.
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (edge.libp2p.getConnections().some(c => c.remotePeer.toString() === relay.peerId)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    // Preconditions: the exact watchdog-observable mainnet state.
+    const selfAddrs = edge.libp2p.getMultiaddrs().map(ma => ma.toString());
+    expect(
+      selfAddrs.filter(a => a.includes('/p2p-circuit')),
+      `expected ZERO /p2p-circuit self-addrs (announce-only address set); got: ${JSON.stringify(selfAddrs)}`,
+    ).toHaveLength(0);
+    expect(nodeHasDirectPublicAddress(selfAddrs)).toBe(true);
+
+    const before = edge.libp2p.getConnections().filter(c => c.remotePeer.toString() === relay.peerId);
+    expect(before.length).toBeGreaterThan(0);
+    const beforeIds = before.map(c => c.id).sort();
+
+    const logSpy = spyConsole('log');
+    try {
+      // The first manual tick is already "past the grace window":
+      // `relayReservationRedialAt` is empty, so nothing suppresses the
+      // forcing branch except the public-reachability gate under test.
+      // Two ticks so a first-tick pass can't mask a second-tick drop.
+      const tick = (edge as unknown as { watchdogTick: () => Promise<void> }).watchdogTick.bind(edge);
+      await tick();
+      await tick();
+
+      const churnLogs = logSpy.calls.filter((call) =>
+        typeof call[0] === 'string'
+        && call[0].includes('Relay watchdog')
+        && (call[0].includes('dropping + redialing') || call[0].includes('to force reserve')),
+      );
+      expect(
+        churnLogs,
+        `public node must NOT force-drop relay-target connections; got: ${JSON.stringify(churnLogs.map(c => c[0]))}`,
+      ).toHaveLength(0);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+
+    // The very same connections survived — close() was never called on them.
+    const after = edge.libp2p.getConnections().filter(c => c.remotePeer.toString() === relay.peerId);
+    expect(after.map(c => c.id).sort()).toEqual(beforeIds);
+    expect(after.every(c => c.status === 'open')).toBe(true);
+  }, 20000);
+
+  it("NAT'd node (private self-addrs only) still forces reservation recovery (PR #1508 sanity)", async () => {
+    // Counterpart to the public-node test above: the #1508 gate must not
+    // disable reservation recovery for nodes that genuinely depend on it.
+    // Every pre-existing watchdog test asserts the forcing branch's
+    // ABSENCE; this one pins that it still FIRES on the NAT'd path.
+    //
+    // Deterministic "transport up, reservation impossible" state: the
+    // relay target is NOT a relay server, so it never advertises the
+    // circuit-hop protocol and the edge holds a live connection but can
+    // never obtain a reservation. Loopback-only listen addrs make
+    // `nodeHasDirectPublicAddress` false, so the watchdog must take the
+    // drop + redial path on the first tick (empty grace map = past the
+    // grace window).
+    const target = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+    });
+    nodes.push(target);
+    await target.start();
+    const targetAddr = target.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [targetAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (edge.libp2p.getConnections().some(c => c.remotePeer.toString() === target.peerId)) break;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    // Preconditions: transport up, no public self-addr, no reservation.
+    const selfAddrs = edge.libp2p.getMultiaddrs().map(ma => ma.toString());
+    expect(nodeHasDirectPublicAddress(selfAddrs)).toBe(false);
+    expect(selfAddrs.filter(a => a.includes('/p2p-circuit'))).toHaveLength(0);
+    expect(
+      edge.libp2p.getConnections().some(c => c.remotePeer.toString() === target.peerId),
+    ).toBe(true);
+
+    const logSpy = spyConsole('log');
+    try {
+      await (edge as unknown as { watchdogTick: () => Promise<void> }).watchdogTick();
+
+      const forcingLog = logSpy.calls.find((call) =>
+        typeof call[0] === 'string'
+        && call[0].includes('Relay watchdog')
+        && call[0].includes('to force reserve'),
+      );
+      expect(
+        forcingLog,
+        `NAT'd node with 0 reservations must still force-redial; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
+      ).toBeDefined();
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 20000);
 });
