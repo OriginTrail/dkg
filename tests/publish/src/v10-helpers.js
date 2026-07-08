@@ -515,14 +515,11 @@ export async function logError(error, nodeName, step, errorStats, kaNumber = nul
     return `${cut.slice(0, lastSpace > n - 40 ? lastSpace : n).trimEnd()}…`;
   };
   const service = categorizeErrorService(error);
-  const serverPart = compact(normalizeErrorMessage(serverError), 220);
-  const testPart = compact(normalizeErrorMessage(testError), 150);
-  // step prefix = DB column routing (publish_error / query_error / ...); the
-  // insert script strips it, so the stored field is exactly the combined pair.
-  const combined = serverPart === testPart
-    ? `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - same as server error`
-    : `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - ${testPart}`;
-  const aggregatedKey = `${step} — ${combined}`;
+  // Grafana/DB gets ONLY the server-side error (the Jenkins console above
+  // keeps both lines). The step prefix exists purely for the DB column
+  // routing in insert_errors_to_db.js, which strips it before insert.
+  const serverPart = compact(normalizeErrorMessage(serverError), 300);
+  const aggregatedKey = `${step} — ${serverPart}`;
   let detailedKey = aggregatedKey;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 
