@@ -1948,6 +1948,25 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return new Uint8Array();
     }
     if (outcome.retryable) {
+      if (outcome.assetUal) {
+        logKaLifecycleEvent(this.log, createOperationContext('share'), {
+          assetUal: outcome.assetUal,
+          stage: 'swm_share',
+          event: 'swm_update_rejected',
+          role: 'receiver',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: fromPeerId,
+          level: 'warn',
+          metadata: {
+            contextGraphId: outcome.cgId,
+            shareOperationId: outcome.shareOperationId,
+            outcome: 'retryable',
+            retryable: true,
+            reason: outcome.reason,
+          },
+        });
+      }
       // rc.9 PR-D (codex follow-up from PR-G #G1): return the
       // 0x02 sentinel instead of throwing. Pre-PR-D this branch
       // threw, hoping libp2p would surface the handler abort as
@@ -1967,6 +1986,25 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `SWM substrate receiver transient rejection from ${fromPeerId} (PR-D watchdog will retry): ${outcome.reason}`,
       );
       return FANOUT_RESPONSE_RETRYABLE;
+    }
+    if (outcome.assetUal) {
+      logKaLifecycleEvent(this.log, createOperationContext('share'), {
+        assetUal: outcome.assetUal,
+        stage: 'swm_share',
+        event: 'swm_update_rejected',
+        role: 'receiver',
+        localPeerId: this.peerId,
+        localNodeIdentityId: this.identityId.toString(),
+        peer: fromPeerId,
+        level: 'warn',
+        metadata: {
+          contextGraphId: outcome.cgId,
+          shareOperationId: outcome.shareOperationId,
+          outcome: 'rejected',
+          retryable: false,
+          reason: outcome.reason,
+        },
+      });
     }
     // Permanent rejection: signal via the 1-byte sentinel so the
     // sender records `rejected` (not `delivered`) and stops here.

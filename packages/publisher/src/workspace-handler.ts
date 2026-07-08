@@ -143,7 +143,15 @@ export type SharedMemoryApplyOutcome =
        */
       insertedTriples?: number;
     }
-  | { applied: false; reason: string; retryable: boolean };
+  | {
+      applied: false;
+      reason: string;
+      retryable: boolean;
+      assetUal?: string;
+      cgId?: string;
+      shareOperationId?: string;
+      publisherPeerId?: string;
+    };
 
 /**
  * Structured rejection code for {@link SharedMemoryHandler.verifyHostModeEnvelopeAuthority}.
