@@ -215,6 +215,7 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
+import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -3888,16 +3889,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       failedPhases: 0,
       deniedPhases: 0,
     });
-    const results = await Promise.all(syncCapable.map(async (remotePeerId) => {
-      const durable = await this.syncFromPeerDetailed(
-        remotePeerId,
-        [contextGraphId],
-      ).catch(emptyDurable);
-      const shared = includeSharedMemory
-        ? await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]).catch(emptyShared)
-        : null;
-      return { durable, shared };
-    }));
+    // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
+    // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
+    // was the top amplifier of the 2026-07-07 mainnet sync storm — one
+    // subscribe/reconcile round on a high-degree node launched N concurrent
+    // full-CG durable+SWM pulls that saturated the triple store (StorageACK
+    // reads then dead-aired behind them). Every selected peer is still synced
+    // and the result array is unchanged (input order, one entry per peer) — the
+    // load is just staggered into waves.
+    const results = await mapWithConcurrency(
+      syncCapable,
+      CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+      async (remotePeerId) => {
+        const durable = await this.syncFromPeerDetailed(
+          remotePeerId,
+          [contextGraphId],
+        ).catch(emptyDurable);
+        const shared = includeSharedMemory
+          ? await this.syncSharedMemoryFromPeerDetailed(remotePeerId, [contextGraphId]).catch(emptyShared)
+          : null;
+        return { durable, shared };
+      },
+    );
     let accessDeniedPeers = 0;
     let peersSucceeded = 0;
     for (const r of results) {
