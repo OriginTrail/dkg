@@ -791,9 +791,13 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     function coverPublishingCost(
         address publishingAgent,
         uint96 baseCost,
-        uint40 /* kaStartEpoch */,
+        uint40 kaStartEpoch,
         uint40 kaEpochs
     ) external onlyConvictionNFT returns (uint96 discountedCost) {
+        // ABI-retained legacy parameter. Emission now anchors at the current
+        // epoch, but the name remains part of the public metadata contract.
+        kaStartEpoch;
+
         uint256 accountId = publishingConvictionStorage.agentToAccountId(publishingAgent);
         if (accountId == 0) revert NoConvictionAccount(publishingAgent);
 

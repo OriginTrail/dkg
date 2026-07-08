@@ -694,7 +694,7 @@
       },
       {
         "internalType": "uint40",
-        "name": "",
+        "name": "kaStartEpoch",
         "type": "uint40"
       },
       {

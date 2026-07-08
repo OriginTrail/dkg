@@ -325,6 +325,26 @@ describe('ABI pin digest — detects silent contract surface drift [CH-5]', () =
 });
 
 describe('ABI content sanity — required event/error surfaces are present [CH-5 / CH-6]', () => {
+  it('PublishingConviction keeps coverPublishingCost input names ABI-stable', () => {
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'PublishingConviction.json'), 'utf8'),
+    ) as AbiEntry[];
+    const fn = abi.find((e) => e.type === 'function' && e.name === 'coverPublishingCost');
+    expect(fn).toBeDefined();
+    expect((fn!.inputs ?? []).map((i) => i.name)).toEqual([
+      'publishingAgent',
+      'baseCost',
+      'kaStartEpoch',
+      'kaEpochs',
+    ]);
+    expect((fn!.inputs ?? []).map((i) => i.type)).toEqual([
+      'address',
+      'uint96',
+      'uint40',
+      'uint40',
+    ]);
+  });
+
   it('KnowledgeCollectionStorage declares KnowledgeAssetCreated with the full spec field set', () => {
     const abi = JSON.parse(
       readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),
