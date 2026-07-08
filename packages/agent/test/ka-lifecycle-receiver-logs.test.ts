@@ -275,6 +275,52 @@ describe('KA receiver lifecycle logs', () => {
     });
   });
 
+  it('logs SWM validation failure lifecycle by assetUal', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+      lifecycleLogOptions: {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+    const entries = captureLogs();
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-validation-lifecycle-fail',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        [
+          `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle" .`,
+          `<http://example.org/ka-lifecycle/stranger> <http://schema.org/name> "Reject me" .`,
+        ].join('\n'),
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    await handler.handle(msg, PUBLISHER_PEER_ID);
+
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=swm_validation_failed'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('outcome=rejected'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('retryable=false'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('validationErrorCount=1'),
+    );
+  });
+
   it('threads SWM assetUal onto retryable catch outcomes after request identity is decoded', async () => {
     class FailingSwmStore extends OxigraphStore {
       override async insert(quads: Parameters<OxigraphStore['insert']>[0]): Promise<void> {
