@@ -174,6 +174,9 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
+    let fetchedPublishedAssetUals: string[] = [];
+    let fetchedMetaCount = 0;
+    let fetchedDataCount = 0;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -209,6 +212,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           }
         : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
+      fetchedPublishedAssetUals = publishedAssetUalsFromMeta(metaResult.quads);
+      fetchedMetaCount = metaResult.quads.length;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
         endPhase();
@@ -216,6 +221,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
       const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
       peerRespondedForContextGraph = true;
+      fetchedDataCount = dataResult.quads.length;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
@@ -360,7 +366,22 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
     } catch (pidErr) {
       endPhase();
-      logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      const failureReason = pidErr instanceof Error ? pidErr.message : String(pidErr);
+      for (const assetUal of fetchedPublishedAssetUals) {
+        logLifecycle?.({
+          assetUal,
+          event: 'sync_failure',
+          action: 'failure',
+          result: 'failed',
+          source: 'durable-sync',
+          contextGraphId: pid,
+          remotePeerId,
+          fetchedMetaCount,
+          fetchedDataCount,
+          reason: failureReason,
+        });
+      }
+      logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${failureReason}`);
       const backoffWorthy = isSyncBackoffWorthyError(pidErr);
       if (backoffWorthy) {
         summary.backoffWorthyFailures += 1;
