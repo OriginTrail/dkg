@@ -40,10 +40,10 @@ export interface DurableSyncLifecycleEvent {
   result: string;
   contextGraphId: string;
   remotePeerId: string;
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples?: number;
-  insertedDataTriples?: number;
+  fetchedMetaCount: number;
+  fetchedDataCount: number;
+  insertedMetaCount?: number;
+  insertedDataCount?: number;
   rejectedKcs?: number;
   reason?: string;
 }
@@ -236,8 +236,8 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           result: 'verified',
           contextGraphId: pid,
           remotePeerId,
-          fetchedMetaTriples: processed.totalFetchedMetaQuads,
-          fetchedDataTriples: processed.totalFetchedDataQuads,
+          fetchedMetaCount: processed.totalFetchedMetaQuads,
+          fetchedDataCount: processed.totalFetchedDataQuads,
           rejectedKcs: processed.rejectedKcs,
         });
       }
@@ -287,10 +287,10 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           result: 'inserted',
           contextGraphId: pid,
           remotePeerId,
-          fetchedMetaTriples: processed.totalFetchedMetaQuads,
-          fetchedDataTriples: processed.totalFetchedDataQuads,
-          insertedMetaTriples: processed.verifiedMeta.length,
-          insertedDataTriples: processed.verifiedData.length,
+          fetchedMetaCount: processed.totalFetchedMetaQuads,
+          fetchedDataCount: processed.totalFetchedDataQuads,
+          insertedMetaCount: processed.verifiedMeta.length,
+          insertedDataCount: processed.verifiedData.length,
           rejectedKcs: processed.rejectedKcs,
         });
       }
