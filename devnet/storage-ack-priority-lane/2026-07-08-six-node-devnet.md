@@ -149,6 +149,132 @@ Result from all six node APIs:
 | 5 | 200 | `true` |
 | 6 | 200 | `true` |
 
+## Post-ACK-Fallback Fix Devnet Rerun - 2026-07-08
+
+Purpose: validate branch commit `05b2af1d2` after restoring ACK fallback candidate retention. This specifically checks that a quorum-sized confirmed tier is ranked first but does not truncate connected fallback candidates out of the live collector pool.
+
+Local validation before devnet:
+
+- `pnpm --filter @origintrail-official/dkg-publisher build`: passed
+- `pnpm exec vitest run test/ack-peer-selection.test.ts` from `packages/publisher`: passed, 12 tests
+- `pnpm exec vitest run test/ack-candidate-pool.test.ts` from `packages/agent`: passed, 14 tests
+- `pnpm run build:runtime`: passed; Vite emitted the existing `MOCK_SUBGRAPHS` export/chunk-size warnings only
+
+Fresh devnet command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DEVNET_DIR=/private/tmp/dkg-v9-storageack-priority-lane-devnet9 \
+HARDHAT_PORT=18725 \
+API_PORT_BASE=20401 \
+LIBP2P_PORT_BASE=21401 \
+DEVNET_OXIGRAPH_BASE=30400 \
+UI_PORT=58753 \
+./scripts/devnet.sh start 6
+```
+
+Startup result:
+
+- Hardhat RPC: `http://127.0.0.1:18725`
+- Auth token: `Yr9h6eSuOt84zjPqAga6VNtKPkJwcUNSKZCIoDGh0`
+- Hub: `0x5FbDB2315678afecb367f032d93F642f64180aa3`
+- `minimumRequiredSignatures` set to `3`
+- Docker was unavailable, so the run used the no-Docker fallback matrix:
+  - Nodes 1-2: managed `oxigraph-server`
+  - Nodes 3-4: in-process `oxigraph`
+  - Nodes 5-6: `oxigraph-worker`
+- `devnet-test` registered on-chain as context graph `v10Id=1`.
+- `devnet-isolation` registered on-chain as context graph `v10Id=2`.
+- Both registered context graphs were visible from all six nodes before the smoke publish.
+
+Node status:
+
+| Node | Role | API | Peer suffix | Connected peers | Store backend | Commit |
+| --- | --- | --- | --- | ---: | --- | --- |
+| 1 | core | `20401` | `3jAyK8cz` | 5 | `oxigraph-server` | `05b2af1d` |
+| 2 | core | `20402` | `uKTthcYN` | 5 | `oxigraph-server` | `05b2af1d` |
+| 3 | core | `20403` | `1nq5es1C` | 5 | `oxigraph` | `05b2af1d` |
+| 4 | core | `20404` | `vPUZ5Edr` | 5 | `oxigraph` | `05b2af1d` |
+| 5 | edge | `20405` | `PVYptTBg` | 5 | `oxigraph-worker` | `05b2af1d` |
+| 6 | edge | `20406` | `nKekMwUz` | 5 | `oxigraph-worker` | `05b2af1d` |
+
+Handler registration evidence:
+
+- Nodes 1-4 registered V10 StorageACK handlers with identities `1`, `2`, `3`, and `4`.
+- Nodes 5 and 6 skipped StorageACK handler registration because they are edge nodes.
+
+First publish smoke:
+
+- KA name: `storageack-fallback-smoke-20260708-devnet9`
+- Subject: `urn:test:storageack-priority:20260708:devnet9`
+- Merkle root: `0x0a8ecaa7ea1e2b5dbb50d7ff6f9d0284c94e2ec51936512673729926668ae182`
+- Status: `confirmed`
+- Block: `470`
+- KA ID: `78842365123416863761786640173251160541596886427289119031537627204190675664896`
+- UAL: `did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/78842365123416863761786640173251160541596886427289119031537627204190675664896`
+- Transaction: `0x3ddb24a1243700e3ef7f3fe3398e8481e71c51517da548518614f96cb123861f`
+
+StorageACK evidence from node 1:
+
+```text
+2026-07-08 19:41:53 [ACKCollector] Selected 5/5 ACK candidate peer(s) (required=3, protocol=/dkg/10.0.1/storage-ack, selected=uKTthcYN:rest,1nq5es1C:rest,vPUZ5Edr:rest,PVYptTBg:rest,nKekMwUz:rest, filtered=none)
+2026-07-08 19:41:53 [ACKCollector] Requesting ACKs from 5 core peers (need 3)
+2026-07-08 19:41:53 [ACKCollector] Valid ACK from 1nq5es1C (identity=3, signer=0x6b84Eb7e... source=member)
+2026-07-08 19:41:53 [ACKCollector] Valid ACK from vPUZ5Edr (identity=4, signer=0xa459Ed0d... source=member)
+2026-07-08 19:41:53 [ACKCollector] Valid ACK from uKTthcYN (identity=2, signer=0x6E6F84B2... source=member)
+2026-07-08 19:41:53 [ACKCollector] Collected 3 ACKs successfully
+2026-07-08 19:41:53 [DKGPublisher] V10: Collected 3 core node ACKs [1nq5es1C:member, vPUZ5Edr:member, uKTthcYN:member]
+2026-07-08 19:41:53 [DKGPublisher] On-chain confirmed: UAL=did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/78842365123416863761786640173251160541596886427289119031537627204190675664896 batchId=78842365123416863761786640173251160541596886427289119031537627204190675664896 tx=0x3ddb24a1243700e3ef7f3fe3398e8481e71c51517da548518614f96cb123861f
+2026-07-08 19:41:55 [ACKCollector] Quorum already settled - abandoning transport retry for PVYptTBg: substrate queued (transport): Protocol selection failed - could not negotiate /dkg/10.0.1/storage-ack
+2026-07-08 19:41:55 [ACKCollector] Quorum already settled - abandoning transport retry for nKekMwUz: substrate queued (transport): Protocol selection failed - could not negotiate /dkg/10.0.1/storage-ack
+```
+
+Read-back for the first asset initially returned `false` on node 3 while sync was still settling. A retry after five seconds returned `true` from all six node APIs.
+
+Second publish smoke, after mesh/identify settle:
+
+- KA name: `storageack-fallback-smoke-20260708-devnet9b`
+- Subject: `urn:test:storageack-priority:20260708:devnet9b`
+- Merkle root: `0x4e804b67902c8857329c4e83dc05ed9dd2df3d148af9039131ed57f3163cc9ff`
+- Status: `confirmed`
+- Block: `569`
+- KA ID: `78842365123416863761786640173251160541596886427289119031537627204190675664897`
+- UAL: `did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/78842365123416863761786640173251160541596886427289119031537627204190675664897`
+- Transaction: `0x7a85852cb8b664e2e046ebcf46af45c15f9e950e3a39621a664691b4f06ec6a6`
+
+StorageACK evidence from node 1:
+
+```text
+2026-07-08 19:43:20 [ACKCollector] Selected 5/5 ACK candidate peer(s) (required=3, protocol=/dkg/10.0.1/storage-ack, selected=uKTthcYN:confirmedCore,1nq5es1C:confirmedCore,vPUZ5Edr:confirmedCore,PVYptTBg:rest,nKekMwUz:rest, filtered=none)
+2026-07-08 19:43:20 [ACKCollector] Requesting ACKs from 5 core peers (need 3)
+2026-07-08 19:43:21 [ACKCollector] Valid ACK from 1nq5es1C (identity=3, signer=0x6b84Eb7e... source=member)
+2026-07-08 19:43:21 [ACKCollector] Valid ACK from vPUZ5Edr (identity=4, signer=0xa459Ed0d... source=member)
+2026-07-08 19:43:21 [ACKCollector] Valid ACK from uKTthcYN (identity=2, signer=0x6E6F84B2... source=member)
+2026-07-08 19:43:21 [ACKCollector] Collected 3 ACKs successfully
+2026-07-08 19:43:21 [DKGPublisher] V10: Collected 3 core node ACKs [1nq5es1C:member, vPUZ5Edr:member, uKTthcYN:member]
+2026-07-08 19:43:21 [DKGPublisher] On-chain confirmed: UAL=did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/78842365123416863761786640173251160541596886427289119031537627204190675664897 batchId=78842365123416863761786640173251160541596886427289119031537627204190675664897 tx=0x7a85852cb8b664e2e046ebcf46af45c15f9e950e3a39621a664691b4f06ec6a6
+2026-07-08 19:43:22 [ACKCollector] Quorum already settled - abandoning transport retry for PVYptTBg: substrate queued (transport): Protocol selection failed - could not negotiate /dkg/10.0.1/storage-ack
+2026-07-08 19:43:22 [ACKCollector] Quorum already settled - abandoning transport retry for nKekMwUz: substrate queued (transport): Protocol selection failed - could not negotiate /dkg/10.0.1/storage-ack
+```
+
+Read-back for the second asset:
+
+| Node | HTTP | ASK result |
+| --- | ---: | --- |
+| 1 | 200 | `true` |
+| 2 | 200 | `true` |
+| 3 | 200 | `true` |
+| 4 | 200 | `true` |
+| 5 | 200 | `true` |
+| 6 | 200 | `true` |
+
+Disposition:
+
+- The second publish exercised the relevant live behavior: `confirmedCore` peers were ranked first, but the connected fallback candidates remained selected (`5/5`, required `3`) instead of being truncated at quorum.
+- Edge nodes do not implement `/dkg/10.0.1/storage-ack`; their transport retries failed after quorum had already settled, which is expected in this no-Docker six-node fallback topology.
+- The exact stale/quorum-sized identify metadata regression is covered by the focused selector and agent tests. This devnet receipt proves the built runtime uses the retained-fallback candidate pool and still completes V10 StorageACK publish/readback across all six nodes.
+- Devnet was stopped after the run; `./scripts/devnet.sh status` reported Hardhat and nodes 1-6 `STOPPED`.
+
 ## Post-#1532 Rebase Rerun - 2026-07-08
 
 Purpose: repeat the six-node StorageACK priority-lane smoke after rebasing
