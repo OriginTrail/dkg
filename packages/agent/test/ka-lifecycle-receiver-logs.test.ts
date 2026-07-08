@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
+import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import {
+  DKG_ONTOLOGY,
   Logger,
   TypedEventBus,
+  contextGraphDataUri,
+  contextGraphMetaUri,
+  decodeSwmSenderKeyMessage,
   encodeWorkspacePublishRequest,
   type LogRecord,
+  type OperationContext,
+  type SwmSenderKeyMessageMsg,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SharedMemoryHandler } from '@origintrail-official/dkg-publisher';
@@ -41,6 +48,26 @@ function swmLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
     entry.message.includes('ka_lifecycle') &&
     entry.message.includes('stage=swm_share')
   ));
+}
+
+function senderKeyLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
+  return entries.filter((entry) => (
+    entry.message.includes('ka_lifecycle') &&
+    entry.message.includes('stage=sender_key')
+  ));
+}
+
+async function insertAgentGate(
+  agent: DKGAgent,
+  contextGraphId: string,
+  agentAddress: string,
+): Promise<void> {
+  await agent.store.insert([{
+    subject: contextGraphDataUri(contextGraphId),
+    predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+    object: `"${agentAddress}"`,
+    graph: contextGraphMetaUri(contextGraphId),
+  }]);
 }
 
 describe('KA receiver lifecycle logs', () => {
@@ -112,5 +139,73 @@ describe('KA receiver lifecycle logs', () => {
 
     expect(resolverInput).toEqual({ agentAddress: AUTHOR_AGENT_ADDRESS, kaNumber: '7' });
     expect(outcome).toMatchObject({ applied: true, assetUal: ASSET_UAL });
+  });
+
+  it('logs Sender Key payload decrypt by assetUal', async () => {
+    const agent = await DKGAgent.create({
+      name: `ka-lifecycle-sender-key-${Math.random().toString(36).slice(2)}`,
+      chainAdapter: new MockChainAdapter(),
+    });
+    agent.publisher.setIdentityId(42n);
+    Object.defineProperty((agent as unknown as { node: object }).node, 'peerId', {
+      value: { toString: () => LOCAL_PEER_ID },
+      configurable: true,
+    });
+    const localRecord = await agent.registerAgent('sender-key-local');
+    const contextGraphId = 'ka-lifecycle-sender-key-cg';
+    await insertAgentGate(agent, contextGraphId, localRecord.agentAddress);
+
+    const storageAddress = await agent.chain.getDKGKnowledgeAssetsAddress!();
+    const kaId = (BigInt(ethers.getAddress(localRecord.agentAddress)) << 96n) | 7n;
+    const assetUal = buildKnowledgeAssetUal(agent.chain.chainId, storageAddress, kaId);
+    const plaintext = encodeWorkspacePublishRequest({
+      shareOperationId: 'sender-key-share-op',
+      contextGraphId,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Sender Key lifecycle" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: localRecord.agentAddress,
+      kaNumber: '7',
+    });
+    const internals = agent as unknown as {
+      encryptWorkspacePayloadWithSenderKey(input: {
+        contextGraphId: string;
+        plaintext: Uint8Array;
+        senderAgentAddress: string;
+        operationId: string;
+      }): Promise<Uint8Array>;
+      decryptWorkspacePayloadWithSenderKey(
+        message: SwmSenderKeyMessageMsg,
+        contextGraphId: string,
+        ctx: OperationContext,
+      ): Promise<Uint8Array>;
+    };
+    const encrypted = await internals.encryptWorkspacePayloadWithSenderKey({
+      contextGraphId,
+      plaintext,
+      senderAgentAddress: localRecord.agentAddress,
+      operationId: 'sender-key-lifecycle-test',
+    });
+    const message = decodeSwmSenderKeyMessage(encrypted);
+    const entries = captureLogs();
+
+    await internals.decryptWorkspacePayloadWithSenderKey(
+      message,
+      contextGraphId,
+      { operationId: 'sender-key-lifecycle-test', operationName: 'share' },
+    );
+
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${assetUal}`),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=sender_key_payload_decrypted'),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('role=receiver'),
+    );
   });
 });
