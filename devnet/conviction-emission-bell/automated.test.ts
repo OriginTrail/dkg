@@ -19,8 +19,18 @@
  *           base draw, no topUp) but emits NOTHING further to the pool — the
  *           base TRAC is already scheduled, so there is no double emission.
  *   step 4  `settle()` before expiry is a pure no-op.
- *   step 5  `migrateEmissionSchedule([id])` on a 10.0.8-created account is
+ *   step 5  THE MAINNET MIGRATION PATH: a synthetic PRE-10.0.8 account
+ *           (planted in PublishingConvictionStorage with lastSettledWindow==0
+ *           and a prior windowSpent) is back-filled by `migrateEmissionSchedule`
+ *           to exactly `committed − spent`, forward-spread; re-migrating is a
+ *           no-op.
+ *   step 6  `migrateEmissionSchedule([id])` on a 10.0.8-CREATED account is
  *           idempotent (the `lastSettledWindow == lock` marker skips it).
+ *
+ * Coverage: steps 2-4 exercise REGULAR activity on fresh 10.0.8 accounts;
+ * step 5 exercises the one-time MIGRATION of legacy accounts (the exact
+ * mainnet `migrateEmissionSchedule([1,2,3,…])` operation); step 6 the
+ * migration's idempotence guard.
  *
  * Preconditions:
  *   ./scripts/devnet.sh clean
@@ -66,6 +76,7 @@ interface Contracts {
   nft: ethers.Contract;
   logic: ethers.Contract;
   logicAddress: string;
+  pcs: ethers.Contract;
   token: ethers.Contract;
   chronos: ethers.Contract;
   eps: ethers.Contract;
@@ -151,6 +162,22 @@ async function loadContracts(): Promise<Contracts> {
     [
       'function getCurrentEpoch() view returns (uint256)',
       'function epochLength() view returns (uint256)',
+      'function epochAtTimestamp(uint256) view returns (uint256)',
+      'function timestampForEpoch(uint256) view returns (uint256)',
+    ],
+    provider,
+  );
+  // Application-state store — used to PLANT a synthetic pre-10.0.8 account for
+  // the migration test (step 5). `onlyContracts` admits the Hub owner, so the
+  // deployer EOA can write a legacy-shaped account directly, exactly as the
+  // hardhat P4/P5b property tests do.
+  const pcs = new ethers.Contract(
+    c('PublishingConvictionStorage'),
+    [
+      'function createAccount(uint256 accountId, (uint96 committedTRAC,uint40 createdAtEpoch,uint40 expiresAtEpoch,uint40 createdAtTimestamp,uint40 expiresAtTimestamp,uint16 lockDurationEpochs,uint16 discountBps,uint16 lastSettledWindow,bool fullySwept,uint72 primaryNode,uint40 lastPrimaryNodeChangeEpoch) acct) external',
+      'function increaseWindowSpent(uint256, uint40, uint96) external',
+      'function accountExists(uint256) view returns (bool)',
+      'function getAccount(uint256) view returns (uint96 committedTRAC,uint40 createdAtEpoch,uint40 expiresAtEpoch,uint40 createdAtTimestamp,uint40 expiresAtTimestamp,uint16 lockDurationEpochs,uint16 discountBps,uint16 lastSettledWindow,bool fullySwept,uint72 primaryNode,uint40 lastPrimaryNodeChangeEpoch)',
     ],
     provider,
   );
@@ -180,6 +207,7 @@ async function loadContracts(): Promise<Contracts> {
     nft,
     logic,
     logicAddress,
+    pcs,
     token,
     chronos,
     eps,
@@ -502,7 +530,89 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     expect(acct.fullySwept as boolean).toBe(false);
   }, 120_000);
 
-  it('step 5: migrateEmissionSchedule on a 10.0.8 account is idempotent (marker skips it)', async () => {
+  it('step 5: migrateEmissionSchedule back-fills a synthetic pre-10.0.8 account (THE mainnet upgrade path)', async () => {
+    // This is the exact operation run on mainnet at upgrade: an account created
+    // BEFORE 10.0.8 (lastSettledWindow == 0, with some windowSpent already
+    // emitted under the old active sink) gets its remaining schedule
+    // (committed − spent, forward-spread) written by the owner-gated batch.
+    // The devnet deploys 10.0.8 from the start, so there are no genuine legacy
+    // accounts — we PLANT one directly in PublishingConvictionStorage (the Hub
+    // owner passes `onlyContracts`), mirroring the hardhat P4/P5b property tests.
+    const s = state.s!;
+    const synthId = 987654321n;
+    const committed = ethers.parseEther('12000') + 5n; // NOT divisible by lock → dust path live
+    const spent0 = ethers.parseEther('111');
+    const epLen: bigint = await s.chronos.epochLength();
+    const nowBlock = await s.provider.getBlock('latest');
+    const nowTs = BigInt(nowBlock!.timestamp);
+    const createdAt = nowTs - epLen / 3n; // mid-window-0, mid-epoch → windows close in the FUTURE (no clamp)
+    const createdEpoch: bigint = await s.chronos.epochAtTimestamp(createdAt);
+    const expiresAt = createdAt + TEST_LOCK * epLen;
+    const expiresEpoch: bigint = (await s.chronos.epochAtTimestamp(expiresAt - 1n)) + 1n;
+
+    const pcsRw = s.pcs.connect(s.hubOwner) as ethers.Contract;
+    let nonce = await rawTxNonce(s.provider, s.hubOwner.address);
+    await (await pcsRw.createAccount(synthId, {
+      committedTRAC: committed,
+      createdAtEpoch: createdEpoch,
+      expiresAtEpoch: expiresEpoch,
+      createdAtTimestamp: createdAt,
+      expiresAtTimestamp: expiresAt,
+      lockDurationEpochs: TEST_LOCK,
+      discountBps: 0,
+      lastSettledWindow: 0, // ← the pre-10.0.8 marker: schedule NOT yet written
+      fullySwept: false,
+      primaryNode: 0,
+      lastPrimaryNodeChangeEpoch: createdEpoch,
+    }, { nonce: nonce++ })).wait();
+    // Some window-0 spend "already emitted under the old rules".
+    await (await pcsRw.increaseWindowSpent(synthId, 0n, spent0, { nonce: nonce++ })).wait();
+    expect(await s.pcs.accountExists(synthId)).toBe(true);
+
+    const currentEpoch: bigint = await s.chronos.getCurrentEpoch();
+
+    // Batch-migrate the legacy account (owner-gated).
+    const logicRw = s.logic.connect(s.hubOwner) as ethers.Contract;
+    const receipt = await (await logicRw.migrateEmissionSchedule([synthId], {
+      nonce: await rawTxNonce(s.provider, s.hubOwner.address),
+    })).wait();
+
+    // Migration schedules exactly committed − spent0 (the spent portion was
+    // already emitted under 10.0.7, so it is NOT re-emitted — conservation).
+    let scheduled: ethers.LogDescription | null = null;
+    for (const log of receipt!.logs) {
+      try {
+        const parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
+        if (parsed?.name === 'EmissionScheduled' && (parsed.args.accountId as bigint) === synthId) scheduled = parsed;
+      } catch { /* not a Logic event */ }
+    }
+    expect(scheduled, 'migration must emit EmissionScheduled for the legacy account').not.toBeNull();
+    expect(scheduled!.args.fromWindow as bigint).toBe(0n);
+    expect(scheduled!.args.toWindow as bigint).toBe(TEST_LOCK);
+    expect(scheduled!.args.treasuryFee as bigint).toBe(0n);
+    expect(scheduled!.args.scheduled as bigint, 'schedule == committed − alreadySpent').toBe(committed - spent0);
+
+    // The migrate tx credits the staker shard by exactly committed − spent0,
+    // forward of the current epoch (createdAt chosen so no window has elapsed).
+    const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
+    expect(staker.total, 'Σ staker-shard credits from migration == committed − spent0').toBe(committed - spent0);
+    for (const r of staker.ranges) {
+      expect(r.start, 'a freshly-created legacy account schedules forward of the current epoch').toBeGreaterThan(currentEpoch);
+    }
+    expect(epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID).total, 'treasury shard empty').toBe(0n);
+
+    // Marker advanced → the account is now fully scheduled.
+    const acct = await s.pcs.getAccount(synthId);
+    expect(acct.lastSettledWindow as bigint).toBe(TEST_LOCK);
+
+    // Idempotent: a second migrate of the SAME legacy account is a pure no-op.
+    const again = await (await logicRw.migrateEmissionSchedule([synthId], {
+      nonce: await rawTxNonce(s.provider, s.hubOwner.address),
+    })).wait();
+    expect(epsCreditsInTx(s, again!, STAKER_SHARD_ID).total, 're-migrating must not double-credit').toBe(0n);
+  }, 180_000);
+
+  it('step 6: migrateEmissionSchedule on a 10.0.8-created account is idempotent (marker skips it)', async () => {
     const s = state.s!;
     const accountId = state.accountId;
     const logicRw = s.logic.connect(s.hubOwner) as ethers.Contract;
