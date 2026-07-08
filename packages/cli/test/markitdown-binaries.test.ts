@@ -436,19 +436,18 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(pkg.files).toContain('scripts');
   });
 
-  it('keeps MarkItDown target metadata in a shared JSON file that the release workflow reads', async () => {
+  it('keeps MarkItDown target metadata packaged for manual releases', async () => {
     const targetsRaw = await readFile(new URL('../markitdown-targets.json', import.meta.url), 'utf-8');
     const targets = JSON.parse(targetsRaw) as Array<{ assetName: string; runner: string }>;
     expect(targets.map((target) => target.assetName)).toEqual(SUPPORTED_TARGETS.map((target) => target.assetName));
 
-    const workflowRaw = await readFile(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf-8');
-    expect(workflowRaw).toContain("import { SUPPORTED_TARGETS } from './packages/cli/scripts/bundle-markitdown-binaries.mjs'");
-    expect(workflowRaw).toContain('fromJSON(needs.markitdown-target-matrix.outputs.matrix)');
-    expect(workflowRaw).toContain('Smoke test bundled MarkItDown binary');
-    expect(workflowRaw).toContain('markitdown-smoke.html');
-    expect(workflowRaw).toContain('markitdown-smoke.docx');
-    expect(workflowRaw).toContain('Hello from MarkItDown smoke test.');
-    expect(workflowRaw).toContain('Hello from DOCX smoke test.');
-    expect(workflowRaw).toContain('.meta.json');
+    const pkgRaw = await readFile(new URL('../package.json', import.meta.url), 'utf-8');
+    const pkg = JSON.parse(pkgRaw) as { files?: string[] };
+    expect(pkg.files).toContain('markitdown-build-info.json');
+    expect(pkg.files).toContain('markitdown-targets.json');
+
+    const releaseProcess = await readFile(new URL('../../../RELEASE_PROCESS.md', import.meta.url), 'utf-8');
+    expect(releaseProcess).toContain('MarkItDown binaries are not attached by this manual process');
+    expect(releaseProcess).toContain('postinstall downloads them best-effort');
   });
 });
