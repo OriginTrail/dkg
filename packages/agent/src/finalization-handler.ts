@@ -157,9 +157,11 @@ export class FinalizationHandler {
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
     let ctx = createOperationContext('gossip');
     let decodedMsg: FinalizationMessageMsg | undefined;
+    let resolvedTargetContextGraphId: string | undefined;
     try {
       const msg = decodeFinalizationMessage(data);
       decodedMsg = msg;
+      resolvedTargetContextGraphId = msg.targetContextGraphId || undefined;
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
       }
@@ -224,6 +226,7 @@ export class FinalizationHandler {
       // the id locally when the wire is empty; resolver failures or
       // not-on-chain CGs fall back to legacy behavior unchanged.
       let ctxGraphId = msg.targetContextGraphId || undefined;
+      resolvedTargetContextGraphId = ctxGraphId;
       if (!ctxGraphId) {
         // Forward-prevention (RS cgId-race): resolve from CHAIN TRUTH first.
         // `getKAContextGraphId(batchId)` is authoritative and immune to the
@@ -236,6 +239,7 @@ export class FinalizationHandler {
         const cacheKey = batchIdForResolve > 0n ? batchIdForResolve.toString() : '';
         if (cacheKey && this.chainCgIdByBatchId.has(cacheKey)) {
           ctxGraphId = this.chainCgIdByBatchId.get(cacheKey);
+          resolvedTargetContextGraphId = ctxGraphId;
         } else if (
           cacheKey && this.chain && this.chain.chainId !== 'none'
           && typeof this.chain.getKAContextGraphId === 'function'
@@ -244,6 +248,7 @@ export class FinalizationHandler {
             const boundCg = await this.chain.getKAContextGraphId(batchIdForResolve);
             if (boundCg !== null && boundCg !== undefined && BigInt(boundCg) > 0n) {
               ctxGraphId = boundCg.toString();
+              resolvedTargetContextGraphId = ctxGraphId;
               this.chainCgIdByBatchId.set(cacheKey, ctxGraphId); // POSITIVE-only
               this.log.info(ctx, `Finalization: resolved cgId from chain truth getKAContextGraphId(${batchIdForResolve})=${ctxGraphId}`);
             }
@@ -258,6 +263,7 @@ export class FinalizationHandler {
             const resolved = await this.resolveContextGraphOnChainId(contextGraphId);
             if (resolved !== null && resolved !== undefined && String(resolved).length > 0) {
               ctxGraphId = String(resolved);
+              resolvedTargetContextGraphId = ctxGraphId;
               this.log.info(ctx, `Finalization: gossip omitted targetContextGraphId; resolved locally to ${ctxGraphId} (defensive lookup)`);
             }
           } catch (err) {
@@ -508,6 +514,7 @@ export class FinalizationHandler {
         this.logLifecycleEvent(ctx, 'finalization_failed', {
           ...decodedMsg,
           contextGraphId: decodedMsg.contextGraphId || contextGraphId,
+          targetContextGraphId: resolvedTargetContextGraphId ?? decodedMsg.targetContextGraphId,
           rootEntityCount: decodedMsg.rootEntities.length,
           outcome: 'failed',
           retryable: true,
