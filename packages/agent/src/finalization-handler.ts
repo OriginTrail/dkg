@@ -7,6 +7,7 @@ import {
   DKGEvent, Logger, createOperationContext, logKaLifecycleEvent,
   assertSafeIri, isSafeIri,
   type EventBus,
+  type FinalizationMessageMsg,
   type OperationContext,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
@@ -116,10 +117,20 @@ export class FinalizationHandler {
       targetContextGraphId?: string;
       txHash?: string;
       publisherAddress?: string;
+      subGraphName?: string;
+      blockNumber?: string | number | bigint | { toString(): string };
+      batchId?: string | number | bigint | { toString(): string };
+      rootEntityCount?: number;
+      swmStatementCount?: number;
+      outcome?: string;
+      retryable?: boolean;
+      reason?: string;
+      level?: 'info' | 'warn' | 'error';
     },
   ): void {
     if (!msg.ual) return;
     logKaLifecycleEvent(this.log, ctx, {
+      level: msg.level,
       assetUal: msg.ual,
       stage: 'finalization',
       event,
@@ -131,23 +142,47 @@ export class FinalizationHandler {
         targetContextGraphId: msg.targetContextGraphId,
         txHash: msg.txHash,
         publisherAddress: msg.publisherAddress,
+        subGraphName: msg.subGraphName,
+        blockNumber: msg.blockNumber?.toString(),
+        batchId: msg.batchId?.toString(),
+        rootEntityCount: msg.rootEntityCount,
+        swmStatementCount: msg.swmStatementCount,
+        outcome: msg.outcome,
+        retryable: msg.retryable,
+        reason: msg.reason,
       },
     });
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
     let ctx = createOperationContext('gossip');
+    let decodedMsg: FinalizationMessageMsg | undefined;
     try {
       const msg = decodeFinalizationMessage(data);
+      decodedMsg = msg;
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
       }
+      this.logLifecycleEvent(ctx, 'finalization_received', {
+        ...msg,
+        contextGraphId: msg.contextGraphId || contextGraphId,
+        rootEntityCount: msg.rootEntities.length,
+      });
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
         // #1100: same guard as GossipPublishHandler — frames of other gossip
         // message types decode "successfully" with garbage in this field, so
         // only WARN when the mismatched value is a plausible CG id.
         if (!validateContextGraphId(msg.contextGraphId).valid) return;
+        this.logLifecycleEvent(ctx, 'finalization_rejected', {
+          ...msg,
+          contextGraphId: msg.contextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          outcome: 'rejected',
+          retryable: false,
+          reason: `contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}"`,
+          level: 'warn',
+        });
         this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
@@ -160,6 +195,15 @@ export class FinalizationHandler {
       }
 
       if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
+        this.logLifecycleEvent(ctx, 'finalization_rejected', {
+          ...msg,
+          contextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          outcome: 'rejected',
+          retryable: false,
+          reason: 'incomplete finalization message',
+          level: 'warn',
+        });
         this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}), ignoring`);
         return;
       }
@@ -229,6 +273,19 @@ export class FinalizationHandler {
         if (sgVal.valid) {
           subGraphName = msg.subGraphName;
         } else {
+          this.logLifecycleEvent(ctx, 'finalization_rejected', {
+            ...msg,
+            contextGraphId,
+            targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+            rootEntityCount: msg.rootEntities.length,
+            subGraphName: msg.subGraphName,
+            blockNumber,
+            batchId: protoToBigInt(msg.batchId),
+            outcome: 'rejected',
+            retryable: false,
+            reason: sgVal.reason,
+            level: 'warn',
+          });
           this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
           return;
         }
@@ -350,30 +407,114 @@ export class FinalizationHandler {
             });
             if (outcome === 'stale-target') {
               this.markProcessed(dedupeKey);
+              this.logLifecycleEvent(ctx, 'finalization_stale_target', {
+                ...msg,
+                targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+                rootEntityCount: msg.rootEntities.length,
+                swmStatementCount: merkleMatchedQuads.length,
+                subGraphName,
+                blockNumber,
+                batchId,
+                outcome,
+                reason: 'newer update already materialized',
+              });
               this.log.info(ctx, `Finalization: a newer update is already materialised for ${msg.ual}, skipping stale publish promotion`);
               return;
             }
             this.markProcessed(dedupeKey);
+            this.logLifecycleEvent(ctx, 'finalization_applied', {
+              ...msg,
+              targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+              rootEntityCount: msg.rootEntities.length,
+              swmStatementCount: merkleMatchedQuads.length,
+              subGraphName,
+              blockNumber,
+              batchId,
+              outcome,
+            });
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
           }
+          this.logLifecycleEvent(ctx, 'finalization_verification_failed', {
+            ...msg,
+            targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+            rootEntityCount: msg.rootEntities.length,
+            swmStatementCount: merkleMatchedQuads.length,
+            subGraphName,
+            blockNumber,
+            batchId,
+            outcome: 'deferred',
+            retryable: true,
+            reason: 'on-chain verification failed',
+            level: 'warn',
+          });
           this.log.info(ctx, `Finalization: on-chain verification failed for ${msg.ual}, will retry via ChainEventPoller`);
           return;
         }
+        this.logLifecycleEvent(ctx, 'finalization_merkle_mismatch', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          swmStatementCount: sharedMemoryQuads.length,
+          subGraphName,
+          blockNumber,
+          batchId: protoToBigInt(msg.batchId),
+          outcome: 'deferred',
+          retryable: true,
+          reason: 'shared memory merkle root mismatch',
+          level: 'warn',
+        });
         this.log.info(ctx, `Finalization: merkle mismatch for ${msg.ual}, shared memory data differs from published`);
       } else {
+        this.logLifecycleEvent(ctx, 'finalization_no_data', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          swmStatementCount: 0,
+          subGraphName,
+          blockNumber,
+          batchId: protoToBigInt(msg.batchId),
+          outcome: 'deferred',
+          retryable: true,
+          reason: 'no shared memory data',
+          level: 'warn',
+        });
         this.log.info(ctx, `Finalization: no shared memory data for ${msg.ual}, peer missed SWM sharing`);
       }
 
       // Fallback: no matching shared memory data. The data will arrive via
       // the regular publish topic broadcast or ChainEventPoller sync.
+      this.logLifecycleEvent(ctx, 'finalization_payload_sync_required', {
+        ...msg,
+        targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+        rootEntityCount: msg.rootEntities.length,
+        swmStatementCount: sharedMemoryQuads.length,
+        subGraphName,
+        blockNumber,
+        batchId: protoToBigInt(msg.batchId),
+        outcome: 'deferred',
+        retryable: true,
+        reason: 'no matching SWM snapshot',
+        level: 'warn',
+      });
       this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching SWM snapshot)`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const errMsg = err instanceof Error ? err.message : String(err);
       // Protobuf decode errors (wire type / index out of range) happen when receiving
       // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
-      if (/wire type|index out of range|offset|unexpected tag/i.test(msg)) return;
-      this.log.warn(ctx, `Finalization: failed to process message: ${msg}`);
+      if (/wire type|index out of range|offset|unexpected tag/i.test(errMsg)) return;
+      if (decodedMsg) {
+        this.logLifecycleEvent(ctx, 'finalization_failed', {
+          ...decodedMsg,
+          contextGraphId: decodedMsg.contextGraphId || contextGraphId,
+          rootEntityCount: decodedMsg.rootEntities.length,
+          outcome: 'failed',
+          retryable: true,
+          reason: errMsg,
+          level: 'warn',
+        });
+      }
+      this.log.warn(ctx, `Finalization: failed to process message: ${errMsg}`);
     }
   }
 
