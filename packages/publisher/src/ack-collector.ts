@@ -9,6 +9,7 @@ import {
   computeUpdateACKDigest,
   isStorageACKDecline,
   isTransientStorageACKDeclineCode,
+  STORAGE_ACK_DECLINE_CODES,
   boundedDeclineCodeLabel,
   isSubscriptionSource,
   withSpan,
@@ -145,6 +146,20 @@ const MAX_TRANSIENT_DECLINE_RETRIES = 6;
 const TRANSIENT_DECLINE_BACKOFF_CAP_MS = 8_000;
 function transientDeclineBackoffMs(retry: number): number {
   return Math.min(1000 * 2 ** Math.max(0, retry - 1), TRANSIENT_DECLINE_BACKOFF_CAP_MS);
+}
+function transientDeclineRetryReason(code: string): string {
+  switch (code) {
+    case STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM:
+      return 'responder is still missing the SWM data';
+    case STORAGE_ACK_DECLINE_CODES.MERKLE_MISMATCH_IN_SWM:
+      return 'responder SWM root does not match yet';
+    case STORAGE_ACK_DECLINE_CODES.MISSING_CIPHERTEXT_CHUNKS:
+      return 'responder is still missing ciphertext chunks';
+    case STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE:
+      return 'responder store is saturated or temporarily unavailable';
+    default:
+      return 'the decline is retryable';
+  }
 }
 const MAX_DECLINE_CODE_CHARS = 64;
 const MAX_DECLINE_MESSAGE_CHARS = 240;
@@ -812,10 +827,12 @@ export class ACKCollector {
               }
               declineRetries += 1;
               const waitMs = transientDeclineBackoffMs(declineRetries);
+              const retryReason = transientDeclineRetryReason(code);
               log(
                 `[ACKCollector] Transient decline from ${peerId.slice(-8)}: ${code}` +
                 (declineMessage ? ` — ${declineMessage}` : '') +
-                ` (retry ${declineRetries}/${MAX_TRANSIENT_DECLINE_RETRIES}, waiting ${waitMs}ms for SWM gossip)`,
+                `; retrying because ${retryReason} ` +
+                `(retry ${declineRetries}/${MAX_TRANSIENT_DECLINE_RETRIES}, waiting ${waitMs}ms)`,
               );
               await sleep(waitMs);
               // #896 review: quorum may have settled DURING the backoff above

@@ -1,5 +1,11 @@
-import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { loadSelectedSharedMemoryQuads, type SharedMemoryReadSelection } from '@origintrail-official/dkg-storage';
+import {
+  getExternalStorePrioritySchedulerSnapshot,
+  loadSelectedSharedMemoryQuads,
+  type SharedMemoryReadSelection,
+  type TripleStore,
+  type Quad,
+  type QueryOptions,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
@@ -125,6 +131,10 @@ class StoreUnavailableError extends Error {
     this.name = 'StoreUnavailableError';
     if (cause instanceof Error && cause.stack) this.stack = cause.stack;
   }
+}
+
+function ackStoreOptions(source: string): QueryOptions {
+  return { priority: 'ack', source };
 }
 
 export interface StorageACKHandlerConfig {
@@ -385,6 +395,9 @@ export class StorageACKHandler {
     // internal error strings (paths, worker state) stay off the network.
     options: { hookMessage?: string } = {},
   ): Uint8Array {
+    getMetrics().storageAckDeclinesTotal.add(1, {
+      reason: boundedDeclineCodeLabel(code),
+    });
     if (this.config.onDecline) {
       const details = {
         code,
@@ -497,14 +510,20 @@ export class StorageACKHandler {
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
       for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        await this.store.deleteByPattern(
+          { graph: catalogGraph, subject },
+          ackStoreOptions('storage-ack.persistCatalog.deleteByPattern'),
+        );
       }
-      await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+      await this.store.insert(
+        parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
+        ackStoreOptions('storage-ack.persistCatalog.insert'),
+      );
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.();
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistCatalog.flush'));
     });
     return result.ok ? { ok: true } : result;
   }
@@ -525,14 +544,17 @@ export class StorageACKHandler {
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
-      await this.store.dropGraph(stagingGraphUri);
+      await this.store.dropGraph(
+        stagingGraphUri,
+        ackStoreOptions('storage-ack.persistStaging.dropGraph'),
+      );
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads);
+      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert'));
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.();
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush'));
     });
     return result.ok ? { ok: true } : result;
   }
@@ -711,11 +733,16 @@ export class StorageACKHandler {
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<Uint8Array>((resolve) => {
       deadlineTimer = setTimeout(() => {
+        const storePressure = getExternalStorePrioritySchedulerSnapshot();
         resolve(
           this.declineTemporarilyUnavailable(
             cgIdForDecline ?? '',
             'ack handler deadline exceeded',
-            new Error(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated)`),
+            new Error(
+              `ACK handler exceeded ${deadlineMs}ms (store slow / saturated; ` +
+              `ackInflight=${storePressure.ackInflight} ackQueued=${storePressure.ackQueued} ` +
+              `normalQueued=${storePressure.normalQueued} backgroundQueued=${storePressure.backgroundQueued})`,
+            ),
           ),
         );
       }, deadlineMs);
@@ -1671,6 +1698,11 @@ export class StorageACKHandler {
       rootEntities.length === 0 ? 'all' : { rootEntities };
     try {
       return await loadSelectedSharedMemoryQuads(this.store, graphUri, selection, {
+        queryOptions: ackStoreOptions(
+          rootEntities.length === 0
+            ? 'storage-ack.loadSWMQuads.constructAll'
+            : 'storage-ack.loadSWMQuads.constructEntity',
+        ),
         quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
       });
     } catch (err) {
