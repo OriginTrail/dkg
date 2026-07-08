@@ -62,7 +62,11 @@ export {
 // `../src/node.js` directly so the package root stays free of
 // internals that would otherwise commit us to a semver contract
 // for test-only surface. Codex review of PR #698 round 3 flagged
-// the prior leak.
+// the prior leak. Same rule for `nodeHasDirectPublicAddress` (the
+// relay watchdog's public-reachability gate, PR #1508): it has no
+// production consumer outside `node.ts`, and its tests
+// (`core/test/relay-public-reachability.test.ts`, `core/test/relay.test.ts`)
+// deep-import it from `../src/node.js`.
 export {
   type Network,
   type NodeIdentity,
