@@ -2671,6 +2671,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           metadata: {
             contextGraphId: event.localCgId,
             onChainCgId: event.onChainCgId,
+            source: 'chain-reconcile',
             ordinal: event.ordinal,
             kaId: event.kaId,
             action: event.action,
@@ -3426,6 +3427,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // already prioritises known cores + the preferred sync peer), then retry.
       if (this.shouldRunVmReconcileActiveFetch(localCgId)) {
         activeFetchRan = true;
+        logKaLifecycleEvent(this.log, ctx, {
+          assetUal: ual,
+          stage: 'reconcile',
+          event: 'reconcile_fetch',
+          role: 'sync',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          metadata: {
+            contextGraphId: localCgId,
+            onChainCgId: onChainCgId.toString(),
+            source: 'chain-reconcile',
+            ordinal,
+            kaId: kaId.toString(),
+            action: 'fetch',
+            result: 'started',
+            head: headBlock,
+            maxPeers: 1,
+          },
+        });
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'fetch', ordinal, kaId: kaId.toString(), ual,
