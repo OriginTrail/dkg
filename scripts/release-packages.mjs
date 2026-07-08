@@ -56,11 +56,11 @@ export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
     }));
 }
 
-function run(cmd, args, options = {}) {
+function runCapture(cmd, args, options = {}) {
   const result = spawnSync(cmd, args, {
     cwd: options.cwd ?? ROOT_DIR,
     encoding: 'utf8',
-    stdio: options.stdio ?? 'pipe',
+    stdio: 'pipe',
     env: { ...process.env, ...(options.env ?? {}) },
   });
   if (result.error) throw result.error;
@@ -71,8 +71,20 @@ function run(cmd, args, options = {}) {
   return result.stdout.trim();
 }
 
+function runInteractive(cmd, args, options = {}) {
+  const result = spawnSync(cmd, args, {
+    cwd: options.cwd ?? ROOT_DIR,
+    stdio: 'inherit',
+    env: { ...process.env, ...(options.env ?? {}) },
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`${cmd} ${args.join(' ')} failed with exit code ${result.status}`);
+  }
+}
+
 function gitHead(rootDir) {
-  return run('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
+  return runCapture('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
 }
 
 export function buildInfoPayload({ commit, distTag, ciRun = null, buildTime = new Date().toISOString() }) {
@@ -136,7 +148,57 @@ function parseTags(value) {
 }
 
 function npmViewJson(args) {
-  return JSON.parse(run('npm', ['view', ...args, '--json']));
+  return JSON.parse(runCapture('npm', ['view', ...args, '--json']));
+}
+
+export function verifyReleaseTag({ tag, version, bases = ['origin/main'], runner = runCapture } = {}) {
+  if (typeof tag !== 'string' || tag.length === 0) {
+    throw new Error('--tag is required (e.g. v10.0.4)');
+  }
+  const problems = [];
+  const attempt = (args) => {
+    try {
+      return { ok: true, output: runner('git', args) };
+    } catch (err) {
+      return { ok: false, output: err instanceof Error ? err.message : String(err) };
+    }
+  };
+  if (typeof version === 'string' && version.length > 0 && tag !== `v${version}`) {
+    problems.push(`tag ${tag} does not match --version ${version} (expected v${version})`);
+  }
+  const local = attempt(['rev-parse', '--verify', `refs/tags/${tag}`]);
+  if (!local.ok) {
+    problems.push(`tag ${tag} not found locally — run: git fetch --force origin --tags`);
+    return problems;
+  }
+  const objectType = attempt(['cat-file', '-t', `refs/tags/${tag}`]);
+  if (!objectType.ok || objectType.output !== 'tag') {
+    problems.push(`tag ${tag} is not an annotated tag object (got: ${objectType.output || 'nothing'}) — create it with git tag -s`);
+  } else {
+    const tagBody = attempt(['cat-file', 'tag', `refs/tags/${tag}`]);
+    if (!tagBody.ok || !/-----BEGIN (PGP|SSH) SIGNATURE-----/.test(tagBody.output)) {
+      problems.push(`tag ${tag} carries no PGP/SSH signature block — sign it with git tag -s`);
+    }
+  }
+  const isAncestorOfSomeBase = bases.some(
+    (base) => attempt(['merge-base', '--is-ancestor', `${tag}^{commit}`, base]).ok,
+  );
+  if (!isAncestorOfSomeBase) {
+    problems.push(`tag ${tag} commit is not reachable from ${bases.join(' or ')} — fetch first (git fetch origin) or retag from a release branch`);
+  }
+  const remote = attempt(['ls-remote', 'origin', `refs/tags/${tag}`]);
+  const remoteSha = remote.ok
+    ? remote.output
+        .split('\n')
+        .map((line) => line.split(/\s+/))
+        .find(([, ref]) => ref === `refs/tags/${tag}`)?.[0] ?? ''
+    : '';
+  if (remoteSha.length === 0) {
+    problems.push(`tag ${tag} is not on origin — push it: git push origin ${tag}`);
+  } else if (remoteSha !== local.output) {
+    problems.push(`local tag ${tag} (${local.output.slice(0, 12)}) differs from origin (${remoteSha.slice(0, 12)}) — the remote tag moved; do not release from it`);
+  }
+  return problems;
 }
 
 function commandList(args) {
@@ -188,7 +250,7 @@ function commandPromote(args) {
       if (dryRun) {
         console.log(`npm ${cmd.join(' ')}`);
       } else {
-        run('npm', cmd, { stdio: 'inherit' });
+        runInteractive('npm', cmd);
       }
     }
   }
@@ -225,10 +287,26 @@ function commandVerifyPublished(args) {
   console.log(`Published package verification passed for ${version}${tags.length ? ` (${tags.join(', ')})` : ''}.`);
 }
 
+function commandVerifyTag(args) {
+  const tag = requireArg(args, 'tag');
+  const version = typeof args.version === 'string' ? args.version : undefined;
+  const parsedBases = parseTags(typeof args.base === 'string' ? args.base : undefined);
+  const bases = parsedBases.length > 0 ? parsedBases : ['origin/main'];
+  const problems = verifyReleaseTag({ tag, version, bases });
+  if (problems.length > 0) {
+    console.error(`Release tag verification failed for ${tag}:`);
+    for (const problem of problems) console.error(`- ${problem}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Release tag verification passed: ${tag} is annotated, signature-bearing, on origin unmoved, and reachable from ${bases.join(', ')}.`);
+}
+
 function usage() {
   console.log(`Usage:
   node scripts/release-packages.mjs list [--json]
   node scripts/release-packages.mjs verify-versions --version X.Y.Z
+  node scripts/release-packages.mjs verify-tag --tag vX.Y.Z [--version X.Y.Z] [--base origin/main]
   node scripts/release-packages.mjs build-info --dist-tag latest|rc|beta|alpha [--commit SHA] [--ci-run ID]
   node scripts/release-packages.mjs promote --version X.Y.Z --tags mainnet,testnet --otp 123456 [--dry-run]
   node scripts/release-packages.mjs verify-published --version X.Y.Z [--tags latest,mainnet,testnet]`);
@@ -243,6 +321,9 @@ async function main() {
       break;
     case 'verify-versions':
       commandVerifyVersions(args);
+      break;
+    case 'verify-tag':
+      commandVerifyTag(args);
       break;
     case 'build-info':
       commandBuildInfo(args);

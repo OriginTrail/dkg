@@ -100,6 +100,7 @@ npm publishing is **fully manual**. There is **no automated npm-publish or tag-t
 From a clean checkout at the tagged commit:
 
 ```bash
+pnpm release:verify-tag --tag vX.Y.Z --version X.Y.Z
 git checkout vX.Y.Z            # detached HEAD at the tag
 pnpm install --frozen-lockfile
 pnpm build                     # must fully succeed (UI bundle included)
@@ -108,11 +109,14 @@ pnpm release:build-info --dist-tag latest
 pnpm -r publish --no-git-checks --tag latest
 ```
 
+`release:verify-tag` restores the tag gates the old tag-triggered workflow enforced, now as a publish preflight: the tag must be an annotated object carrying a PGP/SSH signature block, it must exist on `origin` at the same object (an unpushed or moved tag fails), and its commit must be reachable from `origin/main` (override with `--base` for a release branch). Signer identity is enforced server-side by the signed-tag ruleset; this gate checks structure and ancestry so a publish can never start from a mislabeled or foreign commit.
+
 npm prompts for your **OTP** (2FA). All publishable public `@origintrail-official/*` packages publish in one command; private workspaces are skipped automatically. `pnpm` skips versions already on the registry, so a re-run after a partial publish is safe. `pnpm release:build-info` writes `packages/cli/build-info.json` before packaging, so npm-installed daemons report the tag commit, build time, and publish dist-tag through `/api/status`.
 
 For a canary/prerelease, use the prerelease npm tag and move only the `testnet` update channel:
 
 ```bash
+pnpm release:verify-tag --tag vX.Y.Z-rc.1 --version X.Y.Z-rc.1
 git checkout vX.Y.Z-rc.1
 pnpm install --frozen-lockfile
 pnpm build
