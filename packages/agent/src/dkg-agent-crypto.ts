@@ -35,6 +35,7 @@ import {
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  logKaLifecycleEvent,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -1909,6 +1910,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const wh = this.getOrCreateSharedMemoryHandler();
     const outcome = await wh.handle(data, fromPeerId);
     if (outcome.applied) {
+      if (outcome.assetUal) {
+        logKaLifecycleEvent(this.log, createOperationContext('share'), {
+          assetUal: outcome.assetUal,
+          stage: 'swm_share',
+          event: 'swm_update_applied',
+          role: 'receiver',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: fromPeerId,
+          metadata: {
+            contextGraphId: outcome.cgId,
+            shareOperationId: outcome.shareOperationId,
+            insertedCount: outcome.insertedTriples,
+          },
+        });
+      }
       // PR-H bug 2: emit SwmShareAck on substrate-applied shares
       // too (not just gossip-applied). Pre-PR-H the sender only
       // counted substrate-`delivered` peers via the in-process

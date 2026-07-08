@@ -106,6 +106,7 @@ export interface ContextGraphMetaOracleRecord {
 export type SharedMemoryApplyOutcome =
   | {
       applied: true;
+      assetUal?: string;
       /** Context graph the share applied into. Set on the apply path. */
       cgId?: string;
       /**
