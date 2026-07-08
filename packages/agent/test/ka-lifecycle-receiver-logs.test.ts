@@ -23,6 +23,7 @@ import {
   generateSwmSenderChainKey,
   generateSwmSenderEpochId,
   generateWorkspaceRecipientEncryptionKey,
+  logKaLifecycleEvent,
   type FinalizationMessageMsg,
   type LogRecord,
   type OperationContext,
@@ -230,6 +231,153 @@ async function insertFinalizationSharedMemory(
 describe('KA receiver lifecycle logs', () => {
   afterEach(() => {
     Logger.setSink(null);
+  });
+
+  it('builds a grepable multi-node KA publish lifecycle proof by assetUal', async () => {
+    const proofModule = await import('../src/ka-lifecycle-log-proof.js').catch(() => undefined);
+    expect(proofModule).toBeDefined();
+    if (!proofModule) return;
+    const { buildKaLifecycleLogProof, KA_LIFECYCLE_PROOF_SOURCE_DOCS } = proofModule;
+    expect(KA_LIFECYCLE_PROOF_SOURCE_DOCS).toEqual([
+      'CONTEXT.md',
+      'docs/adr/0001-log-ka-publish-lifecycle-by-asset-ual.md',
+    ]);
+
+    const entries = captureLogs();
+    const log = new Logger('KALifecycleProof');
+    const publisherCtx: OperationContext = { operationId: 'proof-publisher', operationName: 'publish' };
+    const receiverCtx: OperationContext = { operationId: 'proof-receiver', operationName: 'share' };
+    const syncCtx: OperationContext = { operationId: 'proof-sync', operationName: 'sync' };
+    const basePublisher = {
+      assetUal: ASSET_UAL,
+      role: 'publisher' as const,
+      localPeerId: PUBLISHER_PEER_ID,
+      localNodeIdentityId: 'publisher-node-identity',
+    };
+    const baseReceiver = {
+      assetUal: ASSET_UAL,
+      role: 'receiver' as const,
+      localPeerId: LOCAL_PEER_ID,
+      localNodeIdentityId: '42',
+      peer: PUBLISHER_PEER_ID,
+      peerNodeIdentityId: 'publisher-node-identity',
+    };
+    {
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        stage: 'identity',
+        event: 'asset_ual_allocated',
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        stage: 'wm',
+        event: 'write',
+        metadata: { recordCount: 2 },
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        stage: 'swm_share',
+        event: 'prepared',
+        metadata: {
+          rawTriples: '<urn:private> <urn:predicate> "raw proof payload" .',
+          shareOperationId: 'proof-share-op',
+        },
+      });
+      logKaLifecycleEvent(log, receiverCtx, {
+        ...baseReceiver,
+        stage: 'swm_share',
+        event: 'swm_update_received',
+        metadata: { shareOperationId: 'proof-share-op' },
+      });
+      logKaLifecycleEvent(log, receiverCtx, {
+        ...baseReceiver,
+        stage: 'swm_share',
+        event: 'swm_state_changed',
+        metadata: { outcome: 'applied', insertedCount: 2 },
+      });
+      logKaLifecycleEvent(log, receiverCtx, {
+        ...baseReceiver,
+        stage: 'storage_ack',
+        event: 'storage_ack_signed',
+        metadata: { outcome: 'success' },
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        level: 'warn',
+        stage: 'storage_ack',
+        event: 'decline',
+        peer: LOCAL_PEER_ID,
+        peerNodeIdentityId: '42',
+        metadata: { outcome: 'decline', reason: 'NO_DATA_IN_SWM' },
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        stage: 'chain',
+        event: 'confirm',
+        metadata: { txHash: '0xabc', kaId: '7' },
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        stage: 'vm',
+        event: 'promote',
+        metadata: { outcome: 'confirmed' },
+      });
+      logKaLifecycleEvent(log, receiverCtx, {
+        ...baseReceiver,
+        stage: 'finalization',
+        event: 'finalization_applied',
+        metadata: { outcome: 'promoted' },
+      });
+      logKaLifecycleEvent(log, syncCtx, {
+        assetUal: ASSET_UAL,
+        stage: 'sync',
+        event: 'sync_apply',
+        role: 'sync',
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: '42',
+        peer: PUBLISHER_PEER_ID,
+        metadata: { action: 'apply', result: 'inserted' },
+      });
+      logKaLifecycleEvent(log, syncCtx, {
+        assetUal: ASSET_UAL,
+        stage: 'reconcile',
+        event: 'reconcile_promote',
+        role: 'sync',
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: '42',
+        metadata: { action: 'promote', result: 'reconciled' },
+      });
+      logKaLifecycleEvent(log, publisherCtx, {
+        ...basePublisher,
+        assetUal: `${ASSET_UAL}-other`,
+        stage: 'wm',
+        event: 'write',
+      });
+    }
+
+    const proof = buildKaLifecycleLogProof(entries, ASSET_UAL);
+
+    expect(proof.missingRequiredStages).toEqual([]);
+    expect(proof.stageTrail).toEqual([
+      'identity',
+      'wm',
+      'swm_share',
+      'storage_ack',
+      'chain',
+      'vm',
+      'finalization',
+      'sync',
+      'reconcile',
+    ]);
+    expect(proof.eventTrail).toContain('storage_ack_signed');
+    expect(proof.hasAckLog).toBe(true);
+    expect(proof.hasStateChangeLog).toBe(true);
+    expect(proof.hasFailureOrDeclineLog).toBe(true);
+    expect(proof.hasPayloadLeak).toBe(false);
+    expect(proof.grep).toContain(`assetUal=${ASSET_UAL}`);
+    expect(proof.grep).toContain('localPeerId=12D3KooWKaLifecycleReceiver');
+    expect(proof.grep).not.toContain('raw proof payload');
+    expect(proof.grep).not.toContain(`${ASSET_UAL}-other`);
   });
 
   it('keeps Sender Key v1 cryptographic binding compatible when assetUal is carried for logs', () => {
