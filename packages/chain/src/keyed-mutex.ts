@@ -41,6 +41,11 @@ export class KeyedSerializer {
     return result;
   }
 
+  /** True while `key` has an in-flight or queued operation. */
+  isActive(key: string): boolean {
+    return this.tails.has(key);
+  }
+
   /** Number of keys with an in-flight or queued operation. */
   get activeKeyCount(): number {
     return this.tails.size;

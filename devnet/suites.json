@@ -33,6 +33,7 @@
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",
+    "v10-rs-wallet-rotation",
     "v10-stress"
   ]
 }
