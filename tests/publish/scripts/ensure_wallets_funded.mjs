@@ -1,29 +1,56 @@
-// Pre-test funding gate (Base Sepolia): check ETH + TRAC on the publish
-// wallets; if any is low, call the team faucet, wait, re-check. Exit 0 only
-// when every wallet is funded — the Jenkins test stages run after this.
-const WALLETS = (process.env.V10_TESTNET_WALLETS || '0x457759127Ff49F1668141FD69E16277560bF20Aa,0xb1D15B17e6766e05A4f583ccE92B357f96015737,0x92c6db7e977F782101d794A7e1222acc95630617').split(',');
+// Pre-test funding gate (Base Sepolia). Discovers EVERY operational wallet
+// from each test node's own /api/wallets (nodes rotate signers across their
+// whole pool — funding only known wallets leaves rotation landing on drained
+// pool-mates, the exact mainnet insufficient-funds bug). Falls back to the
+// static list when a node is unreachable. Low wallets → faucet → re-check.
+const NODES = [
+  { name: 'TestNode1', url: process.env.TESTNET1_API_URL || 'http://100.99.142.87:9200',  token: process.env.V10_TOKEN_TESTNET1 },
+  { name: 'TestNode2', url: process.env.TESTNET2_API_URL || 'http://100.70.65.41:9200',   token: process.env.V10_TOKEN_TESTNET2 },
+  { name: 'TestNode4', url: process.env.TESTNET4_API_URL || 'http://100.65.228.120:9200', token: process.env.V10_TOKEN_TESTNET4 },
+];
+const FALLBACK = (process.env.V10_TESTNET_WALLETS || '0x457759127Ff49F1668141FD69E16277560bF20Aa,0xb1D15B17e6766e05A4f583ccE92B357f96015737,0x92c6db7e977F782101d794A7e1222acc95630617').split(',');
 const RPC = process.env.V10_TESTNET_RPC || 'https://base-sepolia-rpc.publicnode.com';
 const TRAC = process.env.V10_TESTNET_TRAC || '0x2A58BdD13176D85906D804cdbFFA0D9119282DC8';
-const MIN_ETH = BigInt(process.env.V10_MIN_ETH_WEI || 5e14);   // 0.0005 ETH
-const MIN_TRAC = BigInt(process.env.V10_MIN_TRAC_WEI || 100n * 10n ** 18n); // 100 TRAC
+const MIN_ETH = BigInt(process.env.V10_MIN_ETH_WEI || 5e14);
+const MIN_TRAC = BigInt(process.env.V10_MIN_TRAC_WEI || 100n * 10n ** 18n);
 const FAUCET = 'https://euphoria.origin-trail.network/faucet/fund';
+
+// pull every 0x-address out of any /api/wallets response shape
+const extractAddrs = (x, out = new Set()) => {
+  if (typeof x === 'string') { const m = x.match(/^0x[0-9a-fA-F]{40}$/); if (m) out.add(x); }
+  else if (Array.isArray(x)) x.forEach((v) => extractAddrs(v, out));
+  else if (x && typeof x === 'object') Object.values(x).forEach((v) => extractAddrs(v, out));
+  return out;
+};
+
+const wallets = new Set();
+for (const n of NODES) {
+  try {
+    const r = await fetch(`${n.url}/api/wallets`, { headers: n.token ? { Authorization: `Bearer ${n.token}` } : {}, signal: AbortSignal.timeout(15000) });
+    const found = [...extractAddrs(await r.json())];
+    found.forEach((a) => wallets.add(a));
+    console.log(`${n.name}: discovered ${found.length} wallet(s) from /api/wallets`);
+  } catch (e) {
+    console.log(`${n.name}: /api/wallets unreachable (${String(e.message).slice(0, 60)}) — using fallback list`);
+  }
+}
+if (wallets.size === 0) FALLBACK.forEach((a) => wallets.add(a));
+else FALLBACK.forEach((a) => wallets.add(a)); // union: never lose the known ones
+console.log(`Checking ${wallets.size} wallet(s) total\n`);
 
 const rpc = async (method, params) => {
   const r = await fetch(RPC, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
   return BigInt((await r.json()).result ?? '0x0');
 };
-const balances = async (w) => ({
-  eth: await rpc('eth_getBalance', [w, 'latest']),
-  trac: await rpc('eth_call', [{ to: TRAC, data: '0x70a08231' + w.slice(2).toLowerCase().padStart(64, '0') }, 'latest']),
-});
 const fmt = (v) => (Number(v) / 1e18).toFixed(4);
 const check = async () => {
   const low = [];
-  for (const w of WALLETS) {
-    const b = await balances(w);
-    const ok = b.eth >= MIN_ETH && b.trac >= MIN_TRAC;
-    console.log(`${w}: ${fmt(b.eth)} ETH, ${fmt(b.trac)} TRAC ${ok ? '✅' : '❌ LOW'}`);
+  for (const w of wallets) {
+    const eth = await rpc('eth_getBalance', [w, 'latest']);
+    const trac = await rpc('eth_call', [{ to: TRAC, data: '0x70a08231' + w.slice(2).toLowerCase().padStart(64, '0') }, 'latest']);
+    const ok = eth >= MIN_ETH && trac >= MIN_TRAC;
+    console.log(`${w}: ${fmt(eth)} ETH, ${fmt(trac)} TRAC ${ok ? '✅' : '❌ LOW'}`);
     if (!ok) low.push(w);
   }
   return low;
@@ -35,10 +62,9 @@ if (low.length) {
   const r = await fetch(FAUCET, { method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `v10-fund-${Date.now()}` },
     body: JSON.stringify({ mode: 'v10_base_sepolia', wallets: low }) });
-  const res = await r.json().catch(() => ({}));
-  console.log(`Faucet: ${JSON.stringify(res.summary || res).slice(0, 200)}`);
-  await new Promise((r) => setTimeout(r, 30000)); // let txs mine
+  console.log(`Faucet: ${JSON.stringify((await r.json().catch(() => ({}))).summary || {}).slice(0, 150)}`);
+  await new Promise((r) => setTimeout(r, 30000));
   low = await check();
 }
-if (low.length) { console.error(`\n❌ Still underfunded after faucet: ${low.join(', ')}`); process.exit(1); }
+if (low.length) { console.error(`\n❌ Still underfunded: ${low.join(', ')}`); process.exit(1); }
 console.log('\n✅ All wallets funded — tests may start.');
