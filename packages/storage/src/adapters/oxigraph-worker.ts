@@ -632,7 +632,9 @@ export class OxigraphWorkerStore implements TripleStore {
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
-  async hasGraph(graphUri: string): Promise<boolean> { return this.call('hasGraph', graphUri); }
+  async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
+    return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
+  }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> { return this.call('dropGraph', graphUri); }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

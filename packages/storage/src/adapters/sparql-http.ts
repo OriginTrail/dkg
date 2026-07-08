@@ -437,10 +437,10 @@ export class SparqlHttpStore implements TripleStore {
     return { type: 'quads', quads };
   }
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     const r = await this.query(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
-      { source: 'sparql-http.hasGraph' },
+      { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
     );
     return r.type === 'boolean' && r.value;
   }

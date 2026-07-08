@@ -52,4 +52,23 @@ describe('StorePriorityScheduler', () => {
       'background-2:start',
     ]);
   });
+
+  it('releases an inflight slot when work throws synchronously', async () => {
+    const scheduler = new StorePriorityScheduler(1, 0);
+    const boom = () => {
+      throw new Error('sync boom');
+    };
+
+    await expect(
+      scheduler.run('ack', 'storage-ack.sync-throw', boom as unknown as () => Promise<string>),
+    ).rejects.toThrow('sync boom');
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 0,
+      ackQueued: 0,
+    });
+
+    await expect(
+      scheduler.run('ack', 'storage-ack.after-throw', async () => 'ok'),
+    ).resolves.toBe('ok');
+  });
 });

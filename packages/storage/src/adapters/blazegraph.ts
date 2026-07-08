@@ -146,8 +146,12 @@ export class BlazegraphStore implements TripleStore {
    * delete with two full-graph `countQuads` scans (see above), which is
    * prohibitive on a CPU-pegged core.
    */
-  async update(sparql: string): Promise<void> {
-    await this.sparqlUpdate(sparql);
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
+    await this.sparqlUpdate(
+      sparql,
+      { ...options, source: options?.source ?? 'blazegraph.update' },
+      'update',
+    );
   }
 
   // -------------------------------------------------------------------
@@ -233,9 +237,10 @@ export class BlazegraphStore implements TripleStore {
   // Graph management
   // -------------------------------------------------------------------
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     const r = await this.query(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
+      { ...options, source: options?.source ?? 'blazegraph.hasGraph' },
     );
     return r.type === 'boolean' && r.value;
   }

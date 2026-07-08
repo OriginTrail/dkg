@@ -260,7 +260,12 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     setFetch(async () => new Response(null, { status: 200 }));
     const s = new BlazegraphStore(baseUrl);
     const sparql = 'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }';
-    await s.update(sparql);
+    const controller = new AbortController();
+    await s.update(sparql, {
+      priority: 'ack',
+      source: 'test.blazegraph.update',
+      signal: controller.signal,
+    });
     // Exactly one HTTP call — the count-free contract: no before/after countQuads
     // (which would add SELECT COUNT round-trips, as deleteByPattern/prefix do).
     expect(fetchCalls).toHaveLength(1);
@@ -270,8 +275,23 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     // Direct POST: raw update body with application/sparql-update (not form-encoded).
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
     expect(String(init?.body)).toBe(sparql);
+    expect(init?.signal).toBe(controller.signal);
     expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
     expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
+  });
+
+  it('update honors pre-aborted options before dispatch', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    const controller = new AbortController();
+    controller.abort(new Error('cancel update'));
+
+    await expect(
+      s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }', {
+        priority: 'ack',
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow('cancel update');
+    expect(fetchCalls).toHaveLength(0);
   });
 
   it('update throws on non-OK response', async () => {

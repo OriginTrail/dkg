@@ -156,7 +156,14 @@ export class StorePriorityScheduler {
     this.observeQueueWait(entry, waitMs);
     this.observeDepths();
 
-    entry.work()
+    let result: Promise<unknown>;
+    try {
+      result = entry.work();
+    } catch (err) {
+      result = Promise.reject(err);
+    }
+
+    result
       .then((value) => {
         this.observeDuration(entry, startedAt, 'ok');
         entry.resolve(value);

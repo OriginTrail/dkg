@@ -19,7 +19,7 @@ import {
   TypedEventBus,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 // 2026-07-07 Gnosis mainnet dead-air fix, SLOW-store variant. The existing
@@ -220,6 +220,35 @@ describe('StorageACKHandler — ack-handler deadline (slow-store dead-air fix)',
     expect(onDecline.mock.calls[0]?.[0].message).toContain(
       'ackInflight=2 ackQueued=5 normalQueued=6 backgroundQueued=7',
     );
+  });
+
+  it('aborts in-flight ACK store work when the deadline wins', async () => {
+    const onDecline = vi.fn();
+    let seenSignal: AbortSignal | undefined;
+    let abortMessage = '';
+    const store: TripleStore = {
+      ...nonExternalHangingStore(),
+      query: (_sparql: string, options?: QueryOptions) => new Promise<never>((_resolve, reject) => {
+        expect(options?.priority).toBe('ack');
+        seenSignal = options?.signal;
+        options?.signal?.addEventListener('abort', () => {
+          const reason = options.signal?.reason;
+          abortMessage = reason instanceof Error ? reason.message : String(reason ?? '');
+          reject(reason instanceof Error ? reason : new Error(abortMessage));
+        }, { once: true });
+      }),
+    };
+    const handler = await createHandler(store, { onDecline, ackHandlerDeadlineMs: 50 });
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(seenSignal?.aborted).toBe(true);
+    expect(abortMessage).toContain('ACK handler exceeded 50ms');
+    expect(onDecline).toHaveBeenCalledOnce();
   });
 
   it('a healthy fast handler is unaffected by the deadline (returns its real reply)', async () => {

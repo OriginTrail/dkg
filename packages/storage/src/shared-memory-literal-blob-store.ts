@@ -110,8 +110,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }
 
-  async hasGraph(graphUri: string): Promise<boolean> {
-    return this.inner.hasGraph(graphUri);
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    return this.inner.hasGraph(graphUri, options);
   }
 
   async createGraph(graphUri: string): Promise<void> {

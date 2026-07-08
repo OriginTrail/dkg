@@ -89,7 +89,7 @@ export interface TripleStore {
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
 
-  hasGraph(graphUri: string): Promise<boolean>;
+  hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
