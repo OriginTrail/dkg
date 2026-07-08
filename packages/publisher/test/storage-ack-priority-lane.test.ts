@@ -35,6 +35,12 @@ const swmQuads: Quad[] = [
 const merkleRoot = computeFlatKCRoot(swmQuads, []);
 const swmMerkleLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
 
+function quadsToNQuads(quads: Quad[]): string {
+  return quads
+    .map((q) => `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`)
+    .join('\n');
+}
+
 function publishIntent(): Uint8Array {
   return encodePublishIntent({
     merkleRoot,
@@ -50,9 +56,34 @@ function publishIntent(): Uint8Array {
   });
 }
 
+function inlineStagingPublishIntent(): Uint8Array {
+  const stagingQuads = new TextEncoder().encode(quadsToNQuads(swmQuads));
+  return encodePublishIntent({
+    merkleRoot,
+    contextGraphId,
+    publisherPeerId: 'publisher-0',
+    publicByteSize: stagingQuads.length,
+    isPrivate: false,
+    kaCount: 1,
+    rootEntities: ['urn:entity:1'],
+    epochs: 1,
+    tokenAmountStr: '1000',
+    merkleLeafCount: swmMerkleLeafCount,
+    stagingQuads,
+  });
+}
+
+type RecordedStoreCall = {
+  op: string;
+  priority: QueryOptions['priority'] | undefined;
+  source: string | undefined;
+  signal: AbortSignal | undefined;
+};
+
 class PriorityLaneStore implements TripleStore {
   readonly queryCancellation = 'interruptible' as const;
   ackQueries = 0;
+  readonly writeCalls: RecordedStoreCall[] = [];
   private releaseBackground!: () => void;
   readonly backgroundGate = new Promise<void>((resolve) => {
     this.releaseBackground = resolve;
@@ -96,13 +127,56 @@ class PriorityLaneStore implements TripleStore {
     }, options?.signal);
   }
 
-  async insert(): Promise<void> {}
-  async delete(): Promise<void> {}
-  async deleteByPattern(): Promise<number> { return 0; }
+  private recordWrite(op: string, options?: QueryOptions): void {
+    this.writeCalls.push({
+      op,
+      priority: options?.priority,
+      source: options?.source,
+      signal: options?.signal,
+    });
+  }
+
+  async insert(_quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.insert', async () => {
+      this.recordWrite('insert', options);
+    }, options?.signal);
+  }
+
+  async delete(_quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.delete', async () => {
+      this.recordWrite('delete', options);
+    }, options?.signal);
+  }
+
+  async deleteByPattern(_pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.deleteByPattern', async () => {
+      this.recordWrite('deleteByPattern', options);
+      return 0;
+    }, options?.signal);
+  }
+
   async hasGraph(): Promise<boolean> { return false; }
   async createGraph(): Promise<void> {}
-  async dropGraph(): Promise<void> {}
-  async deleteBySubjectPrefix(): Promise<number> { return 0; }
+
+  async dropGraph(_graphUri: string, options?: QueryOptions): Promise<void> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.dropGraph', async () => {
+      this.recordWrite('dropGraph', options);
+    }, options?.signal);
+  }
+
+  async deleteBySubjectPrefix(_graphUri: string, _prefix: string, options?: QueryOptions): Promise<number> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.deleteBySubjectPrefix', async () => {
+      this.recordWrite('deleteBySubjectPrefix', options);
+      return 0;
+    }, options?.signal);
+  }
+
+  async flush(options?: QueryOptions): Promise<void> {
+    return this.scheduler.run(options?.priority, options?.source ?? 'test.flush', async () => {
+      this.recordWrite('flush', options);
+    }, options?.signal);
+  }
+
   async close(): Promise<void> {}
 }
 
@@ -177,5 +251,29 @@ describe('StorageACKHandler priority store lane', () => {
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
     expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
     expect(onDecline).toHaveBeenCalledOnce();
+  });
+
+  it('passes ACK priority options through inline staging writes and flushes', async () => {
+    const scheduler = new StorePriorityScheduler(2, 1);
+    const events: string[] = [];
+    const store = new PriorityLaneStore(scheduler, events);
+    const handler = createHandler(store, { ackHandlerDeadlineMs: 1_000 });
+
+    const response = await handler.handler(inlineStagingPublishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(false);
+    expect(store.ackQueries).toBe(0);
+    expect(store.writeCalls.map((call) => call.source)).toEqual([
+      'storage-ack.persistStaging.dropGraph',
+      'storage-ack.persistStaging.insert',
+      'storage-ack.persistStaging.flush',
+    ]);
+    expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
+
+    const signals = store.writeCalls.map((call) => call.signal);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    expect(new Set(signals).size).toBe(1);
+    expect(signals[0]?.aborted).toBe(false);
   });
 });
