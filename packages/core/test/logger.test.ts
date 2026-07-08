@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import {
   Logger,
+  KA_LIFECYCLE_ROLES,
+  KA_LIFECYCLE_STAGES,
   createOperationContext,
   logKaLifecycleEvent,
   type LogSink,
@@ -245,6 +247,46 @@ describe('KA lifecycle logging', () => {
     expect(message).toContain('privatePayloadSnippet=[REDACTED]');
     expect(message).toContain('peerDetail=');
     expect(message.length).toBeLessThan(700);
+  });
+
+  it('supports the agreed lifecycle stage and role tokens', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    expect(KA_LIFECYCLE_STAGES).toEqual([
+      'identity',
+      'wm',
+      'swm_share',
+      'sender_key',
+      'storage_ack',
+      'chain',
+      'vm',
+      'finalization',
+      'sync',
+      'reconcile',
+    ]);
+    expect(KA_LIFECYCLE_ROLES).toEqual(['publisher', 'receiver', 'sync']);
+
+    const log = new Logger('KALifecycle');
+    captureStdout(() => {
+      for (const stage of KA_LIFECYCLE_STAGES) {
+        logKaLifecycleEvent(log, { operationId: `op-${stage}`, operationName: 'publish' }, {
+          assetUal: `did:dkg:otp:2043/0xasset/${stage}`,
+          stage,
+          event: `${stage}.progress`,
+          role: 'sync',
+          localPeerId: '12D3KooWLocalPeerFullIdentifier',
+          localNodeIdentityId: 'node-identity-local-full',
+        });
+      }
+    });
+
+    expect(entries.map((entry) => entry.message)).toEqual(
+      KA_LIFECYCLE_STAGES.map((stage) =>
+        expect.stringContaining(`stage=${stage}`),
+      ),
+    );
+    expect(entries.every((entry) => entry.message.includes('role=sync'))).toBe(true);
   });
 });
 
