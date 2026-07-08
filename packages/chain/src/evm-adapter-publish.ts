@@ -834,7 +834,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       signer,
       'update',
       params.onBroadcast,
-      async () => {
+      async (ctx) => {
         // #953: approve INSIDE the per-wallet lock (it sends its own tx on
         // `signer`) so a concurrent same-wallet update/publish can't race on
         // the approve nonce.
@@ -843,6 +843,8 @@ export class PublishMethods extends EVMChainAdapterBase {
           kav10Address,
           newTokenAmount,
           'approve V10 update TRAC',
+          false,
+          ctx.sendContractTransaction,
         );
         return this.populateAndSignV10WithAllowanceRecovery(
           signer,
@@ -852,6 +854,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           kav10Address,
           newTokenAmount,
           'approve V10 update TRAC (forced re-approve, #888)',
+          ctx.sendContractTransaction,
         );
       },
       (preBroadcastTxHash) => {

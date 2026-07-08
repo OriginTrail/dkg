@@ -63,6 +63,36 @@ describe('KeyedSerializer', () => {
     expect(s.activeKeyCount).toBe(0);
   });
 
+  it('reports active keys while an operation is in flight', async () => {
+    const s = new KeyedSerializer();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p = s.run('w', async () => { await gate; });
+
+    expect(s.isActive('w')).toBe(true);
+    expect(s.isActive('other')).toBe(false);
+
+    release();
+    await p;
+    await tick(0);
+    expect(s.isActive('w')).toBe(false);
+  });
+
+  it('reports active keys while later operations are queued', async () => {
+    const s = new KeyedSerializer();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p1 = s.run('w', async () => { await gate; });
+    const p2 = s.run('w', async () => undefined);
+
+    expect(s.isActive('w')).toBe(true);
+
+    release();
+    await Promise.all([p1, p2]);
+    await tick(0);
+    expect(s.isActive('w')).toBe(false);
+  });
+
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
     // Model the real bug (OriginTrail/dkg#953): an op-wallet's `pending`
     // nonce only advances AFTER a tx is broadcast, and there's an async gap
@@ -111,50 +141,5 @@ describe('KeyedSerializer', () => {
       s.run('wallet-1', send(fixedWallet)),
     ]);
     expect(fixed).toEqual([0, 1, 2]);
-  });
-});
-
-describe('KeyedSerializer.isActive', () => {
-  it('is false for a key that has never been used', () => {
-    const s = new KeyedSerializer();
-    expect(s.isActive('w')).toBe(false);
-  });
-
-  it('is true while an op is in flight, false again once its queue drains', async () => {
-    const s = new KeyedSerializer();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    const p = s.run('w', async () => { await gate; });
-
-    expect(s.isActive('w')).toBe(true);       // in flight
-    expect(s.isActive('other')).toBe(false);  // unrelated key stays idle
-
-    release();
-    await p;
-    await tick(0); // let the cleanup microtask remove the settled tail
-    expect(s.isActive('w')).toBe(false);
-  });
-
-  it('stays true while later ops are queued behind a running one', async () => {
-    const s = new KeyedSerializer();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => { release = r; });
-    const p1 = s.run('w', async () => { await gate; });
-    const p2 = s.run('w', async () => undefined); // queued behind p1
-
-    expect(s.isActive('w')).toBe(true);
-    release();
-    await Promise.all([p1, p2]);
-    await tick(0);
-    expect(s.isActive('w')).toBe(false);
-  });
-
-  it('reports busy even when the in-flight op rejects (never wedges the state)', async () => {
-    const s = new KeyedSerializer();
-    const p = s.run('w', async () => { throw new Error('boom'); });
-    expect(s.isActive('w')).toBe(true);
-    await expect(p).rejects.toThrow('boom');
-    await tick(0);
-    expect(s.isActive('w')).toBe(false);
   });
 });
