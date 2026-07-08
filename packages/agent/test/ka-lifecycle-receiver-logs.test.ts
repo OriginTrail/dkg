@@ -1056,6 +1056,80 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('result=reconciled'));
   });
 
+  it('logs chain reconcile active fetch decisions by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const internals = agent as unknown as {
+      chain: MockChainAdapter & {
+        getContextGraphKCAt?: (onChainCgId: bigint, ordinal: bigint) => Promise<bigint>;
+        getDKGKnowledgeAssetsAddress?: () => Promise<string>;
+        getLatestMerkleRoot?: (kaId: bigint) => Promise<Uint8Array>;
+        getLatestMerkleRootPublisher?: (kaId: bigint) => Promise<string>;
+      };
+      getOrCreateFinalizationHandler(): {
+        handleChainReconciledKC(): Promise<'no-swm'>;
+      };
+      collectVmReconcileSwmCandidateState(localCgId: string): Promise<{
+        swmGen: string;
+        candidateNamespaces: string[];
+        peerTopologyKey: string;
+      }>;
+      syncContextGraphFromConnectedPeers(localCgId: string, options?: unknown): Promise<{
+        connectedPeers: number;
+        totalPeers: number;
+        syncCapablePeers: number;
+        peersTried: number;
+        peersSucceeded: number;
+        sharedMemorySynced: number;
+        diagnostics: { sharedMemory: { emptyResponses: number } };
+      }>;
+      reconcileChainOrdinal(
+        localCgId: string,
+        onChainCgId: bigint,
+        ordinal: number,
+        headBlock: number | undefined,
+      ): Promise<unknown>;
+    };
+    internals.chain.getContextGraphKCAt = async () => 7n;
+    internals.chain.getDKGKnowledgeAssetsAddress = async () => AUTHOR_AGENT_ADDRESS;
+    internals.chain.getLatestMerkleRoot = async () => new Uint8Array(32);
+    internals.chain.getLatestMerkleRootPublisher = async () => AUTHOR_AGENT_ADDRESS;
+    const expectedUal = buildKnowledgeAssetUal(internals.chain.chainId, AUTHOR_AGENT_ADDRESS, 7n);
+    internals.getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: async () => 'no-swm',
+    });
+    internals.collectVmReconcileSwmCandidateState = async () => ({
+      swmGen: 'empty:0',
+      candidateNamespaces: [],
+      peerTopologyKey: '',
+    });
+    internals.syncContextGraphFromConnectedPeers = async () => ({
+      connectedPeers: 1,
+      totalPeers: 1,
+      syncCapablePeers: 1,
+      peersTried: 1,
+      peersSucceeded: 0,
+      sharedMemorySynced: 0,
+      diagnostics: { sharedMemory: { emptyResponses: 1 } },
+    });
+    const entries = captureLogs();
+
+    try {
+      await internals.reconcileChainOrdinal(CONTEXT_GRAPH_ID, 77n, 0, 12);
+    } finally {
+      await agent.stop().catch(() => undefined);
+    }
+
+    const messages = reconcileLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${expectedUal}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=reconcile_fetch'));
+    expect(messages).toContainEqual(expect.stringContaining('action=fetch'));
+    expect(messages).toContainEqual(expect.stringContaining('result=started'));
+    expect(messages).toContainEqual(expect.stringContaining(`contextGraphId=${CONTEXT_GRAPH_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('onChainCgId=77'));
+    expect(messages).toContainEqual(expect.stringContaining('ordinal=0'));
+    expect(messages).toContainEqual(expect.stringContaining('kaId=7'));
+  });
+
   it('logs durable sync receive and apply by assetUal', async () => {
     const agent = await createReceiverAgent();
     const publishedMeta = {
