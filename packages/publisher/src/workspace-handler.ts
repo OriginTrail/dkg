@@ -1191,7 +1191,21 @@ export class SharedMemoryHandler {
           { allowUpsert: true, upsertableEntities: upsertable },
         );
         if (!validation.valid) {
-          this.log.warn(ctx, `SWM validation rejected: ${validation.errors.join('; ')}`);
+          const reason = validation.errors.join('; ');
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          this.logSwmLifecycleEvent(ctx, 'swm_validation_failed', {
+            assetUal,
+            contextGraphId,
+            shareOperationId,
+            publisherPeerId,
+            fromPeerId,
+            subGraphName,
+            rootEntityCount: manifestForValidation.length,
+            outcome: 'rejected',
+            retryable: false,
+            reason,
+            validationErrorCount: validation.errors.length,
+          }, 'warn');
           withWriteLocksRejection = 'validation';
           return false;
         }
