@@ -479,6 +479,19 @@ export function isPublicLikeAddress(addr: string): boolean {
   return false;
 }
 
+/**
+ * True when the node advertises at least one DIRECT (non-circuit) public
+ * self-address — i.e. peers can dial it without a relay hop. Such a node does
+ * not need client-side circuit reservations, so the relay watchdog must not
+ * `close()` + redial relay-target connections trying to force one it will
+ * never obtain (the 2026-07-07 Gnosis mainnet ACK-stream churn). A `/p2p-circuit`
+ * self-address is proof of the OPPOSITE — reachability THROUGH a relay — so it
+ * is explicitly excluded here.
+ */
+export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolean {
+  return selfAddrs.some((a) => !a.includes('/p2p-circuit') && isPublicLikeAddress(a));
+}
+
 export class DKGNode {
   private node: Libp2p<DKGServices> | null = null;
   private readonly config: DKGNodeConfig;
@@ -1189,6 +1202,24 @@ export class DKGNode {
     // hint stays accurate within a single iteration.
     let circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
     let haveAnyReservation = circuitSelfAddrs.length > 0;
+    // A publicly-reachable node — one advertising a direct, non-circuit
+    // public self-address (e.g. a Core Node on a public IP) — does not need
+    // client-side circuit reservations at all: peers dial it directly. On
+    // such a node libp2p never forms a `/p2p-circuit` self-addr, so
+    // `haveAnyReservation` stays false forever and the reservation-recovery
+    // branch below would `close()` + redial every relay-target connection on
+    // each grace-window expiry — permanent churn against the very sibling
+    // cores that StorageACK streams run over. (2026-07-07 Gnosis mainnet: the
+    // watchdog dropping 61u7AUrG/Xw8orCA1 aborted in-flight ACK streams →
+    // empty replies the publisher mislabeled as INVALID_SIGNATURE.) When the
+    // node is publicly reachable we treat every relay's reservation gate as
+    // satisfied and skip the forced drop+redial; the benign
+    // reconnect-on-disconnect path below still keeps relay connections alive
+    // for NAT'd peers that reach us over a hop. Snapshotted once per tick —
+    // a node's public-ness doesn't change mid-tick.
+    const nodeIsPubliclyReachable = nodeHasDirectPublicAddress(
+      node.getMultiaddrs().map((ma) => ma.toString()),
+    );
     // Distinct count of CONFIGURED relays that currently hold a
     // reservation. This is the "do we have enough reservations?"
     // signal — not "does every peer hold one?". Recomputed alongside
@@ -1257,6 +1288,7 @@ export class DKGNode {
       // target > current is still detected and recovered) without
       // demanding 100% coverage when target < relayPeers.length.
       const reservationGateSatisfied =
+        nodeIsPubliclyReachable ||
         thisRelayHasReservation ||
         reservedRelayCount >= this.relayReservationCountTarget;
       if (transportUp && reservationGateSatisfied) {

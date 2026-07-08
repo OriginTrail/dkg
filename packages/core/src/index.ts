@@ -54,6 +54,7 @@ export {
   // entries from the phonebook).
   isPublicLikeAddress,
   isLocalOrInternalHostname,
+  nodeHasDirectPublicAddress,
 } from './node.js';
 // NOTE: `isFinitePositiveInteger`, `buildPeerStoreOverrides`, and
 // `buildKadDHTOptions` are intentionally NOT re-exported. They are
