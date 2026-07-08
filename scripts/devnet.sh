@@ -639,14 +639,35 @@ EOCONF
 DEVNET_VERSION_LAYOUT="${DEVNET_VERSION_LAYOUT:-}"
 DEVNET_VERSIONS_DIR="${DEVNET_VERSIONS_DIR:-$REPO_ROOT/.devnet-versions}"
 
-# Latest release tag (vMAJOR.MINOR.PATCH), or DEVNET_PREV_VERSION if set.
+# Latest release tag (vMAJOR.MINOR.PATCH) STRICTLY BELOW the current workspace
+# version, or DEVNET_PREV_VERSION if set. 'prev' must never resolve to the
+# CURRENT version: right after a release the newest tag equals the workspace
+# version (v10.0.3 tag while package.json says 10.0.3), and a prev==current
+# layout silently builds a single-version devnet whose mixed-version suite
+# self-skips — a falsely green lane. Echoes nothing when no older tag exists
+# (callers guard on empty and point at DEVNET_PREV_VERSION).
 resolve_prev_version() {
   if [ -n "${DEVNET_PREV_VERSION:-}" ]; then
     echo "$DEVNET_PREV_VERSION"
     return 0
   fi
-  git -C "$REPO_ROOT" tag --sort=-v:refname 2>/dev/null \
-    | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+  local current tag bare
+  current="$(node -p "require('$REPO_ROOT/package.json').version" 2>/dev/null || true)"
+  for tag in $(git -C "$REPO_ROOT" tag --sort=-v:refname 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+    if [ -z "$current" ]; then
+      # Workspace version unreadable — degrade to the newest tag (legacy behavior).
+      echo "$tag"
+      return 0
+    fi
+    bare="${tag#v}"
+    if [ "$bare" = "$current" ]; then continue; fi
+    if [ "$(printf '%s\n%s\n' "$bare" "$current" | sort -V | head -1)" = "$bare" ]; then
+      echo "$tag" # newest-first scan → first tag strictly below current
+      return 0
+    fi
+  done
+  echo "[devnet] resolve_prev_version: no release tag strictly below current version ${current:-unknown}; set DEVNET_PREV_VERSION explicitly" >&2
+  return 0
 }
 
 # Map a version REF to its cli.js entry point. current/empty -> the repo build.
