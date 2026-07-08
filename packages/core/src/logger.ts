@@ -32,14 +32,33 @@ export type LogSink = (entry: LogRecord) => void;
 
 export type KaLifecycleLogLevel = 'info' | 'warn' | 'error';
 
+export const KA_LIFECYCLE_STAGES = [
+  'identity',
+  'wm',
+  'swm_share',
+  'sender_key',
+  'storage_ack',
+  'chain',
+  'vm',
+  'finalization',
+  'sync',
+  'reconcile',
+] as const;
+
+export type KaLifecycleStage = typeof KA_LIFECYCLE_STAGES[number];
+
+export const KA_LIFECYCLE_ROLES = ['publisher', 'receiver', 'sync'] as const;
+
+export type KaLifecycleRole = typeof KA_LIFECYCLE_ROLES[number];
+
 export type KaLifecycleMetadataValue = string | number | boolean | null | undefined;
 
 export interface KaLifecycleLogEvent {
   level?: KaLifecycleLogLevel;
   assetUal: string;
-  stage: string;
+  stage: KaLifecycleStage;
   event: string;
-  role: string;
+  role: KaLifecycleRole;
   localPeerId: string;
   localNodeIdentityId: string;
   peer?: string;
