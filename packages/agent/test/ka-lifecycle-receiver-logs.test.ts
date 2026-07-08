@@ -14,6 +14,7 @@ import {
   contextGraphMetaUri,
   contextGraphWorkspaceGraphUri,
   decodeSwmSenderKeyPackageAck,
+  decodeStorageACK,
   decodeSwmSenderKeyMessage,
   encodeFinalizationMessage,
   encodePublishIntent,
@@ -24,7 +25,7 @@ import {
   generateSwmSenderChainKey,
   generateSwmSenderEpochId,
   generateWorkspaceRecipientEncryptionKey,
-  logKaLifecycleEvent,
+  isStorageACKDecline,
   type FinalizationMessageMsg,
   type LogRecord,
   type OperationContext,
@@ -33,15 +34,20 @@ import {
   type SwmSenderKeyPackageAADFields,
   type SwmSenderKeyPackageMsg,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   SharedMemoryHandler,
   StorageACKHandler,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
+  type V10ACKProviderParams,
+  type V10CoreNodeACK,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { DKGAgent } from '../src/index.js';
+import { makeTestKaAllocator } from '../../publisher/test/_helpers/ka-allocator.js';
+import { mockSealCtx, wrapPublisherForTest } from '../../publisher/test/_helpers/seal.js';
 
 const LOCAL_PEER_ID = '12D3KooWKaLifecycleReceiver';
 const PUBLISHER_PEER_ID = '12D3KooWPublisherPeer';
@@ -49,6 +55,8 @@ const AUTHOR_AGENT_ADDRESS = '0x000000000000000000000000000000000000c10A';
 const CONTEXT_GRAPH_ID = 'ka-lifecycle-cg';
 const ROOT_ENTITY = 'http://example.org/ka-lifecycle/root';
 const ASSET_UAL = 'did:dkg:evm:31337/0x000000000000000000000000000000000000c10a/7';
+const CONNECTED_CONTEXT_GRAPH_ID = '42';
+const PUBLISHER_PRIVATE_KEY = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 
 async function createReceiverAgent(): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
@@ -117,6 +125,19 @@ function syncLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
     entry.message.includes('ka_lifecycle') &&
     entry.message.includes('stage=sync')
   ));
+}
+
+function publishQuad(contextGraphId: string, subject: string, predicate: string, object: string): Quad {
+  return {
+    subject,
+    predicate,
+    object,
+    graph: `did:dkg:context-graph:${contextGraphId}`,
+  };
+}
+
+function bytes(value: Uint8Array | number[] | undefined): Uint8Array {
+  return value instanceof Uint8Array ? value : new Uint8Array(value ?? []);
 }
 
 async function insertAgentGate(
@@ -242,7 +263,7 @@ describe('KA receiver lifecycle logs', () => {
     Logger.setSink(null);
   });
 
-  it('builds a grepable multi-node KA publish lifecycle proof by assetUal', async () => {
+  it('builds a grepable multi-node KA publish lifecycle proof from connected publisher and receiver paths by assetUal', async () => {
     const proofModule = await import('../src/ka-lifecycle-log-proof.js').catch(() => undefined);
     expect(proofModule).toBeDefined();
     if (!proofModule) return;
@@ -253,118 +274,262 @@ describe('KA receiver lifecycle logs', () => {
     ]);
 
     const entries = captureLogs();
-    const log = new Logger('KALifecycleProof');
-    const publisherCtx: OperationContext = { operationId: 'proof-publisher', operationName: 'publish' };
-    const receiverCtx: OperationContext = { operationId: 'proof-receiver', operationName: 'share' };
-    const syncCtx: OperationContext = { operationId: 'proof-sync', operationName: 'sync' };
-    const basePublisher = {
-      assetUal: ASSET_UAL,
-      role: 'publisher' as const,
-      localPeerId: PUBLISHER_PEER_ID,
-      localNodeIdentityId: 'publisher-node-identity',
-    };
-    const baseReceiver = {
-      assetUal: ASSET_UAL,
-      role: 'receiver' as const,
+    const author = new ethers.Wallet(PUBLISHER_PRIVATE_KEY);
+    const chain = new MockChainAdapter('mock:31337', author.address);
+    chain.seedIdentity(author.address, 7n);
+    chain.minimumRequiredSignatures = 1;
+    const receiverAckWallet = ethers.Wallet.createRandom();
+    const receiverStore = new OxigraphStore();
+    const receiverBus = new TypedEventBus();
+    let connectedAssetUal: string | undefined;
+    const receiverSwmHandler = new SharedMemoryHandler(receiverStore, receiverBus, {
+      assetUalForKaIdentity: async (_input: { agentAddress: string; kaNumber: string }) => {
+        if (!connectedAssetUal) throw new Error('connected ACK provider has not supplied assetUal');
+        return connectedAssetUal;
+      },
+      lifecycleLogOptions: {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+    const receiverAckHandler = new StorageACKHandler(receiverStore, {
+      nodeRole: 'core',
+      nodeIdentityId: 42n,
+      signerWallet: receiverAckWallet,
+      contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: await chain.getEvmChainId(),
+      kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
       localPeerId: LOCAL_PEER_ID,
-      localNodeIdentityId: '42',
-      peer: PUBLISHER_PEER_ID,
-      peerNodeIdentityId: 'publisher-node-identity',
+      ackHandlerDeadlineMs: 0,
+    } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], receiverBus);
+    const publisherStore = new OxigraphStore();
+    const publishQuads = [
+      publishQuad(
+        CONNECTED_CONTEXT_GRAPH_ID,
+        ROOT_ENTITY,
+        'http://schema.org/name',
+        '"Connected lifecycle proof"',
+      ),
+    ];
+    const connectedAckProvider = async (params: V10ACKProviderParams): Promise<V10CoreNodeACK[]> => {
+      if (!params.assetUal) throw new Error('connected ACK provider requires publisher assetUal');
+      connectedAssetUal = params.assetUal;
+      await receiverSwmHandler.handle(
+        encodeWorkspacePublishRequest({
+          shareOperationId: 'connected-share-op',
+          contextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
+          publisherPeerId: PUBLISHER_PEER_ID,
+          nquads: new TextEncoder().encode(
+            `<${ROOT_ENTITY}> <http://schema.org/name> "Connected lifecycle proof" .`,
+          ),
+          manifest: [{ rootEntity: ROOT_ENTITY }],
+          timestampMs: Date.now(),
+          agentAddress: author.address,
+          kaNumber: params.assetUal.slice(params.assetUal.lastIndexOf('/') + 1),
+        }),
+        PUBLISHER_PEER_ID,
+      );
+      const response = await receiverAckHandler.handler(
+        encodePublishIntent({
+          merkleRoot: params.merkleRoot,
+          contextGraphId: params.contextGraphId,
+          publisherPeerId: PUBLISHER_PEER_ID,
+          publicByteSize: params.publicByteSize,
+          isPrivate: false,
+          kaCount: params.kaCount,
+          rootEntities: params.rootEntities,
+          epochs: params.epochs,
+          tokenAmountStr: (params.tokenAmount ?? 0n).toString(),
+          merkleLeafCount: params.merkleLeafCount,
+          stagingQuads: params.stagingQuads,
+          swmGraphId: params.swmGraphId,
+          subGraphName: params.subGraphName,
+          assetUal: params.assetUal,
+        } as unknown as Parameters<typeof encodePublishIntent>[0]),
+        { toString: () => PUBLISHER_PEER_ID },
+      );
+      const ack = decodeStorageACK(response);
+      if (isStorageACKDecline(ack)) {
+        throw new Error(`receiver declined connected ACK: ${ack.declineCode}`);
+      }
+      return [{
+        peerId: LOCAL_PEER_ID,
+        signatureR: bytes(ack.coreNodeSignatureR),
+        signatureVS: bytes(ack.coreNodeSignatureVS),
+        nodeIdentityId: BigInt(ack.nodeIdentityId.toString()),
+      }];
     };
-    {
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        stage: 'identity',
-        event: 'asset_ual_allocated',
-      });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        stage: 'wm',
-        event: 'write',
-        metadata: { recordCount: 2 },
-      });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        stage: 'swm_share',
-        event: 'prepared',
-        metadata: {
-          rawTriples: '<urn:private> <urn:predicate> "raw proof payload" .',
-          shareOperationId: 'proof-share-op',
-        },
-      });
-      logKaLifecycleEvent(log, receiverCtx, {
-        ...baseReceiver,
-        stage: 'swm_share',
-        event: 'swm_update_received',
-        metadata: { shareOperationId: 'proof-share-op' },
-      });
-      logKaLifecycleEvent(log, receiverCtx, {
-        ...baseReceiver,
-        stage: 'swm_share',
-        event: 'swm_state_changed',
-        metadata: { outcome: 'applied', insertedCount: 2 },
-      });
-      logKaLifecycleEvent(log, receiverCtx, {
-        ...baseReceiver,
-        stage: 'storage_ack',
-        event: 'storage_ack_signed',
-        metadata: { outcome: 'success' },
-      });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        level: 'warn',
-        stage: 'storage_ack',
-        event: 'decline',
-        peer: LOCAL_PEER_ID,
-        peerNodeIdentityId: '42',
-        metadata: { outcome: 'decline', reason: 'NO_DATA_IN_SWM' },
-      });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        stage: 'chain',
-        event: 'confirm',
-        metadata: { txHash: '0xabc', kaId: '7' },
-      });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        stage: 'vm',
-        event: 'promote',
-        metadata: { outcome: 'confirmed' },
-      });
-      logKaLifecycleEvent(log, receiverCtx, {
-        ...baseReceiver,
-        stage: 'finalization',
-        event: 'finalization_applied',
-        metadata: { outcome: 'promoted' },
-      });
-      logKaLifecycleEvent(log, syncCtx, {
-        assetUal: ASSET_UAL,
-        stage: 'sync',
-        event: 'sync_apply',
-        role: 'sync',
+    const publisher = wrapPublisherForTest(new DKGPublisher({
+      store: publisherStore,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: PUBLISHER_PRIVATE_KEY,
+      publisherNodeIdentityId: 7n,
+      kaAllocator: makeTestKaAllocator(),
+    }), {
+      author,
+      ctx: mockSealCtx({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      }),
+      v10ACKProvider: connectedAckProvider,
+    });
+
+    const result = await publisher.publish({
+      contextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      quads: publishQuads,
+    });
+    expect(result.status).toBe('confirmed');
+    expect(result.onChainResult).toBeDefined();
+    const onChain = result.onChainResult!;
+
+    await receiverAckHandler.handler(
+      encodePublishIntent({
+        merkleRoot: new Uint8Array(32),
+        contextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
+        publisherPeerId: PUBLISHER_PEER_ID,
+        publicByteSize: 1024,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [`${ROOT_ENTITY}/missing`],
+        epochs: 1,
+        tokenAmountStr: '0',
+        merkleLeafCount: 1,
+        assetUal: result.ual,
+      } as unknown as Parameters<typeof encodePublishIntent>[0]),
+      { toString: () => PUBLISHER_PEER_ID },
+    );
+
+    const finalizationHandler = new FinalizationHandler(
+      receiverStore,
+      finalizationChainWithEvent({
+        txHash: onChain.txHash,
+        blockNumber: onChain.blockNumber,
+        merkleRoot: result.merkleRoot,
+        publisherAddress: author.address,
+        startKAId: onChain.startKAId ?? result.kaId,
+        endKAId: onChain.endKAId ?? result.kaId,
+      }) as any,
+      undefined,
+      undefined,
+      undefined,
+      {
         localPeerId: LOCAL_PEER_ID,
-        localNodeIdentityId: '42',
-        peer: PUBLISHER_PEER_ID,
-        metadata: { action: 'apply', result: 'inserted' },
+        localNodeIdentityId: 42n,
+      },
+    );
+    await finalizationHandler.handleFinalizationMessage(encodeFinalizationMessage({
+      ual: result.ual,
+      contextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
+      kcMerkleRoot: result.merkleRoot,
+      txHash: onChain.txHash,
+      blockNumber: onChain.blockNumber,
+      batchId: result.kaId,
+      startKAId: onChain.startKAId ?? result.kaId,
+      endKAId: onChain.endKAId ?? result.kaId,
+      publisherAddress: author.address,
+      rootEntities: [ROOT_ENTITY],
+      timestampMs: Date.now(),
+      operationId: 'connected-finalization-proof',
+      targetContextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
+    }), CONNECTED_CONTEXT_GRAPH_ID);
+
+    const syncAgent = await createReceiverAgent();
+    const reconcileAgent = await createReceiverAgent();
+    try {
+      const syncInternals = syncAgent as unknown as {
+        fetchSyncPages: () => Promise<{
+          quads: unknown[];
+          bytesReceived: number;
+          resumedFromOffset: number;
+          nextOffset: number;
+          checkpointKey: string;
+          completed: boolean;
+          timedOut: boolean;
+        }>;
+        processDurableBatchInWorker: () => Promise<{
+          verifiedData: Quad[];
+          verifiedMeta: Quad[];
+          totalFetchedDataQuads: number;
+          totalFetchedMetaQuads: number;
+          rejectedKcs: number;
+          emptyResponses: number;
+          metaOnlyResponses: number;
+          dataRejectedMissingMeta: number;
+        }>;
+        insertSyncedQuadsAndInvalidateListCache: (quads: unknown[]) => Promise<void>;
+        syncFromPeerDetailed(remotePeerId: string, contextGraphIds: string[]): Promise<unknown>;
+      };
+      const publishedMeta = {
+        subject: result.ual,
+        predicate: 'http://dkg.io/ontology/merkleRoot',
+        object: `"${ethers.hexlify(result.merkleRoot).slice(2)}"`,
+        graph: contextGraphMetaUri(CONNECTED_CONTEXT_GRAPH_ID),
+      };
+      const publishedData = publishQuad(
+        CONNECTED_CONTEXT_GRAPH_ID,
+        ROOT_ENTITY,
+        'http://schema.org/name',
+        '"Connected lifecycle proof"',
+      );
+      syncInternals.fetchSyncPages = async () => ({
+        quads: [],
+        bytesReceived: 1,
+        resumedFromOffset: 0,
+        nextOffset: 1,
+        checkpointKey: 'connected-sync-checkpoint',
+        completed: true,
+        timedOut: false,
       });
-      logKaLifecycleEvent(log, syncCtx, {
-        assetUal: ASSET_UAL,
-        stage: 'reconcile',
-        event: 'reconcile_promote',
-        role: 'sync',
-        localPeerId: LOCAL_PEER_ID,
-        localNodeIdentityId: '42',
-        metadata: { action: 'promote', result: 'reconciled' },
+      syncInternals.processDurableBatchInWorker = async () => ({
+        verifiedData: [publishedData],
+        verifiedMeta: [publishedMeta],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
       });
-      logKaLifecycleEvent(log, publisherCtx, {
-        ...basePublisher,
-        assetUal: `${ASSET_UAL}-other`,
-        stage: 'wm',
-        event: 'write',
+      syncInternals.insertSyncedQuadsAndInvalidateListCache = async () => undefined;
+      await syncInternals.syncFromPeerDetailed(PUBLISHER_PEER_ID, [CONNECTED_CONTEXT_GRAPH_ID]);
+
+      const reconcileInternals = reconcileAgent as unknown as {
+        subscribedContextGraphs: Map<string, { subscribed: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
+        chain: MockChainAdapter & {
+          getContextGraphKCCount?: (onChainCgId: bigint) => Promise<number>;
+          getBlockNumber?: () => Promise<number | undefined>;
+        };
+        reconcileChainOrdinal: (
+          localCgId: string,
+          onChainCgId: bigint,
+          ordinal: number,
+          headBlock: number | undefined,
+        ) => Promise<{ status: 'reconciled'; blockNumber: number; assetUal: string; kaId: string }>;
+        runVmReconcileForCg(localCgId: string): Promise<void>;
+      };
+      reconcileInternals.subscribedContextGraphs.set(CONNECTED_CONTEXT_GRAPH_ID, {
+        subscribed: true,
+        onChainId: CONNECTED_CONTEXT_GRAPH_ID,
+        lastReconciledOrdinal: 0,
       });
+      reconcileInternals.chain.getContextGraphKCCount = async () => 1;
+      reconcileInternals.chain.getBlockNumber = async () => undefined;
+      reconcileInternals.reconcileChainOrdinal = async () => ({
+        status: 'reconciled',
+        blockNumber: onChain.blockNumber,
+        assetUal: result.ual,
+        kaId: result.kaId.toString(),
+      });
+      await reconcileInternals.runVmReconcileForCg(CONNECTED_CONTEXT_GRAPH_ID);
+    } finally {
+      await syncAgent.stop().catch(() => undefined);
+      await reconcileAgent.stop().catch(() => undefined);
     }
 
-    const proof = buildKaLifecycleLogProof(entries, ASSET_UAL);
+    const proof = buildKaLifecycleLogProof(entries, result.ual);
 
     expect(proof.missingRequiredStages).toEqual([]);
     expect(proof.stageTrail).toEqual([
@@ -378,15 +543,29 @@ describe('KA receiver lifecycle logs', () => {
       'sync',
       'reconcile',
     ]);
+    expect((proof as { roleTrail?: string[] }).roleTrail).toEqual(['publisher', 'receiver', 'sync']);
+    expect((proof as { sourceTrail?: string[] }).sourceTrail).toEqual(expect.arrayContaining([
+      PUBLISHER_PEER_ID,
+      LOCAL_PEER_ID,
+    ]));
     expect(proof.eventTrail).toContain('storage_ack_signed');
+    expect(proof.eventTrail).toContain('finalization_applied');
+    expect(proof.eventTrail).toContain('sync_apply');
+    expect(proof.eventTrail).toContain('reconcile_promote');
     expect(proof.hasAckLog).toBe(true);
     expect(proof.hasStateChangeLog).toBe(true);
     expect(proof.hasFailureOrDeclineLog).toBe(true);
     expect(proof.hasPayloadLeak).toBe(false);
-    expect(proof.grep).toContain(`assetUal=${ASSET_UAL}`);
+    expect(proof.grep).toContain(`assetUal=${result.ual}`);
     expect(proof.grep).toContain('localPeerId=12D3KooWKaLifecycleReceiver');
-    expect(proof.grep).not.toContain('raw proof payload');
-    expect(proof.grep).not.toContain(`${ASSET_UAL}-other`);
+    expect(proof.grep).not.toContain('Connected lifecycle proof');
+    expect(proof.entries.map((entry) => entry.module)).toEqual(expect.arrayContaining([
+      'DKGPublisher',
+      'SharedMemoryHandler',
+      'StorageACKHandler',
+      'FinalizationHandler',
+      'DKGAgent',
+    ]));
   });
 
   it('documents the KA lifecycle log proof handoff sources and grep surface', () => {
