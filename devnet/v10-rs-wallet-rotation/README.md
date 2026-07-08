@@ -32,19 +32,19 @@ non-registered one.
 
 ## Setup
 
-The suite ensures the observed node has ≥2 registered operational wallets — if
-it starts with only the primary, it adds a throwaway one via the node-admin
-route (`POST /api/operational-wallets`, the same on-chain-verified path
-`pr1370-admin-op-wallet` exercises) and funds it with gas.
+The suite requires the observed node to have ≥2 local operational wallets (the
+default devnet provisions 3). An on-chain-only registration cannot satisfy this
+precondition because the daemon still would not hold the signing key.
 
 ## ⚠️ Validation status
 
 The scaffolding and assertions follow the established devnet pattern, but the
-**RS-timing orchestration** (how long to watch / whether to warp proof periods
-for the prover to emit a full `create → submit` cycle) has **not yet been tuned
-against a live network**. Expect to adjust `DKG_RS_ROT_WINDOW` and, on a quiet
-devnet, add proof-period time-warps to match your devnet's proofing-period
-length.
+**RS-timing orchestration** (how long to watch for the prover to emit a full
+`create → submit` cycle) is passive by design: the suite does not time-warp the
+shared devnet clock because that can corrupt in-flight RS challenges for other
+nodes/suites. A local untuned run skips when no full cycle is observed; a
+required validation lane must set `DKG_REQUIRE_RS_ROTATION=1`, which converts
+that inconclusive observation into a hard failure.
 
 ## Run
 
@@ -54,7 +54,16 @@ length.
 pnpm test:devnet:v10-rs-wallet-rotation
 ```
 
+Required-lane run (inconclusive observation becomes a failure):
+
+```bash
+DKG_REQUIRE_RS_ROTATION=1 DKG_RS_ROT_WINDOW=900000 pnpm test:devnet:v10-rs-wallet-rotation
+# or
+pnpm test:devnet:v10-rs-wallet-rotation:required
+```
+
 ## Tuning
 
 - `DKG_RS_ROT_NODE` (default `1`) — which node to observe.
-- `DKG_RS_ROT_WINDOW` (default `300000`) — ms to watch for the node's RS txs.
+- `DKG_RS_ROT_WINDOW` (default `600000`) — ms to watch for the node's RS txs.
+- `DKG_REQUIRE_RS_ROTATION=1` — fail instead of skip when no full `create → submit` cycle is observed.
