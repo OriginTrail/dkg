@@ -149,6 +149,40 @@ function isACKHandlerDeadlineAbort(err: unknown): boolean {
   return false;
 }
 
+function isACKHandlerDeadlineAbortSignal(signal: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted && isACKHandlerDeadlineAbort(signal.reason));
+}
+
+async function runWithDeadline<T>(
+  work: Promise<T>,
+  deadlineMs: number,
+  onDeadline: () => T,
+): Promise<T> {
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let settled = false;
+  const trackedWork = work.finally(() => {
+    settled = true;
+  });
+  const deadline = new Promise<T>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      resolve(onDeadline());
+    }, deadlineMs);
+    if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+  });
+
+  try {
+    const result = await Promise.race([trackedWork, deadline]);
+    if (timedOut) void work.catch(() => undefined);
+    return result;
+  } finally {
+    settled = true;
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+}
+
 function ackStoreOptions(source: string, signal?: AbortSignal): QueryOptions {
   return { priority: 'ack', source, ...(signal ? { signal } : {}) };
 }
@@ -521,11 +555,13 @@ export class StorageACKHandler {
   private async runStoreOpOrDecline<T>(
     cgId: string,
     op: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
     try {
       return { ok: true, value: await op() };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
   }
@@ -564,7 +600,7 @@ export class StorageACKHandler {
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
       await this.store.flush?.(ackStoreOptions('storage-ack.persistCatalog.flush', signal));
-    });
+    }, signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -596,7 +632,7 @@ export class StorageACKHandler {
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
       await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
-    });
+    }, signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -618,6 +654,7 @@ export class StorageACKHandler {
     } catch (err) {
       if (err instanceof StoreUnavailableError) {
         if (isACKHandlerDeadlineAbort(err)) throw err;
+        if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
         return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
       }
       throw err;
@@ -769,38 +806,19 @@ export class StorageACKHandler {
     if (deadlineMs <= 0) return workFactory();
 
     const abortController = new AbortController();
-    let deadlineFired = false;
     const work = workFactory(abortController.signal);
-    const guardedWork = work.catch((err) => {
-      if (deadlineFired) {
-        return new Promise<Uint8Array>(() => {});
-      }
-      throw err;
-    });
 
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<Uint8Array>((resolve) => {
-      deadlineTimer = setTimeout(() => {
-        deadlineFired = true;
-        const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
-        const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
-        resolve(
-          this.declineTemporarilyUnavailable(
-            cgIdForDecline ?? '',
-            'ack handler deadline exceeded',
-            deadlineError,
-          ),
-        );
-        abortController.abort(deadlineError);
-      }, deadlineMs);
-      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    return runWithDeadline(work, deadlineMs, () => {
+      const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
+      const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
+      const decline = this.declineTemporarilyUnavailable(
+        cgIdForDecline ?? '',
+        'ack handler deadline exceeded',
+        deadlineError,
+      );
+      abortController.abort(deadlineError);
+      return decline;
     });
-
-    try {
-      return await Promise.race([guardedWork, deadline]);
-    } finally {
-      if (deadlineTimer) clearTimeout(deadlineTimer);
-    }
   };
 
   /**

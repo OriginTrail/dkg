@@ -251,6 +251,40 @@ describe('StorageACKHandler — ack-handler deadline (slow-store dead-air fix)',
     expect(onDecline).toHaveBeenCalledOnce();
   });
 
+  it('suppresses a late abort rejection after the deadline decline wins', async () => {
+    const onDecline = vi.fn();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    let sawAbort = false;
+    const store: TripleStore = {
+      ...nonExternalHangingStore(),
+      query: (_sparql: string, options?: QueryOptions) => new Promise<never>((_resolve, reject) => {
+        expect(options?.priority).toBe('ack');
+        options?.signal?.addEventListener('abort', () => {
+          sawAbort = true;
+          setTimeout(() => reject(new Error('late abort rejection')), 0);
+        }, { once: true });
+      }),
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const handler = await createHandler(store, { onDecline, ackHandlerDeadlineMs: 50 });
+      const response = await handler.handler(publishIntent(), fakePeerId);
+      const decoded = decodeStorageACK(response);
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+      expect(sawAbort).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(unhandled).toEqual([]);
+      expect(onDecline).toHaveBeenCalledOnce();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('a healthy fast handler is unaffected by the deadline (returns its real reply)', async () => {
     const base = new OxigraphStore();
     await base.insert(
