@@ -30,6 +30,23 @@ export interface LogRecord {
 
 export type LogSink = (entry: LogRecord) => void;
 
+export type KaLifecycleLogLevel = 'info' | 'warn' | 'error';
+
+export type KaLifecycleMetadataValue = string | number | boolean | null | undefined;
+
+export interface KaLifecycleLogEvent {
+  level?: KaLifecycleLogLevel;
+  assetUal: string;
+  stage: string;
+  event: string;
+  role: string;
+  localPeerId: string;
+  localNodeIdentityId: string;
+  peer?: string;
+  peerNodeIdentityId?: string;
+  metadata?: Record<string, KaLifecycleMetadataValue>;
+}
+
 /**
  * Structured logger that prefixes every message with a timestamp,
  * operation name, and operation ID for cross-node log correlation.
@@ -102,4 +119,27 @@ function formatTimestamp(d: Date): string {
 
 export function createOperationContext(operationName: OperationName, sourceOperationId?: string): OperationContext {
   return { operationId: randomUUID(), operationName, sourceOperationId };
+}
+
+export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: KaLifecycleLogEvent): void {
+  const level = input.level ?? 'info';
+  log[level](ctx, formatKaLifecycleEvent(input));
+}
+
+function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {
+  const fields: Array<[string, KaLifecycleMetadataValue]> = [
+    ['assetUal', input.assetUal],
+    ['stage', input.stage],
+    ['event', input.event],
+    ['role', input.role],
+    ['localPeerId', input.localPeerId],
+    ['localNodeIdentityId', input.localNodeIdentityId],
+    ['peer', input.peer],
+    ['peerNodeIdentityId', input.peerNodeIdentityId],
+  ];
+  if (input.metadata) fields.push(...Object.entries(input.metadata));
+  return `ka_lifecycle ${fields
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(' ')}`;
 }
