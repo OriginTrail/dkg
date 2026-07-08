@@ -8,6 +8,7 @@ import {
   encodeStorageACK,
   decodeStorageACK,
   isStorageACKDecline,
+  isTransientStorageACKDeclineCode,
   logKaLifecycleEvent,
   withSpan,
   getMetrics,
@@ -416,6 +417,12 @@ export class StorageACKHandler {
   private logLifecycleResponse(assetUal: string | undefined, peerId: PeerId, ack: StorageACKMsg): void {
     if (!assetUal) return;
     const declined = isStorageACKDecline(ack);
+    const signatureR = ack.coreNodeSignatureR instanceof Uint8Array
+      ? ack.coreNodeSignatureR
+      : new Uint8Array(ack.coreNodeSignatureR ?? []);
+    const signatureVS = ack.coreNodeSignatureVS instanceof Uint8Array
+      ? ack.coreNodeSignatureVS
+      : new Uint8Array(ack.coreNodeSignatureVS ?? []);
     logKaLifecycleEvent(this.log, createOperationContext('share'), {
       assetUal,
       stage: 'storage_ack',
@@ -428,6 +435,13 @@ export class StorageACKHandler {
       metadata: {
         contextGraphId: ack.contextGraphId,
         declineCode: declined ? ack.declineCode : undefined,
+        declineMessage: declined ? ack.declineMessage : undefined,
+        retryable: declined ? isTransientStorageACKDeclineCode(ack.declineCode) : undefined,
+        ackNodeIdentityId: declined ? undefined : String(ack.nodeIdentityId),
+        merkleRoot: declined ? undefined : ethers.hexlify(ack.merkleRoot),
+        signatureRBytes: declined ? undefined : signatureR.length,
+        signatureVSBytes: declined ? undefined : signatureVS.length,
+        subscriptionSource: declined ? undefined : ack.subscriptionSource,
       },
     });
   }
