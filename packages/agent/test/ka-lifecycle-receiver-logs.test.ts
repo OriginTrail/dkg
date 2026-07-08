@@ -346,6 +346,76 @@ describe('KA receiver lifecycle logs', () => {
     );
   });
 
+  it('logs Sender Key decrypt failure by assetUal', async () => {
+    const sender = await DKGAgent.create({
+      name: `ka-lifecycle-sender-key-fail-${Math.random().toString(36).slice(2)}`,
+      chainAdapter: new MockChainAdapter(),
+    });
+    sender.publisher.setIdentityId(42n);
+    Object.defineProperty((sender as unknown as { node: object }).node, 'peerId', {
+      value: { toString: () => LOCAL_PEER_ID },
+      configurable: true,
+    });
+    const senderRecord = await sender.registerAgent('sender-key-fail-local');
+    const contextGraphId = 'ka-lifecycle-sender-key-fail-cg';
+    await insertAgentGate(sender, contextGraphId, senderRecord.agentAddress);
+
+    const storageAddress = await sender.chain.getDKGKnowledgeAssetsAddress!();
+    const kaId = (BigInt(ethers.getAddress(senderRecord.agentAddress)) << 96n) | 7n;
+    const assetUal = buildKnowledgeAssetUal(sender.chain.chainId, storageAddress, kaId);
+    const plaintext = encodeWorkspacePublishRequest({
+      shareOperationId: 'sender-key-fail-share-op',
+      contextGraphId,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Sender Key failure lifecycle" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: senderRecord.agentAddress,
+      kaNumber: '7',
+    });
+    const encrypted = await (sender as unknown as {
+      encryptWorkspacePayloadWithSenderKey(input: {
+        contextGraphId: string;
+        plaintext: Uint8Array;
+        senderAgentAddress: string;
+        operationId: string;
+      }): Promise<Uint8Array>;
+    }).encryptWorkspacePayloadWithSenderKey({
+      contextGraphId,
+      plaintext,
+      senderAgentAddress: senderRecord.agentAddress,
+      operationId: 'sender-key-failure-lifecycle-test',
+    });
+    const message = decodeSwmSenderKeyMessage(encrypted);
+
+    const receiver = await createReceiverAgent();
+    const entries = captureLogs();
+
+    await expect((receiver as unknown as {
+      decryptWorkspacePayloadWithSenderKey(
+        message: SwmSenderKeyMessageMsg,
+        contextGraphId: string,
+        ctx: OperationContext,
+      ): Promise<Uint8Array>;
+    }).decryptWorkspacePayloadWithSenderKey(
+      message,
+      contextGraphId,
+      { operationId: 'sender-key-failure-lifecycle-test', operationName: 'share' },
+    )).rejects.toThrow(/No local Sender Key state/);
+
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${assetUal}`),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=sender_key_payload_decrypt_failed'),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('reason=No local Sender Key state'),
+    );
+  });
+
   it('logs StorageACK success by assetUal', async () => {
     const store = new OxigraphStore();
     const swmGraph = 'did:dkg:context-graph:42/_shared_memory';
