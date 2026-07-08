@@ -15,6 +15,8 @@ import { createCursorState } from '../src/reconcile-cursor.js';
  * the coalescer and UAL dedupe.
  */
 
+const ASSET_UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000aa/7';
+
 function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
   deps: ChainReconcilerDeps;
   persisted: Array<{ cg: string; watermark: number }>;
@@ -149,6 +151,50 @@ describe('reconcileContextGraph — sweep', () => {
     expect(r2.watermark).toBe(2);
     expect(attempted).toEqual([0, 1]);
     expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
+  });
+
+  it('emits assetUal lifecycle decisions for a reconciled published KA ordinal', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      action: string;
+      result: string;
+      localCgId: string;
+      onChainCgId: string;
+      ordinal: number;
+      kaId?: string;
+    }> = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      reconcileOrdinal: async () => ({
+        status: 'reconciled',
+        blockNumber: 12,
+        assetUal: ASSET_UAL,
+        kaId: '7',
+      } as never),
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    } as Partial<ChainReconcilerDeps>);
+    const state = createCursorState(0);
+
+    await reconcileContextGraph(deps, state, 'published-cg', 77n);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      action: 'promote',
+      result: 'reconciled',
+      localCgId: 'published-cg',
+      onChainCgId: '77',
+      ordinal: 0,
+      kaId: '7',
+    }));
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      action: 'cursor-advance',
+      result: 'advanced',
+      localCgId: 'published-cg',
+      onChainCgId: '77',
+      ordinal: 0,
+      kaId: '7',
+    }));
   });
 });
 

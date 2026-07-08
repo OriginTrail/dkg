@@ -40,6 +40,7 @@ export default defineConfig({
       "test/publish-literal-size.test.ts",
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
+      "test/chain-reconciler.test.ts",
       "test/ka-lifecycle-receiver-logs.test.ts",
     ],
     testTimeout: 60_000,
