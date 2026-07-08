@@ -163,6 +163,48 @@ describe('KA receiver lifecycle logs', () => {
     expect(outcome).toMatchObject({ applied: true, assetUal: ASSET_UAL });
   });
 
+  it('logs SWM Share ACK send by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const sent: Array<{ peerId: string; protocol: string; data: Uint8Array }> = [];
+    Object.defineProperty(agent, 'messenger', {
+      value: {
+        sendToPeer: async (peerId: string, protocol: string, data: Uint8Array) => {
+          sent.push({ peerId, protocol, data });
+          return new Uint8Array();
+        },
+      },
+      configurable: true,
+    });
+    const entries = captureLogs();
+
+    await (agent as unknown as {
+      maybeEmitSwmShareAck(outcome: unknown): Promise<void>;
+    }).maybeEmitSwmShareAck({
+      applied: true,
+      assetUal: ASSET_UAL,
+      cgId: CONTEXT_GRAPH_ID,
+      shareOperationId: 'share-op-asset-7',
+      publisherPeerId: PUBLISHER_PEER_ID,
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=swm_share_ack_sent'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`localPeerId=${LOCAL_PEER_ID}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('outcome=sent'),
+    );
+  });
+
   it('logs Sender Key payload decrypt by assetUal', async () => {
     const agent = await DKGAgent.create({
       name: `ka-lifecycle-sender-key-${Math.random().toString(36).slice(2)}`,
