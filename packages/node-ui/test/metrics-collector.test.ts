@@ -271,3 +271,101 @@ describe('MetricsCollector', () => {
     });
   });
 });
+
+// ─── #1066 Item 1: store-metrics presence gate ──────────────────────
+//
+// The six store getters (total triples + KC/KA/confirmed/tentative +
+// context-graph count) are full-store SPARQL scans. When nothing is
+// consuming metrics the collector skips them, leaving those columns null,
+// while the cheap system/network metrics keep flowing.
+describe('MetricsCollector store-metrics presence gate', () => {
+  function countingSource() {
+    const calls = {
+      getContextGraphCount: 0, getTotalTriples: 0, getTotalKCs: 0,
+      getTotalKAs: 0, getConfirmedKCs: 0, getTentativeKCs: 0,
+      getStoreBytes: 0, getPeerCount: 0,
+    };
+    const source: MetricsSource = {
+      getPeerCount: () => { calls.getPeerCount++; return 5; },
+      getDirectPeerCount: () => 3,
+      getRelayedPeerCount: () => 2,
+      getMeshPeerCount: () => 4,
+      getContextGraphCount: async () => { calls.getContextGraphCount++; return 2; },
+      getTotalTriples: async () => { calls.getTotalTriples++; return 1000; },
+      getTotalKCs: async () => { calls.getTotalKCs++; return 15; },
+      getTotalKAs: async () => { calls.getTotalKAs++; return 30; },
+      getConfirmedKCs: async () => { calls.getConfirmedKCs++; return 12; },
+      getTentativeKCs: async () => { calls.getTentativeKCs++; return 3; },
+      getStoreBytes: async () => { calls.getStoreBytes++; return 65536; },
+      getRpcLatencyMs: async () => 25,
+      isRpcHealthy: async () => true,
+    };
+    return { source, calls };
+  }
+
+  it('closed gate: skips the six store scans and nulls their columns; cheap metrics still collect', async () => {
+    const { source, calls } = countingSource();
+    const collector = new MetricsCollector(db, source, dir, () => false);
+    const snap = await collector.collect();
+
+    // None of the full-store scans ran.
+    expect(calls.getTotalTriples).toBe(0);
+    expect(calls.getTotalKCs).toBe(0);
+    expect(calls.getTotalKAs).toBe(0);
+    expect(calls.getConfirmedKCs).toBe(0);
+    expect(calls.getTentativeKCs).toBe(0);
+    expect(calls.getContextGraphCount).toBe(0);
+
+    // Their columns are null.
+    expect(snap.total_triples).toBeNull();
+    expect(snap.total_kcs).toBeNull();
+    expect(snap.total_kas).toBeNull();
+    expect(snap.confirmed_kcs).toBeNull();
+    expect(snap.tentative_kcs).toBeNull();
+    expect(snap.contextGraph_count).toBeNull();
+
+    // Cheap system/network metrics still collected (a CPU peg is still
+    // recorded even with no dashboard open). getStoreBytes is a cheap stat,
+    // not a SPARQL scan, so it is NOT gated.
+    expect(calls.getPeerCount).toBeGreaterThan(0);
+    expect(snap.peer_count).toBe(5);
+    expect(snap.mem_used_bytes).toBeGreaterThan(0);
+    expect(calls.getStoreBytes).toBe(1);
+    expect(snap.store_bytes).toBe(65536);
+  });
+
+  it('open gate: runs the store getters', async () => {
+    const { source, calls } = countingSource();
+    const collector = new MetricsCollector(db, source, dir, () => true);
+    const snap = await collector.collect();
+
+    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+    expect(snap.total_triples).toBe(1000);
+    expect(snap.contextGraph_count).toBe(2);
+  });
+
+  it('no gate supplied: collects store metrics by default (back-compat)', async () => {
+    const { source, calls } = countingSource();
+    const collector = new MetricsCollector(db, source, dir);
+    const snap = await collector.collect();
+
+    expect(calls.getTotalTriples).toBe(1);
+    expect(snap.total_triples).toBe(1000);
+  });
+
+  it('re-evaluates the gate every tick (idle → active resumes store metrics)', async () => {
+    const { source, calls } = countingSource();
+    let watching = false;
+    const collector = new MetricsCollector(db, source, dir, () => watching);
+
+    const idle = await collector.collect();
+    expect(idle.total_triples).toBeNull();
+    expect(calls.getTotalTriples).toBe(0);
+
+    watching = true;
+    const active = await collector.collect();
+    expect(active.total_triples).toBe(1000);
+    expect(calls.getTotalTriples).toBe(1);
+  });
+});

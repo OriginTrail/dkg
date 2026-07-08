@@ -226,3 +226,7 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+// 2026-07-08 sync-storm mitigation (Chunk 1) — resolve the opt-in `agents/_meta`
+// fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
+// it identically to the in-agent lifecycle, without deep-importing `dist/`.
+export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/requester/agents-meta-sync-config.js';

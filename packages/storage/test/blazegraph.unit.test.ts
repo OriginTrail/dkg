@@ -145,6 +145,32 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect((call?.[1]?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
   });
 
+  it('update POSTs raw SPARQL to the endpoint with application/sparql-update and no COUNT scans', async () => {
+    setFetch(async () => new Response(null, { status: 200 }));
+    const s = new BlazegraphStore(baseUrl);
+    const sparql = 'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }';
+    await s.update(sparql);
+    // Exactly one HTTP call — the count-free contract: no before/after countQuads
+    // (which would add SELECT COUNT round-trips, as deleteByPattern/prefix do).
+    expect(fetchCalls).toHaveLength(1);
+    const [url, init] = fetchCalls[0];
+    expect(url).toBe(baseUrl);
+    expect(init?.method).toBe('POST');
+    // Direct POST: raw update body with application/sparql-update (not form-encoded).
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-update');
+    expect(String(init?.body)).toBe(sparql);
+    expect(fetchCalls.some((c) => /\bCOUNT\b/i.test(String(c[1]?.body ?? '')))).toBe(false);
+    expect(fetchCalls.some((c) => String(c[1]?.body ?? '').startsWith('SELECT'))).toBe(false);
+  });
+
+  it('update throws on non-OK response', async () => {
+    setFetch(async () => new Response('boom', { status: 500 }));
+    const s = new BlazegraphStore(baseUrl);
+    await expect(
+      s.update('DELETE WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }'),
+    ).rejects.toThrow(/Blazegraph update failed \(500\)/);
+  });
+
   it('delete is a no-op for empty quad list', async () => {
     const s = new BlazegraphStore(baseUrl);
     await s.delete([]);

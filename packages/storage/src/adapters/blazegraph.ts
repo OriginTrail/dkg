@@ -91,6 +91,20 @@ export class BlazegraphStore implements TripleStore {
     return Math.max(0, before - after);
   }
 
+  /**
+   * Server-side SPARQL UPDATE — POSTs the update verbatim to the endpoint so a
+   * `DELETE { … } WHERE { … }` (or `INSERT … WHERE`) runs entirely inside
+   * Blazegraph with NO client-side COUNT scans. Uniform with the
+   * oxigraph/sparql-http `update()` (`See {@link TripleStore.update}`) so callers
+   * can issue one count-free UPDATE instead of a per-pattern
+   * `deleteByPattern`/`deleteBySubjectPrefix` loop — each of those brackets its
+   * delete with two full-graph `countQuads` scans (see above), which is
+   * prohibitive on a CPU-pegged core.
+   */
+  async update(sparql: string): Promise<void> {
+    await this.sparqlUpdate(sparql);
+  }
+
   // -------------------------------------------------------------------
   // Queries
   // -------------------------------------------------------------------
