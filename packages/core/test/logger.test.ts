@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { Logger, createOperationContext, type LogSink, type OperationContext } from '../src/logger.js';
+import {
+  Logger,
+  createOperationContext,
+  logKaLifecycleEvent,
+  type LogSink,
+  type OperationContext,
+} from '../src/logger.js';
 
 interface LogEntry {
   level: string;
@@ -151,6 +157,50 @@ describe('Logger', () => {
 
     const levels = entries.map(e => e.level);
     expect(levels).toEqual(['debug', 'info', 'warn', 'error']);
+  });
+});
+
+describe('KA lifecycle logging', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+  });
+
+  it('emits an assetUal-correlated lifecycle log with node metadata and severity', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const log = new Logger('KALifecycle');
+    captureStderr(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-1', operationName: 'publish' }, {
+        level: 'warn',
+        assetUal: 'did:dkg:otp:2043/0xasset/42',
+        stage: 'storage_ack',
+        event: 'ack.declined',
+        role: 'publisher',
+        localPeerId: '12D3KooWLocalPeerFullIdentifier',
+        localNodeIdentityId: 'node-identity-local-full',
+        peer: '12D3KooWRemotePeerFullIdentifier',
+        peerNodeIdentityId: 'node-identity-remote-full',
+        metadata: {
+          reason: 'missing-replication-window',
+          retryAfterMs: 2500,
+        },
+      }),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].level).toBe('warn');
+    expect(entries[0].module).toBe('KALifecycle');
+    expect(entries[0].message).toContain('assetUal=did:dkg:otp:2043/0xasset/42');
+    expect(entries[0].message).toContain('stage=storage_ack');
+    expect(entries[0].message).toContain('event=ack.declined');
+    expect(entries[0].message).toContain('role=publisher');
+    expect(entries[0].message).toContain('localPeerId=12D3KooWLocalPeerFullIdentifier');
+    expect(entries[0].message).toContain('localNodeIdentityId=node-identity-local-full');
+    expect(entries[0].message).toContain('peer=12D3KooWRemotePeerFullIdentifier');
+    expect(entries[0].message).toContain('peerNodeIdentityId=node-identity-remote-full');
+    expect(entries[0].message).toContain('reason=missing-replication-window');
+    expect(entries[0].message).toContain('retryAfterMs=2500');
   });
 });
 
