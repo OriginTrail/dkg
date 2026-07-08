@@ -316,7 +316,7 @@ describe('production wiring — the real sync-ingest seam calls the guard', () =
 
 describe('runOversizeSweep (boot-time resident-poison removal)', () => {
   const bigTerm = `"${'x'.repeat(120_000)}"`;
-  const overSelectedButLegal = `"${'y'.repeat(25_000)}"`; // >19k chars over-select, but 25,002 bytes < 60,000 → must survive
+  const overSelectedButLegal = `"${'y'.repeat(25_000)}"`; // over-select, but 25,002 bytes < 60,000 → must survive
   const makeStore = (graphQuads: Record<string, Quad[]>) => {
     const deletions: Array<Partial<Quad>> = [];
     return {
@@ -324,10 +324,14 @@ describe('runOversizeSweep (boot-time resident-poison removal)', () => {
       store: {
         listGraphs: async () => Object.keys(graphQuads),
         query: async (sparql: string) => {
-          const m = /GRAPH <([^>]+)>/.exec(sparql);
-          const quads = (graphQuads[m![1]!] ?? []).filter((q) => {
+          const g = /GRAPH <([^>]+)>/.exec(sparql);
+          // Faithful STRLEN simulation: COUNT CODE POINTS (not UTF-16 units)
+          // against the threshold the sweep actually put in the query, so an
+          // astral literal is over-selected exactly as real oxigraph would.
+          const thr = Number(/STRLEN\(STR\(\?o\)\) > (\d+)/.exec(sparql)?.[1] ?? '0');
+          const quads = (graphQuads[g![1]!] ?? []).filter((q) => {
             const val = q.object.startsWith('"') ? q.object.slice(1, q.object.lastIndexOf('"')) : '';
-            return val.length > 19_000;
+            return [...val].length > thr;
           });
           return { type: 'quads', quads };
         },
@@ -364,6 +368,39 @@ describe('runOversizeSweep (boot-time resident-poison removal)', () => {
     const second = await runOversizeSweep({ store, dataDir, ...hooks });
     expect(second.ran).toBe(false); // marker gates the re-run
     expect(deletions).toHaveLength(1);
+  });
+
+  it('catches ASTRAL-only oversized poison the 19k threshold would have missed (review finding)', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const dataDir = await mkdtemp(`${tmpdir()}/oversweep-astral-`);
+    drops.length = 0;
+    // 11,000 × 😀 = 11,000 code points (STRLEN) but 66,000 MUTF-8 bytes: an
+    // offender that STRLEN>19,000 would skip. The 9,000 threshold over-selects
+    // it, and the exact byte-verify confirms + deletes it.
+    const astral = `"${'😀'.repeat(11_000)}"`;
+    const { store, deletions } = makeStore({ [DATA_GRAPH]: [quad(astral)] });
+    const r = await runOversizeSweep({ store, dataDir, ...hooks });
+    expect(r.sweptQuads).toBe(1);
+    expect(deletions).toHaveLength(1);
+    expect(deletions[0]).toMatchObject({ graph: DATA_GRAPH, object: astral });
+  });
+
+  it('SWEEPS _shared_memory_meta (mutable, not blob-externalized) but skips SWM data + VM', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const dataDir = await mkdtemp(`${tmpdir()}/oversweep-meta-`);
+    drops.length = 0;
+    const metaGraph = `${CG}/_shared_memory_meta`;
+    const { store, deletions } = makeStore({
+      [metaGraph]: [quad(bigTerm, metaGraph)],
+      [SWM_GRAPH]: [quad(bigTerm, SWM_GRAPH)],
+      [VM_GRAPH]: [quad(bigTerm, VM_GRAPH)],
+    });
+    const r = await runOversizeSweep({ store, dataDir, ...hooks });
+    expect(r.scannedGraphs).toBe(1);   // only _shared_memory_meta scanned
+    expect(r.sweptQuads).toBe(1);
+    expect(deletions[0]).toMatchObject({ graph: metaGraph });
   });
 
   it('skips entirely without a dataDir (in-memory store)', async () => {

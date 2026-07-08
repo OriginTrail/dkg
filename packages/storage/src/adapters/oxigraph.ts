@@ -407,14 +407,53 @@ function parseTerm(term: string): oxigraph.NamedNode | oxigraph.Literal | oxigra
   if (term.startsWith('"')) {
     const match = term.match(/^"((?:[^"\\]|\\.)*)"(?:@(\S+)|\^\^<([^>]+)>)?$/);
     if (match) {
-      if (match[2]) return oxigraph.literal(match[1], match[2]);
-      if (match[3]) return oxigraph.literal(match[1], oxigraph.namedNode(match[3]));
-      return oxigraph.literal(match[1]);
+      // UNESCAPE the captured lexical form: query results (fromOxQuad →
+      // termToString) hand back N-Quads-ESCAPED literals, and store.load()
+      // (insert) UNescapes on parse — so a literal whose value contains
+      // `"`, `\`, LF, or CR is stored unescaped but arrives here escaped.
+      // Without this reversal, `oxigraph.literal(match[1])` builds a literal
+      // whose value is the ESCAPED form, which never matches the stored term,
+      // so deleteByPattern / delete silently affect ZERO quads. (Empirically
+      // reproduced; this is the OT-RFC-56 boot-sweep no-op blocker.)
+      const value = unescapeNQuadsLiteral(match[1]);
+      if (match[2]) return oxigraph.literal(value, match[2]);
+      if (match[3]) return oxigraph.literal(value, oxigraph.namedNode(match[3]));
+      return oxigraph.literal(value);
     }
     return oxigraph.literal(term.slice(1, -1));
   }
   if (term.startsWith('_:')) return oxigraph.blankNode(term.slice(2));
   return oxigraph.namedNode(term);
+}
+
+/**
+ * Reverse {@link escapeNQuadsLiteral} (and the standard N-Quads/Turtle string
+ * escapes) so a lexical form round-trips exactly through
+ * `termToString → parseTerm`. Single left-to-right pass, so `\\n` (an escaped
+ * backslash then a literal `n`) correctly yields `\n` (backslash + n), not LF.
+ */
+function unescapeNQuadsLiteral(s: string): string {
+  if (!s.includes('\\')) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c !== '\\' || i + 1 >= s.length) { out += c; continue; }
+    const n = s[++i];
+    switch (n) {
+      case 'n': out += '\n'; break;
+      case 'r': out += '\r'; break;
+      case 't': out += '\t'; break;
+      case 'b': out += '\b'; break;
+      case 'f': out += '\f'; break;
+      case '"': out += '"'; break;
+      case "'": out += "'"; break;
+      case '\\': out += '\\'; break;
+      case 'u': out += String.fromCodePoint(parseInt(s.slice(i + 1, i + 5), 16)); i += 4; break;
+      case 'U': out += String.fromCodePoint(parseInt(s.slice(i + 1, i + 9), 16)); i += 8; break;
+      default: out += n; break; // unknown escape: drop the backslash, keep the char
+    }
+  }
+  return out;
 }
 
 function toOxQuad(q: DKGQuad): oxigraph.Quad | null {
