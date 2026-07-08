@@ -392,6 +392,26 @@ function isTrustedCatalogInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[TRUSTED_CATALOG_ORIGIN_TOKEN] === true;
 }
 
+function selectPublicStagingQuads(
+  options: PublishOptions,
+  nquadsStr: string,
+  publicByteSize: bigint,
+): Uint8Array | undefined {
+  if (!options.fromSharedMemory) {
+    return new TextEncoder().encode(nquadsStr);
+  }
+
+  if (!isInternalOrigin(options)) {
+    return undefined;
+  }
+
+  if (publicByteSize > BigInt(STORAGE_ACK_MAX_STAGING_BYTES)) {
+    return undefined;
+  }
+
+  return new TextEncoder().encode(nquadsStr);
+}
+
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (value.startsWith('"')) {
@@ -2378,22 +2398,24 @@ export class DKGPublisher implements Publisher {
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
     // For direct publish: send staging quads inline via P2P so core nodes
     // can verify the merkle root without needing SWM pre-positioning.
-    // For publishFromSharedMemory (publishContextGraphId set): data is already in
-    // peers' SWM via shared memory gossip — do NOT send inline quads; core nodes
+    // For public callers using fromSharedMemory: data is already in peers'
+    // SWM via shared memory gossip — do NOT send inline quads; core nodes
     // verify against their local SWM copy (preserving storage-attestation).
+    // Internal publishFromSharedMemory() calls use a module-private token and
+    // may inline small public payloads on the first ACK attempt to avoid the
+    // public-CG subscription gap; oversized payloads keep the SWM fallback.
     // Folded public+private publishes send only the private Merkle roots on
     // the ACK wire. Core nodes verify the public quads they store and fold
     // those commitments into the claimed KC root without seeing private
     // plaintext.
-    const isPublishFromSharedMemory = !!options.fromSharedMemory;
     // OT-RFC-38 / LU-5: when an encryptInlinePayload hook is wired (curated
     // CGs only — DKGAgent resolves this from accessPolicy), ALWAYS send the
     // payload inline as AEAD ciphertext, regardless of `fromSharedMemory`.
     // Cores can't decrypt and they're not subscribed to curated SWM yet
     // (substrate split lands in LU-6), so SWM-lookup would always decline
     // with NO_DATA_IN_SWM — the exact bug §1.1 surfaces. Public CGs keep
-    // the existing behaviour: `fromSharedMemory` → cores look up SWM
-    // locally; otherwise plaintext inline.
+    // strict external `fromSharedMemory` semantics; only the internal
+    // publishFromSharedMemory() path can opt into size-gated inline staging.
     // GH #1121 — take the encrypted-inline path whenever a REAL encryption
     // callback is wired. The ONE exception: skip the async-lift mapper's
     // fail-closed DEFAULT on a chainless / local-only publish (ownerOnly KA on
@@ -2459,7 +2481,8 @@ export class DKGPublisher implements Publisher {
         stagingByteSize = publicByteSize;
       }
     } else {
-      // A2 (§1.1 fix): public CGs ALWAYS ship plaintext quads inline — the
+      // A2 (§1.1 fix): internal public-CG VM publishes ship small plaintext
+      // quads inline on the first ACK attempt — the
       // SAME bytes the NO_DATA_IN_SWM self-heal retry (fromSharedMemory:false)
       // and the curated catalog path above already send. Relying on a core's
       // local SWM copy declines NO_DATA_IN_SWM / times out the round whenever
@@ -2472,11 +2495,9 @@ export class DKGPublisher implements Publisher {
       // Exception: above the core's inline cap keep
       // the SWM-lookup fallback so a large publish can still ACK from cores that
       // synced the data (the bound-graph SWM lookup in A3 keeps that path fast).
-      const inlinePublicQuads = new TextEncoder().encode(nquadsStr);
-      stagingQuads =
-        isPublishFromSharedMemory && inlinePublicQuads.length > STORAGE_ACK_MAX_STAGING_BYTES
-          ? undefined
-          : inlinePublicQuads;
+      // Public callers that set `fromSharedMemory: true` keep the strict SWM
+      // contract and therefore omit `stagingQuads`.
+      stagingQuads = selectPublicStagingQuads(options, nquadsStr, publicByteSize);
     }
 
     // Pre-compute tokenAmount and epochs so they can be included in the

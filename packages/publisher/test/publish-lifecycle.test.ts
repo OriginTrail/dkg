@@ -1419,7 +1419,7 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(started).toContain('collect_v10_acks');
   });
 
-  it('V10: public fromSharedMemory publishes inline small staging quads on first ACK attempt', async () => {
+  it('V10: public fromSharedMemory option omits staging quads for strict SWM ACKs', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
@@ -1440,7 +1440,7 @@ describe('Tentative publish UAL uniqueness', () => {
       return realProvider(params);
     };
 
-    const submitted = q(ENTITY, 'http://schema.org/name', '"fromSharedMemory Inline"');
+    const submitted = q(ENTITY, 'http://schema.org/name', '"fromSharedMemory Strict SWM"');
     const result = await pubS(publisher, {
       contextGraphId: CONTEXT_GRAPH,
       quads: [submitted],
@@ -1449,13 +1449,7 @@ describe('Tentative publish UAL uniqueness', () => {
     });
 
     expect(result.status).toBe('confirmed');
-    expect(receivedStagingQuads).toBeDefined();
-    expect(receivedStagingQuads!.length).toBeGreaterThan(0);
-
-    const decoded = new TextDecoder().decode(receivedStagingQuads);
-    expect(decoded).toContain(
-      `<${submitted.subject}> <${submitted.predicate}> ${submitted.object} <${submitted.graph}> .`,
-    );
+    expect(receivedStagingQuads).toBeUndefined();
   });
 
   it('V10: public publishes still support legacy positional v10ACKProvider callbacks', async () => {

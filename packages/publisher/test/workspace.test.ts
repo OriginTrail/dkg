@@ -28,7 +28,7 @@ import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { wrapPublisherForTest, buildSeal } from './_helpers/seal.js';
 import { makeHardhatReceiverACKProvider } from './_helpers/acks.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
-import type { V10ACKProvider } from '../src/publisher.js';
+import type { V10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 
 // RC11 / PR1: in-memory 3-of-N ACK provider that signs the V10 ACK
 // digest with the staked Hardhat receiver wallets (REC1..REC3). Replaces
@@ -409,6 +409,39 @@ describe('Workspace: publishFromSharedMemory', () => {
       expect(dataResult.bindings.length).toBe(1);
       expect(dataResult.bindings[0]['o']).toBe('"Enshrine Me"');
     }
+  });
+
+  it('inlines small public SWM payloads for the internal first ACK attempt', async () => {
+    const quads = [
+      q(ENTITY, 'http://schema.org/name', '"Inline From SWM"'),
+    ];
+    await publisher.share(CONTEXT_GRAPH, quads, { publisherPeerId: 'peer-inline' });
+
+    let receivedStagingQuads: Uint8Array | undefined;
+    const realProvider = getAckProvider();
+    const v10ACKProvider: V10ACKProvider = async (params: V10ACKProviderParams) => {
+      receivedStagingQuads = params.stagingQuads;
+      expect(params.ackMode.kind).toBe('public');
+      return realProvider(params);
+    };
+
+    const selectedQuads = [{
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Inline From SWM"',
+      graph: DATA_GRAPH,
+    }];
+    const result = await publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      precomputedAttestation: await sealForQuads(selectedQuads, CONTEXT_GRAPH),
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(receivedStagingQuads).toBeDefined();
+    expect(receivedStagingQuads!.length).toBeGreaterThan(0);
+
+    const decoded = new TextDecoder().decode(receivedStagingQuads!);
+    expect(decoded).toContain(`<${ENTITY}> <http://schema.org/name> "Inline From SWM"`);
   });
 
   it('enshrine with rootEntities filter only enshrines those entities', async () => {
