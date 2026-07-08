@@ -209,6 +209,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
+import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/requester/agents-meta-sync-config.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1711,6 +1712,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
+      // unless the operator opts in. Reads `DKG_SERVE_AGENTS_META` FRESH per call
+      // so the kill-switch is reversible at runtime without a node restart.
+      shouldWithholdDurableMeta: (contextGraphId) =>
+        shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
     });
@@ -3147,7 +3153,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphIds,
       onPhase,
       onAccessDenied,
-      syncAgentsMeta: this.config.nodeRole === 'core' ? true : this.config.syncAgentsMeta,
+      syncAgentsMeta: resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
       createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
       fetchSyncPages: this.fetchSyncPages.bind(this),
       sinceBatchIdFor,

@@ -930,9 +930,9 @@ export interface DKGAgentConfig {
   syncSharedMemoryOnConnect?: boolean;
   /**
    * When false, durable sync skips the large system `agents/_meta` graph while
-   * still syncing `agents` data as the phonebook. Defaults to true for
-   * compatibility; only honored for edge nodes that do not need full KA/KC
-   * lifecycle metadata for the system agents graph. Core nodes always sync it.
+   * still syncing `agents` data as the phonebook. Defaults to false on every
+   * node role (cores included); set true (or `DKG_SYNC_AGENTS_META=1`) to fetch
+   * the full system KA/KC lifecycle metadata for the agents graph.
    */
   syncAgentsMeta?: boolean;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */

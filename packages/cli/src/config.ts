@@ -553,10 +553,18 @@ export interface DkgConfig {
    */
   swmAwaitCuratorAck?: boolean;
   /**
-   * Keep durable sync of `did:dkg:context-graph:agents/_meta` enabled by
-   * default. Edge-node operators can set this to false to sync the `agents`
-   * phonebook data without pulling the large system KA/KC lifecycle metadata.
-   * Ignored on core nodes, which always sync system graph metadata.
+   * Durable sync of the system `did:dkg:context-graph:agents/_meta` graph.
+   * Defaults to OFF on every node role, cores included: `agents/_meta` is
+   * bloated KA/KC lifecycle metadata with no cross-node consumer and was a hot
+   * contributor to the mainnet sync-retry storm. Set this to `true` (or export
+   * `DKG_SYNC_AGENTS_META=1`) to re-enable fetching it. The `agents` DATA graph
+   * (the peer phonebook) is always synced regardless of this flag.
+   *
+   * NOTE: this flag is read once at daemon construction (restart required to
+   * change it). Re-enabling fetch on ONE node is not enough on its own — serving
+   * cores withhold `agents/_meta` by default too, so a re-enabled fetcher still
+   * receives empty pages unless the serving cores also set
+   * `DKG_SERVE_AGENTS_META=1` (that serve switch IS runtime-hot, no restart).
    */
   syncAgentsMeta?: boolean;
   /**

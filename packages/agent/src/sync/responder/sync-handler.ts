@@ -65,6 +65,17 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /**
+   * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
+   * `_meta` snapshot for `contextGraphId` — the responder then replies with an
+   * empty (completed) meta page instead of materializing/serving it. Kept as an
+   * injected dependency so daemon config policy (the `DKG_SERVE_AGENTS_META`
+   * kill-switch + the agents-registry-CG check) lives at the wiring site, NOT in
+   * the sync responder. Omitted / returns falsy ⇒ serve normally (the pre-#1233
+   * behaviour), so callers that don't wire it are unaffected. The production
+   * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
+   */
+  shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
 }
@@ -233,6 +244,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     publicSnapshotStore,
     parseSyncRequest,
     authorizeSyncRequest,
+    shouldWithholdDurableMeta,
     logWarn,
     logDebug,
   } = params;
@@ -449,33 +461,52 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
         if (nquads.length === 0) return new TextEncoder().encode('');
       } else if (phase === 'meta') {
-        const queryStartedAt = Date.now();
-        const session = prepareResponderSession(
-          'Durable meta',
-          `${peerId}:durable-meta:${contextGraphId}`,
-          request.syncSessionId,
-          offset,
-        );
-        const rows = await readDurableMetaPage({
-          store,
-          contextGraphId,
-          registeredSubGraphNames: await subGraphRegistrationMemo.get(
+        // Durable-meta serve-skip (#1233). When the injected policy predicate
+        // says to withhold this CG's `_meta` (production: the agents registry
+        // system CG, whose `_meta` is bloated per-heartbeat KA/KC records with NO
+        // cross-node consumer — agent facts are served from the DATA phase — and
+        // serving it just re-propagates the bloat across the mesh), skip
+        // materializing/serializing it and leave `nquads` empty, which returns an
+        // empty (completed) meta page. The requester tolerates this exactly like
+        // a legitimately-empty meta graph — it treats an empty body as clean EOF
+        // (page-fetch.ts: `if (!nquadsText) break`). Only THIS durable-meta
+        // snapshot is withheld: the DATA phase, and any CG the predicate does not
+        // flag, are untouched. The predicate reads the `DKG_SERVE_AGENTS_META`
+        // kill-switch per call at the wiring site, so it is reversible at runtime.
+        if (shouldWithholdDurableMeta?.(contextGraphId)) {
+          logDebug(
+            createOperationContext('sync'),
+            `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
+          );
+        } else {
+          const queryStartedAt = Date.now();
+          const session = prepareResponderSession(
+            'Durable meta',
+            `${peerId}:durable-meta:${contextGraphId}`,
+            request.syncSessionId,
+            offset,
+          );
+          const rows = await readDurableMetaPage({
+            store,
             contextGraphId,
-            { refresh: offset === 0, signal },
-          ),
-          offset,
-          limit,
-          signal,
-          rowListMemo: session ? durableMetaRowsMemo : undefined,
-          rowListCacheKey: session?.rowListCacheKey,
-          refreshRowList: session?.refreshRowList,
-        });
-        const queryDurationMs = Date.now() - queryStartedAt;
-        const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
-        if (serialized) nquads.push(serialized);
-        const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+            registeredSubGraphNames: await subGraphRegistrationMemo.get(
+              contextGraphId,
+              { refresh: offset === 0, signal },
+            ),
+            offset,
+            limit,
+            signal,
+            rowListMemo: session ? durableMetaRowsMemo : undefined,
+            rowListCacheKey: session?.rowListCacheKey,
+            refreshRowList: session?.refreshRowList,
+          });
+          const queryDurationMs = Date.now() - queryStartedAt;
+          const serializeStartedAt = Date.now();
+          const serialized = serializeResponderRows(rows);
+          if (serialized) nquads.push(serialized);
+          const serializeDurationMs = Date.now() - serializeStartedAt;
+          logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        }
       } else {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
