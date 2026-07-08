@@ -636,6 +636,55 @@ describe('handleNodeUIRequest /api/metrics snapshot-first behaviour (#1066 Item 
   });
 });
 
+describe('handleNodeUIRequest metrics-consumer presence wiring (#1066 Item 1)', () => {
+  // markMetricsConsumer is the 11th positional arg (after relayStatsProvider).
+  // This proves the runtime wiring: a served metric route marks the presence
+  // object the collector consults; other routes do not. Because the daemon
+  // calls handleNodeUIRequest only after rate-limit/admission/auth accept the
+  // request, marking here is inherently post-auth (a rejected request never
+  // reaches this handler, so it cannot open the store-metrics gate).
+  const fakeDb = () => ({
+    getMetrics: () => [], getErrorHotspots: () => [],
+    getLatestSnapshot: () => ({ ts: 1, total_triples: 1 }),
+    getSnapshotHistory: () => [],
+  } as any);
+
+  it('GET /api/metrics marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('GET /api/metrics/history marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics/history`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('a non-metrics route does NOT mark a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    // /api/relay/stats is handled here (404 without a relay provider) but is
+    // not a metric route, so it must not open the gate.
+    const res = await fetch(`${baseUrl}/api/relay/stats`);
+    expect(res.status).toBe(404);
+    expect(marks).toBe(0);
+  });
+});
+
 describe('handleNodeUIRequest replication routes (Phase F)', () => {
   let db: DashboardDB;
   let dir: string;

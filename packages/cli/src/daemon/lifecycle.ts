@@ -3142,16 +3142,6 @@ export async function runDaemonInner(
     try {
       const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host}`);
 
-      // Metrics presence (#1066 Item 1): a read of the metric-serving routes
-      // counts as an active consumer, keeping the collector's store scans warm
-      // for Grafana / health probes as well as the node-UI dashboard.
-      if (
-        reqUrl.pathname === "/api/metrics" ||
-        reqUrl.pathname === "/api/metrics/history"
-      ) {
-        metricsPresence.mark();
-      }
-
       // Resolve CORS origin once per request (request-scoped, not global)
       const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
       (res as any).__corsOrigin = reqCorsOrigin;
@@ -3316,7 +3306,13 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      // Metrics presence (#1066 Item 1): a served read of /api/metrics[/history]
+      // marks a consumer, keeping the collector's store scans warm for Grafana /
+      // health probes as well as the dashboard. Marking happens INSIDE the route
+      // handler (below) so it only fires after rate-limit, admission, and auth
+      // have accepted the request — a rejected/unauthenticated request cannot
+      // open the store-metrics gate.
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
       await handleRequest(

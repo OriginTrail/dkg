@@ -98,6 +98,13 @@ export async function handleNodeUIRequest(
   telemetrySettings?: TelemetrySettingsCallbacks,
   corsOrigin?: string | null,
   relayStatsProvider?: RelayStatsProvider,
+  /**
+   * Called when a metric-serving route (/api/metrics[/history]) is actually
+   * served here — i.e. after the daemon's rate-limit/admission/auth gates have
+   * accepted the request. Lets the metrics collector treat the caller as a live
+   * consumer without the daemon duplicating route knowledge. (#1066 Item 1)
+   */
+  markMetricsConsumer?: () => void,
 ): Promise<boolean> {
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
@@ -105,6 +112,7 @@ export async function handleNodeUIRequest(
   // --- Metrics ---
 
   if (req.method === 'GET' && path === '/api/metrics') {
+    markMetricsConsumer?.();
     // Serve the latest tick-written snapshot rather than live-collecting.
     // A live collect() re-runs the full-store COUNT scans on every request, so
     // an external poller (Grafana / health probe) could hammer a saturated
@@ -125,6 +133,7 @@ export async function handleNodeUIRequest(
   }
 
   if (req.method === 'GET' && path === '/api/metrics/history') {
+    markMetricsConsumer?.();
     const from = parseInt(url.searchParams.get('from') ?? '0', 10) || (Date.now() - 86_400_000);
     const to = parseInt(url.searchParams.get('to') ?? '0', 10) || Date.now();
     const maxPoints = parseInt(url.searchParams.get('maxPoints') ?? '500', 10);
