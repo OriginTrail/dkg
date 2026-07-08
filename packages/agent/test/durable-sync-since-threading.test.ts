@@ -29,6 +29,9 @@ function makeContext(options: {
     metaOnlyResponses?: number;
     dataRejectedMissingMeta?: number;
   };
+  metaQuads?: Quad[];
+  dataQuads?: Quad[];
+  processError?: Error;
   logLifecycle?: (event: {
     assetUal: string;
     event: string;
@@ -43,7 +46,9 @@ function makeContext(options: {
   const insertedBatches: Quad[][] = [];
   const deletedCheckpoints: string[] = [];
   const page = (phase: 'data' | 'meta'): SyncPageResult => ({
-    quads: phase === 'data' ? ([{ id: 'data' }] as never[]) : ([{ id: 'meta' }] as never[]),
+    quads: phase === 'data'
+      ? (options.dataQuads ?? ([{ id: 'data' }] as never[]))
+      : (options.metaQuads ?? ([{ id: 'meta' }] as never[])),
     bytesReceived: phase === 'data' ? 20 : 10,
     resumedFromOffset: 0,
     nextOffset: phase === 'data' ? 1 : 2,
@@ -80,6 +85,7 @@ function makeContext(options: {
       },
       sinceBatchIdFor: options.sinceBatchIdFor,
       processDurableBatchInWorker: async (dataQuads: Quad[], metaQuads: Quad[], _ctx: unknown, acceptUnverified: boolean) => {
+        if (options.processError) throw options.processError;
         processCalls.push({ dataCount: dataQuads.length, metaCount: metaQuads.length, acceptUnverified });
         return {
           verifiedData,
@@ -255,6 +261,42 @@ describe('runDurableSync sinceBatchId threading', () => {
       contextGraphId: 'mfacts',
       remotePeerId: 'peerR',
       reason: 'data-rejected-missing-meta',
+    }));
+  });
+
+  it('emits published KA sync failure lifecycle event when verification fails after metadata fetch', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      event: string;
+      action: string;
+      result: string;
+      contextGraphId: string;
+      remotePeerId: string;
+      reason?: string;
+    }> = [];
+    const publishedMeta = {
+      subject: ASSET_UAL,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${'ab'.repeat(32)}"`,
+      graph: 'did:dkg:context-graph:mfacts/_meta',
+    };
+    const { context } = makeContext({
+      metaQuads: [publishedMeta],
+      dataQuads: [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"Fact"', graph: 'did:dkg:context-graph:mfacts' }],
+      processError: new Error('worker verifier failed'),
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    });
+
+    await runDurableSync(context);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      event: 'sync_failure',
+      action: 'failure',
+      result: 'failed',
+      contextGraphId: 'mfacts',
+      remotePeerId: 'peerR',
+      reason: 'worker verifier failed',
     }));
   });
 });
