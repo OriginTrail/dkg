@@ -209,7 +209,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
+import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1713,9 +1713,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
-      // unless the operator opts in. The bound method reads `DKG_SERVE_AGENTS_META`
+      // unless the operator opts in. The predicate reads `DKG_SERVE_AGENTS_META`
       // FRESH per call, so the kill-switch is reversible at runtime (no restart).
-      shouldWithholdDurableMeta: this.shouldWithholdDurableMeta.bind(this),
+      shouldWithholdDurableMeta: createAgentsDurableMetaWithholdPredicate(),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
     });
@@ -3587,20 +3587,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const divisor = Math.max(1, remainingContextGraphs);
     const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
     return Date.now() + budgetMs;
-  }
-
-  /**
-   * Serve-skip policy seam (#1233): the responder's injected `shouldWithholdDurableMeta`
-   * predicate (wired in `start()` → `registerSyncHandler`). Withholds the
-   * no-consumer `agents/_meta` snapshot from peers unless the operator opts in.
-   * Reads `DKG_SERVE_AGENTS_META` FRESH on every call — so flipping the env
-   * takes effect on the next sync request with no node restart (runtime-hot) —
-   * and delegates the precedence to the pure `shouldWithholdAgentsDurableMeta`
-   * resolver. Extracted as a method so the call-site wiring + runtime-hot
-   * behaviour are unit-testable in isolation (does not touch `this`).
-   */
-  shouldWithholdDurableMeta(this: DKGAgent, contextGraphId: string): boolean {
-    return shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META);
   }
 
   /**

@@ -320,17 +320,18 @@ export class PublishHandler {
       // #1233 follow-up — bound agents/_meta: this direct-protocol receive path
       // is load-bearing (the `metadataQuads` we insert are the SAME object the
       // tentative lifecycle expires/pends on below), so it cannot be skipped for
-      // the agents CG. INSERT then PRUNE (insert-first): the just-inserted UAL is
-      // `keepUal`, so the prune protects it and a prune failure only degrades
-      // boundedness instead of losing the record. The agents system CG (never
-      // confirms on-chain) keeps at most one live record per agent; no-op prune
-      // for every other CG (so it just inserts).
+      // the agents CG. INSERT then PRUNE (insert-first) via the helper: the
+      // just-inserted UAL is `recordUal` so the prune protects it, and a
+      // post-insert prune failure is swallowed (warned) inside the helper so it
+      // can never abort this ACK / orphan the pending publish below. The agents
+      // system CG (never confirms on-chain) keeps at most one live record per
+      // agent; no-op prune for every other CG (so it just inserts).
       await insertBoundedAgentRegistryMeta({
         store: this.store,
         contextGraphId,
         metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
         rootEntities: manifest.map((m) => m.rootEntity),
-        keepUal: request.ual,
+        recordUal: request.ual,
         metadataQuads,
       });
 

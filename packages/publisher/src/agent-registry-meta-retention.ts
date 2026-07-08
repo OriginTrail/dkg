@@ -34,30 +34,56 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
  * The prune deletes the SAME agent's superseded prior records; running it BEFORE
  * the insert (the original #1233 shape) meant an insert failure after a
  * successful prune could leave the agent with NO record at all. Inserting FIRST
- * and passing `keepUal = the just-inserted UAL` flips the prune's
- * `FILTER(?record != keepUal)` from a defensive no-op into an active GUARANTEE
- * that the new record survives. Failure semantics improve accordingly: an insert
- * failure propagates with the prior record untouched (no loss); a prune failure
- * after a successful insert only degrades boundedness (the next heartbeat
- * re-prunes) — it never loses state.
+ * and passing `recordUal` = the just-inserted UAL flips the prune's
+ * `FILTER(?record != recordUal)` from a defensive no-op into an active GUARANTEE
+ * that the new record survives.
+ *
+ * Failure semantics are asymmetric BY DESIGN (#1533):
+ *   - INSERT failure → PROPAGATES. It happens before the prune and nothing
+ *     durable changed, so the caller correctly aborts (e.g. rejects the ACK).
+ *   - PRUNE failure AFTER a successful insert → SWALLOWED (loud warn), NOT
+ *     propagated. The record is already durably inserted, so the caller MUST
+ *     still run its downstream lifecycle registration
+ *     (`pendingPublishes`/`expireTentativePublish`). Letting a transient prune
+ *     error bubble up would reject the ACK and orphan the tentative publish (its
+ *     timeout cleanup never registers). Boundedness is only degraded for one
+ *     round; the next heartbeat re-prunes.
  *
  * For non-agents CGs the prune is a no-op (see
  * {@link pruneSupersededAgentRegistryMeta}), so this is just the insert.
+ *
+ * @param opts.recordUal REQUIRED — the UAL of the record in `metadataQuads`. It
+ *   is both the record being inserted and the one protected from the prune, so
+ *   it MUST equal the `<ual>` subject of `metadataQuads` (a drift would let the
+ *   prune delete the just-inserted record).
  */
 export async function insertBoundedAgentRegistryMeta(opts: {
   store: TripleStore;
   contextGraphId: string;
   metaGraph: string;
   rootEntities: readonly string[];
-  keepUal?: string;
+  recordUal: string;
   metadataQuads: Quad[];
 }): Promise<void> {
-  const { store, contextGraphId, metaGraph, rootEntities, keepUal, metadataQuads } = opts;
+  const { store, contextGraphId, metaGraph, rootEntities, recordUal, metadataQuads } = opts;
   // Insert FIRST so a prune failure can never leave the agent with no record.
+  // An insert failure PROPAGATES (caller aborts; nothing durable changed).
   await store.insert(metadataQuads);
-  // Then bound: evict this agent's superseded prior records. `keepUal` protects
-  // the record we just inserted.
-  await pruneSupersededAgentRegistryMeta({ store, contextGraphId, metaGraph, rootEntities, keepUal });
+  // The record is now durable, so a prune failure MUST NOT abort the caller's
+  // downstream lifecycle registration — swallow it with a loud warn and let the
+  // next heartbeat re-prune. `recordUal` protects the row we just wrote.
+  try {
+    await pruneSupersededAgentRegistryMeta({
+      store, contextGraphId, metaGraph, rootEntities, keepUal: recordUal,
+    });
+  } catch (err) {
+    log.warn(
+      createOperationContext('system'),
+      `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
+        `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
+        `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+    );
+  }
 }
 
 /**

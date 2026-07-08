@@ -77,3 +77,17 @@ export function shouldWithholdAgentsDurableMeta(
   if (!isAgentRegistryContextGraph(contextGraphId)) return false;
   return parseBooleanEnv(serveEnvValue) !== true;
 }
+
+/**
+ * Build the responder's injected `shouldWithholdDurableMeta` predicate (#1233),
+ * wired into `registerSyncHandler` at the daemon lifecycle call site. The
+ * returned predicate reads `DKG_SERVE_AGENTS_META` FRESH on every call — so
+ * flipping the env takes effect on the next sync request with no node restart
+ * (runtime-hot) — and delegates the decision to the pure
+ * `shouldWithholdAgentsDurableMeta` resolver. Lives here (not on the lifecycle
+ * mixin) so the serve-skip policy is fully contained in this module.
+ */
+export function createAgentsDurableMetaWithholdPredicate(): (contextGraphId: string) => boolean {
+  return (contextGraphId) =>
+    shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META);
+}

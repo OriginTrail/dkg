@@ -221,7 +221,7 @@ export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/ma
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.
-// `parseBooleanEnv` / `shouldWithholdAgentsDurableMeta` stay internal to the
-// agent package (only tests import them, via the module path) — the CLI needs
-// only the fetch-flag resolver.
-export { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
+// `parseBooleanEnv` is part of the shipped public surface (#1526) — keep it
+// exported. The serve-side policy (`shouldWithholdAgentsDurableMeta` + its
+// predicate factory) stays internal; only the in-agent lifecycle + tests use it.
+export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
