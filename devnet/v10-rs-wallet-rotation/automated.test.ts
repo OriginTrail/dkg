@@ -183,6 +183,12 @@ describe('V10 Random Sampling — operational-wallet rotation (Phase 4)', () => 
       if (create.size >= 1 && submit.size >= 1 && senders.size >= 2) break;
     }
 
+    // The window must contain a FULL create→submit cycle — the header's claim.
+    // Without the per-method assertions, two createChallenges from two wallets
+    // would satisfy the rotation check while submitProof went entirely
+    // unobserved (the false-green shape the devnet-suite review flagged).
+    expect(create.size, 'observed NO createChallenge from the node in the window — lengthen DKG_RS_ROT_WINDOW / warp proof periods').toBeGreaterThan(0);
+    expect(submit.size, 'observed NO submitProof from the node in the window — lengthen DKG_RS_ROT_WINDOW / warp proof periods').toBeGreaterThan(0);
     expect(senders.size, 'observed NO RS txs from the node in the window — lengthen DKG_RS_ROT_WINDOW / warp proof periods').toBeGreaterThan(0);
 
     // FAIL-CLOSED (deterministic, the core safety property): every wallet that

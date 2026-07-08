@@ -4094,6 +4094,66 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       expect(chosen.address).toBe(walletA.address);
     });
 
+    it('nextRandomSamplingSigner requests exactly the RS spec (rotatable-free / native-only / preferIdle)', async () => {
+      // Pins the wrapper itself — every other test stubs it or calls
+      // selectSigner directly, so a wrong txClass/funding/preferIdle here
+      // would otherwise only surface on a live devnet.
+      const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      const specs: any[] = [];
+      (a as any).selectSigner = async (spec: any) => { specs.push(spec); return (a as any).signer; };
+      await (a as any).nextRandomSamplingSigner();
+      expect(specs).toEqual([{
+        txClass: 'rotatable-free',
+        funding: { kind: 'native-only', nativeFloorWei: 0n },
+        preferIdle: true,
+      }]);
+    });
+
+    it('RS selection revalidates the chosen wallet on-chain: an out-of-band re-registration is evicted', async () => {
+      // Out-of-band removal race: walletB was removed from THIS identity and
+      // re-registered to ANOTHER (identity 99) by a second node instance — the
+      // same-process set never saw it. The selection must detect the mismatch
+      // on the fresh chain read, evict B, and fall back to the primary.
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n); // primary gas-empty → B preferred first
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      const refreshed: string[] = [];
+      (a as any).refreshIdentityIdForAddress = async (addr: string) => {
+        refreshed.push(lc(addr));
+        return lc(addr) === lc(walletB.address) ? 99n : 5n;
+      };
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(refreshed).toContain(lc(walletB.address));
+      expect(chosen.address).toBe(walletA.address); // fell back to the primary anchor
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(false); // evicted
+    });
+
+    it('RS revalidation FAILS OPEN on a chain-read error (an RPC blip must not stall proofs)', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      (a as any).refreshIdentityIdForAddress = async () => { throw new Error('rpc down'); };
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(chosen.address).toBe(walletB.address); // kept despite the failed read
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+    });
+
+    it('RS revalidation keeps a wallet that still resolves to our identity', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      (a as any).refreshIdentityIdForAddress = async () => 5n;
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(chosen.address).toBe(walletB.address);
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+    });
+
     it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {
       const prev = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
       process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = '1';
