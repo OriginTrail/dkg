@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -46,6 +46,17 @@ export type WorkspaceSenderKeyDecryptor = (
   contextGraphId: string,
   ctx: OperationContext,
 ) => Promise<Uint8Array>;
+
+export type WorkspaceAssetUalResolver = (
+  input: { agentAddress: string; kaNumber: string },
+) => string | undefined | Promise<string | undefined>;
+
+type SharedMemoryLifecycleValue = string | number | bigint | (() => string | number | bigint | undefined);
+
+export interface SharedMemoryLifecycleLogOptions {
+  localPeerId?: SharedMemoryLifecycleValue;
+  localNodeIdentityId?: SharedMemoryLifecycleValue;
+}
 
 export interface ContextGraphMetaOracleRecord {
   allowedPeers?: readonly string[];
@@ -106,6 +117,7 @@ export interface ContextGraphMetaOracleRecord {
 export type SharedMemoryApplyOutcome =
   | {
       applied: true;
+      assetUal?: string;
       /** Context graph the share applied into. Set on the apply path. */
       cgId?: string;
       /**
@@ -138,7 +150,15 @@ export type SharedMemoryApplyOutcome =
        */
       insertedTriples?: number;
     }
-  | { applied: false; reason: string; retryable: boolean };
+  | {
+      applied: false;
+      reason: string;
+      retryable: boolean;
+      assetUal?: string;
+      cgId?: string;
+      shareOperationId?: string;
+      publisherPeerId?: string;
+    };
 
 /**
  * Structured rejection code for {@link SharedMemoryHandler.verifyHostModeEnvelopeAuthority}.
@@ -252,6 +272,8 @@ export class SharedMemoryHandler {
     contextGraphId: string,
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
   private readonly workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
+  private readonly assetUalForKaIdentity?: WorkspaceAssetUalResolver;
+  private readonly lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
   private readonly now: () => number;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private readonly log = new Logger('SharedMemoryHandler');
@@ -342,6 +364,8 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
       workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
+      assetUalForKaIdentity?: WorkspaceAssetUalResolver;
+      lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
       now?: () => number;
       publicSnapshotStore?: WorkspacePublicSnapshotStore;
       /**
@@ -381,6 +405,8 @@ export class SharedMemoryHandler {
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
+    this.assetUalForKaIdentity = options?.assetUalForKaIdentity;
+    this.lifecycleLogOptions = options?.lifecycleLogOptions;
     this.now = options?.now ?? (() => Date.now());
     this.publicSnapshotStore = options?.publicSnapshotStore;
     // PR #570 Codex follow-up (final, post-merge): validate the
@@ -492,6 +518,59 @@ export class SharedMemoryHandler {
       );
     }
     return floored;
+  }
+
+  private resolveLifecycleValue(value: SharedMemoryLifecycleValue | undefined): string | undefined {
+    const resolved = typeof value === 'function' ? value() : value;
+    return resolved === undefined ? undefined : resolved.toString();
+  }
+
+  private logSwmLifecycleEvent(
+    ctx: OperationContext,
+    event: string,
+    input: {
+      assetUal?: string;
+      contextGraphId?: string;
+      shareOperationId?: string;
+      publisherPeerId?: string;
+      fromPeerId?: string;
+      subGraphName?: string;
+      rootEntityCount?: number;
+      statementCount?: number;
+      insertedCount?: number;
+      outcome?: string;
+      retryable?: boolean;
+      reason?: string;
+      validationErrorCount?: number;
+    },
+    level?: 'info' | 'warn' | 'error',
+  ): void {
+    const localPeerId = this.resolveLifecycleValue(this.lifecycleLogOptions?.localPeerId);
+    const localNodeIdentityId = this.resolveLifecycleValue(this.lifecycleLogOptions?.localNodeIdentityId);
+    if (!input.assetUal || !localPeerId || !localNodeIdentityId) return;
+    logKaLifecycleEvent(this.log, ctx, {
+      assetUal: input.assetUal,
+      stage: 'swm_share',
+      event,
+      role: 'receiver',
+      localPeerId,
+      localNodeIdentityId,
+      peer: input.fromPeerId ?? input.publisherPeerId,
+      level,
+      metadata: {
+        contextGraphId: input.contextGraphId,
+        shareOperationId: input.shareOperationId,
+        publisherPeerId: input.publisherPeerId,
+        subGraphName: input.subGraphName,
+        rootEntityCount: input.rootEntityCount,
+        statementCount: input.statementCount,
+        insertedCount: input.insertedCount,
+        outcome: input.outcome,
+        retryable: input.retryable,
+        reason: input.reason,
+        validationErrorCount: input.validationErrorCount,
+      },
+    });
   }
 
   /**
@@ -812,6 +891,10 @@ export class SharedMemoryHandler {
     // can signal which branch fired; the post-closure code
     // maps `cas` → retryable and `validation` → permanent.
     let withWriteLocksRejection: 'validation' | 'cas' | undefined;
+    let lifecycleAssetUal: string | undefined;
+    let lifecycleCgId: string | undefined;
+    let lifecycleShareOperationId: string | undefined;
+    let lifecyclePublisherPeerId: string | undefined;
     try {
       const { envelope, signedPayload } = decoded;
       let request = decoded.request;
@@ -974,20 +1057,44 @@ export class SharedMemoryHandler {
         ctx = createOperationContext('share', request.operationId);
       }
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
+      const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
+      lifecycleAssetUal = assetUal;
+      lifecycleCgId = contextGraphId;
+      lifecycleShareOperationId = shareOperationId;
+      lifecyclePublisherPeerId = publisherPeerId;
+      const rejectOutcome = (reason: string, retryable: boolean): SharedMemoryApplyOutcome => ({
+        applied: false,
+        reason,
+        retryable,
+        assetUal,
+        cgId: contextGraphId,
+        shareOperationId,
+        publisherPeerId,
+      });
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
+      this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
+        assetUal,
+        contextGraphId,
+        shareOperationId,
+        publisherPeerId,
+        fromPeerId,
+        subGraphName,
+        rootEntityCount: manifest?.length ?? 0,
+        outcome: 'received',
+      });
 
       if (!shareOperationId) {
         const reason = `missing shareOperationId for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       if (!trustedReplay && publisherPeerId !== fromPeerId) {
         const reason = `payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       // PR-A R1 NOTE: the redundant-apply counter is bumped AFTER the
@@ -1005,7 +1112,7 @@ export class SharedMemoryHandler {
       if (!trustedReplay && allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
         const reason = `peer "${fromPeerId}" not in allowlist for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       if (subGraphName) {
@@ -1013,7 +1120,7 @@ export class SharedMemoryHandler {
         if (!v.valid) {
           const reason = `invalid subGraphName "${subGraphName}": ${v.reason}`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
-          return { applied: false, reason, retryable: false };
+          return rejectOutcome(reason, false);
         }
       }
 
@@ -1086,10 +1193,35 @@ export class SharedMemoryHandler {
           { allowUpsert: true, upsertableEntities: upsertable },
         );
         if (!validation.valid) {
-          this.log.warn(ctx, `SWM validation rejected: ${validation.errors.join('; ')}`);
+          const reason = validation.errors.join('; ');
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          this.logSwmLifecycleEvent(ctx, 'swm_validation_failed', {
+            assetUal,
+            contextGraphId,
+            shareOperationId,
+            publisherPeerId,
+            fromPeerId,
+            subGraphName,
+            rootEntityCount: manifestForValidation.length,
+            outcome: 'rejected',
+            retryable: false,
+            reason,
+            validationErrorCount: validation.errors.length,
+          }, 'warn');
           withWriteLocksRejection = 'validation';
           return false;
         }
+        this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
+          assetUal,
+          contextGraphId,
+          shareOperationId,
+          publisherPeerId,
+          fromPeerId,
+          subGraphName,
+          rootEntityCount: manifestForValidation.length,
+          statementCount: quads.length,
+          outcome: 'accepted',
+        });
         onPhase?.('validate', 'end');
 
         if (casConditions && casConditions.length > 0) {
@@ -1199,6 +1331,18 @@ export class SharedMemoryHandler {
         // rejected duplicate deliveries count as "redundant applies"
         // and skew the `/api/slo` metric.
         this.recordSeenShareOp(contextGraphId, shareOperationId, ctx);
+        this.logSwmLifecycleEvent(ctx, 'swm_state_changed', {
+          assetUal,
+          contextGraphId,
+          shareOperationId,
+          publisherPeerId,
+          fromPeerId,
+          subGraphName,
+          rootEntityCount: manifestForValidation.length,
+          statementCount: quads.length,
+          insertedCount: quads.length,
+          outcome: 'applied',
+        });
         this.log.info(ctx, `Stored SWM write ${shareOperationId} (${quads.length} quads)`);
         this.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
           contextGraphId,
@@ -1210,6 +1354,7 @@ export class SharedMemoryHandler {
         });
         return {
           applied: true,
+          assetUal,
           cgId: contextGraphId,
           shareOperationId,
           publisherPeerId,
@@ -1225,17 +1370,15 @@ export class SharedMemoryHandler {
       // outbox doesn't drop a payload that would apply after
       // out-of-order delivery converges.
       if (withWriteLocksRejection === 'cas') {
-        return {
-          applied: false,
-          reason: 'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
-          retryable: true,
-        };
+        return rejectOutcome(
+          'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
+          true,
+        );
       }
-      return {
-        applied: false,
-        reason: 'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
-        retryable: false,
-      };
+      return rejectOutcome(
+        'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
+        false,
+      );
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.
       // The dominant production case here is `workspaceSenderKeyDecryptor`
@@ -1249,7 +1392,30 @@ export class SharedMemoryHandler {
       // retry budget and get dropped without operator action.
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
-      return { applied: false, reason, retryable: true };
+      return {
+        applied: false,
+        reason,
+        retryable: true,
+        assetUal: lifecycleAssetUal,
+        cgId: lifecycleCgId,
+        shareOperationId: lifecycleShareOperationId,
+        publisherPeerId: lifecyclePublisherPeerId,
+      };
+    }
+  }
+
+  private async resolveAssetUalForKaIdentity(
+    agentAddress: string | undefined,
+    kaNumber: string | undefined,
+    ctx: OperationContext,
+  ): Promise<string | undefined> {
+    if (!agentAddress || !kaNumber || !this.assetUalForKaIdentity) return undefined;
+    try {
+      return await this.assetUalForKaIdentity({ agentAddress, kaNumber });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `SWM assetUal derivation failed: ${reason}`);
+      return undefined;
     }
   }
 

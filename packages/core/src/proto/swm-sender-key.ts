@@ -38,7 +38,8 @@ export const SwmSenderKeyPackageSchema = new Type('SwmSenderKeyPackage')
   .add(new Field('ephemeralPublicKey', 14, 'bytes'))
   .add(new Field('nonce', 15, 'bytes'))
   .add(new Field('ciphertext', 16, 'bytes'))
-  .add(new Field('signature', 17, 'bytes'));
+  .add(new Field('signature', 17, 'bytes'))
+  .add(new Field('assetUal', 18, 'string'));
 
 export const SwmSenderKeyPackageAckSchema = new Type('SwmSenderKeyPackageAck')
   .add(new Field('version', 1, 'string'))
@@ -51,7 +52,8 @@ export const SwmSenderKeyPackageAckSchema = new Type('SwmSenderKeyPackageAck')
   .add(new Field('epochId', 8, 'string'))
   .add(new Field('membershipHash', 9, 'string'))
   .add(new Field('recipientAgentAddress', 10, 'string'))
-  .add(new Field('reasonCode', 11, 'string'));
+  .add(new Field('reasonCode', 11, 'string'))
+  .add(new Field('assetUal', 12, 'string'));
 
 export const SwmSenderKeyMessageSchema = new Type('SwmSenderKeyMessage')
   .add(new Field('version', 1, 'string'))
@@ -66,7 +68,8 @@ export const SwmSenderKeyMessageSchema = new Type('SwmSenderKeyMessage')
   .add(new Field('nonce', 10, 'bytes'))
   .add(new Field('ciphertext', 11, 'bytes'))
   .add(new Field('aadHash', 12, 'bytes'))
-  .add(new Field('senderKeySignature', 13, 'bytes'));
+  .add(new Field('senderKeySignature', 13, 'bytes'))
+  .add(new Field('assetUal', 14, 'string'));
 
 export const SwmSenderKeySecretSchema = new Type('SwmSenderKeySecret')
   .add(new Field('contextGraphId', 1, 'string'))
@@ -97,6 +100,7 @@ export interface SwmSenderKeyPackageMsg {
   nonce: Uint8Array;
   ciphertext: Uint8Array;
   signature: Uint8Array;
+  assetUal?: string;
 }
 
 export interface SwmSenderKeyPackageAckMsg {
@@ -111,6 +115,7 @@ export interface SwmSenderKeyPackageAckMsg {
   epochId?: string;
   membershipHash?: string;
   recipientAgentAddress?: string;
+  assetUal?: string;
 }
 
 export type KnownSwmSenderKeyPackageAckReasonCode =
@@ -161,6 +166,7 @@ export interface SwmSenderKeyMessageMsg {
   ciphertext: Uint8Array;
   aadHash: Uint8Array;
   senderKeySignature: Uint8Array;
+  assetUal?: string;
 }
 
 export interface SwmSenderKeySecretMsg {
@@ -180,6 +186,7 @@ export interface SwmSenderKeyMessageAADFields {
   type?: string;
   contextGraphId: string;
   subGraphName?: string;
+  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
@@ -193,6 +200,7 @@ export interface SwmSenderKeyPackageAADFields {
   type?: string;
   contextGraphId: string;
   subGraphName?: string;
+  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
@@ -218,6 +226,7 @@ export function encodeSwmSenderKeyPackage(msg: SwmSenderKeyPackageMsg): Uint8Arr
     SwmSenderKeyPackageSchema.create({
       ...msg,
       subGraphName: msg.subGraphName ?? '',
+      assetUal: msg.assetUal ?? '',
       createdAtMs: uint64ForProto(msg.createdAtMs),
       initialMessageIndex: uint64ForProto(msg.initialMessageIndex),
     }),
@@ -231,6 +240,7 @@ export function decodeSwmSenderKeyPackage(buf: Uint8Array): SwmSenderKeyPackageM
     type: stringField(decoded.type),
     contextGraphId: stringField(decoded.contextGraphId),
     subGraphName: stringField(decoded.subGraphName) || undefined,
+    assetUal: stringField(decoded.assetUal) || undefined,
     senderAgentAddress: stringField(decoded.senderAgentAddress),
     epochId: stringField(decoded.epochId),
     membershipHash: stringField(decoded.membershipHash),
@@ -259,6 +269,7 @@ export function encodeSwmSenderKeyPackageAck(msg: SwmSenderKeyPackageAckMsg): Ui
       epochId: msg.epochId ?? '',
       membershipHash: msg.membershipHash ?? '',
       recipientAgentAddress: msg.recipientAgentAddress ?? '',
+      assetUal: msg.assetUal ?? '',
     }),
   ).finish();
 }
@@ -278,6 +289,7 @@ export function decodeSwmSenderKeyPackageAck(buf: Uint8Array): SwmSenderKeyPacka
     epochId: stringField(decoded.epochId) || undefined,
     membershipHash: stringField(decoded.membershipHash) || undefined,
     recipientAgentAddress: stringField(decoded.recipientAgentAddress) || undefined,
+    assetUal: stringField(decoded.assetUal) || undefined,
   };
 }
 
@@ -286,6 +298,7 @@ export function encodeSwmSenderKeyMessage(msg: SwmSenderKeyMessageMsg): Uint8Arr
     SwmSenderKeyMessageSchema.create({
       ...msg,
       subGraphName: msg.subGraphName ?? '',
+      assetUal: msg.assetUal ?? '',
       messageIndex: uint64ForProto(msg.messageIndex),
     }),
   ).finish();
@@ -298,6 +311,7 @@ export function decodeSwmSenderKeyMessage(buf: Uint8Array): SwmSenderKeyMessageM
     type: stringField(decoded.type),
     contextGraphId: stringField(decoded.contextGraphId),
     subGraphName: stringField(decoded.subGraphName) || undefined,
+    assetUal: stringField(decoded.assetUal) || undefined,
     senderAgentAddress: stringField(decoded.senderAgentAddress),
     epochId: stringField(decoded.epochId),
     membershipHash: stringField(decoded.membershipHash),
@@ -337,7 +351,7 @@ export function decodeSwmSenderKeySecret(buf: Uint8Array): SwmSenderKeySecretMsg
 }
 
 export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFields): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(SWM_SENDER_KEY_AAD_DOMAIN),
     framedString('version'),
@@ -348,6 +362,8 @@ export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFiel
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -360,11 +376,12 @@ export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFiel
     framedString(fields.cipherAlgorithm ?? SWM_SENDER_KEY_CIPHER_ALGORITHM),
     framedString('nonce'),
     framedBytes(fields.nonce),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFields): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(SWM_SENDER_KEY_SETUP_AAD_DOMAIN),
     framedString('version'),
@@ -375,6 +392,8 @@ export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFiel
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -399,13 +418,14 @@ export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFiel
     framedBytes(fields.nonce),
     framedString('ciphertext'),
     framedBytes(fields.ciphertext),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeyPackageEncryptionAAD(
   fields: Omit<SwmSenderKeyPackageAADFields, 'ciphertext'>,
 ): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(`${SWM_SENDER_KEY_SETUP_AAD_DOMAIN}.encryption`),
     framedString('version'),
@@ -416,6 +436,8 @@ export function computeSwmSenderKeyPackageEncryptionAAD(
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -438,7 +460,8 @@ export function computeSwmSenderKeyPackageEncryptionAAD(
     framedBytes(fields.ephemeralPublicKey),
     framedString('nonce'),
     framedBytes(fields.nonce),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeySignaturePayload(

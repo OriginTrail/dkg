@@ -1,11 +1,15 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
+import type { EventBus, StorageACKDeclineCode, StorageACKMsg, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
+  Logger,
+  createOperationContext,
   decodePublishIntent,
   decodeUpdateIntent,
   encodeStorageACK,
   decodeStorageACK,
   isStorageACKDecline,
+  isTransientStorageACKDeclineCode,
+  logKaLifecycleEvent,
   withSpan,
   getMetrics,
   computePublishACKDigest,
@@ -175,6 +179,8 @@ export interface StorageACKHandlerConfig {
     contextGraphId: string;
     message: string;
   }) => void | Promise<void>;
+  /** Local libp2p peer id for KA lifecycle logs. */
+  localPeerId?: string;
   /**
    * Codex PR #608: independent curation oracle. The handler MUST verify a
    * publisher's `isEncryptedPayload=true` claim against the CG's real
@@ -350,6 +356,7 @@ export class StorageACKHandler {
   private store: TripleStore;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
+  private readonly log = new Logger('StorageACKHandler');
 
   constructor(store: TripleStore, config: StorageACKHandlerConfig, eventBus: EventBus) {
     this.store = store;
@@ -404,6 +411,38 @@ export class StorageACKHandler {
       nodeIdentityId: 0,
       declineCode: code,
       declineMessage: message,
+    });
+  }
+
+  private logLifecycleResponse(assetUal: string | undefined, peerId: PeerId, ack: StorageACKMsg): void {
+    if (!assetUal) return;
+    const declined = isStorageACKDecline(ack);
+    const signatureR = ack.coreNodeSignatureR instanceof Uint8Array
+      ? ack.coreNodeSignatureR
+      : new Uint8Array(ack.coreNodeSignatureR ?? []);
+    const signatureVS = ack.coreNodeSignatureVS instanceof Uint8Array
+      ? ack.coreNodeSignatureVS
+      : new Uint8Array(ack.coreNodeSignatureVS ?? []);
+    logKaLifecycleEvent(this.log, createOperationContext('share'), {
+      assetUal,
+      stage: 'storage_ack',
+      event: declined ? 'storage_ack_declined' : 'storage_ack_signed',
+      role: 'receiver',
+      localPeerId: this.config.localPeerId ?? 'unknown',
+      localNodeIdentityId: this.config.nodeIdentityId.toString(),
+      peer: peerId.toString(),
+      level: declined ? 'warn' : 'info',
+      metadata: {
+        contextGraphId: ack.contextGraphId,
+        declineCode: declined ? ack.declineCode : undefined,
+        declineMessage: declined ? ack.declineMessage : undefined,
+        retryable: declined ? isTransientStorageACKDeclineCode(ack.declineCode) : undefined,
+        ackNodeIdentityId: declined ? undefined : String(ack.nodeIdentityId),
+        merkleRoot: declined ? undefined : ethers.hexlify(ack.merkleRoot),
+        signatureRBytes: declined ? undefined : signatureR.length,
+        signatureVSBytes: declined ? undefined : signatureVS.length,
+        subscriptionSource: declined ? undefined : ack.subscriptionSource,
+      },
     });
   }
 
@@ -633,11 +672,13 @@ export class StorageACKHandler {
       : undefined;
     return withSpan('publisher.storage_ack_handler', async (span) => {
       let cgIdAttr: string | undefined;
+      let assetUal: string | undefined;
       try {
         // contextGraphId is cheap to read off the decoded intent for the span
         // attribute; the full classification rides the encoded response below.
         const intentPreview = decodePublishIntent(data);
         cgIdAttr = intentPreview.contextGraphId;
+        assetUal = intentPreview.assetUal;
         if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
       } catch {
         // Malformed request — handlePublishIntent will throw + reset below.
@@ -648,6 +689,7 @@ export class StorageACKHandler {
           cgIdAttr,
         );
         const decoded = decodeStorageACK(result);
+        this.logLifecycleResponse(assetUal, peerId, decoded);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';
           span.setAttribute('dkg.ack_outcome', 'decline');

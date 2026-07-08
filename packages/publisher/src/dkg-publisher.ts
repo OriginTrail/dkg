@@ -2729,6 +2729,16 @@ export class DKGPublisher implements Publisher {
       onPhase?.('collect_v10_acks', 'start');
       try {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
+        const reservedAckKaId =
+          (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+        let assetUal: string | undefined;
+        if (reservedAckKaId !== undefined) {
+          try {
+            assetUal = await this.resolveKaUal(reservedAckKaId);
+          } catch {
+            assetUal = undefined;
+          }
+        }
         // OT-RFC-49 / WS-D: for curated CGs the publisher pays / signs against
         // the catalog footprint (`effectiveByteSize` == `catalogByteSize`) and
         // the curated commitment is `catalogCommitment`. For public CGs nothing
@@ -2744,6 +2754,7 @@ export class DKGPublisher implements Publisher {
           swmGraphId,
           subGraphName: options.subGraphName,
           merkleLeafCount: kcMerkleLeafCount,
+          assetUal,
         };
         const lifecycleAckMode = useCuratedCatalog
           ? 'curated_catalog'

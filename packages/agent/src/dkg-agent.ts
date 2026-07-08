@@ -1774,6 +1774,7 @@ export class DKGAgent extends DKGAgentBase {
         swmGraphId: params.swmGraphId,
         subGraphName: params.subGraphName,
         merkleLeafCount: params.merkleLeafCount,
+        assetUal: params.assetUal,
         ackMode: params.ackMode,
       });
       return result.acks;
