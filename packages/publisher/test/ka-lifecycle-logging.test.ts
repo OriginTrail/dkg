@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { QuorumUnmetError } from '../src/ack-errors.js';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
 import { makeTestKaAllocator } from './_helpers/ka-allocator.js';
@@ -112,5 +113,86 @@ describe('KA lifecycle logging - publisher publish', () => {
     const chainConfirm = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'event') === 'confirm');
     expect(chainConfirm?.message).toContain(`kaId=${result.kaId}`);
     expect(chainConfirm?.message).toContain('txHash=0x');
+  });
+
+  it('logs ACK declines and quorum failure under the allocated assetUal', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain.seedIdentity(wallet.address, 1n);
+    chain.minimumRequiredSignatures = 2;
+    const store = new OxigraphStore();
+    const logEntries: LogRecord[] = [];
+    Logger.setSink((entry) => logEntries.push(entry));
+    const quorumError = new QuorumUnmetError({
+      collected: 0,
+      required: 2,
+      dialled: 2,
+      peerOutcomes: [
+        {
+          peerId: 'peer-decline-1',
+          dialOk: true,
+          protocolSupported: true,
+          swmHostModeAdvertised: true,
+          reason: 'STORAGE_ACK_DECLINE:NO_DATA_IN_SWM',
+        },
+      ],
+      legacyMessage: 'storage_ack_insufficient',
+    });
+
+    const publisher = wrapPublisherForTest(new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: TEST_KEY,
+      publisherNodeIdentityId: 7n,
+      kaAllocator: makeTestKaAllocator(),
+    }), {
+      author: wallet,
+      ctx: mockSealCtx({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      }),
+    });
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      quads: [
+        q('urn:ka-log:ack-failure-root', 'http://schema.org/name', '"AckFailureBot"'),
+      ],
+      v10ACKProvider: async () => {
+        throw quorumError;
+      },
+    })).rejects.toBe(quorumError);
+
+    const lifecycleLogs = logEntries.filter((entry) => entry.message.startsWith('ka_lifecycle '));
+    const assetUal = lifecycleField(lifecycleLogs[0]!.message, 'assetUal');
+    const scopedLogs = lifecycleLogs.filter((entry) => entry.message.includes(`assetUal=${assetUal}`));
+
+    expect(scopedLogs.map((entry) => `${lifecycleField(entry.message, 'stage')}:${lifecycleField(entry.message, 'event')}`))
+      .toEqual([
+        'identity:asset_ual_allocated',
+        'wm:write',
+        'swm_share:prepared',
+        'storage_ack:request',
+        'storage_ack:decline',
+        'storage_ack:quorum',
+        'storage_ack:failure',
+      ]);
+
+    const decline = scopedLogs.find((entry) => lifecycleField(entry.message, 'event') === 'decline');
+    expect(decline?.message).toContain('peer=peer-decline-1');
+    expect(decline?.message).toContain('outcome=decline');
+    expect(decline?.message).toContain('reason=STORAGE_ACK_DECLINE:NO_DATA_IN_SWM');
+
+    const quorum = scopedLogs.find((entry) => lifecycleField(entry.message, 'event') === 'quorum');
+    expect(quorum?.message).toContain('outcome=failure');
+    expect(quorum?.message).toContain('quorumCollected=0');
+    expect(quorum?.message).toContain('quorumRequired=2');
+    expect(quorum?.message).toContain('peerDialled=2');
+
+    const failure = scopedLogs.find((entry) => lifecycleField(entry.message, 'event') === 'failure');
+    expect(failure?.message).toContain('errorClass=QuorumUnmetError');
   });
 });
