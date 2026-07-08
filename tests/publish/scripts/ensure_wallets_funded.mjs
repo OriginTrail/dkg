@@ -8,7 +8,7 @@ const NODES = [
   { name: 'TestNode2', url: process.env.TESTNET2_API_URL || 'http://100.70.65.41:9200',   token: process.env.V10_TOKEN_TESTNET2 },
   { name: 'TestNode4', url: process.env.TESTNET4_API_URL || 'http://100.65.228.120:9200', token: process.env.V10_TOKEN_TESTNET4 },
 ];
-const FALLBACK = (process.env.V10_TESTNET_WALLETS || '0x457759127Ff49F1668141FD69E16277560bF20Aa,0xb1D15B17e6766e05A4f583ccE92B357f96015737,0x92c6db7e977F782101d794A7e1222acc95630617').split(',');
+const FALLBACK = (process.env.V10_TESTNET_WALLETS || '0x4c92AeE34BAd19c3C51B632A0d48872dbDb02495,0xE3808e734cC77F63369D59365ef2bB0E2Adb3B3f,0xac7089c953e213A0D4Bb03B7799Ae1E08046b4A4,0xc3252faBEb9Be99dfc4a0614E493bb6149eBBD60,0x6A0d08372b3889123EAf586F8cd29b4C8e698049,0x8cc06bC44815BC52f6f27eef2D74ae2A94DbBFcb,0xA218C803fc77a2f5d68cDf3919b3980d1B082Ea4,0x3DE7e0Ac72C0936EaF9C81eC004aEE163A6a4884,0xB5D93553a96793888234fAF481b2EFa7d137b92c,0xa441223110d8F8CE31aFB45231E05Bb693b76D6C').split(',');
 const RPC = process.env.V10_TESTNET_RPC || 'https://base-sepolia-rpc.publicnode.com';
 const TRAC = process.env.V10_TESTNET_TRAC || '0x2A58BdD13176D85906D804cdbFFA0D9119282DC8';
 const MIN_ETH = BigInt(process.env.V10_MIN_ETH_WEI || 5e14);
@@ -58,11 +58,14 @@ const check = async () => {
 
 let low = await check();
 if (low.length) {
-  console.log(`\nFunding ${low.length} wallet(s) via faucet...`);
-  const r = await fetch(FAUCET, { method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `v10-fund-${Date.now()}` },
-    body: JSON.stringify({ mode: 'v10_base_sepolia', wallets: low }) });
-  console.log(`Faucet: ${JSON.stringify((await r.json().catch(() => ({}))).summary || {}).slice(0, 150)}`);
+  console.log(`\nFunding ${low.length} wallet(s) via faucet (batches of 4 — API cap)...`);
+  for (let i = 0; i < low.length; i += 4) {
+    const batch = low.slice(i, i + 4);
+    const r = await fetch(FAUCET, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': `v10-fund-${Date.now()}-${i}` },
+      body: JSON.stringify({ mode: 'v10_base_sepolia', wallets: batch }) });
+    console.log(`Faucet batch ${i / 4 + 1}: ${JSON.stringify((await r.json().catch(() => ({}))).summary || {}).slice(0, 150)}`);
+  }
   await new Promise((r) => setTimeout(r, 30000));
   low = await check();
 }
