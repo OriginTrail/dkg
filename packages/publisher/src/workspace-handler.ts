@@ -895,6 +895,7 @@ export class SharedMemoryHandler {
     let lifecycleCgId: string | undefined;
     let lifecycleShareOperationId: string | undefined;
     let lifecyclePublisherPeerId: string | undefined;
+    let lifecycleAssetVerified = false;
     try {
       const { envelope, signedPayload } = decoded;
       let request = decoded.request;
@@ -1059,31 +1060,17 @@ export class SharedMemoryHandler {
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
       const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
-      lifecycleAssetUal = assetUal;
-      lifecycleCgId = contextGraphId;
-      lifecycleShareOperationId = shareOperationId;
-      lifecyclePublisherPeerId = publisherPeerId;
       const rejectOutcome = (reason: string, retryable: boolean): SharedMemoryApplyOutcome => ({
         applied: false,
         reason,
         retryable,
-        assetUal,
+        assetUal: lifecycleAssetVerified ? assetUal : undefined,
         cgId: contextGraphId,
         shareOperationId,
         publisherPeerId,
       });
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
-      this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
-        assetUal,
-        contextGraphId,
-        shareOperationId,
-        publisherPeerId,
-        fromPeerId,
-        subGraphName,
-        rootEntityCount: manifest?.length ?? 0,
-        outcome: 'received',
-      });
 
       if (!shareOperationId) {
         const reason = `missing shareOperationId for context graph "${contextGraphId}"`;
@@ -1123,6 +1110,22 @@ export class SharedMemoryHandler {
           return rejectOutcome(reason, false);
         }
       }
+
+      lifecycleAssetVerified = true;
+      lifecycleAssetUal = assetUal;
+      lifecycleCgId = contextGraphId;
+      lifecycleShareOperationId = shareOperationId;
+      lifecyclePublisherPeerId = publisherPeerId;
+      this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
+        assetUal,
+        contextGraphId,
+        shareOperationId,
+        publisherPeerId,
+        fromPeerId,
+        subGraphName,
+        rootEntityCount: manifest?.length ?? 0,
+        outcome: 'received',
+      });
 
       await this.graphManager.ensureContextGraph(contextGraphId);
 

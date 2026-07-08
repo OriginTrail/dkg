@@ -19,6 +19,19 @@ across publisher, receiver, ACK, finalization, sync, and reconcile entries.
 Do not paste raw payload data into the handoff; raw payload, triples,
 ciphertext, plaintext, and private snippets must be absent or redacted.
 
+For a PR handoff, include enough run metadata for another engineer to repeat
+the check:
+
+- git commit SHA and branch under test
+- devnet size and node roles
+- publish command or API route used to create the KA
+- emitted `assetUal`
+- exact grep command and full grep output, with only sensitive payload values
+  redacted
+
+The sample below is representative. Treat the live grep output from the branch
+under test as the verifiable artifact.
+
 ## Recorded Devnet Grep Evidence
 
 Recorded compact grep result for one multi-node publish on a local devnet:

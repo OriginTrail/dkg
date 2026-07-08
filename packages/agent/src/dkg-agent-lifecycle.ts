@@ -74,6 +74,7 @@ import {
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
+  type PublishIntentMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
   type WorkspaceRecipientEncryptionKey,
@@ -1070,6 +1071,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
               localPeerId: this.peerId,
+              resolveAssetUalForPublishIntent: ({ intent }) =>
+                resolveStorageAckLifecycleAssetUalFromLocalSwm({ store: this.store, chain: this.chain, intent }),
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
               // may be absent on a chunked V2 intent (the handler then
@@ -5061,6 +5064,95 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return totalDeleted;
   }
 
+}
+
+export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(input: {
+  store: TripleStore;
+  chain: ChainAdapter;
+  intent: PublishIntentMsg;
+}): Promise<string | undefined> {
+  const swmGraphId = input.intent.swmGraphId?.trim() || input.intent.contextGraphId?.trim();
+  if (!swmGraphId) return undefined;
+  const subGraphName = input.intent.subGraphName?.trim() || undefined;
+  const baseSwmGraph = contextGraphSharedMemoryUri(swmGraphId, subGraphName);
+  try {
+    assertSafeIri(baseSwmGraph);
+  } catch {
+    return undefined;
+  }
+
+  const rootValues = (input.intent.rootEntities ?? [])
+    .map((root) => {
+      try {
+        return `<${assertSafeIri(root)}>`;
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((root): root is string => root !== undefined);
+  const graphPattern = rootValues.length > 0
+    ? `VALUES ?s { ${rootValues.join(' ')} } ?s ?p ?o .`
+    : '?s ?p ?o .';
+
+  const result = await input.store.query(`
+    SELECT DISTINCT ?g WHERE {
+      GRAPH ?g { ${graphPattern} }
+      FILTER(STRSTARTS(STR(?g), ${sparqlString(`${baseSwmGraph}/`)}))
+      FILTER(!STRSTARTS(STR(?g), ${sparqlString(`${baseSwmGraph}/staging/`)}))
+    }
+  `, { source: 'agent.storageAckLifecycleAssetUal' });
+  if (result.type !== 'bindings') return undefined;
+
+  const identities = new Map<string, { agentAddress: string; kaNumber: bigint }>();
+  for (const row of result.bindings) {
+    const parsed = parsePerKaSharedMemoryGraphIdentity(row.g, baseSwmGraph);
+    if (!parsed) continue;
+    const key = `${parsed.agentAddress.toLowerCase()}/${parsed.kaNumber.toString()}`;
+    identities.set(key, parsed);
+  }
+  if (identities.size !== 1) return undefined;
+
+  const identity = [...identities.values()][0];
+  const storageAddr = input.chain.getDKGKnowledgeAssetsAddress
+    ? await input.chain.getDKGKnowledgeAssetsAddress()
+    : await input.chain.getKnowledgeAssetsLifecycleAddress();
+  const kaId = (BigInt(identity.agentAddress.toLowerCase()) << 96n) | identity.kaNumber;
+  return buildKnowledgeAssetUal(input.chain.chainId, storageAddr, kaId);
+}
+
+function parsePerKaSharedMemoryGraphIdentity(
+  bindingValue: string | undefined,
+  baseSwmGraph: string,
+): { agentAddress: string; kaNumber: bigint } | undefined {
+  const graphUri = normalizeBindingIri(bindingValue);
+  if (!graphUri) return undefined;
+  const prefix = `${baseSwmGraph}/`;
+  if (!graphUri.startsWith(prefix)) return undefined;
+  const suffix = graphUri.slice(prefix.length);
+  if (!suffix || suffix.startsWith('staging/')) return undefined;
+  const parts = suffix.split('/');
+  if (parts.length !== 2) return undefined;
+  const [agentAddressRaw, kaNumberRaw] = parts;
+  const agentAddress = normalizeEvmAddressFromGraph(agentAddressRaw);
+  if (!agentAddress || !/^\d+$/.test(kaNumberRaw)) return undefined;
+  return {
+    agentAddress,
+    kaNumber: BigInt(kaNumberRaw),
+  };
+}
+
+function normalizeEvmAddressFromGraph(value: string): string | undefined {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) return undefined;
+  return ethers.getAddress(value.toLowerCase());
+}
+
+function normalizeBindingIri(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.startsWith('<') && trimmed.endsWith('>')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
 }
 
 async function listGraphFamily(store: TripleStore, rootGraph: string): Promise<string[]> {

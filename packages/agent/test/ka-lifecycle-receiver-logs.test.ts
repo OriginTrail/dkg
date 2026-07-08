@@ -5,12 +5,12 @@ import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/
 import {
   DKG_ONTOLOGY,
   Logger,
+  MemoryLayer,
   STORAGE_ACK_DECLINE_CODES,
   TypedEventBus,
-  computeSwmSenderKeyMessageAAD,
   computeSwmSenderKeyPackageAAD,
-  computeSwmSenderKeyPackageEncryptionAAD,
   contextGraphDataUri,
+  contextGraphLayerUri,
   contextGraphMetaUri,
   contextGraphWorkspaceGraphUri,
   decodeSwmSenderKeyPackageAck,
@@ -29,9 +29,7 @@ import {
   type FinalizationMessageMsg,
   type LogRecord,
   type OperationContext,
-  type SwmSenderKeyMessageAADFields,
   type SwmSenderKeyMessageMsg,
-  type SwmSenderKeyPackageAADFields,
   type SwmSenderKeyPackageMsg,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -46,6 +44,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { DKGAgent } from '../src/index.js';
+import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from '../src/dkg-agent-lifecycle.js';
 import { makeTestKaAllocator } from '../../publisher/test/_helpers/ka-allocator.js';
 import { mockSealCtx, wrapPublisherForTest } from '../../publisher/test/_helpers/seal.js';
 
@@ -158,7 +157,6 @@ async function buildSenderKeyPackage(input: {
   senderWallet: ethers.HDNodeWallet;
   recipientAgentAddress: string;
   recipientKeyId: string;
-  assetUal: string;
 }): Promise<SwmSenderKeyPackageMsg> {
   const signingKeypair = await generateEd25519Keypair();
   const recipientPublicKey = generateWorkspaceRecipientEncryptionKey(
@@ -177,7 +175,6 @@ async function buildSenderKeyPackage(input: {
     chainKey: generateSwmSenderChainKey(),
     senderSigningPublicKey: signingKeypair.publicKey,
     recipientPublicKey,
-    assetUal: input.assetUal,
   });
   pkg.signature = ethers.getBytes(
     await input.senderWallet.signMessage(computeSwmSenderKeyPackageAAD(pkg)),
@@ -596,53 +593,6 @@ describe('KA receiver lifecycle logs', () => {
     expect(handoff).toContain('stage=reconcile event=reconcile_promote role=sync');
   });
 
-  it('keeps Sender Key v1 cryptographic binding compatible when assetUal is carried for logs', () => {
-    const packageFields: SwmSenderKeyPackageAADFields = {
-      contextGraphId: CONTEXT_GRAPH_ID,
-      subGraphName: 'sender-key-compat',
-      senderAgentAddress: AUTHOR_AGENT_ADDRESS,
-      epochId: 'sender-key-compat-epoch',
-      membershipHash: 'sha256:sender-key-compat',
-      recipientAgentAddress: '0x000000000000000000000000000000000000c20A',
-      recipientKeyId: 'did:dkg:agent:0x000000000000000000000000000000000000c20A#x25519',
-      createdAtMs: 1_770_000_000_000,
-      initialMessageIndex: 0,
-      senderSigningPublicKey: new Uint8Array(32).fill(1),
-      ephemeralPublicKey: new Uint8Array(32).fill(2),
-      nonce: new Uint8Array(12).fill(3),
-      ciphertext: new Uint8Array(48).fill(4),
-    };
-    const messageFields: SwmSenderKeyMessageAADFields = {
-      contextGraphId: CONTEXT_GRAPH_ID,
-      subGraphName: 'sender-key-compat',
-      senderAgentAddress: AUTHOR_AGENT_ADDRESS,
-      epochId: 'sender-key-compat-epoch',
-      membershipHash: 'sha256:sender-key-compat',
-      messageIndex: 7,
-      nonce: new Uint8Array(12).fill(5),
-    };
-
-    const packageWithLogMetadata: SwmSenderKeyPackageMsg = {
-      ...packageFields,
-      assetUal: ASSET_UAL,
-      signature: new Uint8Array(65),
-    };
-    const messageWithLogMetadata: SwmSenderKeyMessageMsg = {
-      ...messageFields,
-      assetUal: ASSET_UAL,
-      ciphertext: new Uint8Array(48),
-      aadHash: new Uint8Array(32),
-      senderKeySignature: new Uint8Array(64),
-    };
-
-    expect(computeSwmSenderKeyPackageAAD(packageWithLogMetadata))
-      .toEqual(computeSwmSenderKeyPackageAAD(packageFields));
-    expect(computeSwmSenderKeyPackageEncryptionAAD(packageWithLogMetadata))
-      .toEqual(computeSwmSenderKeyPackageEncryptionAAD(packageFields));
-    expect(computeSwmSenderKeyMessageAAD(messageWithLogMetadata))
-      .toEqual(computeSwmSenderKeyMessageAAD(messageFields));
-  });
-
   it('logs a substrate-applied SWM receive by assetUal', async () => {
     const agent = await createReceiverAgent();
     const entries = captureLogs();
@@ -998,6 +948,44 @@ describe('KA receiver lifecycle logs', () => {
     );
   });
 
+  it('does not emit assetUal-scoped SWM receive logs before publisher peer verification', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+      lifecycleLogOptions: {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+    const entries = captureLogs();
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-spoofed-peer',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle spoof" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    const outcome = await handler.handle(msg, '12D3KooWAttackerPeer');
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+    });
+    expect(swmLifecycleLogs(entries).some((entry) =>
+      entry.message.includes(`assetUal=${ASSET_UAL}`),
+    )).toBe(false);
+    expect(swmLifecycleLogs(entries).some((entry) =>
+      entry.message.includes('event=swm_update_received'),
+    )).toBe(false);
+  });
+
   it('logs SWM Share ACK send by assetUal', async () => {
     const agent = await createReceiverAgent();
     const sent: Array<{ peerId: string; protocol: string; data: Uint8Array }> = [];
@@ -1161,7 +1149,7 @@ describe('KA receiver lifecycle logs', () => {
     )).toBe(false);
   });
 
-  it('does not log Sender Key setup decline by unauthenticated package assetUal', async () => {
+  it('does not log Sender Key setup decline without authenticated assetUal evidence', async () => {
     const agent = await createReceiverAgent();
     const senderWallet = ethers.Wallet.createRandom();
     const recipientWallet = ethers.Wallet.createRandom();
@@ -1181,7 +1169,6 @@ describe('KA receiver lifecycle logs', () => {
       senderWallet,
       recipientAgentAddress: recipientWallet.address,
       recipientKeyId,
-      assetUal: ASSET_UAL,
     });
     const entries = captureLogs();
 
@@ -1366,6 +1353,45 @@ describe('KA receiver lifecycle logs', () => {
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('retryable=true'),
     );
+  });
+
+  it('derives StorageACK lifecycle assetUal from verified local SWM graph identity', async () => {
+    const store = new OxigraphStore();
+    const chain = new MockChainAdapter('mock:31337', AUTHOR_AGENT_ADDRESS.toLowerCase());
+    const swmGraph = contextGraphLayerUri('42', MemoryLayer.SharedWorkingMemory, AUTHOR_AGENT_ADDRESS, '7');
+    await store.insert([{
+      subject: ROOT_ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Production ACK lifecycle"',
+      graph: swmGraph,
+    }]);
+
+    const assetUal = await resolveStorageAckLifecycleAssetUalFromLocalSwm({
+      store,
+      chain,
+      intent: {
+        contextGraphId: '42',
+        publisherPeerId: PUBLISHER_PEER_ID,
+        merkleRoot: new Uint8Array(32),
+        publicByteSize: 1024,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [ROOT_ENTITY],
+      },
+    });
+
+    expect(assetUal).toBe(buildKnowledgeAssetUal(
+      chain.chainId,
+      await chain.getDKGKnowledgeAssetsAddress(),
+      (BigInt(ethers.getAddress(AUTHOR_AGENT_ADDRESS.toLowerCase())) << 96n) | 7n,
+    ));
+  });
+
+  it('wires the production DKGAgent StorageACK handler with the lifecycle assetUal resolver', () => {
+    const source = readFileSync(new URL('../src/dkg-agent-lifecycle.ts', import.meta.url), 'utf8');
+
+    expect(source).toContain('resolveAssetUalForPublishIntent');
+    expect(source).toContain('resolveStorageAckLifecycleAssetUalFromLocalSwm');
   });
 
   it('logs chain reconcile promote decisions by assetUal', async () => {

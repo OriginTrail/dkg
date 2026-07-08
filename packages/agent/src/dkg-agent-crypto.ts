@@ -1210,8 +1210,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
     });
-    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(input.plaintext);
-
     const membershipHash = computeSwmSenderKeyMembershipHash({
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
@@ -1242,7 +1240,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         sender,
         recipients: resolution.recipients,
         membershipHash,
-        assetUal,
         ctx,
       });
       this.swmSenderKeySendStates.set(stateKey, state);
@@ -1257,7 +1254,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
       subGraphName: state.subGraphName,
-      assetUal,
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
@@ -1284,7 +1280,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     sender: AgentKeyRecord & { privateKey: string };
     recipients: readonly WorkspaceAgentRecipient[];
     membershipHash: string;
-    assetUal?: string;
     ctx: OperationContext;
   }): Promise<LocalSwmSenderKeySendState> {
     const senderAgentAddress = ethers.getAddress(input.sender.agentAddress);
@@ -1334,7 +1329,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           state,
           recipient,
           senderPrivateKey: input.sender.privateKey,
-          assetUal: input.assetUal,
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
@@ -1858,7 +1852,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     state: LocalSwmSenderKeySendState;
     recipient: WorkspaceAgentRecipient;
     senderPrivateKey: string;
-    assetUal?: string;
   }): Promise<SwmSenderKeyPackageMsg> {
     if (!input.recipient.publicKeyBytes) {
       throw new Error(`Missing public encryption key bytes for DKG agent ${input.recipient.agentAddress}`);
@@ -1866,7 +1859,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const pkg = await encryptSwmSenderKeyPackage({
       contextGraphId: input.state.contextGraphId,
       subGraphName: input.state.subGraphName,
-      assetUal: input.assetUal,
       senderAgentAddress: input.state.senderAgentAddress,
       epochId: input.state.epochId,
       membershipHash: input.state.membershipHash,

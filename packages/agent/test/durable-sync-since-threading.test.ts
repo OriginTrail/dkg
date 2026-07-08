@@ -264,7 +264,7 @@ describe('runDurableSync sinceBatchId threading', () => {
     }));
   });
 
-  it('emits published KA sync failure lifecycle event when verification fails after metadata fetch', async () => {
+  it('does not emit asset-scoped sync failure lifecycle event from unverified fetched metadata', async () => {
     const lifecycleEvents: Array<{
       assetUal: string;
       event: string;
@@ -289,15 +289,7 @@ describe('runDurableSync sinceBatchId threading', () => {
 
     await runDurableSync(context);
 
-    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
-      assetUal: ASSET_UAL,
-      event: 'sync_failure',
-      action: 'failure',
-      result: 'failed',
-      contextGraphId: 'mfacts',
-      remotePeerId: 'peerR',
-      reason: 'worker verifier failed',
-    }));
+    expect(lifecycleEvents).toEqual([]);
   });
 });
 

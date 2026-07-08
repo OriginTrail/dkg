@@ -174,7 +174,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
-    let fetchedPublishedAssetUals: string[] = [];
+    let verifiedPublishedAssetUals: string[] = [];
     let fetchedMetaCount = 0;
     let fetchedDataCount = 0;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -212,7 +212,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           }
         : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      fetchedPublishedAssetUals = publishedAssetUalsFromMeta(metaResult.quads);
       fetchedMetaCount = metaResult.quads.length;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
@@ -235,6 +234,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
       const publishedAssetUals = publishedAssetUalsFromMeta(processed.verifiedMeta);
+      verifiedPublishedAssetUals = publishedAssetUals;
       for (const assetUal of publishedAssetUals) {
         logLifecycle?.({
           assetUal,
@@ -367,7 +367,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     } catch (pidErr) {
       endPhase();
       const failureReason = pidErr instanceof Error ? pidErr.message : String(pidErr);
-      for (const assetUal of fetchedPublishedAssetUals) {
+      for (const assetUal of verifiedPublishedAssetUals) {
         logLifecycle?.({
           assetUal,
           event: 'sync_failure',
