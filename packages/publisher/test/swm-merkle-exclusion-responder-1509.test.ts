@@ -28,6 +28,8 @@ import {
   encodePublishIntent,
   decodeStorageACK,
   isStorageACKDecline,
+  contextGraphSharedMemoryUri,
+  TypedEventBus,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
   WORKSPACE_OWNER_PREDICATE,
@@ -41,7 +43,13 @@ import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const CONTEXT_GRAPH_ID = '42';
-const SWM_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory`;
+// Derive the SWM graph URI from the SAME canonical helper production uses
+// (dkg-core `contextGraphSharedMemoryUri`, wired into the handler config
+// below). The seeded quads and the handler's `swmGraphUri` resolution both
+// flow through it, so any change to the canonical URI format / subgraph
+// handling forces this pin to move in lockstep with production rather than
+// silently keeping a stale hand-built template green.
+const SWM_GRAPH_URI = contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID);
 
 const coreWallet = ethers.Wallet.createRandom();
 const fakePeerId = { toString: () => 'requester-peer' };
@@ -77,13 +85,16 @@ async function seededHandler(): Promise<StorageACKHandler> {
     nodeRole: 'core',
     nodeIdentityId: 42n,
     signerWallet: coreWallet,
-    contextGraphSharedMemoryUri: (cgId: string) =>
-      `did:dkg:context-graph:${cgId}/_shared_memory`,
+    // Same canonical helper production wires into the handler config
+    // (dkg-agent-lifecycle.ts) — NOT a private template — so a URI-format
+    // change forces the seeded quads (via SWM_GRAPH_URI) and the recompute's
+    // graph resolution to move together.
+    contextGraphSharedMemoryUri,
     chainId: TEST_CHAIN_ID,
     kav10Address: TEST_KAV10_ADDR,
   };
-  const eventBus = { emit: () => {}, on: () => {}, off: () => {}, once: () => {} };
-  return new StorageACKHandler(store as any, config, eventBus as any);
+  const eventBus = new TypedEventBus();
+  return new StorageACKHandler(store as any, config, eventBus);
 }
 
 /**
