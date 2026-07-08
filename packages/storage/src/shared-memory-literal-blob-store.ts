@@ -52,33 +52,33 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     this.thresholdBytes = options.thresholdBytes;
   }
 
-  async insert(quads: Quad[]): Promise<void> {
-    if (quads.length === 0) return this.inner.insert(quads);
+  async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    if (quads.length === 0) return this.inner.insert(quads, options);
     const externalized = await Promise.all(
       quads.map((quad) => this.externalizeInsertQuad(quad)),
     );
-    return this.inner.insert(externalized);
+    return this.inner.insert(externalized, options);
   }
 
-  async delete(quads: Quad[]): Promise<void> {
-    if (quads.length === 0) return this.inner.delete(quads);
-    return this.inner.delete(quads.map((quad) => this.translateDeleteQuad(quad)));
+  async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
+    if (quads.length === 0) return this.inner.delete(quads, options);
+    return this.inner.delete(quads.map((quad) => this.translateDeleteQuad(quad)), options);
   }
 
-  async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
+  async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
     const translated = this.translateDeletePattern(pattern);
     if (!Array.isArray(translated)) {
-      return this.inner.deleteByPattern(translated);
+      return this.inner.deleteByPattern(translated, options);
     }
 
     let removed = 0;
     for (const item of translated) {
-      removed += await this.inner.deleteByPattern(item);
+      removed += await this.inner.deleteByPattern(item, options);
     }
     return removed;
   }
 
-  async update(sparql: string): Promise<void> {
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new Error('SharedMemoryLiteralBlobStore: inner store does not support update()');
     }
@@ -88,7 +88,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     // a copied placeholder rehydrates identically through `query`). Re-running
     // externalization here is impossible anyway: an arbitrary UPDATE string
     // carries no quad objects to inspect.
-    return this.inner.update(sparql);
+    return this.inner.update(sparql, options);
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -113,8 +113,8 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.createGraph(graphUri);
   }
 
-  async dropGraph(graphUri: string): Promise<void> {
-    return this.inner.dropGraph(graphUri);
+  async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
+    return this.inner.dropGraph(graphUri, options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -127,16 +127,16 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
       : (await this.inner.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
   }
 
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    return this.inner.deleteBySubjectPrefix(graphUri, prefix);
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
+    return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
   }
 
-  async countQuads(graphUri?: string): Promise<number> {
-    return this.inner.countQuads(graphUri);
+  async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
+    return this.inner.countQuads(graphUri, options);
   }
 
-  async flush(): Promise<void> {
-    await this.inner.flush?.();
+  async flush(options?: QueryOptions): Promise<void> {
+    await this.inner.flush?.(options);
   }
 
   async close(): Promise<void> {
