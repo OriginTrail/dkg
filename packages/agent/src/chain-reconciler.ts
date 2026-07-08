@@ -24,6 +24,7 @@
  */
 
 import {
+  type CompletedOrdinal,
   type CursorState,
   recordCompletion,
   absorbConfirmed,
@@ -142,14 +143,30 @@ export async function reconcileContextGraph(
     deps.log(`reconcile ${localCgId}: getHeadBlock failed, holding watermark (${err instanceof Error ? err.message : String(err)})`);
   }
 
-  // Re-absorb any depth-held ordinals as the head advances — a long-running
-  // node makes progress on confirmation-depth-blocked ordinals even with no
-  // new completions this pass. Skipped when the head is unobservable.
-  if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
-
   let reconciled = 0;
   let pending = 0;
   const assets: ReconciledAssetDecision[] = [];
+  const cursorAdvancedAssets: Array<{
+    assetUal: string;
+    ordinal: number;
+    kaId?: string;
+    blockNumber?: number;
+  }> = [];
+  const trackCursorAdvancedAsset = (completion: CompletedOrdinal): void => {
+    if (!completion.assetUal) return;
+    cursorAdvancedAssets.push({
+      assetUal: completion.assetUal,
+      ordinal: completion.ordinal,
+      ...(completion.kaId ? { kaId: completion.kaId } : {}),
+      blockNumber: completion.blockNumber,
+    });
+  };
+
+  // Re-absorb any depth-held ordinals as the head advances — a long-running
+  // node makes progress on confirmation-depth-blocked ordinals even with no
+  // new completions this pass. Skipped when the head is unobservable.
+  if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth, trackCursorAdvancedAsset);
+
   const ordinals = ordinalsToReconcile(state, head);
   if (headUnavailable) {
     pending = ordinals.length;
@@ -206,9 +223,15 @@ export async function reconcileContextGraph(
         // block as a self-consistent head.
         recordCompletion(
           state,
-          { ordinal, blockNumber: outcome.blockNumber },
+          {
+            ordinal,
+            blockNumber: outcome.blockNumber,
+            ...(outcome.assetUal ? { assetUal: outcome.assetUal } : {}),
+            ...(outcome.kaId ? { kaId: outcome.kaId } : {}),
+          },
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,
+          trackCursorAdvancedAsset,
         );
       } else {
         pending += 1;
@@ -218,7 +241,7 @@ export async function reconcileContextGraph(
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
-    for (const asset of assets) {
+    for (const asset of cursorAdvancedAssets) {
       if (asset.ordinal < before || asset.ordinal >= state.watermark) continue;
       deps.logLifecycle?.({
         assetUal: asset.assetUal,
