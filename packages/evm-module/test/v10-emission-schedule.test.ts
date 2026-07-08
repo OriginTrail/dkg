@@ -436,16 +436,23 @@ describe('@integration V10 deterministic emission schedule (10.0.8)', function (
       await NFT.getAddress(),
       '0x1000000000000000000',
     ]);
+    // Pass a kaStartEpoch deliberately FAR from the current epoch: 10.0.8
+    // emits the topUp overflow from the current epoch and ignores the
+    // (ABI-retained) kaStartEpoch parameter. Modelling from e0 while the call
+    // supplies e0 + 5 makes this test fail if the implementation ever regresses
+    // to kaStartEpoch-anchored emission (ranges would shift to e0 + 5).
+    const kaStartEpochArg = e0 + 5n;
     const tx = await Logic.connect(nftSigner).coverPublishingCost(
       agent.address,
       baseCost,
-      e0,
+      kaStartEpochArg,
       lock,
     );
     const rc = await tx.wait();
     const txTs = BigInt((await hre.ethers.provider.getBlock(rc!.blockNumber))!.timestamp);
 
     // Model: prorateActiveSink(overflow, currentEpoch, lock, epLen, timeUntilNextEpoch@tx).
+    // Anchored at e0 (current epoch), NOT kaStartEpochArg — proving the param is ignored.
     const nextBoundary = await ChronosContract.timestampForEpoch(e0 + 1n);
     const timeRemaining = nextBoundary - txTs;
     const model = new PoolModel(remBefore);
@@ -572,6 +579,88 @@ describe('@integration V10 deterministic emission schedule (10.0.8)', function (
     const after = await poolSnapshot(e0, e0 + 2n * lock + 3n);
     for (const [e, v] of after) {
       expect(v, `epoch ${e}`).to.equal(before.get(e));
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // P5b — migrateEmissionSchedule on ACTUAL legacy state (the mainnet path)
+  // -------------------------------------------------------------------------
+  it('P5b: migrateEmissionSchedule writes the exact schedule for a synthetic pre-10.0.8 account (B − spent per window + dust), sets the marker, and emits once', async () => {
+    // This is the path run on mainnet at upgrade time: an account created
+    // before 10.0.8 (lastSettledWindow = 0, with a window-0 spend already
+    // emitted under the old active sink) is scheduled by the batch, NOT by a
+    // lazy settle() touch. P4 covers the settle() self-heal; this covers the
+    // batch entrypoint proper so a regression in the batch loop / account
+    // hand-off to _scheduleRemaining cannot pass unnoticed.
+    const synthId = 909n;
+    const committed = ethers.parseEther('12000') + 5n; // NOT divisible by lock → dust path live
+    const nowTs = BigInt(await time.latest());
+    const createdAt = nowTs - epLen / 3n; // mid-window-0, mid-epoch
+    const createdEpoch = await ChronosContract.epochAtTimestamp(createdAt);
+    const expiresAt = createdAt + lock * epLen;
+    const expiresEpoch = (await ChronosContract.epochAtTimestamp(expiresAt - 1n)) + 1n;
+    await PCS.createAccount(synthId, {
+      committedTRAC: committed,
+      createdAtEpoch: createdEpoch,
+      expiresAtEpoch: expiresEpoch,
+      createdAtTimestamp: createdAt,
+      expiresAtTimestamp: expiresAt,
+      lockDurationEpochs: lock,
+      discountBps: 0,
+      lastSettledWindow: 0,
+      fullySwept: false,
+      primaryNode: 0,
+      lastPrimaryNodeChangeEpoch: createdEpoch,
+    });
+    const spent0 = ethers.parseEther('111');
+    await PCS.increaseWindowSpent(synthId, 0n, spent0);
+
+    const e0 = await ChronosContract.getCurrentEpoch();
+    const from = e0;
+    const to = e0 + 2n * lock + 3n;
+    const before = await poolSnapshot(from, to);
+    const remBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
+
+    // Batch-migrate the legacy account.
+    await expect(Logic.migrateEmissionSchedule([synthId]))
+      .to.emit(Logic, 'EmissionScheduled')
+      .withArgs(synthId, 0n, lock, committed - spent0, 0n);
+
+    // Schedule is exactly committed − spent0 (the window-0 spend was already
+    // emitted under the old rules; the batch schedules only the remainder).
+    const model = new PoolModel(remBefore);
+    const spentMap = new Map<bigint, bigint>([[0n, spent0]]);
+    const { scheduled } = await scheduleModel({
+      chronos: ChronosContract,
+      model,
+      committed,
+      createdAtTimestamp: createdAt,
+      lock,
+      epLen,
+      spent: spentMap,
+    });
+    expect(scheduled).to.equal(committed - spent0);
+
+    const after = await poolSnapshot(from, to);
+    const diff = poolDiff(before, after);
+    let sum = 0n;
+    for (let e = from; e <= to; e++) {
+      expect(diff.get(e) ?? 0n, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
+      sum += diff.get(e) ?? 0n;
+    }
+    const remAfter = await ES.accumulatedRemainder(STAKER_SHARD_ID);
+    expect(sum + (remAfter - remBefore)).to.equal(committed - spent0);
+
+    // Marker set → subsequent batch/settle passes are no-ops (conservation:
+    // the account can never be double-scheduled).
+    const acct = await PCS.getAccount(synthId);
+    expect(acct.lastSettledWindow).to.equal(lock);
+
+    const reSnap = await poolSnapshot(from, to);
+    await Logic.migrateEmissionSchedule([synthId]);
+    const reSnap2 = await poolSnapshot(from, to);
+    for (let e = from; e <= to; e++) {
+      expect(reSnap2.get(e), `epoch ${e}`).to.equal(reSnap.get(e));
     }
   });
 

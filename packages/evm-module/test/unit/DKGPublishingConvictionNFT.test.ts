@@ -854,10 +854,15 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         );
 
         await time.setNextBlockTimestamp(Number(targetTimestamp));
+        // Pass a kaStartEpoch deliberately away from the execution epoch
+        // (`targetEpoch`): 10.0.8 anchors the overflow emission at the current
+        // epoch and ignores the ABI-retained kaStartEpoch. The harness model
+        // above is anchored at `targetEpoch`, so this call fails if the
+        // implementation ever regresses to kaStartEpoch-anchored emission.
         const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
           agent.address,
           baseCost,
-          targetEpoch,
+          targetEpoch + 5n,
           LOCK_DURATION,
         );
         const receipt = await tx.wait();
