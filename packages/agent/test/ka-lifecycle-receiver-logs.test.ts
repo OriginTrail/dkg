@@ -1130,6 +1130,59 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('kaId=7'));
   });
 
+  it('logs chain reconcile core-fill decisions by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const internals = agent as unknown as {
+      subscribedContextGraphs: Map<string, {
+        subscribed: boolean;
+        coreHosted?: boolean;
+        onChainId?: string;
+        lastReconciledOrdinal?: number;
+      }>;
+      chain: MockChainAdapter & {
+        getContextGraphKCCount?: (onChainCgId: bigint) => Promise<number>;
+        getBlockNumber?: () => Promise<number | undefined>;
+      };
+      reconcileChainOrdinal: (
+        localCgId: string,
+        onChainCgId: bigint,
+        ordinal: number,
+        headBlock: number | undefined,
+      ) => Promise<{ status: 'reconciled'; blockNumber: number; assetUal: string; kaId: string }>;
+      runVmReconcileForCg(localCgId: string): Promise<void>;
+    };
+    internals.subscribedContextGraphs.set(CONTEXT_GRAPH_ID, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '77',
+      lastReconciledOrdinal: 0,
+    });
+    internals.chain.getContextGraphKCCount = async () => 1;
+    internals.chain.getBlockNumber = async () => undefined;
+    internals.reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 12,
+      assetUal: ASSET_UAL,
+      kaId: '7',
+    });
+    const entries = captureLogs();
+
+    try {
+      await internals.runVmReconcileForCg(CONTEXT_GRAPH_ID);
+    } finally {
+      await agent.stop().catch(() => undefined);
+    }
+
+    const messages = reconcileLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=reconcile_core_fill'));
+    expect(messages).toContainEqual(expect.stringContaining('action=core-fill'));
+    expect(messages).toContainEqual(expect.stringContaining('result=filled'));
+    expect(messages).toContainEqual(expect.stringContaining(`contextGraphId=${CONTEXT_GRAPH_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('onChainCgId=77'));
+    expect(messages).toContainEqual(expect.stringContaining('kaId=7'));
+  });
+
   it('logs durable sync receive and apply by assetUal', async () => {
     const agent = await createReceiverAgent();
     const publishedMeta = {
