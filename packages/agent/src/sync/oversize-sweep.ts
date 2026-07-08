@@ -39,12 +39,21 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { OversizeDrop } from './oversize-filter.js';
 
 const SWEEP_MARKER = '.oversize-sweep-v1.done';
-const SHARED_MEMORY_INFIX = '/_shared_memory';
-const VERIFIABLE_MEMORY_INFIX = '/_verifiable_memory';
-// Over-select threshold in SPARQL characters: MUTF-8 bytes ≤ 3 bytes/char,
-// so any term over the 60,000-byte limit has > (60,000/3) - small overhead
-// characters. 19,000 keeps a wide safety margin.
-const STRLEN_OVERSELECT_CHARS = 19_000;
+// Match `_shared_memory` / `_verifiable_memory` as a full path SEGMENT — same
+// predicate as the ingest filter. The bucket + per-KA descendants are exempt
+// (SWM: legit blob-externalized large literals; VM: never partial-delete a
+// Merkle graph), but the sibling `…/_shared_memory_meta` is NOT exempt and IS
+// swept — it can hold resident poison and is not externalized.
+const SHARED_MEMORY_SEGMENT_RE = /\/_shared_memory(\/|$)/;
+const VERIFIABLE_MEMORY_SEGMENT_RE = /\/_verifiable_memory(\/|$)/;
+// Over-select threshold in SPARQL CHARACTERS (STRLEN counts code points). Java
+// MUTF-8 is up to 6 bytes per code point (astral chars = surrogate pair, 3+3),
+// so a >60,000-BYTE literal has > 60,000/6 = 10,000 code points. 9,000 is a
+// safe floor that cannot miss an over-limit literal even when it is entirely
+// astral (emoji / CJK-Ext-B / math alphanumerics — review finding); the exact
+// MUTF-8 byte check in JS re-verifies each candidate, so a lower threshold only
+// costs a few extra verifications, never a missed offender.
+const STRLEN_OVERSELECT_CHARS = 9_000;
 
 export interface OversizeSweepStore {
   listGraphs(): Promise<string[]>;
@@ -68,7 +77,7 @@ export interface OversizeSweepResult {
 }
 
 function isExemptGraph(graph: string): boolean {
-  return graph.includes(SHARED_MEMORY_INFIX) || graph.includes(VERIFIABLE_MEMORY_INFIX);
+  return SHARED_MEMORY_SEGMENT_RE.test(graph) || VERIFIABLE_MEMORY_SEGMENT_RE.test(graph);
 }
 
 /**
