@@ -728,6 +728,25 @@ export class ACKCollector {
             'publisher.ack_peer_request',
             async (span) => {
               const response = await this.deps.sendP2P(peerId, ackProtocolId, intentBytes);
+              // A ZERO-LENGTH reply is not a StorageACK — it is what the
+              // requester reads when the responder aborts the stream
+              // mid-handler (protocol-router stream.abort → clean EOF →
+              // readAll returns empty bytes). decodeStorageACK would turn it
+              // into a default message with empty signature fields, which
+              // recoverACKSigner then rejects as INVALID_SIGNATURE — a
+              // cryptographic verdict on what is really a transport/store
+              // hiccup, permanently deselecting a healthy peer mid-round.
+              // 2026-07-07 mainnet incident: cores under store load returned
+              // CORE_TEMPORARILY_UNAVAILABLE declines whose stream had already
+              // been abandoned by the publisher's send timeout, so every such
+              // round surfaced as "Invalid ACK signature". Treat an empty
+              // reply as a recoverable transport error: it rides the transport
+              // retry budget and, if it persists, terminates as TRANSPORT_ERROR
+              // (the peer's 6-step transient ladder / a re-dial can still land
+              // a real ACK) rather than a terminal signature rejection.
+              if (response.length === 0) {
+                throw new Error('empty ACK reply (stream aborted remotely — responder decline/abort or connection churn)');
+              }
               const decoded: StorageACKMsg = decodeStorageACK(response);
               if (isStorageACKDecline(decoded)) {
                 const declineCode = sanitizeDeclineField(
