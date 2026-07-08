@@ -33,13 +33,27 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
 // `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by the
 // root-set shape. Run UNSERIALIZED they delete each other's just-inserted record and
 // a shared root ends with ZERO `_meta` rows. So we serialize at the SAME granularity
-// as the prune's blast radius (one lock key per individual root) via the shared
-// gate-based {@link withKeyedLocks} helper: writes sharing a root serialize, writes
-// over disjoint roots stay concurrent. Per-root — not the incidental single-root
-// heartbeat shape — because the direct-protocol receive handler does not enforce
-// singleton agents-CG writes. PER-PROCESS is sufficient: an agent's heartbeats land
-// on the same receiving node and the prune only touches that node's local store.
-const _agentMetaLocks = new Map<string, Promise<void>>();
+// as the prune's blast radius (one lock key per individual root) via the gate-based
+// {@link withKeyedLocks} helper: writes sharing a root serialize, writes over
+// disjoint roots stay concurrent. Per-root — not the incidental single-root heartbeat
+// shape — because the direct-protocol receive handler does not enforce singleton
+// agents-CG writes.
+//
+// The lock domain is scoped PER STORE (not module-global): two independent handlers
+// backed by different `TripleStore`s must not falsely serialize on a shared agents
+// root, and test/runtime isolation must not depend on hidden global state. A WeakMap
+// lets a discarded store's locks be GC'd. In production there is a single main store,
+// so this is behaviour-identical — the scoping just removes the hidden coupling.
+const _agentMetaLocksByStore = new WeakMap<TripleStore, Map<string, Promise<void>>>();
+
+function agentMetaLocksFor(store: TripleStore): Map<string, Promise<void>> {
+  let locks = _agentMetaLocksByStore.get(store);
+  if (!locks) {
+    locks = new Map<string, Promise<void>>();
+    _agentMetaLocksByStore.set(store, locks);
+  }
+  return locks;
+}
 
 /**
  * Insert a heartbeat's `_meta` tracking rows and THEN bound the agents-registry
@@ -105,13 +119,13 @@ export async function insertBoundedAgentRegistryMeta(opts: {
     );
   }
 
-  // Serialize insert+prune per individual root (see the note on _agentMetaLocks):
-  // any two writes sharing a root (identical OR overlapping sets, e.g. {X} vs {X,Y})
-  // serialize so they can't insert-then-prune each other down to zero records; writes
-  // for disjoint roots stay concurrent. The locks span insert→prune and are released
-  // only after the prune try/catch.
+  // Serialize insert+prune per individual root, scoped to THIS store (see the note on
+  // _agentMetaLocksByStore): any two writes sharing a root (identical OR overlapping
+  // sets, e.g. {X} vs {X,Y}) serialize so they can't insert-then-prune each other down
+  // to zero records; writes for disjoint roots stay concurrent. The locks span
+  // insert→prune and are released only after the prune try/catch.
   const lockKeys = rootEntities.map((root) => `${contextGraphId}:${root}`);
-  await withKeyedLocks(_agentMetaLocks, lockKeys, async () => {
+  await withKeyedLocks(agentMetaLocksFor(store), lockKeys, async () => {
     // Insert FIRST so a prune failure can never leave the agent with no record.
     // An insert failure PROPAGATES (caller aborts; nothing durable changed).
     await store.insert(metadataQuads);
