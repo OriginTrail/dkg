@@ -569,4 +569,46 @@ describe('KA receiver lifecycle logs', () => {
       expect.stringContaining('localNodeIdentityId=42'),
     );
   });
+
+  it('logs finalization no-data fallback by assetUal', async () => {
+    const store = new OxigraphStore();
+    const handler = new (FinalizationHandler as any)(
+      store,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ual: ASSET_UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: '0x' + 'bc'.repeat(32),
+      blockNumber: 101,
+      batchId: 8,
+      startKAId: 8,
+      endKAId: 8,
+      publisherAddress: AUTHOR_AGENT_ADDRESS,
+      rootEntities: [ROOT_ENTITY],
+      timestampMs: Date.now(),
+      operationId: 'finalization-no-data-lifecycle-test',
+      targetContextGraphId: '42',
+    }), CONTEXT_GRAPH_ID);
+
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=finalization_no_data'),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('reason=no shared memory data'),
+    );
+  });
 });
