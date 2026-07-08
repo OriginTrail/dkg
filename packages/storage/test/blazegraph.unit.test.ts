@@ -4,6 +4,40 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { getExternalStorePrioritySchedulerSnapshot } from '../src/store-priority-scheduler.js';
+
+async function waitForCondition(
+  predicate: () => boolean,
+  message: string,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
+
+function blazeSelectResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      head: { vars: ['name'] },
+      results: { bindings: [{ name: { type: 'literal', value: 'Alice' } }] },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
+
+function blazeListGraphsResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      head: { vars: ['g'] },
+      results: { bindings: [{ g: { type: 'uri', value: 'http://g1' } }] },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  );
+}
 
 describe('BlazegraphStore (mocked HTTP)', () => {
   const baseUrl = 'http://blaze.test/sparql';
@@ -100,6 +134,83 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect((init?.headers as Record<string, string>)['Content-Type']).toBe('application/sparql-query');
     expect(String(init?.body)).toMatch(/^SELECT /);
     expect(String(init?.body)).not.toMatch(/^query=/);
+  });
+
+  it('routes ack-priority adapter queries ahead of queued background fetch work', async () => {
+    const before = getExternalStorePrioritySchedulerSnapshot();
+    expect(before.maxConcurrent).toBeGreaterThan(1);
+    expect(before.ackReservedSlots).toBeGreaterThan(0);
+    const backgroundSlots = before.maxConcurrent - before.ackReservedSlots;
+    const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
+    const releaseHeldListGraphs: Array<() => void> = [];
+    const backgroundWork: Array<Promise<unknown>> = [];
+    let listGraphRequests = 0;
+    let queuedBackground: Promise<unknown> | undefined;
+    let ackQuery: Promise<unknown> | undefined;
+
+    setFetch(async (_url, init) => {
+      const body = String(init?.body ?? '');
+      if (body.includes('ack-priority-probe')) {
+        arrivals.push('ack');
+        return blazeSelectResponse();
+      }
+      if (body.includes('DISTINCT') && body.includes('?g')) {
+        arrivals.push('listGraphs');
+        listGraphRequests++;
+        if (listGraphRequests <= backgroundSlots) {
+          return new Promise<Response>((resolve) => {
+            releaseHeldListGraphs.push(() => resolve(blazeListGraphsResponse()));
+          });
+        }
+        return blazeListGraphsResponse();
+      }
+      arrivals.push('other');
+      return blazeSelectResponse();
+    });
+
+    try {
+      const s = new BlazegraphStore(baseUrl);
+      for (let i = 0; i < backgroundSlots; i++) {
+        backgroundWork.push(s.listGraphs({
+          priority: 'background',
+          source: `test.background.${i}`,
+        }));
+      }
+      await waitForCondition(
+        () => arrivals.filter((kind) => kind === 'listGraphs').length === backgroundSlots,
+        `background listGraphs requests did not fill non-ACK lanes; arrivals=${arrivals.join(',')}`,
+      );
+      const saturated = getExternalStorePrioritySchedulerSnapshot();
+      expect(saturated.backgroundInflight - before.backgroundInflight).toBe(backgroundSlots);
+
+      queuedBackground = s.listGraphs({
+        priority: 'background',
+        source: 'test.background.queued',
+      });
+      const queued = getExternalStorePrioritySchedulerSnapshot();
+      expect(queued.backgroundQueued - before.backgroundQueued).toBe(1);
+
+      ackQuery = s.query(
+        'SELECT ?name WHERE { # ack-priority-probe\n?s ?p ?o }',
+        { priority: 'ack', source: 'test.ack' },
+      );
+      await waitForCondition(
+        () => arrivals.includes('ack'),
+        `ACK query did not reach fetch before queued background work; arrivals=${arrivals.join(',')}`,
+      );
+
+      expect(arrivals.slice(0, backgroundSlots)).toEqual(Array(backgroundSlots).fill('listGraphs'));
+      expect(arrivals[backgroundSlots]).toBe('ack');
+      expect(arrivals.filter((kind) => kind === 'listGraphs')).toHaveLength(backgroundSlots);
+      await ackQuery;
+    } finally {
+      for (const release of releaseHeldListGraphs.splice(0)) release();
+      await Promise.allSettled([
+        ...backgroundWork,
+        ...(queuedBackground ? [queuedBackground] : []),
+        ...(ackQuery ? [ackQuery] : []),
+      ]);
+    }
   });
 
   it('ASK query returns boolean result', async () => {

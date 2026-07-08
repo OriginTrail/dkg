@@ -1,6 +1,12 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, type Server, type ServerResponse } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { SparqlHttpStore, createTripleStore, type Quad, type SparqlHttpSlowQueryEvent } from '../src/index.js';
+import {
+  SparqlHttpStore,
+  createTripleStore,
+  getExternalStorePrioritySchedulerSnapshot,
+  type Quad,
+  type SparqlHttpSlowQueryEvent,
+} from '../src/index.js';
 
 let server: Server;
 let queryUrl: string;
@@ -8,6 +14,37 @@ let updateUrl: string;
 const insertedQuads: string[] = [];
 /** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
 let listGraphsHits = 0;
+
+function respondSelect(res: ServerResponse): void {
+  if (res.writableEnded) return;
+  res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+  res.end(JSON.stringify({
+    head: { vars: ['name'] },
+    results: { bindings: [{ name: { type: 'literal', value: 'Alice' } }] },
+  }));
+}
+
+function respondListGraphs(res: ServerResponse): void {
+  if (res.writableEnded) return;
+  res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+  res.end(JSON.stringify({
+    head: { vars: ['g'] },
+    results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
+  }));
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  message: string,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(message);
+}
 
 function startTestServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -38,21 +75,10 @@ function startTestServer(): Promise<void> {
           }
           if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
             listGraphsHits++;
-            const respond = () => {
-              res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
-              res.end(JSON.stringify({
-                head: { vars: ['g'] },
-                results: { bindings: [{ g: { type: 'uri', value: 'http://ex.org/g1' } }] },
-              }));
-            };
-            respond();
+            respondListGraphs(res);
             return;
           }
-          res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
-          res.end(JSON.stringify({
-            head: { vars: ['name'] },
-            results: { bindings: [{ name: { type: 'literal', value: 'Alice' } }] },
-          }));
+          respondSelect(res);
           return;
         }
         if (req.url === '/error-update') {
@@ -123,6 +149,104 @@ describe('SparqlHttpStore (test server)', () => {
     if (result.type === 'bindings') {
       expect(result.bindings.length).toBe(1);
       expect(result.bindings[0]['name']).toBe('"Alice"');
+    }
+  });
+
+  it('routes ack-priority adapter queries ahead of queued background HTTP work', async () => {
+    const before = getExternalStorePrioritySchedulerSnapshot();
+    expect(before.maxConcurrent).toBeGreaterThan(1);
+    expect(before.ackReservedSlots).toBeGreaterThan(0);
+    const backgroundSlots = before.maxConcurrent - before.ackReservedSlots;
+    const arrivals: Array<'listGraphs' | 'ack' | 'other'> = [];
+    const heldListGraphResponses: ServerResponse[] = [];
+    let listGraphRequests = 0;
+    let priorityServer: Server | undefined;
+    const backgroundWork: Array<Promise<unknown>> = [];
+    let queuedBackground: Promise<unknown> | undefined;
+    let ackQuery: Promise<unknown> | undefined;
+
+    try {
+      priorityServer = createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          const decoded = decodeURIComponent(body);
+          if (!req.url?.startsWith('/query')) {
+            arrivals.push('other');
+            respondSelect(res);
+            return;
+          }
+          if (decoded.includes('ack-priority-probe')) {
+            arrivals.push('ack');
+            respondSelect(res);
+            return;
+          }
+          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+            arrivals.push('listGraphs');
+            listGraphRequests++;
+            if (listGraphRequests <= backgroundSlots) {
+              heldListGraphResponses.push(res);
+              return;
+            }
+            respondListGraphs(res);
+            return;
+          }
+          arrivals.push('other');
+          respondSelect(res);
+        });
+      });
+      await new Promise<void>((resolve) => {
+        priorityServer!.listen(0, '127.0.0.1', resolve);
+      });
+      const port = (priorityServer.address() as { port: number }).port;
+      const priorityUrl = `http://127.0.0.1:${port}/query`;
+      const priorityStore = new SparqlHttpStore({ queryEndpoint: priorityUrl, updateEndpoint: priorityUrl });
+
+      for (let i = 0; i < backgroundSlots; i++) {
+        backgroundWork.push(priorityStore.listGraphs({
+          priority: 'background',
+          source: `test.background.${i}`,
+        }));
+      }
+      await waitForCondition(
+        () => arrivals.filter((kind) => kind === 'listGraphs').length === backgroundSlots,
+        `background listGraphs requests did not fill non-ACK lanes; arrivals=${arrivals.join(',')}`,
+      );
+      const saturated = getExternalStorePrioritySchedulerSnapshot();
+      expect(saturated.backgroundInflight - before.backgroundInflight).toBe(backgroundSlots);
+
+      queuedBackground = priorityStore.listGraphs({
+        priority: 'background',
+        source: 'test.background.queued',
+      });
+      const queued = getExternalStorePrioritySchedulerSnapshot();
+      expect(queued.backgroundQueued - before.backgroundQueued).toBe(1);
+
+      ackQuery = priorityStore.query(
+        'SELECT ?name WHERE { # ack-priority-probe\n?s ?p ?o }',
+        { priority: 'ack', source: 'test.ack' },
+      );
+      await waitForCondition(
+        () => arrivals.includes('ack'),
+        `ACK query did not reach the adapter HTTP server before queued background work; arrivals=${arrivals.join(',')}`,
+      );
+
+      expect(arrivals.slice(0, backgroundSlots)).toEqual(Array(backgroundSlots).fill('listGraphs'));
+      expect(arrivals[backgroundSlots]).toBe('ack');
+      expect(arrivals.filter((kind) => kind === 'listGraphs')).toHaveLength(backgroundSlots);
+      await ackQuery;
+    } finally {
+      for (const res of heldListGraphResponses.splice(0)) respondListGraphs(res);
+      await Promise.allSettled([
+        ...backgroundWork,
+        ...(queuedBackground ? [queuedBackground] : []),
+        ...(ackQuery ? [ackQuery] : []),
+      ]);
+      if (priorityServer) {
+        await new Promise<void>((resolve, reject) => {
+          priorityServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
     }
   });
 
