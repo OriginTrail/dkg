@@ -359,9 +359,6 @@ export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFiel
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
   ];
-  if (fields.assetUal !== undefined) {
-    parts.push(framedString('assetUal'), framedString(fields.assetUal));
-  }
   parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
@@ -392,9 +389,6 @@ export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFiel
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
   ];
-  if (fields.assetUal !== undefined) {
-    parts.push(framedString('assetUal'), framedString(fields.assetUal));
-  }
   parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
@@ -439,9 +433,6 @@ export function computeSwmSenderKeyPackageEncryptionAAD(
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
   ];
-  if (fields.assetUal !== undefined) {
-    parts.push(framedString('assetUal'), framedString(fields.assetUal));
-  }
   parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),

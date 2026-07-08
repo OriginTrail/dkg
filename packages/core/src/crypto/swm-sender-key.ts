@@ -398,7 +398,6 @@ function deriveMessageNonce(
     type: SWM_SENDER_KEY_MESSAGE_TYPE,
     contextGraphId: fields.contextGraphId,
     subGraphName: fields.subGraphName,
-    assetUal: fields.assetUal,
     senderAgentAddress: fields.senderAgentAddress,
     epochId: fields.epochId,
     membershipHash: fields.membershipHash,
