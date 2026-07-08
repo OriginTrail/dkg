@@ -94,11 +94,34 @@ done
 
 target_dir="$DEVNET_DIR/node${target_node}"
 target_log="$target_dir/daemon.log"
+target_api=$((API_PORT_BASE + target_node - 1))
 say "target core = node${target_node} (store on port ${target_port}); publisher = node${PUBLISHER_NODE}"
+
+# SAFETY (otReviewAgent #1517): we are about to send process-control signals to
+# whatever is on ${target_port}. A stale .devnet dir could point at a port some
+# UNRELATED local service now owns, and we must never SIGSTOP that. Two guards:
+#
+#   1. The target node must actually be RUNNING — its /api/status must answer.
+#      A live node proves the config we read the port from is current, not stale.
+#      (/api/status is unauthenticated, matching the devnet harness.)
+#   2. The process on the port must LOOK like a triple store (oxigraph /
+#      blazegraph / sparql / java). If it doesn't, we refuse to signal it.
+#
+# If either guard fails the script SKIPs (exit 0) rather than touching a process
+# it can't positively identify as this node's store.
+curl -sf "http://127.0.0.1:${target_api}/api/status" >/dev/null 2>&1 \
+  || skip "target core node${target_node} API not responding on ${target_api} — the .devnet config may be stale; refusing to signal any process by port"
 
 STORE_PID="$(lsof -ti "tcp:${target_port}" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
 [ -n "$STORE_PID" ] || skip "no process is LISTENing on the store port ${target_port} for node${target_node}"
-say "store process pid = ${STORE_PID}"
+
+store_cmd="$(ps -p "$STORE_PID" -o args= 2>/dev/null || true)"
+[ -n "$store_cmd" ] || store_cmd="$(ps -p "$STORE_PID" -o command= 2>/dev/null || true)"
+case "$store_cmd" in
+  *oxigraph*|*blazegraph*|*sparql*|*java*) : ;;   # recognized triple-store process
+  *) skip "process ${STORE_PID} on port ${target_port} does not look like a triple store (cmd: ${store_cmd:-unknown}) — refusing to SIGSTOP an unidentified process" ;;
+esac
+say "store process pid = ${STORE_PID} (cmd: ${store_cmd})"
 
 # --- publish helper ---------------------------------------------------------
 publish_ka() { # <name-suffix> -> prints combined CLI output; returns publish exit code
