@@ -196,6 +196,89 @@ describe('KA lifecycle logging - publisher publish', () => {
     expect(failure?.message).toContain('errorClass=QuorumUnmetError');
   });
 
+  it('logs non-decline ACK peer outcomes under the allocated assetUal', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain.seedIdentity(wallet.address, 1n);
+    chain.minimumRequiredSignatures = 3;
+    const store = new OxigraphStore();
+    const logEntries: LogRecord[] = [];
+    Logger.setSink((entry) => logEntries.push(entry));
+    const quorumError = new QuorumUnmetError({
+      collected: 0,
+      required: 3,
+      dialled: 3,
+      peerOutcomes: [
+        {
+          peerId: 'peer-transport-error',
+          dialOk: false,
+          reason: 'TRANSPORT_ERROR',
+        },
+        {
+          peerId: 'peer-no-response',
+          reason: 'no_response',
+        },
+        {
+          peerId: 'peer-pool-shortfall',
+          reason: 'pool_below_quorum',
+        },
+      ],
+      legacyMessage: 'storage_ack_timeout',
+    });
+
+    const publisher = wrapPublisherForTest(new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: TEST_KEY,
+      publisherNodeIdentityId: 7n,
+      kaAllocator: makeTestKaAllocator(),
+    }), {
+      author: wallet,
+      ctx: mockSealCtx({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      }),
+    });
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      quads: [
+        q('urn:ka-log:ack-nondecline-root', 'http://schema.org/name', '"AckNonDeclineBot"'),
+      ],
+      v10ACKProvider: async () => {
+        throw quorumError;
+      },
+    })).rejects.toBe(quorumError);
+
+    const lifecycleLogs = logEntries.filter((entry) => entry.message.startsWith('ka_lifecycle '));
+    const assetUal = lifecycleField(lifecycleLogs[0]!.message, 'assetUal');
+    const scopedLogs = lifecycleLogs.filter((entry) => entry.message.includes(`assetUal=${assetUal}`));
+    const peerOutcomeLogs = scopedLogs.filter((entry) => entry.message.includes('peer=peer-'));
+
+    expect(peerOutcomeLogs.map((entry) => `${lifecycleField(entry.message, 'event')}:${lifecycleField(entry.message, 'peer')}`))
+      .toEqual([
+        'failure:peer-transport-error',
+        'timeout:peer-no-response',
+        'failure:peer-pool-shortfall',
+      ]);
+
+    const transport = peerOutcomeLogs.find((entry) => entry.message.includes('peer=peer-transport-error'));
+    expect(transport?.message).toContain('outcome=failure');
+    expect(transport?.message).toContain('reason=TRANSPORT_ERROR');
+    expect(transport?.message).toContain('dialOk=false');
+
+    const timeout = peerOutcomeLogs.find((entry) => entry.message.includes('peer=peer-no-response'));
+    expect(timeout?.message).toContain('outcome=timeout');
+    expect(timeout?.message).toContain('reason=no_response');
+
+    const poolShortfall = peerOutcomeLogs.find((entry) => entry.message.includes('peer=peer-pool-shortfall'));
+    expect(poolShortfall?.message).toContain('outcome=failure');
+    expect(poolShortfall?.message).toContain('reason=pool_below_quorum');
+  });
+
   it('logs chain submit failure under the allocated assetUal', async () => {
     const wallet = new ethers.Wallet(TEST_KEY);
     const chain = new MockChainAdapter('mock:31337', wallet.address);
