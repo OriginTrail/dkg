@@ -35,8 +35,6 @@ export interface ACKCandidatePeerSelectionResult {
   diagnostics: ACKCandidatePeerDiagnostic[];
 }
 
-const FALLBACK_CANDIDATE_MULTIPLIER = 2;
-
 function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
   return new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0));
 }
@@ -53,24 +51,14 @@ function flattenTiers(tiers: readonly ACKCandidateTier[], preferred: ReadonlySet
   return tiers.flatMap((tier) => rankPreferredWithinTier(tier.peers, preferred));
 }
 
-function appendUnique(target: string[], ids: readonly string[], max: number): void {
+function appendUnique(target: string[], ids: readonly string[]): void {
   for (const id of ids) {
-    if (target.length >= max) return;
     if (!target.includes(id)) target.push(id);
   }
 }
 
-function boundedCandidateLimit(requiredACKs: number): number {
-  return Math.max(1, requiredACKs) * FALLBACK_CANDIDATE_MULTIPLIER;
-}
-
-function appendBoundedFallback(
-  selected: string[],
-  fallback: readonly string[],
-  requiredACKs: number,
-): string[] {
-  const max = Math.max(selected.length, boundedCandidateLimit(requiredACKs));
-  appendUnique(selected, fallback, max);
+function appendFallback(selected: string[], fallback: readonly string[]): string[] {
+  appendUnique(selected, fallback);
   return selected;
 }
 
@@ -129,7 +117,7 @@ function diagnosticForPeer(input: {
       ? (input.knownCorePeerIds?.has(input.peerId) ?? false)
       : true;
   const selected = input.selected.has(input.peerId);
-  let reason = selected ? 'selected' : 'bounded-fallback';
+  let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
   else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
@@ -166,26 +154,12 @@ export function selectACKCandidatePeersWithDiagnostics(
   } else if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
     const v2Advertised = tiers.find((tier) => tier.name === 'v2Advertised')?.peers ?? [];
     peers = rankPreferredWithinTier(v2Advertised, preferredACKPeers);
-    appendBoundedFallback(
+    appendFallback(
       peers,
       flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
-      input.requiredACKs,
     );
   } else {
-    const confirmedCore = tiers.find((tier) => tier.name === 'confirmedCore')?.peers ?? [];
-    const rest = flattenTiers(tiers.filter((tier) => tier.name === 'rest'), preferredACKPeers);
-    if (confirmedCore.length >= input.requiredACKs) {
-      peers = rankPreferredWithinTier(confirmedCore, preferredACKPeers);
-      if (preferredACKPeers.size > 0) {
-        appendBoundedFallback(peers, rest, input.requiredACKs);
-      }
-    } else if (confirmedCore.length > 0) {
-      peers = rankPreferredWithinTier(confirmedCore, preferredACKPeers);
-      appendBoundedFallback(peers, rest, input.requiredACKs);
-    } else {
-      peers = [];
-      appendBoundedFallback(peers, flattenTiers(tiers, preferredACKPeers), input.requiredACKs);
-    }
+    peers = flattenTiers(tiers, preferredACKPeers);
   }
 
   const tierMap = tierByPeer(tiers);
