@@ -11,15 +11,23 @@ import {
   computeSwmSenderKeyPackageEncryptionAAD,
   contextGraphDataUri,
   contextGraphMetaUri,
+  decodeSwmSenderKeyPackageAck,
   decodeSwmSenderKeyMessage,
   encodeFinalizationMessage,
   encodePublishIntent,
+  encodeSwmSenderKeyPackage,
   encodeWorkspacePublishRequest,
+  encryptSwmSenderKeyPackage,
+  generateEd25519Keypair,
+  generateSwmSenderChainKey,
+  generateSwmSenderEpochId,
+  generateWorkspaceRecipientEncryptionKey,
   type LogRecord,
   type OperationContext,
   type SwmSenderKeyMessageAADFields,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAADFields,
+  type SwmSenderKeyPackageMsg,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -96,6 +104,38 @@ async function insertAgentGate(
     object: `"${agentAddress}"`,
     graph: contextGraphMetaUri(contextGraphId),
   }]);
+}
+
+async function buildSenderKeyPackage(input: {
+  contextGraphId: string;
+  senderWallet: ethers.HDNodeWallet;
+  recipientAgentAddress: string;
+  recipientKeyId: string;
+  assetUal: string;
+}): Promise<SwmSenderKeyPackageMsg> {
+  const signingKeypair = await generateEd25519Keypair();
+  const recipientPublicKey = generateWorkspaceRecipientEncryptionKey(
+    `did:dkg:agent:${input.recipientAgentAddress}`,
+    input.recipientKeyId,
+  ).publicKeyBytes!;
+  const pkg = await encryptSwmSenderKeyPackage({
+    contextGraphId: input.contextGraphId,
+    senderAgentAddress: input.senderWallet.address,
+    epochId: generateSwmSenderEpochId(),
+    membershipHash: 'sha256:ka-lifecycle-sender-key-decline',
+    recipientAgentAddress: input.recipientAgentAddress,
+    recipientKeyId: input.recipientKeyId,
+    createdAtMs: Date.now(),
+    initialMessageIndex: 0,
+    chainKey: generateSwmSenderChainKey(),
+    senderSigningPublicKey: signingKeypair.publicKey,
+    recipientPublicKey,
+    assetUal: input.assetUal,
+  });
+  pkg.signature = ethers.getBytes(
+    await input.senderWallet.signMessage(computeSwmSenderKeyPackageAAD(pkg)),
+  );
+  return pkg;
 }
 
 describe('KA receiver lifecycle logs', () => {
@@ -659,6 +699,51 @@ describe('KA receiver lifecycle logs', () => {
     expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('outcome=accepted'),
     );
+  });
+
+  it('logs Sender Key setup decline and ACK-decline by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const senderWallet = ethers.Wallet.createRandom();
+    const recipientWallet = ethers.Wallet.createRandom();
+    const contextGraphId = 'ka-lifecycle-sender-key-decline-cg';
+    const recipientKeyId =
+      `did:dkg:agent:${recipientWallet.address.toLowerCase()}#x25519-decline`;
+    const internals = agent as unknown as {
+      getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+      handleSwmSenderKeyPackage(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
+    };
+    internals.getContextGraphAgentGateAddresses = async () => [
+      senderWallet.address,
+      recipientWallet.address,
+    ];
+    const pkg = await buildSenderKeyPackage({
+      contextGraphId,
+      senderWallet,
+      recipientAgentAddress: recipientWallet.address,
+      recipientKeyId,
+      assetUal: ASSET_UAL,
+    });
+    const entries = captureLogs();
+
+    const response = await internals.handleSwmSenderKeyPackage(
+      encodeSwmSenderKeyPackage(pkg),
+      PUBLISHER_PEER_ID,
+    );
+    const ack = decodeSwmSenderKeyPackageAck(response);
+
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('recipient-not-local');
+    expect((ack as { assetUal?: string }).assetUal).toBe(ASSET_UAL);
+
+    const messages = senderKeyLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining('event=sender_key_setup_declined'));
+    expect(messages).toContainEqual(expect.stringContaining('event=sender_key_setup_ack_declined'));
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('outcome=declined'));
+    expect(messages).toContainEqual(expect.stringContaining('accepted=false'));
+    expect(messages).toContainEqual(expect.stringContaining('reasonCode=recipient-not-local'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
+    expect(messages).toContainEqual(expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`));
   });
 
   it('logs Sender Key decrypt failure by assetUal', async () => {
