@@ -4,8 +4,10 @@ import { resolve } from 'node:path';
 /**
  * storage-ack-store-outage — wraps `scripts/devnet-test-store-outage.sh`, which
  * pauses ONE core's store mid-publish (SIGSTOP/SIGCONT) and asserts the publish
- * still confirms via the healthy cores and again after recovery. Depends on a
- * running devnet; not part of the default `pnpm test` fan-out.
+ * still confirms via the healthy cores, the paused core logs the typed
+ * CORE_TEMPORARILY_UNAVAILABLE decline, and publishing works again after
+ * recovery. Depends on a running devnet; not part of the default `pnpm test`
+ * fan-out.
  *
  * Run: `pnpm test:devnet:storage-ack-store-outage`.
  */

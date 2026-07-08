@@ -13,20 +13,22 @@
  * but they mock the store. This suite covers the INTEGRATION the incident
  * exercised: a REAL store going down mid-publish, end-to-end across live nodes.
  *
- * The orchestration (find the target core's store process, SIGSTOP it, publish,
- * assert, SIGCONT to recover) lives in `scripts/devnet-test-store-outage.sh`, so
- * an operator can run it by hand and process control stays in shell — same shape
- * as the edge-update-flow suite. This file is the thin vitest wrapper.
+ * The orchestration (identify the target core's managed store process, SIGSTOP
+ * it, publish from an edge node, assert quorum + the typed decline, SIGCONT to
+ * recover) lives in `scripts/devnet-test-store-outage.sh`, so an operator can
+ * run it by hand and process control stays in shell — same shape as the
+ * edge-update-flow suite. This file is the thin vitest wrapper.
  *
- * Preconditions:
- *   - a running devnet (`./scripts/devnet.sh start 6`) where at least one
- *     NON-publisher core uses a per-node HTTP store (oxigraph-server /
- *     sparql-http) so ONE store can be isolated. The default devnet layout puts
- *     the oxigraph-server backend on core node 2 — ideal.
+ * Preconditions (the script SKIPs — exit 0 — with guidance when unmet, so the
+ * suite is green-and-informative on unsuitable lanes rather than falsely red):
+ *   - a running devnet (`./scripts/devnet.sh start 6`) with an EDGE node to
+ *     publish from (minimumRequiredSignatures=3 and a publisher does not sign
+ *     its own quorum, so a core publisher + one paused core cannot reach quorum
+ *     on the default 4-core layout — otReviewAgent #1517) and at least one
+ *     non-publisher core on the daemon-managed `oxigraph-server` backend so ONE
+ *     store can be isolated AND positively identified before it is signaled.
+ *     The default devnet layout (oxigraph-server on cores 1-2, edges 5-6) fits.
  *   - `lsof` on the host (to find the store process by port).
- *
- * When those aren't met the script SKIPs (exit 0) with guidance, so the suite is
- * green-and-informative on unsuitable lanes rather than falsely red.
  *
  * Run: pnpm test:devnet:storage-ack-store-outage
  */
@@ -81,8 +83,11 @@ describe('storage-ack-store-outage — a core store failing mid-publish degrades
 
     // Either it SKIPped (precondition unmet) or it PASSed — both are exit 0. A
     // PASS must have asserted the load-bearing contract: publish confirmed while
-    // one core's store was down, and again after recovery. Anchor on those
-    // lines so a regression that quietly stops exercising the outage still fails.
+    // one core's store was down, the paused core returned the TYPED
+    // CORE_TEMPORARILY_UNAVAILABLE decline (the incident regression — dead-air
+    // here fails the script), and the publish confirmed again after recovery.
+    // Anchor on those lines so a regression that quietly stops exercising the
+    // outage still fails.
     const skipped = /\[store-outage\] SKIP:/.test(stdout);
     if (skipped) {
       // eslint-disable-next-line no-console
@@ -90,7 +95,8 @@ describe('storage-ack-store-outage — a core store failing mid-publish degrades
       return;
     }
     expect(stdout).toMatch(/publish confirmed via the healthy cores while node\d+'s store was down/);
+    expect(stdout).toMatch(/node\d+ returned a typed CORE_TEMPORARILY_UNAVAILABLE decline/);
     expect(stdout).toMatch(/publish confirmed after node\d+'s store recovered/);
     expect(stdout).toMatch(/\[store-outage\] PASS/);
-  }, 300_000);
+  }, 360_000);
 });
