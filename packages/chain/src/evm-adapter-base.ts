@@ -581,6 +581,29 @@ export class EVMChainAdapterBase {
   protected readonly signerTxSerializer = new KeyedSerializer();
 
   /**
+   * Lowercased addresses of operational wallets CONFIRMED registered on-chain
+   * under the node's identity. Seeded with the primary signer (`pool[0]`, the
+   * identity anchor guaranteed registered via `createProfile`) and extended by
+   * `ensureOperationalWalletsRegistered` / `addOperationalWallet`. Used by
+   * `selectSigner` for `rotatable-free` (RS) eligibility, which must fail CLOSED
+   * to registered wallets: `RandomSampling` resolves the node via
+   * `getIdentityId(msg.sender)`, so a signer that is not a registered
+   * operational key resolves to identity 0 and reverts — burning the proof
+   * period. A wallet is admitted here only once its registration is confirmed,
+   * never optimistically.
+   *
+   * This is a same-process cache of on-chain state: seeded/extended on confirmed
+   * registration and PRUNED on a first-party `removeOperationalWallet`. It does
+   * NOT observe out-of-band changes (a removal via another node instance / a
+   * direct admin tx, or a key re-assigned to a different identity) — those go
+   * stale until restart (which re-seeds to currently-registered wallets). Impact
+   * of staleness is bounded: RS may waste one proof attempt on a no-longer-registered
+   * wallet, no fund/safety loss. A durable close (revalidate `getIdentityId(w)`
+   * at selection time via the identityId cache) is a tracked follow-up.
+   */
+  protected readonly registeredOperationalAddresses = new Set<string>();
+
+  /**
    * Funding-aware publish selection floors. A wallet is "fundable" (preferred
    * by `nextAuthorizedSigner`) when its native balance > `minPublisherNativeWei`
    * AND its TRAC balance > `minPublisherTracWei`. Default `0n` (strictly
@@ -613,7 +636,11 @@ export class EVMChainAdapterBase {
    * OPEN (treat null as fundable). Reused across a bulk publish loop so it
    * does not re-read the same wallet on every iteration.
    */
-  protected readonly fundingCache = new Map<string, { native: bigint | null; trac: bigint | null; ts: number }>();
+  // `nativeTs`/`tracTs` age independently: a native-only (RS) probe refreshes
+  // ONLY the native slot, so a transient TRAC read failure during an RS tick
+  // can never overwrite a valid cached TRAC balance with a fail-open `null` —
+  // which a publish selection inside the TTL would misread as "TRAC-fundable".
+  protected readonly fundingCache = new Map<string, { native: bigint | null; nativeTs: number; trac: bigint | null; tracTs: number }>();
 
   protected readonly hubAddress: string;
 
@@ -1033,6 +1060,10 @@ export class EVMChainAdapterBase {
     for (const key of config.additionalKeys ?? []) {
       this.signerPool.push(new Wallet(key, this.provider));
     }
+    // The primary signer is the node's identity anchor (a registered operational
+    // key via createProfile), so RS may always fall back to it. Additional
+    // wallets join this set only once their registration is confirmed on-chain.
+    this.registeredOperationalAddresses.add(this.signer.address.toLowerCase());
     if (config.adminPrivateKey) {
       this.adminSigner = new Wallet(config.adminPrivateKey, this.provider);
       const adminAddress = this.adminSigner.address.toLowerCase();
@@ -1649,7 +1680,8 @@ export class EVMChainAdapterBase {
       // Eligibility by class. `rotatable-policy` filters to on-chain authorized
       // publishers for the CG; with no ContextGraphs surface every operational
       // wallet is a candidate (funding-aware over the whole pool, NOT a plain
-      // pick). `rotatable-funded`/`rotatable-free` use the whole pool.
+      // pick). `rotatable-free` (RS) narrows to on-chain-registered operational
+      // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
       let eligible: Wallet[];
       if (spec.txClass === 'rotatable-policy' && this.contracts.contextGraphs) {
         eligible = [];
@@ -1667,6 +1699,14 @@ export class EVMChainAdapterBase {
             'Ensure at least one configured wallet is permitted by on-chain publish authority.',
           );
         }
+      } else if (spec.txClass === 'rotatable-free') {
+        // FAIL CLOSED to registered operational wallets. An unregistered signer
+        // resolves to identity 0 on `RandomSampling` and reverts, burning the
+        // proof period, so a not-yet-confirmed wallet must NOT be selected.
+        // `this.signer` (pool[0]) is always registered, so the fallback is safe
+        // and never empty. See `registeredOperationalAddresses`.
+        eligible = ordered.filter((w) => this.registeredOperationalAddresses.has(w.address.toLowerCase()));
+        if (eligible.length === 0) eligible = [this.signer];
       } else {
         eligible = ordered;
       }
@@ -1709,6 +1749,25 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Thin random-sampling wrapper over {@link selectSigner}: pick a REGISTERED
+   * operational wallet to sign the next `createChallenge` / `submitProof`.
+   * `rotatable-free` because RS moves zero value (native gas only — the contract
+   * has no TRAC transfer) and its score accrues to the node's identity via
+   * `getIdentityId(msg.sender)` regardless of WHICH registered operational
+   * wallet signs. `preferIdle` biases toward a wallet whose per-wallet lock is
+   * free so a deadline-bound proof does not queue behind an in-flight publish on
+   * the primary wallet (the wallet-#0 head-of-line contention this rotation
+   * removes). Eligibility fails closed to the primary signer (see selectSigner).
+   */
+  protected async nextRandomSamplingSigner(): Promise<Wallet> {
+    return this.selectSigner({
+      txClass: 'rotatable-free',
+      funding: { kind: 'native-only', nativeFloorWei: this.minPublisherNativeWei },
+      preferIdle: true,
+    });
+  }
+
+  /**
    * Among `candidates` (already in round-robin order), return the first that is
    * fundable per `funding` — or, when `preferIdle` and idle-aware selection is
    * enabled, the first fundable wallet whose per-wallet lock is currently free.
@@ -1723,7 +1782,11 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     preferIdle: boolean,
   ): Promise<Wallet> {
-    const fundings = await Promise.all(candidates.map((s) => this.getWalletFunding(s.address)));
+    // Mode-aware read: native-only selections (RS) touch only the native slot
+    // so their high-frequency probes can't poison the cached TRAC balance.
+    const fundings = await Promise.all(
+      candidates.map((s) => this.getWalletFunding(s.address, { metrics: funding.kind })),
+    );
     // Fundability is own-balance first (cheap), with a Publishing Conviction
     // Account (PCA) fallback for `native+trac`: a registered+covering PCA agent
     // wallet pays the publish from its conviction account, NOT its own TRAC, so
@@ -1841,29 +1904,44 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Best-effort native + TRAC balance read for one operational wallet, cached
-   * for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure / timeout yields
-   * `null` for that metric (callers fail open). `forceRefresh` bypasses and
-   * warms the cache (used on the error-enrichment path).
+   * Best-effort native (+ TRAC) balance read for one operational wallet,
+   * per-metric cached for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure /
+   * timeout yields `null` for that metric (callers fail open). `forceRefresh`
+   * bypasses and warms the cache (used on the error-enrichment path).
+   *
+   * `metrics: 'native-only'` (RS / relay / settle selections) reads and
+   * refreshes ONLY the native slot; the returned `trac` is whatever the cache
+   * holds (possibly stale or null) and MUST NOT be consulted by native-only
+   * callers (`isWalletFundable` returns before touching it). This keeps
+   * high-frequency RS probes from poisoning the TRAC slot publish selections
+   * rely on.
    */
   protected async getWalletFunding(
     address: string,
-    opts?: { forceRefresh?: boolean },
+    opts?: { forceRefresh?: boolean; metrics?: 'native-only' | 'native+trac' },
   ): Promise<{ native: bigint | null; trac: bigint | null }> {
     const key = address.toLowerCase();
     const now = Date.now();
-    if (!opts?.forceRefresh) {
-      const cached = this.fundingCache.get(key);
-      if (cached && now - cached.ts < PUBLISHER_FUNDING_CACHE_TTL_MS) {
-        return { native: cached.native, trac: cached.trac };
-      }
+    const cached = this.fundingCache.get(key);
+    const fresh = (ts: number | undefined) =>
+      !opts?.forceRefresh && ts !== undefined && now - ts < PUBLISHER_FUNDING_CACHE_TTL_MS;
+    const readNative = !fresh(cached?.nativeTs);
+    const readTrac = (opts?.metrics ?? 'native+trac') === 'native+trac' && !fresh(cached?.tracTs);
+    if (!readNative && !readTrac) {
+      return { native: cached!.native, trac: cached!.trac };
     }
-    const [native, trac] = await Promise.all([
-      this.readNativeBalance(address),
-      this.readTracBalance(address),
+    const [nativeRead, tracRead] = await Promise.all([
+      readNative ? this.readNativeBalance(address) : Promise.resolve(null),
+      readTrac ? this.readTracBalance(address) : Promise.resolve(null),
     ]);
-    this.fundingCache.set(key, { native, trac, ts: now });
-    return { native, trac };
+    const next = {
+      native: readNative ? nativeRead : cached!.native,
+      nativeTs: readNative ? now : cached!.nativeTs,
+      trac: readTrac ? tracRead : cached?.trac ?? null,
+      tracTs: readTrac ? now : cached?.tracTs ?? 0,
+    };
+    this.fundingCache.set(key, next);
+    return { native: next.native, trac: next.trac };
   }
 
   private async readNativeBalance(address: string): Promise<bigint | null> {

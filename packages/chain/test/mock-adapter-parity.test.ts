@@ -89,6 +89,15 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
+  // internals (the generalized wallet selector, the funding predicate behind
+  // it, the RS-specific selector wrapper, and the serialized RS send). Not
+  // ChainAdapter interface methods; the mock has no wallet pool, funding, or
+  // nonce surface to mirror — same category as the neighbours in this list.
+  'selectSigner',
+  'isWalletFundable',
+  'nextRandomSamplingSigner',
+  'sendRandomSamplingTx',
   // Funding-aware publish wallet selection internals (native+TRAC balance
   // reads, the fundability gate, the cache, and the insufficient-funds error
   // enrichment). EVM-only — the mock has no provider/ERC-20 balance surface

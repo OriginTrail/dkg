@@ -397,6 +397,9 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     a.getRandomSampling = async () => ({ rs, rss });
     a.readContract = readContract;
     a.sendContractTransaction = sendContractTransaction;
+    // Keep selection deterministic (this test is about the identity read-back,
+    // not wallet rotation) so it doesn't hit a live balance RPC.
+    a.nextRandomSamplingSigner = async () => a.signer;
 
     const result = await a.createChallenge();
 
@@ -408,6 +411,113 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(readContract.calls[0][3]).toBe(challengeIdentityId);
     expect(result.contextGraphId).toBe(contextGraphId);
     expect(result.challenge.knowledgeAssetId).toBe(11n);
+  });
+
+  it('createChallenge signs with the wallet selected by nextRandomSamplingSigner (not hardcoded pool[0])', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(a.signer.address);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = { hash: '0x' + '11'.repeat(32), blockNumber: 1, index: 0, logs: [{ topics: encoded.topics, data: encoded.data }] };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: { interface: rsInterface }, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    // Force selection to the SECOND operational wallet: if createChallenge were
+    // still pinned to this.signer (pool[0]) the send would use it, not w1.
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.createChallenge();
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('createChallenge');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+  });
+
+  it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    const receipt = { hash: '0x' + '22'.repeat(32), blockNumber: 5, index: 0, status: 1, logs: [] };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: {} });
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.submitProof(new Uint8Array([1, 2, 3]), []);
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('submitProof');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+  });
+
+  // ── self-heal for STALE eligibility: an out-of-band removed wallet that
+  // lingers in registeredOperationalAddresses reverts ProfileDoesntExist; the
+  // RS send evicts it and retries once on the primary signer (pool[0]).
+  const profileDoesntExistError = () => {
+    const iface = new Interface(['error ProfileDoesntExist(uint72 identityId)']);
+    const e: any = new Error('execution reverted: unknown custom error');
+    e.data = iface.encodeErrorResult('ProfileDoesntExist', [0n]); // enrichEvmError reads e.data
+    return e;
+  };
+
+  it('sendRandomSamplingTx self-heals a ProfileDoesntExist revert: evicts the stale wallet, retries on pool[0]', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w0 = a.signer;              // pool[0], the always-registered identity anchor
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(w0.address);
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase()); // stale: in-set but removed on-chain
+    a.nextRandomSamplingSigner = async () => w1;                    // rotation picks the stale wallet
+    const okReceipt = { hash: '0xok', status: 1 } as any;
+    const sendSpy = recorder(async (_c: any, _m: any, _args: any, signer: any) => {
+      if (signer.address === w1.address) throw profileDoesntExistError();
+      return okReceipt;
+    });
+    a.sendContractTransaction = sendSpy;
+    const clearSpy = recorder(() => undefined);
+    a.clearIdentityIdForAddress = clearSpy;
+
+    const result = await a.sendRandomSamplingTx({}, 'createChallenge', [], 'label');
+
+    expect(result).toBe(okReceipt);
+    expect(sendSpy.calls).toHaveLength(2);            // w1 (reverts) → retry w0
+    expect(sendSpy.calls[0][3]).toBe(w1);
+    expect(sendSpy.calls[1][3]).toBe(w0);             // retried on the primary anchor
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(false); // evicted
+    expect(clearSpy.calls).toHaveLength(1);           // stale cached identityId dropped
+  });
+
+  it('sendRandomSamplingTx does NOT retry a non-ProfileDoesntExist revert (propagates, no eviction)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase());
+    a.nextRandomSamplingSigner = async () => w1;
+    const sendSpy = recorder(async () => { throw new Error('This challenge is no longer active'); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow('no longer active');
+    expect(sendSpy.calls).toHaveLength(1);            // no retry
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(true); // not evicted
+  });
+
+  it('sendRandomSamplingTx does NOT self-heal when the PRIMARY signer reverts (nothing safer to retry)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig()); // single wallet → pool[0] only
+    a.nextRandomSamplingSigner = async () => a.signer;
+    const sendSpy = recorder(async () => { throw profileDoesntExistError(); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow();
+    expect(sendSpy.calls).toHaveLength(1);            // primary revert → no retry loop
   });
 });
 
@@ -3755,7 +3865,10 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // walletA is funded, but its zero balance is still cached. Backdate every
     // cache entry past the TTL so the next selection must re-read.
     tracByAddr.set(lc(walletA.address), ONE);
-    for (const entry of ((a as any).fundingCache as Map<string, { ts: number }>).values()) entry.ts = 0;
+    for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number; tracTs: number }>).values()) {
+      entry.nativeTs = 0;
+      entry.tracTs = 0;
+    }
     const second = await (a as any).nextAuthorizedSigner(CG);
     expect(second.address).toBe(walletA.address); // re-read picks up the now-funded head
   });
@@ -3866,6 +3979,14 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
   // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
   describe('selectSigner — generalized funding modes + idle preference', () => {
     const nativeOnly = { kind: 'native-only' as const, nativeFloorWei: 0n };
+    // rotatable-free eligibility fails CLOSED to REGISTERED operational wallets
+    // (Phase 4). These tests exercise the funding/idle logic, so mark the whole
+    // pool registered; the fail-closed gate itself is covered separately below.
+    const registerPool = (a: any) => {
+      for (const w of (a.signerPool as ethers.Wallet[])) {
+        a.registeredOperationalAddresses.add(w.address.toLowerCase());
+      }
+    };
     const nativeAndTrac = {
       kind: 'native+trac' as const,
       nativeFloorWei: 0n,
@@ -3876,6 +3997,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
       const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // Head walletA: gas but ZERO own-TRAC. Under publish (native+trac) it would
       // be skipped; under native-only it is fundable, so the head is chosen.
       nativeByAddr.set(lc(walletA.address), ONE);
@@ -3886,24 +4008,44 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     it('native-only still skips a gas-EMPTY wallet', async () => {
       const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
       const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
       expect(chosen.address).toBe(walletB.address);
     });
 
-    it('rotatable-free selects over the WHOLE pool, ignoring the authorized-publisher filter', async () => {
+    it('rotatable-free ignores the authorized-publisher filter (registered pool, not auth-gated)', async () => {
       const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // No wallet is an authorized publisher → publish (rotatable-policy) throws…
       (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
       await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeAndTrac }))
         .rejects.toThrow(/No authorized publisher wallet/);
-      // …but rotatable-free ignores that surface and picks from the whole pool.
+      // …but rotatable-free never consults that surface — it picks from the
+      // registered pool regardless of publish authority.
       const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
       expect(chosen.address).toBe(walletA.address);
     });
 
+    it('rotatable-free FAILS CLOSED: an UNREGISTERED funded+idle wallet is never selected', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // Only pool[0] (walletA) is registered (constructor seed); walletB is NOT.
+      // Make walletA gas-poor AND busy, walletB abundantly funded AND idle — yet
+      // walletB must NOT be picked (unregistered → identity 0 → on-chain revert).
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
+        expect(chosen.address).not.toBe(walletB.address);
+      } finally { release(); }
+    });
+
     it('preferIdle biases toward a funded wallet whose per-wallet lock is free', async () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       // Both funded (helper default). Hold walletA (the round-robin head) busy.
       let release!: () => void;
       const gate = new Promise<void>((r) => { release = r; });
@@ -3916,6 +4058,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
     it('preferIdle is fail-open: when NO funded wallet is idle it returns the first funded (never excludes)', async () => {
       const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
       let releaseA!: () => void; let releaseB!: () => void;
       const gA = new Promise<void>((r) => { releaseA = r; });
       const gB = new Promise<void>((r) => { releaseB = r; });
@@ -3927,11 +4070,36 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       } finally { releaseA(); releaseB(); }
     });
 
+    it('native-only (RS) probes never poison the cached TRAC balance a publish relies on', async () => {
+      const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // walletA own-TRAC funded, walletB not — a publish must pick A.
+      tracByAddr.set(lc(walletA.address), ONE);
+      tracByAddr.set(lc(walletB.address), 0n);
+      // Prime both cache slots with a full (native+trac) read.
+      await (a as any).getWalletFunding(walletA.address);
+      await (a as any).getWalletFunding(walletB.address);
+      // TRAC reads start failing (store/RPC blip) while natives stay readable,
+      // and the native slots expire — the exact per-prover-tick RS shape.
+      (a as any).readTracBalance = async () => null;
+      for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number }>).values()) {
+        entry.nativeTs = 0;
+      }
+      // RS probe (native-only) re-reads natives; it must NOT touch TRAC slots.
+      await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      const cachedA = ((a as any).fundingCache as Map<string, { trac: bigint | null }>).get(lc(walletA.address));
+      expect(cachedA?.trac).toBe(ONE); // not clobbered to the failed-read null
+      // A publish inside the TTL still sees walletA as own-TRAC funded.
+      const chosen = await (a as any).nextAuthorizedSigner(CG);
+      expect(chosen.address).toBe(walletA.address);
+    });
+
     it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {
       const prev = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
       process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = '1';
       try {
         const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        registerPool(a);
         let release!: () => void;
         const gate = new Promise<void>((r) => { release = r; });
         void (a as any).signerTxSerializer.run(walletA.address, () => gate);
