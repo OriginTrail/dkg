@@ -235,12 +235,12 @@
             "deployed": true
         },
         "PublishingConviction": {
-            "evmAddress": "0x7bEf1bb2139d186d0888329607762D0833C9EC4a",
-            "version": "10.0.7",
-            "gitBranch": "deploy/10.0.2-mainnet-registries",
-            "gitCommitHash": "f175fd4ab342e90db09eb9a8948b244ae38f66c6",
-            "deploymentBlock": 43583799,
-            "deploymentTimestamp": 1782935888267,
+            "evmAddress": "0x99341dEb6cdfACA94F359591ED3fD20da1901DAf",
+            "version": "10.0.8",
+            "gitBranch": "main",
+            "gitCommitHash": "6a91a16db87db6f5765456c8d7032a6a1031541e",
+            "deploymentBlock": 43880924,
+            "deploymentTimestamp": 1783530138645,
             "deployed": true
         },
         "DKGPublishingConvictionNFT": {
