@@ -33,7 +33,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, logKaLifecycleEvent, sparqlString, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   LEGACY_TRUST_LEVEL_PREDICATE,
@@ -2660,6 +2660,30 @@ export class SwmHostModeMethods extends DKGAgentBase {
           toWatermark: watermark,
         });
       },
+      logLifecycle: (event) => {
+        logKaLifecycleEvent(this.log, createOperationContext('system'), {
+          assetUal: event.assetUal,
+          stage: 'reconcile',
+          event: `reconcile_${event.action.replace('-', '_')}`,
+          role: 'sync',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          metadata: {
+            contextGraphId: event.localCgId,
+            onChainCgId: event.onChainCgId,
+            ordinal: event.ordinal,
+            kaId: event.kaId,
+            action: event.action,
+            result: event.result,
+            head: event.head,
+            watermark: event.watermark,
+            fromWatermark: event.fromWatermark,
+            toWatermark: event.toWatermark,
+            blockNumber: event.blockNumber,
+            reason: event.reason,
+          },
+        });
+      },
       confirmationDepth: DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH,
       log: (msg) => this.log.info(createOperationContext('system'), msg),
     };
@@ -3355,7 +3379,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       // Recently reconciled (live-burst guard): treat as already-done so the
       // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
+      if (this.recentReconciledUals.has(cacheKey)) {
+        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
+      }
 
       if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
@@ -3367,7 +3393,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ual,
           detail: 'negative-cache',
         });
-        return { status: 'pending' };
+        return { status: 'pending', assetUal: ual, kaId: kaId.toString(), reason: 'negative-cache' };
       }
 
       publisherAddress = (this.chain.getLatestMerkleRootPublisher
@@ -3448,7 +3474,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'promote', ordinal, kaId: kaId.toString(), ual,
         });
-        return { status: 'reconciled', blockNumber: versionBlock };
+        return { status: 'reconciled', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
       case 'already-confirmed':
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
@@ -3457,7 +3483,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
       case 'stale-target':
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
@@ -3466,7 +3492,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock };
+        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
           this.vmReconcileFetchCooldownAt.delete(localCgId);
@@ -3481,14 +3507,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
         });
-        return { status: 'pending' };
+        return {
+          status: 'pending',
+          assetUal: ual,
+          kaId: kaId.toString(),
+          reason: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
+        };
       case 'unverified':
       default:
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: outcome,
         });
-        return { status: 'pending' };
+        return { status: 'pending', assetUal: ual, kaId: kaId.toString(), reason: outcome };
     }
   }
 
