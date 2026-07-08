@@ -132,6 +132,11 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'sendSignedTransactionAndWait',
   'sendPopulatedTransaction',
   'sendContractTransaction',
+  // TS-private / protected write-serialization plumbing. The EVM adapter uses
+  // this scope to expose an unlocked sender only while the per-wallet serializer
+  // is held; the mock has no nonce-sign-broadcast window to mirror.
+  'withSerializedSignerWrite',
+  'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
