@@ -91,6 +91,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -416,6 +417,17 @@ export class ContextGraphMethods extends DKGAgentBase {
     callerAgentAddress?: string;
   }): Promise<void> {
     const ctx = createOperationContext('system');
+    // OT-RFC-56 §4.6: name/description land as raw literals in a
+    // network-replicated graph — enforce the protocol limit before ANY
+    // side effect (see ensureContextGraphLocal for the incident context).
+    assertRdfLiteralMutf8Safe(`"${opts.name}"`, {
+      label: 'contextGraph.name', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+    });
+    if (opts.description) {
+      assertRdfLiteralMutf8Safe(`"${opts.description}"`, {
+        label: 'contextGraph.description', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
+      });
+    }
     const gm = new GraphManager(this.store);
     const contextGraphUri = `did:dkg:context-graph:${opts.id}`;
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);

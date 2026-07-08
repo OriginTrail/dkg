@@ -58,6 +58,23 @@ import type {
 const BARE_URL_RE = /https?:\/\/[^\s)<>"]+/g;
 const INLINE_LINK_RE = /\[[^\]]*\]\(([^)\s]+)\)/g;
 
+/**
+ * Display bound for section names (OT-RFC-56 §4.6). Headings are headings —
+ * anything longer is a markdown-parse artifact (a huge single-line document
+ * surfaces its whole body as one "heading"), and un-truncated it becomes an
+ * oversized RDF literal the DKG's replicated graphs must refuse (the
+ * 2026-07-08 mainnet 177KB `schema:name` poison was exactly this shape).
+ * 2,048 chars ≤ 6,144 MUTF-8 bytes — far below the 60,000-byte protocol
+ * limit. Frontmatter fields are NOT truncated: they are author-controlled
+ * structured data, and the daemon's guarded import routes reject oversized
+ * values there with a caller-correctable error.
+ */
+const SECTION_NAME_MAX_CHARS = 2_048;
+function truncateSectionName(text: string): string {
+  if (text.length <= SECTION_NAME_MAX_CHARS) return text;
+  return `${text.slice(0, SECTION_NAME_MAX_CHARS - 1)}…`;
+}
+
 /** OKF `type` value → an rdf:type object IRI (raw, no angle brackets). */
 function typeToIri(value: unknown): string | null {
   const s = String(value).trim();
@@ -232,7 +249,13 @@ export function mapConcept(
   parsed.headings.forEach((text, i) => {
     const sectionIri = `${iri}${SECTION_GENID_INFIX}okfsec_${sanitizeForBlank(doc.conceptId)}_${i}`;
     quads.push({ subject: iri, predicate: DKG_HAS_SECTION, object: sectionIri });
-    quads.push({ subject: sectionIri, predicate: SCHEMA_NAME, object: literalTerm(text) });
+    // OT-RFC-56 §4.6: a markdown-parse quirk (e.g. a huge single-line
+    // document) can surface an arbitrarily large string as a "heading" —
+    // the exact producer bug behind the 2026-07-08 mainnet 177KB
+    // `schema:name` working-memory poison. Section names are HEADINGS:
+    // truncate to a sane display bound rather than failing the whole
+    // import over a parse artifact.
+    quads.push({ subject: sectionIri, predicate: SCHEMA_NAME, object: literalTerm(truncateSectionName(text)) });
   });
 
   const resolvedLinks: OkfLink[] = [];

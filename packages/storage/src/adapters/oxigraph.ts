@@ -12,6 +12,7 @@ import type {
   TripleStoreQueryOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
 type OxStore = InstanceType<typeof oxigraph.Store>;
 type OxTerm = oxigraph.Term;
@@ -188,6 +189,22 @@ export class OxigraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[]): Promise<void> {
     if (quads.length === 0) return;
+    // Oversize parity with the Blazegraph adapter (OT-RFC-56 §4.6): Oxigraph
+    // itself has no literal-size limit, which made oxigraph-backed nodes
+    // accept + re-serve oversized literals that Blazegraph peers can
+    // physically never store — the split-brain half of the 2026-07-08
+    // mainnet poison incident. Assert at the same Java MUTF-8 hard limit so
+    // no backend silently persists what another must refuse. `_shared_memory`
+    // graphs are exempt: their large literals are legitimately handled by the
+    // SharedMemoryLiteralBlobStore wrapper (externalize-on-insert,
+    // rehydrate-on-query), whose INNER store is exactly this adapter.
+    const guarded = quads.filter((q) => !q.graph?.includes('/_shared_memory'));
+    if (guarded.length > 0) {
+      assertQuadLiteralsMutf8Safe(guarded, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphStore.insert',
+      });
+    }
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
