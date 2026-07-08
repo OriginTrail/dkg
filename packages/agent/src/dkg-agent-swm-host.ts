@@ -2706,6 +2706,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // is a Core filling its own gap. Distinct telemetry so operators can see
       // the Core-to-Core fill path working (success-criteria metric).
       if (result.reconciled > 0 && sub.coreHosted && !sub.subscribed) {
+        for (const asset of result.assets) {
+          if (asset.status !== 'reconciled') continue;
+          logKaLifecycleEvent(this.log, createOperationContext('system'), {
+            assetUal: asset.assetUal,
+            stage: 'reconcile',
+            event: 'reconcile_core_fill',
+            role: 'sync',
+            localPeerId: this.peerId,
+            localNodeIdentityId: this.identityId.toString(),
+            metadata: {
+              contextGraphId: asset.localCgId,
+              onChainCgId: asset.onChainCgId,
+              source: 'chain-reconcile',
+              ordinal: asset.ordinal,
+              kaId: asset.kaId,
+              action: 'core-fill',
+              result: 'filled',
+              head: result.head,
+              watermark: result.watermark,
+              blockNumber: asset.blockNumber,
+            },
+          });
+        }
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: sub.onChainId,
