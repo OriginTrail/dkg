@@ -3865,7 +3865,10 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // walletA is funded, but its zero balance is still cached. Backdate every
     // cache entry past the TTL so the next selection must re-read.
     tracByAddr.set(lc(walletA.address), ONE);
-    for (const entry of ((a as any).fundingCache as Map<string, { ts: number }>).values()) entry.ts = 0;
+    for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number; tracTs: number }>).values()) {
+      entry.nativeTs = 0;
+      entry.tracTs = 0;
+    }
     const second = await (a as any).nextAuthorizedSigner(CG);
     expect(second.address).toBe(walletA.address); // re-read picks up the now-funded head
   });
@@ -4065,6 +4068,30 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
         const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
         expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
       } finally { releaseA(); releaseB(); }
+    });
+
+    it('native-only (RS) probes never poison the cached TRAC balance a publish relies on', async () => {
+      const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // walletA own-TRAC funded, walletB not — a publish must pick A.
+      tracByAddr.set(lc(walletA.address), ONE);
+      tracByAddr.set(lc(walletB.address), 0n);
+      // Prime both cache slots with a full (native+trac) read.
+      await (a as any).getWalletFunding(walletA.address);
+      await (a as any).getWalletFunding(walletB.address);
+      // TRAC reads start failing (store/RPC blip) while natives stay readable,
+      // and the native slots expire — the exact per-prover-tick RS shape.
+      (a as any).readTracBalance = async () => null;
+      for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number }>).values()) {
+        entry.nativeTs = 0;
+      }
+      // RS probe (native-only) re-reads natives; it must NOT touch TRAC slots.
+      await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      const cachedA = ((a as any).fundingCache as Map<string, { trac: bigint | null }>).get(lc(walletA.address));
+      expect(cachedA?.trac).toBe(ONE); // not clobbered to the failed-read null
+      // A publish inside the TTL still sees walletA as own-TRAC funded.
+      const chosen = await (a as any).nextAuthorizedSigner(CG);
+      expect(chosen.address).toBe(walletA.address);
     });
 
     it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {

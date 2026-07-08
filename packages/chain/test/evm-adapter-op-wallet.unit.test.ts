@@ -114,6 +114,16 @@ describe('EVMChainAdapter.addOperationalWallet', () => {
     expect(readContract.calls).toHaveLength(1);
   });
 
+  it('marks the wallet RS-eligible on a successful add (positive registration path)', async () => {
+    // The inverse of the remove-prune test below: without this set-add a
+    // just-registered wallet would silently stay out of RS rotation until
+    // the next daemon restart.
+    const { a } = makeAdapter();
+    expect((a as any).registeredOperationalAddresses.has(EXTERNAL.toLowerCase())).toBe(false);
+    await a.addOperationalWallet(EXTERNAL);
+    expect((a as any).registeredOperationalAddresses.has(EXTERNAL.toLowerCase())).toBe(true);
+  });
+
   it('throws when no admin key is configured', async () => {
     const { a, calls } = makeAdapter({ admin: false });
     await expect(a.addOperationalWallet(EXTERNAL)).rejects.toThrow(/adminPrivateKey is not configured/);
@@ -198,5 +208,36 @@ describe('EVMChainAdapter.removeOperationalWallet', () => {
     const { a, calls } = makeAdapter({ admin: false });
     await expect(a.removeOperationalWallet(EXTERNAL)).rejects.toThrow(/adminPrivateKey is not configured/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('EVMChainAdapter.ensureOperationalWalletsRegistered — RS eligibility set', () => {
+  const EXTERNAL2 = '0x' + 'd'.repeat(40);
+
+  it('marks already-registered and newly-confirmed wallets eligible; unconfirmed stay out', async () => {
+    const { a } = makeAdapter({
+      identityId: 5n,
+      // Per-address getIdentityId reads, in candidate order:
+      //   pool[0] (primary) → 5n (already registered under this identity)
+      //   EXTERNAL          → 0n (missing → registered by the batch tx)
+      //   EXTERNAL2         → 0n (missing → tx sent, but never confirms)
+      identityLookupValues: [5n, 0n, 0n],
+      operationalPurposeWallets: [EXTERNAL], // post-tx confirm: EXTERNAL yes, EXTERNAL2 no
+    });
+    const set = (a as any).registeredOperationalAddresses as Set<string>;
+    const primary = (a as any).signer.address as string;
+    // Drop the constructor seed so the alreadyRegistered branch is observable.
+    set.clear();
+
+    const result = await a.ensureOperationalWalletsRegistered({
+      additionalAddresses: [EXTERNAL, EXTERNAL2],
+    });
+
+    expect(result.alreadyRegistered).toEqual([primary]);
+    expect(result.registered).toEqual([ethers.getAddress(EXTERNAL)]);
+    // Eligibility mirrors on-chain confirmation exactly (fail-closed):
+    expect(set.has(primary.toLowerCase())).toBe(true);       // already-registered path
+    expect(set.has(EXTERNAL.toLowerCase())).toBe(true);      // newly-confirmed path
+    expect(set.has(EXTERNAL2.toLowerCase())).toBe(false);    // unconfirmed → NOT eligible
   });
 });

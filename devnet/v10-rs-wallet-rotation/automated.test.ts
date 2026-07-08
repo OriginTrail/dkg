@@ -46,9 +46,7 @@ import {
   detectDevnet,
   ensureAllIdentities,
   contractAt,
-  setEth,
   getJson,
-  postJson,
   sleep,
   type DevnetState,
   type DevnetNode,
@@ -75,24 +73,37 @@ let node: DevnetNode;
 let identityStorage: ethers.Contract;
 let randomSamplingAddr: string;
 
-/** Lowercased addresses the node reports as its registered operational wallets. */
-async function nodeOperationalWallets(): Promise<Set<string>> {
+/**
+ * Lowercased addresses from the node's LOCAL wallet store. `operational`
+ * excludes the admin key; `all` is the node's complete signing universe —
+ * the attribution scope for "this node sent that tx" (a node can only sign
+ * with keys it holds).
+ */
+async function nodeLocalWallets(): Promise<{ operational: Set<string>; all: Set<string> }> {
   const { json } = await getJson(node, '/api/operational-wallets');
-  const set = new Set<string>();
+  const operational = new Set<string>();
+  const all = new Set<string>();
   for (const w of json.wallets ?? []) {
-    if (!w.isAdmin) set.add(String(w.address).toLowerCase());
+    const addr = String(w.address).toLowerCase();
+    all.add(addr);
+    if (!w.isAdmin) operational.add(addr);
   }
-  return set;
+  return { operational, all };
 }
 
 /**
- * Scan blocks `[fromBlock, toBlock]` for transactions the node's wallets sent to
- * the RandomSampling contract, bucketed by method. Returns the distinct sender
- * set per method (all lowercased).
+ * Scan blocks `[fromBlock, toBlock]` for transactions THE OBSERVED NODE's
+ * wallets sent to the RandomSampling contract, bucketed by method. Returns the
+ * distinct sender set per method (all lowercased). `nodeWallets` scopes the
+ * scan: every node on the devnet runs a prover, so without the sender filter
+ * the buckets fill with OTHER nodes' RS txs — tripping both the fail-closed
+ * assertion (foreign sender ∉ this node's wallets) and the ≥2-sender early
+ * stop (two senders from two different nodes is not rotation).
  */
 async function collectRsSenders(
   fromBlock: number,
   toBlock: number,
+  nodeWallets: Set<string>,
 ): Promise<{ create: Set<string>; submit: Set<string> }> {
   const create = new Set<string>();
   const submit = new Set<string>();
@@ -102,8 +113,9 @@ async function collectRsSenders(
     if (!block) continue;
     for (const tx of block.prefetchedTransactions ?? []) {
       if ((tx.to ?? '').toLowerCase() !== rsLower) continue;
-      const sel = (tx.data ?? '0x').slice(0, 10);
       const from = tx.from.toLowerCase();
+      if (!nodeWallets.has(from)) continue; // another node's prover — out of scope
+      const sel = (tx.data ?? '0x').slice(0, 10);
       if (sel === CREATE_SELECTOR) create.add(from);
       else if (sel === SUBMIT_SELECTOR) submit.add(from);
     }
@@ -131,24 +143,25 @@ beforeAll(async () => {
   const hub = contractAt(state, 'Hub', ['function getContractAddress(string) view returns (address)']);
   randomSamplingAddr = await hub.getContractAddress('RandomSampling');
 
-  // Ensure the node has ≥2 registered operational wallets. If it starts with
-  // only the primary, add a throwaway one via the node-admin route (this is the
-  // same on-chain-verified path pr1370-admin-op-wallet exercises) and fund it
-  // with gas so RS can actually route to it.
-  let wallets = await nodeOperationalWallets();
-  if (wallets.size < 2) {
-    const throwaway = ethers.Wallet.createRandom().address;
-    const res = await postJson(node, '/api/operational-wallets', { address: throwaway });
-    expect(res.status, `add op wallet: ${JSON.stringify(res.json)}`).toBe(200);
-    await setEth(state, throwaway, '10'); // fund gas so RS may select it
-    wallets = await nodeOperationalWallets();
-  }
-  expect(wallets.size, 'node must have ≥2 registered operational wallets to observe rotation').toBeGreaterThanOrEqual(2);
+  // HARD PRECONDITION: the node needs ≥2 LOCAL operational wallets (keys it
+  // can actually sign with). POSTing a random address to
+  // /api/operational-wallets cannot manufacture one — that route only
+  // AUTHORIZES an address on-chain; the daemon holds no key for it and the
+  // GET below lists the LOCAL wallet store, so a fallback registration can
+  // never satisfy this check. The canonical devnet provisions 3
+  // (`NUM_OP_WALLETS=3` in scripts/devnet.sh).
+  const { operational } = await nodeLocalWallets();
+  expect(
+    operational.size,
+    `node${OBSERVE_NODE} has ${operational.size} local operational wallet(s); rotation needs ≥2. ` +
+      'Start the devnet with NUM_OP_WALLETS>=2 (scripts/devnet.sh default is 3) — ' +
+      'an on-chain-only registration cannot substitute for a local signing key.',
+  ).toBeGreaterThanOrEqual(2);
 }, 300_000);
 
 describe('V10 Random Sampling — operational-wallet rotation (Phase 4)', () => {
   it('rotates RS writes across registered wallets, and EVERY sender is a registered op key (fail-closed)', async () => {
-    const registered = await nodeOperationalWallets();
+    const { operational: registered, all: localWallets } = await nodeLocalWallets();
     const startBlock = await state.provider.getBlockNumber();
 
     // Watch a window for the node's autonomous prover to emit RS txs. NOTE: this
@@ -161,7 +174,10 @@ describe('V10 Random Sampling — operational-wallet rotation (Phase 4)', () => 
     while (Date.now() < deadline) {
       await sleep(10_000);
       const toBlock = await state.provider.getBlockNumber();
-      ({ create, submit } = await collectRsSenders(startBlock, toBlock));
+      // Scope by the node's FULL local store (not just op keys) so the
+      // fail-closed check below keeps teeth: an RS tx signed by a local
+      // non-operational key (e.g. the admin wallet) must FAIL, not vanish.
+      ({ create, submit } = await collectRsSenders(startBlock, toBlock, localWallets));
       senders = new Set([...create, ...submit]);
       // Stop early once we've observed a full create→submit cycle spanning ≥2 wallets.
       if (create.size >= 1 && submit.size >= 1 && senders.size >= 2) break;

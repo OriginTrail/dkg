@@ -636,7 +636,11 @@ export class EVMChainAdapterBase {
    * OPEN (treat null as fundable). Reused across a bulk publish loop so it
    * does not re-read the same wallet on every iteration.
    */
-  protected readonly fundingCache = new Map<string, { native: bigint | null; trac: bigint | null; ts: number }>();
+  // `nativeTs`/`tracTs` age independently: a native-only (RS) probe refreshes
+  // ONLY the native slot, so a transient TRAC read failure during an RS tick
+  // can never overwrite a valid cached TRAC balance with a fail-open `null` —
+  // which a publish selection inside the TTL would misread as "TRAC-fundable".
+  protected readonly fundingCache = new Map<string, { native: bigint | null; nativeTs: number; trac: bigint | null; tracTs: number }>();
 
   protected readonly hubAddress: string;
 
@@ -1778,7 +1782,11 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     preferIdle: boolean,
   ): Promise<Wallet> {
-    const fundings = await Promise.all(candidates.map((s) => this.getWalletFunding(s.address)));
+    // Mode-aware read: native-only selections (RS) touch only the native slot
+    // so their high-frequency probes can't poison the cached TRAC balance.
+    const fundings = await Promise.all(
+      candidates.map((s) => this.getWalletFunding(s.address, { metrics: funding.kind })),
+    );
     // Fundability is own-balance first (cheap), with a Publishing Conviction
     // Account (PCA) fallback for `native+trac`: a registered+covering PCA agent
     // wallet pays the publish from its conviction account, NOT its own TRAC, so
@@ -1896,29 +1904,44 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Best-effort native + TRAC balance read for one operational wallet, cached
-   * for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure / timeout yields
-   * `null` for that metric (callers fail open). `forceRefresh` bypasses and
-   * warms the cache (used on the error-enrichment path).
+   * Best-effort native (+ TRAC) balance read for one operational wallet,
+   * per-metric cached for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure /
+   * timeout yields `null` for that metric (callers fail open). `forceRefresh`
+   * bypasses and warms the cache (used on the error-enrichment path).
+   *
+   * `metrics: 'native-only'` (RS / relay / settle selections) reads and
+   * refreshes ONLY the native slot; the returned `trac` is whatever the cache
+   * holds (possibly stale or null) and MUST NOT be consulted by native-only
+   * callers (`isWalletFundable` returns before touching it). This keeps
+   * high-frequency RS probes from poisoning the TRAC slot publish selections
+   * rely on.
    */
   protected async getWalletFunding(
     address: string,
-    opts?: { forceRefresh?: boolean },
+    opts?: { forceRefresh?: boolean; metrics?: 'native-only' | 'native+trac' },
   ): Promise<{ native: bigint | null; trac: bigint | null }> {
     const key = address.toLowerCase();
     const now = Date.now();
-    if (!opts?.forceRefresh) {
-      const cached = this.fundingCache.get(key);
-      if (cached && now - cached.ts < PUBLISHER_FUNDING_CACHE_TTL_MS) {
-        return { native: cached.native, trac: cached.trac };
-      }
+    const cached = this.fundingCache.get(key);
+    const fresh = (ts: number | undefined) =>
+      !opts?.forceRefresh && ts !== undefined && now - ts < PUBLISHER_FUNDING_CACHE_TTL_MS;
+    const readNative = !fresh(cached?.nativeTs);
+    const readTrac = (opts?.metrics ?? 'native+trac') === 'native+trac' && !fresh(cached?.tracTs);
+    if (!readNative && !readTrac) {
+      return { native: cached!.native, trac: cached!.trac };
     }
-    const [native, trac] = await Promise.all([
-      this.readNativeBalance(address),
-      this.readTracBalance(address),
+    const [nativeRead, tracRead] = await Promise.all([
+      readNative ? this.readNativeBalance(address) : Promise.resolve(null),
+      readTrac ? this.readTracBalance(address) : Promise.resolve(null),
     ]);
-    this.fundingCache.set(key, { native, trac, ts: now });
-    return { native, trac };
+    const next = {
+      native: readNative ? nativeRead : cached!.native,
+      nativeTs: readNative ? now : cached!.nativeTs,
+      trac: readTrac ? tracRead : cached?.trac ?? null,
+      tracTs: readTrac ? now : cached?.tracTs ?? 0,
+    };
+    this.fundingCache.set(key, next);
+    return { native: next.native, trac: next.trac };
   }
 
   private async readNativeBalance(address: string): Promise<bigint | null> {
