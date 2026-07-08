@@ -1,8 +1,31 @@
 # Changelog
 
-All notable changes to the DKG V9 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [10.0.4] - 2026-07-08
+
+Mainnet ACK and release-ops patch: fixes ACK candidate selection and empty-reply retry handling, scopes relay-watchdog churn to private nodes, adds universal per-wallet EVM transaction serialization for publisher approve/send paths, and lands the manual canary/testnet/mainnet release promotion flow. **No smart-contract changes - no deployment required** (no Solidity source, ABI, or deployment JSON changes since 10.0.3).
+
+### Added
+
+- **Universal per-wallet transaction dispatcher** for EVM sends, including serialized approval sends and regression coverage for different-wallet concurrency plus the approval sender wiring (#1503).
+- **Manual release promotion tooling and docs** for package version verification, build metadata, signed tag checks, npm publish verification, canary/testnet promotion, and mainnet dist-tag promotion (#1498).
+
+### Changed
+
+- **Release CI** now validates the manual release flow and keeps release automation focused on signed release gates instead of the removed disabled npm-publish workflow (#1498).
+
+### Fixed
+
+- **ACK peer selection** now uses ACK candidate rankings only for relay preference, not eligibility; publishing remains chain-truth gated by valid on-chain ACK provider status (#1501).
+- **Zero-length ACK replies** are treated as retryable transport failures instead of `INVALID_SIGNATURE`, preserving fallback to other ACK providers (#1507).
+- **Public relay watchdog** no longer churns sibling-core connections on public nodes, with the gate covered at watchdog and relay levels (#1508).
+
+### Deployment
+
+- **No new contract deployment.** No Solidity source, ABI, or deployment JSON changes since 10.0.3; existing v10 registries remain the deploy targets.
 
 ## [10.0.3] - 2026-07-07
 
