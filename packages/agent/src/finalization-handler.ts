@@ -19,7 +19,7 @@ import {
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
   generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad,
-  pruneSupersededAgentRegistryMeta,
+  insertBoundedAgentRegistryMeta,
   generateSubGraphRegistration,
   splitTrustedGeneratedCatalogRootMap,
   shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock,
@@ -1414,22 +1414,25 @@ export class FinalizationHandler {
     }
     // #1233 follow-up — bound agents/_meta: this confirmed-metadata restatement
     // is load-bearing (prior-root cleanup + the tentative→confirmed flip), so it
-    // cannot be skipped for the agents CG. Evict the SAME agent's prior tracking
-    // record(s) before inserting so agents/_meta stays O(agents), not O(agents ×
-    // heartbeats). No-op for every other CG. For the agents CG `ctxGraphId` is
-    // always undefined (never on-chain), so `metaQuads` land in the default
-    // `<cg>/_meta` graph — the graph pruned here.
+    // cannot be skipped for the agents CG. INSERT then PRUNE (insert-first) via
+    // the helper: the just-inserted UAL is `recordUal` so the prune protects it,
+    // and a post-insert prune failure is swallowed (warned) inside the helper so
+    // it can never abort this promotion. agents/_meta
+    // stays O(agents), not O(agents × heartbeats); no-op prune for every other CG
+    // (so it just inserts). For the agents CG `ctxGraphId` is always undefined
+    // (never on-chain), so `metaQuads` land in the default `<cg>/_meta` graph —
+    // the graph bounded here.
     // NOTE: the agents CG is always-tentative and never confirms on-chain, so in
     // practice this promotion is not reached for it (see report); this is a
     // defensive, lifecycle-preserving bound that keeps the invariant robust.
-    await pruneSupersededAgentRegistryMeta({
+    await insertBoundedAgentRegistryMeta({
       store: this.store,
       contextGraphId,
       metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
       rootEntities,
-      keepUal: ual,
+      recordUal: ual,
+      metadataQuads: metaQuads,
     });
-    await this.store.insert(metaQuads);
 
     // Clean up promoted shared memory entries
     const sharedMemoryGraph = subGraphName

@@ -104,6 +104,10 @@ export default defineConfig({
           'test/daemon-openclaw.part-*.test.ts',
           'test/daemon-hermes.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
+          // Daemon call-site wiring guard: runDaemonInner passes the resolved
+          // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
+          // wallets) — no hardhat.
+          'test/daemon-sync-agents-meta-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

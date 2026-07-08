@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, Logger } from '@origintrail-official/dkg-core';
 import { generateTentativeMetadata, type KAMetadata } from '../src/index.js';
-import { pruneSupersededAgentRegistryMeta } from '../src/agent-registry-meta-retention.js';
+import {
+  pruneSupersededAgentRegistryMeta,
+  insertBoundedAgentRegistryMeta,
+} from '../src/agent-registry-meta-retention.js';
 
 // #1233 follow-up — the residual, LOAD-BEARING `_meta` write sites (the
 // direct-protocol receive handler + the confirmed-metadata restatement) cannot
@@ -58,6 +61,14 @@ async function heartbeat(
   });
   await store.insert(metaQuads);
   return metaQuads;
+}
+
+/** Build (without inserting) the collapsed tentative `_meta` rows for a heartbeat. */
+function metaQuadsFor(cg: string, rootEntity: string, ual: string): Quad[] {
+  return generateTentativeMetadata(
+    { ual, contextGraphId: cg, merkleRoot: new Uint8Array(32), publisherPeerId: 'peer', timestamp: new Date() },
+    [{ rootEntity, kcUal: ual, tokenId: 1n, publicTripleCount: 1, privateTripleCount: 0 }],
+  );
 }
 
 async function tentativeUals(store: OxigraphStore, cg: string): Promise<string[]> {
@@ -281,5 +292,153 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     const warn = records.find((r) => r.level === 'warn' && /SKIPPED/.test(r.message));
     expect(warn, 'a loud warn was emitted about the skipped agents/_meta bound').toBeDefined();
     expect(warn?.module).toBe('AgentRegistryMetaRetention');
+  });
+
+  it('(1) insert-first: an insert failure preserves the prior record and propagates (no loss)', async () => {
+    const base = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    await base.insert(metaQuadsFor(AGENTS, agent, mkUal('prior')));
+    const priorCount = await base.countQuads(metaOf(AGENTS));
+    expect(priorCount).toBeGreaterThan(0);
+
+    // A store whose insert() throws — the prune must never be reached, so the
+    // prior record can't be lost (the whole reason for insert-before-prune).
+    const throwingStore = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'insert') return async () => { throw new Error('disk full'); };
+        return Reflect.get(t, p, r);
+      },
+    }) as unknown as OxigraphStore;
+
+    await expect(
+      insertBoundedAgentRegistryMeta({
+        store: throwingStore,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        rootEntities: [agent],
+        recordUal: mkUal('new'),
+        metadataQuads: metaQuadsFor(AGENTS, agent, mkUal('new')),
+      }),
+    ).rejects.toThrow(/disk full/);
+
+    expect(
+      await base.countQuads(metaOf(AGENTS)),
+      'the prior record is untouched — the prune never ran (no state loss)',
+    ).toBe(priorCount);
+  });
+
+  it('(1) insert-first: a prune failure after a successful insert is NON-FATAL (resolves + warns)', async () => {
+    // The record is durably inserted BEFORE the prune, so a transient prune
+    // failure must NOT reject — else the caller (PublishHandler) would abort its
+    // ACK and never register pendingPublishes/expireTentativePublish, orphaning
+    // the tentative publish (#1533). It must resolve + warn instead.
+    const base = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    // insert() runs on the real base store (succeeds); update() throws — that is
+    // the engine the prune uses, so the prune fails AFTER a durable insert.
+    const pruneFailsStore = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'update') return async () => { throw new Error('update boom'); };
+        if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
+        return Reflect.get(t, p, r);
+      },
+    }) as unknown as OxigraphStore;
+
+    const records: Array<{ level: string; module: string; message: string }> = [];
+    Logger.setSink((rec) => { records.push(rec); });
+    try {
+      await expect(
+        insertBoundedAgentRegistryMeta({
+          store: pruneFailsStore,
+          contextGraphId: AGENTS,
+          metaGraph: metaOf(AGENTS),
+          rootEntities: [agent],
+          recordUal: mkUal('new'),
+          metadataQuads: metaQuadsFor(AGENTS, agent, mkUal('new')),
+        }),
+      ).resolves.toBeUndefined(); // NON-FATAL: swallows the prune error, does not reject
+    } finally {
+      Logger.setSink(null);
+    }
+
+    // The just-inserted record is live (the insert ran on the real store).
+    expect(
+      await tentativeUals(base, AGENTS),
+      'the record is durably inserted despite the prune failure',
+    ).toEqual([mkUal('new')]);
+    // …and the swallowed prune failure was made visible.
+    const warn = records.find((r) => r.level === 'warn' && /bound skipped this round/i.test(r.message));
+    expect(warn, 'a loud warn was emitted for the swallowed prune failure').toBeDefined();
+    expect(warn?.module).toBe('AgentRegistryMetaRetention');
+  });
+
+  it('(1) insert-first happy path: after insert+prune only the newest record survives', async () => {
+    const store = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    await store.insert(metaQuadsFor(AGENTS, agent, mkUal('prior')));
+
+    await insertBoundedAgentRegistryMeta({
+      store,
+      contextGraphId: AGENTS,
+      metaGraph: metaOf(AGENTS),
+      rootEntities: [agent],
+      recordUal: mkUal('new'),
+      metadataQuads: metaQuadsFor(AGENTS, agent, mkUal('new')),
+    });
+
+    expect(
+      await tentativeUals(store, AGENTS),
+      'the just-inserted record survives (protected by recordUal); the prior is pruned',
+    ).toEqual([mkUal('new')]);
+  });
+
+  it('(1) non-agents CG: insertBounded just inserts (prune no-op), full history retained', async () => {
+    const store = new OxigraphStore();
+    const cg = 'user-cg';
+    const root = 'did:dkg:entity:some-thing';
+    for (let i = 0; i < 3; i++) {
+      await insertBoundedAgentRegistryMeta({
+        store,
+        contextGraphId: cg,
+        metaGraph: metaOf(cg),
+        rootEntities: [root],
+        recordUal: mkUal(`u-${i}`),
+        metadataQuads: metaQuadsFor(cg, root, mkUal(`u-${i}`)),
+      });
+    }
+    expect(
+      (await tentativeUals(store, cg)).length,
+      'non-agents CG keeps every record (prune is a no-op)',
+    ).toBe(3);
+  });
+
+  it('(2) warns (not a silent drop) on an unsafe root, and still prunes the safe ones', async () => {
+    const store = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    // A prior record for the SAFE agent that MUST still be pruned.
+    await store.insert(metaQuadsFor(AGENTS, agent, mkUal('prior')));
+
+    const records: Array<{ level: string; module: string; message: string }> = [];
+    Logger.setSink((r) => { records.push(r); });
+    try {
+      await pruneSupersededAgentRegistryMeta({
+        store,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        rootEntities: ['bad iri with <> spaces', agent],
+        keepUal: mkUal('current'),
+      });
+    } finally {
+      Logger.setSink(null);
+    }
+
+    const warn = records.find((r) => r.level === 'warn' && /unsafe root/i.test(r.message));
+    expect(warn, 'a loud warn is emitted for the dropped unsafe root').toBeDefined();
+    expect(warn?.message, 'the warn names the skipped root').toContain('bad iri with <> spaces');
+    expect(warn?.module).toBe('AgentRegistryMetaRetention');
+    expect(
+      await store.countQuads(metaOf(AGENTS)),
+      'the safe root is still pruned — the pass is not silently aborted',
+    ).toBe(0);
   });
 });
