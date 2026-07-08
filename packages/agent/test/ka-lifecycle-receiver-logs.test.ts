@@ -195,6 +195,24 @@ function finalizationChainResolvingTarget(targetContextGraphId = '42') {
   };
 }
 
+async function insertFinalizationSharedMemory(
+  store: OxigraphStore,
+  rootEntity: string,
+  label: string,
+): Promise<Uint8Array> {
+  const swmQuads = [{
+    subject: rootEntity,
+    predicate: 'http://schema.org/name',
+    object: JSON.stringify(label),
+    graph: contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID),
+  }];
+  await store.insert(swmQuads);
+  return computeFlatKCRootV10(
+    swmQuads.map((quad) => ({ ...quad, graph: '' })),
+    [],
+  );
+}
+
 describe('KA receiver lifecycle logs', () => {
   afterEach(() => {
     Logger.setSink(null);
@@ -1154,5 +1172,107 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('targetContextGraphId=42'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
     expect(messages).toContainEqual(expect.stringContaining('reason=SWM finalization slice unavailable'));
+  });
+
+  it('logs rejected finalization by assetUal', async () => {
+    const store = new OxigraphStore();
+    const handler = new FinalizationHandler(
+      store,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(makeFinalizationMessage({
+      contextGraphId: 'ka-lifecycle-cg-other',
+      operationId: 'finalization-reject-lifecycle-test',
+    })), CONTEXT_GRAPH_ID);
+
+    const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=finalization_rejected'));
+    expect(messages).toContainEqual(expect.stringContaining('outcome=rejected'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
+    expect(messages).toContainEqual(
+      expect.stringContaining('reason=contextGraphId "ka-lifecycle-cg-other" does not match topic "ka-lifecycle-cg"'),
+    );
+  });
+
+  it('logs finalization verification failure by assetUal', async () => {
+    const store = new OxigraphStore();
+    const rootEntity = `${ROOT_ENTITY}/verification-failed`;
+    const merkleRoot = await insertFinalizationSharedMemory(
+      store,
+      rootEntity,
+      'Verification failure lifecycle',
+    );
+    const handler = new FinalizationHandler(
+      store,
+      finalizationChainResolvingTarget('42') as any,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(makeFinalizationMessage({
+      operationId: 'finalization-verification-failed-lifecycle-test',
+      kcMerkleRoot: merkleRoot,
+      rootEntities: [rootEntity],
+    })), CONTEXT_GRAPH_ID);
+
+    const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=finalization_verification_failed'));
+    expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
+    expect(messages).toContainEqual(expect.stringContaining('outcome=deferred'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
+    expect(messages).toContainEqual(expect.stringContaining('reason=on-chain verification failed'));
+  });
+
+  it('logs finalization merkle mismatch by assetUal', async () => {
+    const store = new OxigraphStore();
+    const rootEntity = `${ROOT_ENTITY}/merkle-mismatch`;
+    await insertFinalizationSharedMemory(
+      store,
+      rootEntity,
+      'Merkle mismatch lifecycle',
+    );
+    const handler = new FinalizationHandler(
+      store,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(makeFinalizationMessage({
+      operationId: 'finalization-merkle-mismatch-lifecycle-test',
+      kcMerkleRoot: new Uint8Array(32).fill(0xee),
+      rootEntities: [rootEntity],
+    })), CONTEXT_GRAPH_ID);
+
+    const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=finalization_merkle_mismatch'));
+    expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
+    expect(messages).toContainEqual(expect.stringContaining('outcome=deferred'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
+    expect(messages).toContainEqual(expect.stringContaining('reason=shared memory merkle root mismatch'));
   });
 });
