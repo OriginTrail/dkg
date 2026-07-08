@@ -78,6 +78,12 @@ export class MetricsCollector {
     private readonly db: DashboardDB,
     private readonly source: MetricsSource,
     private readonly dataDir?: string,
+    /**
+     * Gate for the expensive store-scan getters (#1066 Item 1). When it returns
+     * false the tick skips the full-store COUNT scans and leaves those columns
+     * null. Defaults to always-collect so existing callers/tests are unchanged.
+     */
+    private readonly shouldCollectStoreMetrics: () => boolean = () => true,
   ) {}
 
   start(): void {
@@ -148,12 +154,20 @@ export class MetricsCollector {
     let tentativeKCs: number | null = null;
     let contextGraphCount: number | null = null;
 
-    try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
-    try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
-    try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
-    try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
-    try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
-    try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+    // These six getters are full-store SPARQL scans (COUNT / COUNT(DISTINCT)
+    // across every graph, plus the context-graph inventory) — the expensive
+    // part of a tick. Skip them when nothing is consuming metrics, leaving the
+    // columns null (already nullable; charts render the gap). The cheap
+    // system/network metrics above always collect, so a CPU peg is still
+    // recorded even while no dashboard is open. (#1066 Item 1)
+    if (this.shouldCollectStoreMetrics()) {
+      try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
+      try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
+      try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
+      try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
+      try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
+      try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+    }
 
     let relayCapacity: number | null = null;
     let relayReservationCount: number | null = null;

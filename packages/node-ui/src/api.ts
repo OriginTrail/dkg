@@ -105,17 +105,23 @@ export async function handleNodeUIRequest(
   // --- Metrics ---
 
   if (req.method === 'GET' && path === '/api/metrics') {
+    // Serve the latest tick-written snapshot rather than live-collecting.
+    // A live collect() re-runs the full-store COUNT scans on every request, so
+    // an external poller (Grafana / health probe) could hammer a saturated
+    // store. The periodic collector already refreshes the snapshot (effective
+    // 30s TTL) and a store outage still surfaces as null columns rather than
+    // being masked. (#1066 Item 1)
+    const snap = db.getLatestSnapshot();
+    if (snap) return json(res, 200, snap);
+    // Cold start only: no snapshot yet (before the first tick). Fall back to a
+    // single live collect so the first request isn't empty; steady state never
+    // reaches here, so external pollers never trigger a per-request scan.
     if (metricsCollector) {
       try {
-        const live = await metricsCollector.collect();
-        return json(res, 200, live);
-      } catch {
-        const snap = db.getLatestSnapshot();
-        return json(res, 200, snap ?? {});
-      }
+        return json(res, 200, await metricsCollector.collect());
+      } catch { /* fall through to empty */ }
     }
-    const snap = db.getLatestSnapshot();
-    return json(res, 200, snap ?? {});
+    return json(res, 200, {});
   }
 
   if (req.method === 'GET' && path === '/api/metrics/history') {

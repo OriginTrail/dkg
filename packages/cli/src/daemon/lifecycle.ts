@@ -24,6 +24,7 @@ import {
   parseRdfInt,
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
+import { createMetricsPresence } from "./metrics-presence.js";
 import {
   appendFile,
   chmod,
@@ -2345,10 +2346,26 @@ export async function runDaemonInner(
     },
   };
 
+  // Connected node-UI SSE dashboard clients. Declared here (before the metrics
+  // collector) so the presence gate below can consult it; the /api/events
+  // handler further down populates it.
+  const sseClients = new Set<ServerResponse>();
+
+  // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
+  // full-store scans, so the collector skips them when nothing is consuming
+  // metrics — no open dashboard SSE stream and no recent /api/metrics[/history]
+  // read. Bounds those scans to <=1 per tick under load (instead of one per
+  // request) and to zero when idle. Override with DKG_METRICS_ALWAYS_COLLECT=1.
+  const metricsPresence = createMetricsPresence({
+    sseClientCount: () => sseClients.size,
+    alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
+  });
+
   const metricsCollector = new MetricsCollector(
     dashDb,
     metricsSource,
     dkgDir(),
+    () => metricsPresence.hasRecentConsumer(),
   );
   metricsCollector.start();
   log("Metrics collector started (30s interval)");
@@ -2678,8 +2695,9 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  const sseClients = new Set<ServerResponse>();
+  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients.
+  // `sseClients` is declared earlier (by the metrics collector) so the metrics
+  // presence gate can consult it.
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
@@ -3123,6 +3141,16 @@ export async function runDaemonInner(
   const server = createServer(async (req, res) => {
     try {
       const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host}`);
+
+      // Metrics presence (#1066 Item 1): a read of the metric-serving routes
+      // counts as an active consumer, keeping the collector's store scans warm
+      // for Grafana / health probes as well as the node-UI dashboard.
+      if (
+        reqUrl.pathname === "/api/metrics" ||
+        reqUrl.pathname === "/api/metrics/history"
+      ) {
+        metricsPresence.mark();
+      }
 
       // Resolve CORS origin once per request (request-scoped, not global)
       const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;

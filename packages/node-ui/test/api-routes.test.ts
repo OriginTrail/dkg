@@ -596,6 +596,46 @@ describe('handleNodeUIRequest CORS origin handling', () => {
   });
 });
 
+describe('handleNodeUIRequest /api/metrics snapshot-first behaviour (#1066 Item 1)', () => {
+  it('serves the latest snapshot without live-collecting when a snapshot exists', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => ({ ts: 123, total_triples: 42, peer_count: 3 }),
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(42);
+    expect(body.ts).toBe(123);
+    // No per-request full-store scan — the periodic collector is the only scanner.
+    expect(collectCalls).toBe(0);
+  });
+
+  it('cold start: falls back to a single live collect when no snapshot exists yet', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => undefined,
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999, total_triples: 7 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(7);
+    expect(collectCalls).toBe(1);
+  });
+});
+
 describe('handleNodeUIRequest replication routes (Phase F)', () => {
   let db: DashboardDB;
   let dir: string;
