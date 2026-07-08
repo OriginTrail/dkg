@@ -5,6 +5,7 @@ import {
   RecentUalSet,
   type ChainReconcilerDeps,
   type OrdinalOutcome,
+  type ReconcileLifecycleEvent,
 } from '../src/chain-reconciler.js';
 import { createCursorState } from '../src/reconcile-cursor.js';
 
@@ -229,6 +230,51 @@ describe('reconcileContextGraph — sweep', () => {
       onChainCgId: '77',
       ordinal: 0,
       kaId: '7',
+    }));
+  });
+
+  it('emits cursor-advance with assetUal when a depth-held published KA advances on a later sweep', async () => {
+    let headBlock = 100;
+    let attempts = 0;
+    const lifecycleEvents: ReconcileLifecycleEvent[] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      getHeadBlock: async () => headBlock,
+      confirmationDepth: 5,
+      reconcileOrdinal: async () => {
+        attempts += 1;
+        return {
+          status: 'reconciled',
+          blockNumber: 100,
+          assetUal: ASSET_UAL,
+          kaId: '7',
+        } as never;
+      },
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    } as Partial<ChainReconcilerDeps>);
+    const state = createCursorState(0);
+
+    const r1 = await reconcileContextGraph(deps, state, 'published-cg', 77n);
+    expect(r1.watermark).toBe(0);
+    expect(lifecycleEvents).not.toContainEqual(expect.objectContaining({
+      action: 'cursor-advance',
+    }));
+
+    headBlock = 106;
+    const r2 = await reconcileContextGraph(deps, state, 'published-cg', 77n);
+
+    expect(r2.watermark).toBe(1);
+    expect(attempts).toBe(1);
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      action: 'cursor-advance',
+      result: 'advanced',
+      localCgId: 'published-cg',
+      onChainCgId: '77',
+      ordinal: 0,
+      kaId: '7',
+      fromWatermark: 0,
+      toWatermark: 1,
     }));
   });
 });
