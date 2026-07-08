@@ -195,4 +195,67 @@ describe('KA lifecycle logging - publisher publish', () => {
     const failure = scopedLogs.find((entry) => lifecycleField(entry.message, 'event') === 'failure');
     expect(failure?.message).toContain('errorClass=QuorumUnmetError');
   });
+
+  it('logs chain submit failure under the allocated assetUal', async () => {
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain.seedIdentity(wallet.address, 1n);
+    chain.minimumRequiredSignatures = 1;
+    const chainFailure = Object.assign(new Error('simulated-chain-revert'), {
+      name: 'MockChainRevertError',
+    });
+    (chain as unknown as { createKnowledgeAssets: (...args: unknown[]) => Promise<never> }).createKnowledgeAssets =
+      async () => {
+        throw chainFailure;
+      };
+    const store = new OxigraphStore();
+    const logEntries: LogRecord[] = [];
+    Logger.setSink((entry) => logEntries.push(entry));
+
+    const publisher = wrapPublisherForTest(new DKGPublisher({
+      store,
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair(),
+      publisherPrivateKey: TEST_KEY,
+      publisherNodeIdentityId: 7n,
+      kaAllocator: makeTestKaAllocator(),
+    }), {
+      author: wallet,
+      ctx: mockSealCtx({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+      }),
+      v10ACKProvider: mockChainStubACKProvider({ identityId: 1n }),
+    });
+
+    await expect(publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      quads: [
+        q('urn:ka-log:chain-failure-root', 'http://schema.org/name', '"ChainFailureBot"'),
+      ],
+    })).rejects.toBe(chainFailure);
+
+    const lifecycleLogs = logEntries.filter((entry) => entry.message.startsWith('ka_lifecycle '));
+    const assetUal = lifecycleField(lifecycleLogs[0]!.message, 'assetUal');
+    const scopedLogs = lifecycleLogs.filter((entry) => entry.message.includes(`assetUal=${assetUal}`));
+
+    expect(scopedLogs.map((entry) => `${lifecycleField(entry.message, 'stage')}:${lifecycleField(entry.message, 'event')}`))
+      .toEqual([
+        'identity:asset_ual_allocated',
+        'wm:write',
+        'swm_share:prepared',
+        'storage_ack:request',
+        'storage_ack:success',
+        'storage_ack:quorum',
+        'chain:submit',
+        'chain:failure',
+      ]);
+
+    const failure = scopedLogs.find((entry) => lifecycleField(entry.message, 'event') === 'failure');
+    expect(failure?.level).toBe('error');
+    expect(failure?.message).toContain('errorClass=MockChainRevertError');
+    expect(failure?.message).toContain('reason=simulated-chain-revert');
+  });
 });
