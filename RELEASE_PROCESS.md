@@ -100,10 +100,13 @@ pnpm install --frozen-lockfile
 pnpm build                     # must fully succeed (UI bundle included)
 pnpm release:verify-versions --version X.Y.Z
 pnpm release:build-info --dist-tag latest
+pnpm release:verify-pack       # asserts the dkg tarball ships network/*.json + project.json + build-info.json
 pnpm -r publish --no-git-checks --tag latest
 ```
 
 `release:verify-tag` restores the tag gates the old tag-triggered workflow enforced, now as a publish preflight: the tag must be an annotated object carrying a PGP/SSH signature block, it must exist on `origin` at the same object (an unpushed or moved tag fails), and its commit must be reachable from `origin/main` (override with `--base` for a release branch). Signer identity is enforced server-side by the signed-tag ruleset; this gate checks structure and ancestry so a publish can never start from a mislabeled or foreign commit.
+
+`release:verify-pack` runs `npm pack --dry-run` on `@origintrail-official/dkg` and fails the release if the tarball would omit `project.json`, `build-info.json`, or any `network/*.json` overlay. The `network/*.json` + `project.json` files are copied into `packages/cli` from the repo root at pack time (a `prepack` step), not committed — 10.0.3 shipped them but 10.0.4 dropped them when a turbo cache hit skipped the copy, leaving npm-installed nodes with no network overlay. The `prepack` copy now makes materialization unconditional; this preflight is the belt-and-suspenders guard that turns a silent drop into a hard failure. Run it **after** `release:build-info` so `build-info.json` (which drives `/api/status` and startup telemetry) is present for the check. It cannot protect against an explicit `pnpm publish --ignore-scripts` (that skips `prepack` by design) — a single blessed publish command that refuses `--ignore-scripts` is tracked as follow-up hardening.
 
 npm prompts for your **OTP** (2FA). All publishable public `@origintrail-official/*` packages publish in one command; private workspaces are skipped automatically. `pnpm` skips versions already on the registry, so a re-run after a partial publish is safe. `pnpm release:build-info` writes `packages/cli/build-info.json` before packaging, so npm-installed daemons report the tag commit, build time, and publish dist-tag through `/api/status`.
 
@@ -116,6 +119,7 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm release:verify-versions --version X.Y.Z-canary.1
 pnpm release:build-info --dist-tag canary
+pnpm release:verify-pack
 pnpm -r publish --no-git-checks --tag canary
 pnpm release:promote --version X.Y.Z-canary.1 --tags testnet --otp <fresh 2FA code>
 ```

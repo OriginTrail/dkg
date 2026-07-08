@@ -9,10 +9,23 @@ import { fileURLToPath } from 'node:url';
 import {
   buildInfoPayload,
   discoverPublishablePackages,
+  findMissingCliPackAssets,
   findReleaseVersionMismatches,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
+import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
+
+const NPM_AVAILABLE = (() => {
+  try {
+    return spawnSync('npm', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32' }).status === 0;
+  } catch {
+    return false;
+  }
+})();
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../release-packages.mjs');
 
@@ -199,3 +212,153 @@ test('promote survives interactive npm calls for the whole package set', () => {
     fs.rmSync(shimDir, { recursive: true, force: true });
   }
 });
+
+function writeCliPackFixture(root) {
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+}
+
+test('flags a cli tarball missing network overlays + project.json + build-info.json (the 10.0.4 drop)', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  const packReport = () => JSON.stringify([{ files: [{ path: 'dist/cli.js' }, { path: 'package.json' }] }]);
+  const missing = findMissingCliPackAssets(root, packReport);
+  assert.deepEqual(
+    [...missing].sort(),
+    ['build-info.json', 'network/mainnet-base.json', 'network/testnet.json', 'project.json'],
+  );
+}));
+
+test('passes when the cli tarball includes every network overlay + project.json + build-info.json', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  // npm reports Windows paths with backslashes — the check must normalize them.
+  const packReport = () => JSON.stringify([{ files: [
+    { path: 'project.json' },
+    { path: 'build-info.json' },
+    { path: 'network\\testnet.json' },
+    { path: 'network/mainnet-base.json' },
+    { path: 'dist/cli.js' },
+  ] }]);
+  assert.deepEqual(findMissingCliPackAssets(root, packReport), []);
+}));
+
+test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops stale overlays)', () => withFixture((root) => {
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{"a":1}\n');
+  fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{"b":2}\n');
+  fs.writeFileSync(path.join(root, 'project.json'), '{"name":"x"}\n');
+  // A stale overlay left in the package from an earlier build/branch.
+  fs.mkdirSync(path.join(root, 'packages', 'cli', 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages', 'cli', 'network', 'devnet.json'), '{"stale":true}\n');
+
+  const { networkJsonFiles } = copyCliRuntimeAssets({ rootDir: root });
+
+  const cliNetwork = path.join(root, 'packages', 'cli', 'network');
+  assert.deepEqual(networkJsonFiles, ['mainnet-base.json', 'testnet.json']);
+  assert.ok(fs.existsSync(path.join(cliNetwork, 'testnet.json')), 'testnet.json copied');
+  assert.ok(fs.existsSync(path.join(cliNetwork, 'mainnet-base.json')), 'mainnet-base.json copied');
+  assert.ok(fs.existsSync(path.join(root, 'packages', 'cli', 'project.json')), 'project.json copied');
+  assert.equal(fs.existsSync(path.join(cliNetwork, 'devnet.json')), false, 'stale overlay removed (mirror, not append)');
+}));
+
+test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => withFixture((root) => {
+  // network/ present but project.json absent
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  assert.throws(() => copyCliRuntimeAssets({ rootDir: root }), /project\.json not found/);
+}));
+
+test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
+  const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
+  assert.match(cliPkg.scripts.build ?? '', /copy-cli-runtime-assets\.mjs/, 'build must run the copy script');
+});
+
+test('the copy and the verifier consume one shared asset manifest', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  const { relPaths } = cliRuntimeAssetManifest({ rootDir: root });
+  // What the copy materializes (project.json + every network overlay)…
+  assert.deepEqual(relPaths, ['project.json', 'network/mainnet-base.json', 'network/testnet.json']);
+  // …is exactly what the verifier requires, plus the generated build-info.json.
+  const spyReport = () => JSON.stringify([{ files: [...relPaths, 'build-info.json'].map((p) => ({ path: p })) }]);
+  assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
+}));
+
+test('the shared manifest is fail-closed — matches the copier, not best-effort', () => withFixture((root) => {
+  // no network/ dir at all
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /network\/ directory not found/);
+  // empty network/
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /no network\/\*\.json overlays/);
+  // overlays present but project.json missing
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /project\.json not found/);
+}));
+
+test('findMissingCliPackAssets cannot silently build a required list without network overlays', () => withFixture((root) => {
+  // A source tree with no network/ + a lenient pack report must NOT pass — the
+  // fail-closed manifest throws instead of requiring only project.json/build-info.
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  const lenientReport = () => JSON.stringify([{ files: [{ path: 'project.json' }, { path: 'build-info.json' }] }]);
+  assert.throws(() => findMissingCliPackAssets(root, lenientReport), /network\/ directory not found/);
+}));
+
+test('packages/cli ships the runtime assets in its published files list', () => {
+  // Guards the REAL package manifest contract — the integration test uses its
+  // own fixture files, so this is what fails if production `files` drops one.
+  const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  for (const entry of ['network', 'project.json', 'build-info.json']) {
+    assert.ok((cliPkg.files ?? []).includes(entry), `packages/cli#files must ship ${entry}`);
+  }
+});
+
+test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd)', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  let seenCwd;
+  const spyRunner = (_cmd, _args, opts) => {
+    seenCwd = opts.cwd;
+    return JSON.stringify([{ files: [] }]);
+  };
+  findMissingCliPackAssets(root, spyRunner);
+  assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
+}));
+
+// The integration test the mocked-runner unit tests can't give: run the REAL
+// copy script through the REAL npm pack lifecycle and observe the tarball. The
+// fixture embeds a copy of the real script so it resolves the fixture as its
+// root (no production test-seam). Catches prepack-logs-to-stdout and
+// prepack/cwd/lifecycle regressions the mocks would hide. (The production
+// packages/cli#files contract is guarded separately by the files-list test
+// above — this fixture defines its own files array, so it can't protect that.)
+test('real npm pack --dry-run runs prepack and includes every runtime asset', { skip: NPM_AVAILABLE ? false : 'npm not available' }, () => withFixture((root) => {
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.copyFileSync(COPY_SCRIPT, path.join(root, 'scripts', 'copy-cli-runtime-assets.mjs'));
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  const cliDir = path.join(root, 'packages', 'cli');
+  fs.mkdirSync(cliDir, { recursive: true });
+  fs.writeFileSync(path.join(cliDir, 'build-info.json'), '{}\n'); // generated by release:build-info
+  fs.writeFileSync(path.join(cliDir, 'package.json'), `${JSON.stringify({
+    name: '@origintrail-official/dkg', version: '0.0.0-fixture', private: true,
+    files: ['network', 'project.json', 'build-info.json'],
+    scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' },
+  }, null, 2)}\n`);
+
+  const res = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+    cwd: cliDir, encoding: 'utf8', shell: process.platform === 'win32',
+  });
+  assert.equal(res.status, 0, `npm pack failed: ${res.stderr}`);
+  // JSON.parse fails if prepack polluted stdout — that is the regression guard.
+  const report = JSON.parse(res.stdout);
+  const packed = new Set(
+    (Array.isArray(report) ? report : [report])
+      .flatMap((entry) => entry.files ?? [])
+      .map((file) => file.path.replace(/\\/g, '/')),
+  );
+  for (const asset of ['project.json', 'build-info.json', 'network/testnet.json', 'network/mainnet-base.json']) {
+    assert.ok(packed.has(asset), `real tarball missing ${asset}`);
+  }
+}));
