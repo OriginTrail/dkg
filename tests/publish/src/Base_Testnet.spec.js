@@ -9,14 +9,12 @@
 // Sequential node map (TestNode<N> = beacon-0<N>):
 //   TestNode1 = dkg-v10-beacon-01 (100.99.142.87)
 //   TestNode2 = dkg-v10-beacon-02 (100.70.65.41)
-//   TestNode3 = dkg-v10-beacon-03 (100.120.12.74)
 //   TestNode4 = dkg-v10-beacon-04 (100.65.228.120)
 import { defineChainPublishSuite } from './v10-publish-lib.js';
 
 const nodes = [
   { name: 'TestNode1', hostname: process.env.TESTNET1_API_URL || 'http://100.99.142.87:9200',  token: process.env.V10_TOKEN_TESTNET1 },
   { name: 'TestNode2', hostname: process.env.TESTNET2_API_URL || 'http://100.70.65.41:9200',   token: process.env.V10_TOKEN_TESTNET2 },
-  { name: 'TestNode3', hostname: process.env.TESTNET3_API_URL || 'http://100.120.12.74:9200',  token: process.env.V10_TOKEN_TESTNET3 },
   { name: 'TestNode4', hostname: process.env.TESTNET4_API_URL || 'http://100.65.228.120:9200', token: process.env.V10_TOKEN_TESTNET4 },
 ];
 
