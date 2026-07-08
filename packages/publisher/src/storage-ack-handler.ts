@@ -13,11 +13,13 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
+  DEFAULT_SEND_TIMEOUT_MS,
   boundedDeclineCodeLabel,
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
   sharedMemoryReadBothFilter,
+  isSwmMerkleExcludedQuad,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -297,7 +299,40 @@ export interface StorageACKHandlerConfig {
     maxRetries: number;
     delayMs: number;
   };
+  /**
+   * Wall-clock deadline for a single ACK-handler invocation. If the handler's
+   * store work has not produced a reply within this budget, the handler
+   * returns a `CORE_TEMPORARILY_UNAVAILABLE` decline instead of dead-airing
+   * the stream. The publisher's per-send timeout is 20s
+   * (`DEFAULT_SEND_TIMEOUT_MS`), so the default here is deliberately BELOW it
+   * (15s) — a slow store (e.g. under a sync storm) then hands the publisher an
+   * actionable transient decline that engages its retry-with-backoff ladder,
+   * rather than a timeout the publisher can only read as a dead peer
+   * (2026-07-07 Gnosis mainnet: cores whose Blazegraph was saturated dead-aired
+   * past 20s and every round burned as TRANSPORT_ERROR / mislabeled
+   * INVALID_SIGNATURE). Set to 0 to disable the deadline. Tests override it.
+   */
+  ackHandlerDeadlineMs?: number;
 }
+
+/**
+ * Safety margin between the ACK-handler deadline and the publisher's per-send
+ * timeout: the budget left for the decline to be encoded, written to the
+ * stream, and read by the publisher before it gives up on the send. Without
+ * it the deadline decline would race the publisher's own timeout and lose.
+ */
+export const ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS = 5_000;
+
+/**
+ * Default ACK-handler deadline — DERIVED from the publisher's per-send timeout
+ * ({@link DEFAULT_SEND_TIMEOUT_MS}, 20s) minus
+ * {@link ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS} (5s) = 15s, so the
+ * "decline must reach the publisher before it gives up" invariant is
+ * compile-time coupled to the send timeout instead of restated as a bare
+ * literal that could silently drift.
+ */
+export const DEFAULT_ACK_HANDLER_DEADLINE_MS =
+  DEFAULT_SEND_TIMEOUT_MS - ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS;
 
 /**
  * StorageACKHandler implements the core node side of V10 spec §9.0 Phase 3.
@@ -608,7 +643,10 @@ export class StorageACKHandler {
         // Malformed request — handlePublishIntent will throw + reset below.
       }
       try {
-        const result = await this.handlePublishIntent(data, peerId);
+        const result = await this.runHandlerWithDeadline(
+          this.handlePublishIntent(data, peerId),
+          cgIdAttr,
+        );
         const decoded = decodeStorageACK(result);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';
@@ -640,6 +678,54 @@ export class StorageACKHandler {
         throw err;
       }
     });
+  };
+
+  /**
+   * Run an in-flight ACK body ({@link handlePublishIntent} or
+   * {@link handleUpdateIntent}) under a wall-clock deadline. If the store
+   * work has not produced a reply within `ackHandlerDeadlineMs` (default 15s,
+   * below the publisher's 20s per-send timeout), resolve with a
+   * `CORE_TEMPORARILY_UNAVAILABLE` decline so the publisher gets an actionable
+   * transient response instead of dead-air. The in-flight work is left to
+   * settle in the background — any staging it has already persisted is
+   * idempotent, and a late resolve/reject is swallowed so it cannot surface as
+   * an unhandled rejection once the deadline reply has been sent.
+   *
+   * A THROWN handler error still propagates (the race rejects) → the outer
+   * handler resets the stream exactly as before; the deadline only converts
+   * the *slow* (non-throwing) case, which previously had no in-band signal.
+   */
+  private runHandlerWithDeadline = async (
+    work: Promise<Uint8Array>,
+    cgIdForDecline: string | undefined,
+  ): Promise<Uint8Array> => {
+    const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
+    if (deadlineMs <= 0) return work;
+
+    // Swallow a late rejection from work when the deadline wins (see jsdoc).
+    // When work WINS the race it still rejects through `Promise.race` below,
+    // so real handler errors are unaffected by this no-op handler.
+    void work.catch(() => {});
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<Uint8Array>((resolve) => {
+      deadlineTimer = setTimeout(() => {
+        resolve(
+          this.declineTemporarilyUnavailable(
+            cgIdForDecline ?? '',
+            'ack handler deadline exceeded',
+            new Error(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated)`),
+          ),
+        );
+      }, deadlineMs);
+      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    });
+
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+    }
   };
 
   /**
@@ -1193,9 +1279,34 @@ export class StorageACKHandler {
    * ACKs require exactly one KA before signing.
    *
    * Mirrors the publish `handler` above; only the digest, the request
-   * fields, and the protocol id differ.
+   * fields, and the protocol id differ — including the ACK-handler
+   * deadline: without it a hanging store op (SWM fallback `store.query`,
+   * catalog persist) dead-airs update ACKs past the publisher's 20s
+   * per-send timeout exactly as publish did, and the update collector
+   * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  updateHandler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+    let cgIdForDecline: string | undefined;
+    try {
+      // contextGraphId is cheap to read off the decoded intent for the
+      // deadline decline; handleUpdateIntent re-decodes + validates below.
+      cgIdForDecline = decodeUpdateIntent(data).contextGraphId;
+    } catch {
+      // Malformed request — handleUpdateIntent will throw + reset below.
+    }
+    return this.runHandlerWithDeadline(
+      this.handleUpdateIntent(data, peerId),
+      cgIdForDecline,
+    );
+  };
+
+  /**
+   * Original update-intent handling body. Split out from
+   * {@link updateHandler} so the public entry point runs it under the
+   * shared ACK deadline; the logic here is byte-for-byte the pre-deadline
+   * behaviour.
+   */
+  private handleUpdateIntent = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -1538,12 +1649,20 @@ export class StorageACKHandler {
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
     assertSafeIri(graphUri);
+    // The publisher computes the KC merkle root over its SWM read with the
+    // trust-level / workspace-owner bookkeeping quads filtered OUT
+    // (`isSwmMerkleExcludedQuad`). The core responder recomputes the same root
+    // from its OWN SWM copy here, so it MUST apply the identical exclusion —
+    // otherwise any trust-level/workspace-owner quad resident in the core's
+    // store is hashed on one side but not the other and every folded-private
+    // ACK declines MERKLE_MISMATCH_IN_SWM (2026-07-07 Gnosis mainnet). Shared
+    // single-source filter so the two paths can never drift again.
     if (rootEntities.length === 0) {
       // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
       // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.queryStoreOrUnavailable(sparql);
-      return result.type === 'quads' ? result.quads : [];
+      return result.type === 'quads' ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q)) : [];
     }
 
     const allQuads: Quad[] = [];
@@ -1553,7 +1672,9 @@ export class StorageACKHandler {
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.queryStoreOrUnavailable(sparql);
       if (result.type === 'quads') {
-        allQuads.push(...result.quads);
+        for (const q of result.quads) {
+          if (!isSwmMerkleExcludedQuad(q)) allQuads.push(q);
+        }
       }
     }
     return allQuads;

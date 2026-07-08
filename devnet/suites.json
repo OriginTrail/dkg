@@ -18,6 +18,7 @@
     "core-peers-features",
     "edge-update-flow",
     "greenfield-10min",
+    "mixed-version",
     "pr1366-pca-deposit-waiver",
     "pr1369-folded-private-ack",
     "pr1370-admin-op-wallet",
@@ -34,6 +35,7 @@
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",
+    "v10-rs-wallet-rotation",
     "v10-stress"
   ]
 }

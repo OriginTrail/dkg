@@ -606,6 +606,8 @@ export class DKGAgent extends DKGAgentBase {
         chainId: config.chainConfig.chainId,
         approvalPolicy: config.chainConfig.approvalPolicy,
         cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
+        minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
+        minPublisherTracWei: config.chainConfig.minPublisherTracWei,
         contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       };
       if (config.chainConfig.adminPrivateKey) {
