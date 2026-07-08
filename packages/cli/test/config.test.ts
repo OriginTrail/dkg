@@ -903,6 +903,39 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(overridden?.minPublisherTracWei).toBe(456n);
   });
 
+  it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {
+    // What operators and the network overlay can actually produce: JSON.parse /
+    // yaml.load never yield bigints. Strings must survive above 2^53.
+    const merged = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '2000000000000000000' } },
+      { chain: { ...fullNetworkChain, minPublisherTracWei: 456 } },
+    );
+    expect(merged?.minPublisherNativeWei).toBe(2_000_000_000_000_000_000n);
+    expect(merged?.minPublisherTracWei).toBe(456n);
+
+    // Operator string overrides an overlay number.
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '789' } },
+      { chain: { ...fullNetworkChain, minPublisherNativeWei: 123 } },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+  });
+
+  it('rejects malformed funding-floor values at startup instead of mis-comparing silently', () => {
+    const withFloor = (chain: Record<string, unknown>) =>
+      resolveChainConfig({ chain: chain as never }, { chain: fullNetworkChain });
+    expect(() => withFloor({ minPublisherNativeWei: '0.002' }))
+      .toThrow(/chain\.minPublisherNativeWei must be a decimal wei bigint string/);
+    expect(() => withFloor({ minPublisherNativeWei: '' }))
+      .toThrow(/empty string/);
+    expect(() => withFloor({ minPublisherTracWei: -5 }))
+      .toThrow(/non-negative/);
+    expect(() => withFloor({ minPublisherNativeWei: 1e18 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
+    expect(() => withFloor({ minPublisherTracWei: 1.5 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
+  });
+
   it('dedupes primary + backups while preserving operator priority', () => {
     const merged = resolveChainConfig(
       {

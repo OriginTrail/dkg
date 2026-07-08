@@ -157,9 +157,13 @@ export interface NetworkConfig {
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
     cgRegistryScanPageSize?: number;
-    /** Network-level per-chain funding floors (wei). See `ChainConfig.minPublisher*Wei`. */
-    minPublisherNativeWei?: bigint;
-    minPublisherTracWei?: bigint;
+    /**
+     * Network-level per-chain funding floors (wei). See
+     * `ChainConfig.minPublisher*Wei`. Overlay JSON can only carry
+     * string/number; both are normalized to bigint in `resolveChainConfig`.
+     */
+    minPublisherNativeWei?: bigint | string | number;
+    minPublisherTracWei?: bigint | string | number;
   };
   faucet?: {
     url: string;
@@ -268,14 +272,25 @@ export interface ChainConfig {
    * above `minPublisherTracWei`; below the floor it is deprioritized (best-funded
    * fallback still sends). Both default to `0n` (only strictly-empty wallets are
    * skipped) — per-chain non-zero native defaults are supplied by the network
-   * overlay. Threaded straight to `EVMAdapterConfig.minPublisher*Wei`.
+   * overlay.
+   *
+   * Persisted config (JSON/YAML) cannot express a bigint: use a decimal wei
+   * **string** (recommended — wei amounts overflow the safe number range) or an
+   * integer number. `resolveChainConfig` normalizes + validates both into the
+   * strict bigint that reaches `EVMAdapterConfig.minPublisher*Wei`, failing
+   * fast at startup on decimals, negatives, or unsafe-precision numbers.
    */
-  minPublisherNativeWei?: bigint;
-  minPublisherTracWei?: bigint;
+  minPublisherNativeWei?: bigint | string | number;
+  minPublisherTracWei?: bigint | string | number;
 }
 
-export type ResolvedChainConfig = Partial<Omit<ChainConfig, 'approvalPolicy'>> & {
+export type ResolvedChainConfig = Partial<
+  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei'>
+> & {
   approvalPolicy?: ApprovalPolicyConfig;
+  /** Normalized funding floors — always bigint past resolution. */
+  minPublisherNativeWei?: bigint;
+  minPublisherTracWei?: bigint;
 };
 
 export interface LargeLiteralStorageConfig {
@@ -944,6 +959,50 @@ export function resolveApprovalPolicy(
   };
 }
 
+/**
+ * Normalize a persisted wei amount (funding floors) into a bigint.
+ *
+ * JSON/YAML configs and the network overlay can only produce strings and
+ * numbers, never bigints — so accept all three and fail fast at startup on
+ * anything that would otherwise silently mis-compare downstream: decimal
+ * strings (`BigInt('0.002')` throws — good), empty strings (`BigInt('')` is
+ * silently `0n` — guarded), non-integer or unsafe-precision numbers (would
+ * lose wei), and negatives (would invert the floor comparison).
+ */
+export function parseWeiFloor(
+  value: bigint | string | number | undefined,
+  label: string,
+): bigint | undefined {
+  if (value === undefined) return undefined;
+  let parsed: bigint;
+  if (typeof value === 'bigint') {
+    parsed = value;
+  } else if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(
+        `${label} must be an integer within Number.MAX_SAFE_INTEGER when given as a number — use a decimal wei string for larger amounts (got: ${value})`,
+      );
+    }
+    parsed = BigInt(value);
+  } else {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new Error(`${label} must be a decimal wei bigint string (got an empty string)`);
+    }
+    try {
+      parsed = BigInt(trimmed);
+    } catch (err: any) {
+      throw new Error(
+        `${label} must be a decimal wei bigint string (got: ${JSON.stringify(value)}, ${err?.message ?? err})`,
+      );
+    }
+  }
+  if (parsed < 0n) {
+    throw new Error(`${label} must be non-negative (got: ${parsed})`);
+  }
+  return parsed;
+}
+
 let _networkConfig: NetworkConfig | null = null;
 let _networkConfigName: string | null = null;
 
@@ -1265,10 +1324,18 @@ export function resolveChainConfig(
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
   // Funding floors: local config wins, else the network overlay's per-chain
-  // default (both default 0n downstream in the adapter when unset).
-  const minPublisherNativeWei = cfg?.minPublisherNativeWei ?? net?.minPublisherNativeWei;
+  // default (both default 0n downstream in the adapter when unset). Persisted
+  // values arrive as string/number — normalize to bigint here, failing fast on
+  // garbage instead of letting it reach the adapter's balance comparisons.
+  const minPublisherNativeWei = parseWeiFloor(
+    cfg?.minPublisherNativeWei ?? net?.minPublisherNativeWei,
+    'chain.minPublisherNativeWei',
+  );
   if (minPublisherNativeWei !== undefined) merged.minPublisherNativeWei = minPublisherNativeWei;
-  const minPublisherTracWei = cfg?.minPublisherTracWei ?? net?.minPublisherTracWei;
+  const minPublisherTracWei = parseWeiFloor(
+    cfg?.minPublisherTracWei ?? net?.minPublisherTracWei,
+    'chain.minPublisherTracWei',
+  );
   if (minPublisherTracWei !== undefined) merged.minPublisherTracWei = minPublisherTracWei;
   if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
   return merged;
