@@ -48,25 +48,32 @@ interface NodeVersion {
   version: string;
 }
 
-function parseSemver(v: string): [number, number, number] {
+/** Parse `MAJOR.MINOR.PATCH`, or null if the string carries no semver — callers
+ *  must handle null explicitly rather than silently comparing a 0.0.0 stand-in
+ *  (otReviewAgent #1513: coercing an unknown version to 0.0.0 hides the very
+ *  invariant the skew assertions depend on). */
+function parseSemver(v: string): [number, number, number] | null {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(v);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
-/** Standard semver compare: <0 if a<b, 0 if equal, >0 if a>b. */
-function cmpSemver(a: string, b: string): number {
-  const A = parseSemver(a);
-  const B = parseSemver(b);
+const KNOWN_ROLES = new Set(['core', 'edge']);
+
+/** Standard semver compare over two ALREADY-PARSED versions. */
+function cmpSemver(a: [number, number, number], b: [number, number, number]): number {
   for (let i = 0; i < 3; i++) {
-    if (A[i] !== B[i]) return A[i] - B[i];
+    if (a[i] !== b[i]) return a[i] - b[i];
   }
   return 0;
 }
 
+/** Raw /api/status — no magic fallbacks. Missing fields surface as empty
+ *  strings so the reachability test can fail loudly on a malformed boundary
+ *  instead of silently mislabeling a node's version/role. */
 async function statusOf(node: DevnetNode): Promise<{ version: string; nodeRole: string }> {
   const res = await fetchRetry(`http://127.0.0.1:${node.apiPort}/api/status`);
   const j = (await res.json()) as { version?: string; nodeRole?: string };
-  return { version: j.version ?? 'unknown', nodeRole: j.nodeRole ?? 'edge' };
+  return { version: j.version ?? '', nodeRole: j.nodeRole ?? '' };
 }
 
 let devnet: DevnetState | null = null;
@@ -96,6 +103,19 @@ describe('mixed-version devnet interop', () => {
       return;
     }
     expect(versions.length).toBeGreaterThan(0);
+    // Fail loudly on a malformed status boundary rather than silently coercing:
+    // the whole suite reasons over versions and core/edge roles, so every node
+    // MUST report a parseable version and a known role (otReviewAgent #1513).
+    const badVersion = versions.filter((v) => parseSemver(v.version) === null);
+    expect(
+      badVersion,
+      `nodes with a missing/unparseable /api/status version: ${badVersion.map((v) => `node${v.num}="${v.version}"`).join(', ')}`,
+    ).toEqual([]);
+    const badRole = versions.filter((v) => !KNOWN_ROLES.has(v.role));
+    expect(
+      badRole,
+      `nodes with an unexpected /api/status nodeRole (want core|edge): ${badRole.map((v) => `node${v.num}="${v.role}"`).join(', ')}`,
+    ).toEqual([]);
   });
 
   it('runs at least two distinct versions (else skips the skew checks with guidance)', () => {
@@ -114,15 +134,26 @@ describe('mixed-version devnet interop', () => {
 
   it('edges are NOT ahead of cores (rollout shape: edges lag the cores)', () => {
     if (!devnet) return;
-    const cores = versions.filter((v) => v.role === 'core').map((v) => v.version);
-    const edges = versions.filter((v) => v.role === 'edge').map((v) => v.version);
+    // Parse up front; the reachability test above already guaranteed every node
+    // has a parseable version, so a null here is a real invariant break, not a
+    // silent 0.0.0.
+    const parsed = (role: string) =>
+      versions
+        .filter((v) => v.role === role)
+        .map((v) => {
+          const p = parseSemver(v.version);
+          if (!p) throw new Error(`node${v.num} has an unparseable version "${v.version}"`);
+          return p;
+        });
+    const cores = parsed('core');
+    const edges = parsed('edge');
     if (cores.length === 0 || edges.length === 0) return;
     const minCore = [...cores].sort(cmpSemver)[0];
     const maxEdge = [...edges].sort(cmpSemver)[edges.length - 1];
     // Every edge <= every core (edges behind, or equal on a single-version lane).
     expect(
       cmpSemver(maxEdge, minCore),
-      `expected max edge version (${maxEdge}) <= min core version (${minCore})`,
+      `expected max edge version (${maxEdge.join('.')}) <= min core version (${minCore.join('.')})`,
     ).toBeLessThanOrEqual(0);
   });
 
