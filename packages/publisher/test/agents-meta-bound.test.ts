@@ -78,6 +78,16 @@ function metaQuadsFor(cg: string, rootEntity: string, ual: string): Quad[] {
   );
 }
 
+/** Build (without inserting) a MULTI-root record — one member row per root, same UAL. */
+function metaQuadsForRoots(cg: string, roots: string[], ual: string): Quad[] {
+  return generateTentativeMetadata(
+    { ual, contextGraphId: cg, merkleRoot: new Uint8Array(32), publisherPeerId: 'peer', timestamp: new Date() },
+    roots.map((rootEntity, i) => ({
+      rootEntity, kcUal: ual, tokenId: BigInt(i + 1), publicTripleCount: 1, privateTripleCount: 0,
+    })),
+  );
+}
+
 async function tentativeUals(store: OxigraphStore, cg: string): Promise<string[]> {
   const res = await store.query(
     `SELECT DISTINCT ?ual WHERE { GRAPH <${metaOf(cg)}> { ?ual <${STATUS}> "tentative" } }`,
@@ -461,6 +471,49 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
       'concurrent same-agent heartbeats collapse to exactly the newest record (B); ' +
         'this is [] without the mutex and [A,B] if serialized-but-unbounded',
     ).toEqual([mkUal('B')]);
+  });
+
+  it('(A2) serializes concurrent OVERLAPPING-root writes — a shared root is never zeroed (#1534)', async () => {
+    // Two concurrent agents/_meta writes with INTERSECTING-but-unequal root sets:
+    // {A} and {A,B}. A per-root-SET lock keys them differently ("A" vs "A,B"), so
+    // both insert then mutually prune on shared root A → A ends with ZERO records
+    // (the #1534 review bug). Per-INDIVIDUAL-root locking makes them share the
+    // root-A lock and serialize: `call([A])` dispatches first → acquires lock A →
+    // completes → then `call([A,B])` inserts and prunes → its {A,B} record survives
+    // and still covers A. Deterministic: exactly the {A,B} UAL remains (it is `[]`
+    // without per-root serialization).
+    const base = new OxigraphStore();
+    const agentA = agentDid(0xa1);
+    const agentB = agentDid(0xb2);
+    const raceStore = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
+        if (p === 'update') return async (sparql: string) => {
+          await new Promise((res) => setTimeout(res, 0)); // defer the prune past both inserts
+          return base.update(sparql);
+        };
+        return Reflect.get(t, p, r);
+      },
+    }) as unknown as OxigraphStore;
+
+    const call = (roots: string[], ual: string) =>
+      insertBoundedAgentRegistryMeta({
+        store: raceStore,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        rootEntities: roots,
+        recordUal: ual,
+        metadataQuads: metaQuadsForRoots(AGENTS, roots, ual),
+      });
+
+    await Promise.all([call([agentA], mkUal('A')), call([agentA, agentB], mkUal('AB'))]);
+
+    // The surviving {A,B} record carries a member row for agentA, so agentA is NOT
+    // zeroed. (Without per-root locking this is `[]`.)
+    expect(
+      await tentativeUals(base, AGENTS),
+      'overlapping-root writes serialize on the shared root; the newest ({A,B}) survives and still covers A',
+    ).toEqual([mkUal('AB')]);
   });
 
   it('(C) throws when recordUal is not a subject of metadataQuads (drift guard)', async () => {

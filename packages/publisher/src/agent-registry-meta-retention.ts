@@ -26,16 +26,20 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
   }
 }
 
-// Per-(agents-CG, root-set) serialization (#1533 review). Two concurrent
-// same-agent heartbeats each insert a fresh UAL and then prune "everything for
-// this agent but mine". Run UNSERIALIZED they delete each other's record and the
-// agent ends with ZERO `_meta` rows. This chained-promise mutex (mirrors
-// `withMaterializationLock` in metadata.ts) makes same-root insert+prune run
-// sequentially — the 2nd call sees the 1st's record as a prior and deletes it,
-// keeping its own — so ≥1 record always survives; different roots stay
-// concurrent. PER-PROCESS is sufficient: an agent's heartbeats land on the same
-// receiving node and the prune only touches that node's local store. The map
-// self-evicts once a key's chain drains, so it stays bounded.
+// Per-INDIVIDUAL-root serialization (#1533/#1534 review). Two concurrent
+// agents/_meta writes whose root sets INTERSECT each insert a fresh record and
+// then prune "every record for these roots but mine" — and
+// `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by
+// the root-set shape. Run UNSERIALIZED they delete each other's just-inserted
+// record and a shared root ends with ZERO `_meta` rows. So we lock at the SAME
+// granularity as the prune's blast radius — ONE lock per individual root, acquired
+// in sorted order (deadlock-free) — so any two writes sharing a root serialize
+// while writes for disjoint roots stay concurrent. Locking the mutation boundary
+// (per root) rather than the incidental single-root heartbeat shape matters
+// because the direct-protocol receive handler does not enforce singleton
+// agents-CG writes. PER-PROCESS is sufficient: an agent's heartbeats land on the
+// same receiving node and the prune only touches that node's local store. Each map
+// entry self-evicts once its chain drains, so it stays bounded.
 const _agentMetaLocks = new Map<string, Promise<unknown>>();
 
 async function withAgentMetaLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -54,6 +58,25 @@ async function withAgentMetaLock<T>(key: string, fn: () => Promise<T>): Promise<
   } finally {
     if (_agentMetaLocks.get(key) === run) _agentMetaLocks.delete(key);
   }
+}
+
+/**
+ * Acquire one lock per individual root in `rootEntities`, in sorted order (so
+ * lock-ordering is deterministic → deadlock-free), then run `fn` while holding all
+ * of them. Two calls whose root sets INTERSECT share ≥1 root lock and serialize;
+ * calls for disjoint roots run concurrently. This matches the prune predicate,
+ * which deletes by any matching member root. Empty roots → no lock (the prune is a
+ * no-op for empty roots, so there is nothing to serialize).
+ */
+function withAgentMetaRootLocks<T>(
+  contextGraphId: string,
+  rootEntities: readonly string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const keys = [...new Set(rootEntities)].sort().map((root) => `${contextGraphId}:${root}`);
+  const acquire = (i: number): Promise<T> =>
+    i >= keys.length ? fn() : withAgentMetaLock(keys[i], () => acquire(i + 1));
+  return acquire(0);
 }
 
 /**
@@ -79,9 +102,10 @@ async function withAgentMetaLock<T>(key: string, fn: () => Promise<T>): Promise<
  *     timeout cleanup never registers). Boundedness is only degraded for one
  *     round; the next heartbeat re-prunes.
  *
- * Concurrency: same-agent calls are serialized per root-set (a per-process
- * mutex) so two overlapping heartbeats can't insert-then-prune each other down to
- * zero records; different agents run concurrently.
+ * Concurrency: calls are serialized per individual root (a per-process mutex) so
+ * two writes sharing any root — identical OR overlapping sets — can't
+ * insert-then-prune each other down to zero records; writes for disjoint roots run
+ * concurrently.
  *
  * For non-agents CGs the prune is a no-op (see
  * {@link pruneSupersededAgentRegistryMeta}), so this is just the insert.
@@ -119,23 +143,13 @@ export async function insertBoundedAgentRegistryMeta(opts: {
     );
   }
 
-  // Serialize insert+prune per agent-root-set so two concurrent same-agent
-  // heartbeats can't delete each other's record (see the mutex note above). The
-  // lock spans insert→prune and is released only after the prune try/catch.
-  //
-  // Key granularity — the lock key is the sorted root-SET, which serializes calls
-  // carrying the IDENTICAL set. That exactly matches the real workload: agents/_meta
-  // is only ever written by the single-agent profile heartbeat (`rootEntities` is
-  // the singleton `[agentDID]`), so same-agent calls always share one key (→
-  // serialized) and different agents get disjoint keys (→ concurrent, and their
-  // prunes touch disjoint records anyway). NOTE for future maintainers: the prune's
-  // blast radius is per-INDIVIDUAL-root (it deletes any record whose member matches
-  // ANY root in `rootEntities`), so if agents/_meta ever gains a MULTI-root writer,
-  // two calls with intersecting-but-unequal sets ({X} vs {X,Y}) would escape this
-  // set-key and could prune each other to zero — at that point key per-individual
-  // root (locks acquired in sorted order to stay deadlock-free), not per-set.
-  const lockKey = `${contextGraphId}:${[...new Set(rootEntities)].sort().join(',')}`;
-  await withAgentMetaLock(lockKey, async () => {
+  // Serialize insert+prune at the SAME granularity as the prune's blast radius —
+  // one lock per individual root, acquired in sorted order (see
+  // withAgentMetaRootLocks). Any two writes sharing a root (identical OR overlapping
+  // sets, e.g. {X} vs {X,Y}) serialize so they can't insert-then-prune each other
+  // down to zero records; writes for disjoint roots stay concurrent. The lock(s)
+  // span insert→prune and are released only after the prune try/catch.
+  await withAgentMetaRootLocks(contextGraphId, rootEntities, async () => {
     // Insert FIRST so a prune failure can never leave the agent with no record.
     // An insert failure PROPAGATES (caller aborts; nothing durable changed).
     await store.insert(metadataQuads);
