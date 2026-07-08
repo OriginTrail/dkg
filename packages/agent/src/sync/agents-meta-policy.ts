@@ -1,7 +1,12 @@
-// 2026-07-08 sync-storm mitigation (Chunk 1) — resolve whether durable sync
-// should FETCH the system `agents/_meta` graph. Extracted as a pure function so
-// both the CLI daemon lifecycle and the in-agent lifecycle resolve the flag
-// identically, and so the precedence can be unit-tested in isolation.
+// Agents-registry `_meta` sync policy (#1233 sync-storm mitigation). Neutral home
+// for BOTH sides of the agents/_meta bloat mitigation, so the dependency graph is
+// honest — it is consumed by the requester FETCH path, the responder SERVE path,
+// AND the CLI daemon lifecycle, and is owned by none of them:
+//   - resolveSyncAgentsMeta          — FETCH-side opt-IN (should durable sync pull agents/_meta?)
+//   - shouldWithholdAgentsDurableMeta — SERVE-side opt-OUT (should the responder withhold it?)
+// Both are pure functions (env passed IN, never read here) so the precedence is
+// unit-testable in isolation and neither the responder nor the requester carries
+// daemon config policy.
 
 import { isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
 

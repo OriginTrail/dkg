@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
-import { shouldWithholdAgentsDurableMeta } from '../src/sync/requester/agents-meta-sync-config.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -168,27 +167,5 @@ describe('sync responder durable-meta phase — injected serve-skip predicate', 
     const graphs = lineGraphsFromNquads(out);
     expect(graphs.has(AGENTS_ENTITY)).toBe(true);
     expect(out).toContain(`${DKG_NS}nodeRole`);
-  });
-});
-
-describe('shouldWithholdAgentsDurableMeta — env-backed default policy', () => {
-  it('withholds the agents CG _meta by default (flag unset/empty/falsey)', () => {
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, undefined)).toBe(true);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '')).toBe(true);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '0')).toBe(true);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'false')).toBe(true);
-  });
-
-  it('serves the agents CG _meta when DKG_SERVE_AGENTS_META is truthy (kill-switch)', () => {
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '1')).toBe(false);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'true')).toBe(false);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'on')).toBe(false);
-    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'yes')).toBe(false);
-  });
-
-  it('never withholds a non-agents CG regardless of the flag', () => {
-    expect(shouldWithholdAgentsDurableMeta(USER_CG, undefined)).toBe(false);
-    expect(shouldWithholdAgentsDurableMeta(USER_CG, '0')).toBe(false);
-    expect(shouldWithholdAgentsDurableMeta(USER_CG, '1')).toBe(false);
   });
 });

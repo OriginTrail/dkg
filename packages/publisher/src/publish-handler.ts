@@ -21,7 +21,7 @@ import {
   getConfirmedStatusQuad,
   type KAMetadata,
 } from './metadata.js';
-import { pruneSupersededAgentRegistryMeta } from './agent-registry-meta-retention.js';
+import { insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { PublishJournal, type JournalEntry } from './publish-journal.js';
 
@@ -320,19 +320,19 @@ export class PublishHandler {
       // #1233 follow-up — bound agents/_meta: this direct-protocol receive path
       // is load-bearing (the `metadataQuads` we insert are the SAME object the
       // tentative lifecycle expires/pends on below), so it cannot be skipped for
-      // the agents CG. Instead, evict this agent's PRIOR tentative tracking
-      // record(s) before inserting the fresh heartbeat's record, so the agents
-      // system CG (which never confirms on-chain) keeps at most one live record
-      // per agent instead of accumulating one per heartbeat. No-op for every
-      // other CG; the record inserted below stays the live tentative record.
-      await pruneSupersededAgentRegistryMeta({
+      // the agents CG. INSERT then PRUNE (insert-first): the just-inserted UAL is
+      // `keepUal`, so the prune protects it and a prune failure only degrades
+      // boundedness instead of losing the record. The agents system CG (never
+      // confirms on-chain) keeps at most one live record per agent; no-op prune
+      // for every other CG (so it just inserts).
+      await insertBoundedAgentRegistryMeta({
         store: this.store,
         contextGraphId,
         metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
         rootEntities: manifest.map((m) => m.rootEntity),
         keepUal: request.ual,
+        metadataQuads,
       });
-      await this.store.insert(metadataQuads);
 
       // ── Tentative lifecycle timeout ──
       const timeout = setTimeout(
