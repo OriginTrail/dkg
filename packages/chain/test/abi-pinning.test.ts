@@ -281,7 +281,21 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Repinned (bulk-register-agents, 10.0.7): added owner-gated
   // `registerAgents(uint256,address[])` (no new event/error — reuses
   // AgentRegistered). Function surface change → new digest.
-  PublishingConviction:         '2f35f06c94b14f4137b5602d5fc58793bfe812bb5263c6545d9da50f479bdb29',
+  // Repinned (deterministic emission schedule, 10.0.8): added the Hub-owner
+  // batch `migrateEmissionSchedule(uint256[])` + event
+  // `EmissionScheduled(uint256,uint40,uint40,uint96,uint96)` (`scheduled`
+  // staker-shard net + `treasuryFee` treasury-shard split), the
+  // permissionless `collectTreasuryEmission(uint256,uint256)` + event
+  // `TreasuryEmissionCollected(uint256,uint256,uint96)` + errors
+  // `TreasuryNotSet()` / `InvalidCollectionRange(uint256,uint256,uint256)`,
+  // and the `TREASURY_SHARD_ID` constant getter. The staker-pool
+  // distribution of committedTRAC is now written up front at account
+  // creation (each window's budget forward-spread over the lock length,
+  // split net/fee at schedule time when a treasury is wired), so
+  // `WindowSettled` is no longer emitted (declaration retained — decoding
+  // stays valid) and `settle()` reduces to schedule-if-needed + the
+  // post-expiry topUp tail. Additive surface change → new digest.
+  PublishingConviction:         '6836d907ef63ba140d60051830a89714a143d7e9154ce64e5ee94958d3dff9d7',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',
