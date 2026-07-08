@@ -828,6 +828,10 @@ export class SharedMemoryHandler {
     // can signal which branch fired; the post-closure code
     // maps `cas` → retryable and `validation` → permanent.
     let withWriteLocksRejection: 'validation' | 'cas' | undefined;
+    let lifecycleAssetUal: string | undefined;
+    let lifecycleCgId: string | undefined;
+    let lifecycleShareOperationId: string | undefined;
+    let lifecyclePublisherPeerId: string | undefined;
     try {
       const { envelope, signedPayload } = decoded;
       let request = decoded.request;
@@ -992,6 +996,10 @@ export class SharedMemoryHandler {
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
       const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
+      lifecycleAssetUal = assetUal;
+      lifecycleCgId = contextGraphId;
+      lifecycleShareOperationId = shareOperationId;
+      lifecyclePublisherPeerId = publisherPeerId;
       const rejectOutcome = (reason: string, retryable: boolean): SharedMemoryApplyOutcome => ({
         applied: false,
         reason,
@@ -1274,7 +1282,15 @@ export class SharedMemoryHandler {
       // retry budget and get dropped without operator action.
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
-      return { applied: false, reason, retryable: true };
+      return {
+        applied: false,
+        reason,
+        retryable: true,
+        assetUal: lifecycleAssetUal,
+        cgId: lifecycleCgId,
+        shareOperationId: lifecycleShareOperationId,
+        publisherPeerId: lifecyclePublisherPeerId,
+      };
     }
   }
 
