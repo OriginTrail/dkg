@@ -1331,6 +1331,18 @@ export class SharedMemoryHandler {
         // rejected duplicate deliveries count as "redundant applies"
         // and skew the `/api/slo` metric.
         this.recordSeenShareOp(contextGraphId, shareOperationId, ctx);
+        this.logSwmLifecycleEvent(ctx, 'swm_state_changed', {
+          assetUal,
+          contextGraphId,
+          shareOperationId,
+          publisherPeerId,
+          fromPeerId,
+          subGraphName,
+          rootEntityCount: manifestForValidation.length,
+          statementCount: quads.length,
+          insertedCount: quads.length,
+          outcome: 'applied',
+        });
         this.log.info(ctx, `Stored SWM write ${shareOperationId} (${quads.length} quads)`);
         this.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
           contextGraphId,
