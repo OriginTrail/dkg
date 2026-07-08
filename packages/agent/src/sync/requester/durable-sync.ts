@@ -3,7 +3,7 @@ import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -265,6 +265,13 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     } catch (pidErr) {
       endPhase();
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      if (isSyncPermanentRejection(pidErr)) {
+        // Missed-seam alarm (OT-RFC-56): the oversize guard should have
+        // filtered this BEFORE the store insert. Reaching here means an
+        // ingest path bypassed the guard — this page will fail identically
+        // on every retry until that seam is wired.
+        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
+      }
       const backoffWorthy = isSyncBackoffWorthyError(pidErr);
       if (backoffWorthy) {
         summary.backoffWorthyFailures += 1;

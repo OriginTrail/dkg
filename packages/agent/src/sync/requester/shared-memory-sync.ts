@@ -3,7 +3,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 
@@ -270,6 +270,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
     } catch (err) {
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (isSyncPermanentRejection(err)) {
+        // Missed-seam alarm (OT-RFC-56) — see durable-sync.ts: the oversize
+        // guard should have filtered this before the insert.
+        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
+      }
       const backoffWorthy = isSyncBackoffWorthyError(err);
       if (backoffWorthy) {
         summary.backoffWorthyFailures += 1;
