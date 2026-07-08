@@ -14,7 +14,7 @@ import {
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
-import { cliRuntimeAssetRelPaths, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
+import { cliRuntimeAssetManifest, copyCliRuntimeAssets } from '../../copy-cli-runtime-assets.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const COPY_SCRIPT = path.join(REPO_ROOT, 'scripts', 'copy-cli-runtime-assets.mjs');
@@ -277,13 +277,41 @@ test('packages/cli lifecycle is wired to the copy script (build + prepack)', () 
 
 test('the copy and the verifier consume one shared asset manifest', () => withFixture((root) => {
   writeCliPackFixture(root);
-  const manifest = cliRuntimeAssetRelPaths({ rootDir: root });
+  const { relPaths } = cliRuntimeAssetManifest({ rootDir: root });
   // What the copy materializes (project.json + every network overlay)…
-  assert.deepEqual(manifest, ['project.json', 'network/mainnet-base.json', 'network/testnet.json']);
+  assert.deepEqual(relPaths, ['project.json', 'network/mainnet-base.json', 'network/testnet.json']);
   // …is exactly what the verifier requires, plus the generated build-info.json.
-  const spyReport = () => JSON.stringify([{ files: [...manifest, 'build-info.json'].map((p) => ({ path: p })) }]);
+  const spyReport = () => JSON.stringify([{ files: [...relPaths, 'build-info.json'].map((p) => ({ path: p })) }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
 }));
+
+test('the shared manifest is fail-closed — matches the copier, not best-effort', () => withFixture((root) => {
+  // no network/ dir at all
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /network\/ directory not found/);
+  // empty network/
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /no network\/\*\.json overlays/);
+  // overlays present but project.json missing
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  assert.throws(() => cliRuntimeAssetManifest({ rootDir: root }), /project\.json not found/);
+}));
+
+test('findMissingCliPackAssets cannot silently build a required list without network overlays', () => withFixture((root) => {
+  // A source tree with no network/ + a lenient pack report must NOT pass — the
+  // fail-closed manifest throws instead of requiring only project.json/build-info.
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+  const lenientReport = () => JSON.stringify([{ files: [{ path: 'project.json' }, { path: 'build-info.json' }] }]);
+  assert.throws(() => findMissingCliPackAssets(root, lenientReport), /network\/ directory not found/);
+}));
+
+test('packages/cli ships the runtime assets in its published files list', () => {
+  // Guards the REAL package manifest contract — the integration test uses its
+  // own fixture files, so this is what fails if production `files` drops one.
+  const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  for (const entry of ['network', 'project.json', 'build-info.json']) {
+    assert.ok((cliPkg.files ?? []).includes(entry), `packages/cli#files must ship ${entry}`);
+  }
+});
 
 test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd)', () => withFixture((root) => {
   writeCliPackFixture(root);
@@ -299,8 +327,10 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
 // The integration test the mocked-runner unit tests can't give: run the REAL
 // copy script through the REAL npm pack lifecycle and observe the tarball. The
 // fixture embeds a copy of the real script so it resolves the fixture as its
-// root (no production test-seam). Catches prepack-logs-to-stdout, a dropped
-// `files` entry, and cwd/lifecycle regressions the mocks would hide.
+// root (no production test-seam). Catches prepack-logs-to-stdout and
+// prepack/cwd/lifecycle regressions the mocks would hide. (The production
+// packages/cli#files contract is guarded separately by the files-list test
+// above — this fixture defines its own files array, so it can't protect that.)
 test('real npm pack --dry-run runs prepack and includes every runtime asset', { skip: NPM_AVAILABLE ? false : 'npm not available' }, () => withFixture((root) => {
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
   fs.copyFileSync(COPY_SCRIPT, path.join(root, 'scripts', 'copy-cli-runtime-assets.mjs'));
