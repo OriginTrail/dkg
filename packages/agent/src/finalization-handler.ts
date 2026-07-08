@@ -1425,22 +1425,15 @@ export class FinalizationHandler {
     // NOTE: the agents CG is always-tentative and never confirms on-chain, so in
     // practice this promotion is not reached for it (see report); this is a
     // defensive, lifecycle-preserving bound that keeps the invariant robust.
-    // Prune by the roots THIS record actually covers — the ones in `kaMetadata`,
-    // which drops zero-public-triple roots (the `continue` above) — NOT the full
-    // pre-filter `rootEntities`. Otherwise the prune would evict a dropped root's
-    // prior record while the just-inserted record does not cover it, zeroing that
-    // root's `_meta` (the exact invariant this bound protects). Deriving from
-    // `kaMetadata` also keeps the prune scope and the inserted record's roots a
-    // single source of truth (no drift). Behaviour-identical when every root has
-    // public triples (kaMetadata roots === rootEntities); the divergence is only the
-    // zero-public edge — and unreachable for the agents CG today (it never confirms
-    // on-chain, per the note above), so this is defensive by construction.
-    const coveredRoots = kaMetadata.map((m) => m.rootEntity);
+    // The bound derives its lock + prune roots from `metaQuads` itself, so the
+    // dropped zero-public-triple roots (the `continue` above) are naturally excluded
+    // from the prune — it can only evict superseded records for roots THIS record
+    // covers, never zero a root the record omits. (Previously this call passed a
+    // separate rootEntities list, which risked exactly that drift.)
     await insertBoundedAgentRegistryMeta({
       store: this.store,
       contextGraphId,
       metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
-      rootEntities: coveredRoots,
       recordUal: ual,
       metadataQuads: metaQuads,
     });
