@@ -4,6 +4,8 @@ import {
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
   isTrustLevelQuad,
+  isSwmMerkleExcludedQuad,
+  WORKSPACE_OWNER_PREDICATE,
   assertNoUserAuthoredTrustLevelQuads,
   isTrustLevel,
 } from '../src/index.js';
@@ -36,6 +38,22 @@ describe('trust metadata helpers', () => {
     expect(isTrustLevelQuad({ predicate: TRUST_LEVEL_PREDICATE })).toBe(true);
     expect(isTrustLevelQuad({ predicate: 'https://dkg.network/ontology#trustLevel' })).toBe(true);
     expect(isTrustLevelQuad({ predicate: 'http://schema.org/name' })).toBe(false);
+  });
+
+  // 2026-07-07 MERKLE_MISMATCH_IN_SWM regression: the publisher and the core
+  // responder BOTH exclude these bookkeeping quads before recomputing the KC
+  // merkle root over their SWM copies. If the two exclusion sets ever diverge,
+  // folded-private ACKs fail. This pins the single-source predicate they share.
+  it('isSwmMerkleExcludedQuad excludes trust-level AND workspace-owner bookkeeping, nothing else', () => {
+    // trust-level (canonical + legacy) — excluded
+    expect(isSwmMerkleExcludedQuad({ predicate: TRUST_LEVEL_PREDICATE })).toBe(true);
+    expect(isSwmMerkleExcludedQuad({ predicate: 'https://dkg.network/ontology#trustLevel' })).toBe(true);
+    // workspace-owner bookkeeping — excluded
+    expect(WORKSPACE_OWNER_PREDICATE).toBe('http://dkg.io/ontology/workspaceOwner');
+    expect(isSwmMerkleExcludedQuad({ predicate: WORKSPACE_OWNER_PREDICATE })).toBe(true);
+    // ordinary author payload — kept (hashed into the root)
+    expect(isSwmMerkleExcludedQuad({ predicate: 'http://schema.org/name' })).toBe(false);
+    expect(isSwmMerkleExcludedQuad({ predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' })).toBe(false);
   });
 
   it('validates TrustLevel values at runtime', () => {

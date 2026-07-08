@@ -25,6 +25,30 @@ export function isTrustLevelQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): b
   return TRUST_LEVEL_PREDICATES.has(quad.predicate);
 }
 
+/**
+ * Workspace-owner bookkeeping predicate. Stamped onto SWM quads during
+ * ingestion to record which agent owns a shared-memory entry; it is NOT part
+ * of the author's payload.
+ */
+export const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
+
+/**
+ * A quad that lives in SWM but MUST be excluded from the KC merkle-root
+ * recompute. Trust-level annotations and workspace-owner bookkeeping are added
+ * by SWM ingestion, not by the author, so hashing them into the root diverges
+ * the publisher's root from the core responder's on the exact same content.
+ *
+ * This is the SINGLE SOURCE OF TRUTH for that exclusion set: the publisher
+ * (`DKGPublisher` SWM read) and the core responder (`StorageACKHandler`
+ * `loadSWMQuads`) both filter on it, so the two recompute paths can never
+ * drift — the drift being the 2026-07-07 `MERKLE_MISMATCH_IN_SWM` incident,
+ * where the responder hashed trust-level/workspace-owner quads the publisher
+ * had filtered out and declined every folded-private ACK.
+ */
+export function isSwmMerkleExcludedQuad(quad: Pick<TrustLevelQuadLike, 'predicate'>): boolean {
+  return isTrustLevelQuad(quad) || quad.predicate === WORKSPACE_OWNER_PREDICATE;
+}
+
 export function isTrustLevel(value: unknown): value is TrustLevel {
   return typeof value === 'number' &&
     Number.isInteger(value) &&

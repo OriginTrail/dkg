@@ -18,6 +18,7 @@ import {
   catalogCommittedLeaves,
   contextGraphCatalogUri,
   sharedMemoryReadBothFilter,
+  isSwmMerkleExcludedQuad,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -1538,12 +1539,20 @@ export class StorageACKHandler {
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
     assertSafeIri(graphUri);
+    // The publisher computes the KC merkle root over its SWM read with the
+    // trust-level / workspace-owner bookkeeping quads filtered OUT
+    // (`isSwmMerkleExcludedQuad`). The core responder recomputes the same root
+    // from its OWN SWM copy here, so it MUST apply the identical exclusion —
+    // otherwise any trust-level/workspace-owner quad resident in the core's
+    // store is hashed on one side but not the other and every folded-private
+    // ACK declines MERKLE_MISMATCH_IN_SWM (2026-07-07 Gnosis mainnet). Shared
+    // single-source filter so the two paths can never drift again.
     if (rootEntities.length === 0) {
       // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
       // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.queryStoreOrUnavailable(sparql);
-      return result.type === 'quads' ? result.quads : [];
+      return result.type === 'quads' ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q)) : [];
     }
 
     const allQuads: Quad[] = [];
@@ -1553,7 +1562,9 @@ export class StorageACKHandler {
       const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
       const result = await this.queryStoreOrUnavailable(sparql);
       if (result.type === 'quads') {
-        allQuads.push(...result.quads);
+        for (const q of result.quads) {
+          if (!isSwmMerkleExcludedQuad(q)) allQuads.push(q);
+        }
       }
     }
     return allQuads;
