@@ -62,18 +62,37 @@ describe('filterOversizedSyncQuads (protocol limit, 60,000)', () => {
     expect(r.dropped).toEqual([]);
   });
 
-  it('passes externalLiteralRef placeholder terms', () => {
+  it('passes a real (small) externalLiteralRef placeholder term', () => {
     const ref = quad(`"sha256:${'a'.repeat(64)}"^^<http://dkg.io/ontology/externalLiteralRef>`);
     const r = filterOversizedSyncQuads([ref]);
     expect(r.kept).toEqual([ref]);
     expect(r.dropped).toEqual([]);
   });
 
-  it('exempts _shared_memory graphs (blob-store rehydration makes large SWM literals legitimate on the wire)', () => {
-    const bigSwm = quad(lit(70_000), SWM_GRAPH);
-    const r = filterOversizedSyncQuads([bigSwm]);
-    expect(r.kept).toEqual([bigSwm]);
+  it('DROPS an oversized ref-datatype term (no datatype-suffix bypass — review finding)', () => {
+    // A hostile peer attaches the ref datatype to a huge value; it must NOT be
+    // exempted just because of the suffix.
+    const fakeRef = quad(`"${'x'.repeat(70_000)}"^^<http://dkg.io/ontology/externalLiteralRef>`);
+    const r = filterOversizedSyncQuads([fakeRef]);
+    expect(r.kept).toEqual([]);
+    expect(r.dropped).toHaveLength(1);
+    expect(r.dropped[0]!.kind).toBe('oversize');
+  });
+
+  it('exempts _shared_memory DATA graphs (bucket + per-KA), where large literals are legitimately blob-externalized', () => {
+    const bucket = quad(lit(70_000), SWM_GRAPH);
+    const perKa = quad(lit(70_000), `${CG}/_shared_memory/0xauthor/7`, 'http://ex.org/ka');
+    const r = filterOversizedSyncQuads([bucket, perKa]);
+    expect(r.kept).toEqual([bucket, perKa]);
     expect(r.dropped).toEqual([]);
+  });
+
+  it('does NOT exempt _shared_memory_meta (sibling segment, not blob-externalized — review finding)', () => {
+    const bigMeta = quad(lit(70_000), `${CG}/_shared_memory_meta`);
+    const r = filterOversizedSyncQuads([bigMeta]);
+    expect(r.kept).toEqual([]);
+    expect(r.dropped).toHaveLength(1);
+    expect(r.dropped[0]!.kind).toBe('oversize');
   });
 
   it('quarantines a _verifiable_memory graph ALL-OR-NOTHING (never a partial Merkle-committed graph)', () => {
@@ -259,5 +278,37 @@ describe('runDurableSync — the poison-page retry-loop regression', () => {
       seam: 'durable-sync',
       predicate: 'https://schema.org/description',
     });
+  });
+});
+
+describe('production wiring — the real sync-ingest seam calls the guard', () => {
+  // Falsification (review): the pure-filter regression above proves the helper
+  // works, not that the production seam uses it. This drives the REAL
+  // insertSyncedQuadsAndInvalidateListCache (durable-sync's storeInsert) on a
+  // live agent + store. On oxigraph (no size limit) a removed guard would store
+  // the oversized quad, so deleting the production call turns this red.
+  it('insertSyncedQuadsAndInvalidateListCache drops+tombstones oversized, stores the rest, does not throw', async () => {
+    const { DKGAgent } = await import('../src/index.js');
+    const { NoChainAdapter } = await import('@origintrail-official/dkg-chain');
+    const { OxigraphStore } = await import('@origintrail-official/dkg-storage');
+    const store = new OxigraphStore();
+    const agent = await DKGAgent.create({
+      name: 'IngestWiringNode', listenPort: 0, listenHost: '127.0.0.1',
+      store, chainAdapter: new NoChainAdapter(), nodeRole: 'core', skills: [],
+    });
+    try {
+      const good = { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"small"', graph: 'http://ex.org/g' } as Quad;
+      const poison = { subject: 'http://ex.org/s2', predicate: 'http://ex.org/p', object: `"${'x'.repeat(120_000)}"`, graph: 'http://ex.org/g' } as Quad;
+
+      await expect((agent as any).insertSyncedQuadsAndInvalidateListCache([good, poison])).resolves.toBeUndefined();
+
+      const r = await store.query('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+      const subjects = r.type === 'bindings' ? r.bindings.map((b) => b.s) : [];
+      expect(subjects).toContain('http://ex.org/s');       // conforming quad stored
+      expect(subjects).not.toContain('http://ex.org/s2');  // poison NOT stored (guard dropped it pre-insert)
+      expect((agent as any).oversizeTombstoneLog.size).toBeGreaterThan(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
   });
 });

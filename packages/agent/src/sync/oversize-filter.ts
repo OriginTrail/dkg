@@ -33,8 +33,14 @@
  *    content is Merkle-committed; a missing quad breaks proof verification),
  *    so an oversized quad there drops that graph's ENTIRE batch contribution
  *    (quarantine, RFC-56 §4.3) rather than the single quad.
- *  - `externalLiteralRef`-typed terms always pass (they are ~100-byte
- *    placeholders by construction).
+ *    LIMITATION (review): the quarantine is batch-local — if a VM graph's
+ *    quads span multiple sync PAGES and an oversized quad arrives on a later
+ *    page, earlier pages were already stored, leaving a partial VM graph. This
+ *    is not a regression (pre-fix, earlier pages were stored too and the
+ *    oversized page then looped forever), and a partial VM graph simply fails
+ *    Merkle verification (reader-safe). Producer guards make oversized VM
+ *    unpublishable going forward, so this only concerns legacy/foreign data;
+ *    a persistent per-graph-version quarantine marker is a tracked follow-up.
  */
 
 import {
@@ -44,10 +50,16 @@ import {
   isOversizedRdfLiteralError,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { EXTERNAL_LITERAL_REF_DATATYPE } from '@origintrail-official/dkg-storage';
 
-const SHARED_MEMORY_INFIX = '/_shared_memory';
-const VERIFIABLE_MEMORY_INFIX = '/_verifiable_memory';
+// Match `_shared_memory` / `_verifiable_memory` as a full path SEGMENT — the
+// bucket graph (`…/_shared_memory`) and its per-KA descendants
+// (`…/_shared_memory/{author}/{n}`), but NOT the sibling `…/_shared_memory_meta`
+// graph. Review caught a `.includes('/_shared_memory')` bug that wrongly
+// exempted the meta graph, which the blob store does NOT externalize — so
+// oversized meta literals slipped past the guard. Meta graphs fall through to
+// the normal per-quad drop (they never legitimately hold large literals).
+const SHARED_MEMORY_SEGMENT_RE = /\/_shared_memory(\/|$)/;
+const VERIFIABLE_MEMORY_SEGMENT_RE = /\/_verifiable_memory(\/|$)/;
 
 export type OversizeDropKind = 'oversize' | 'vm-quarantine' | 'store-reject';
 
@@ -63,23 +75,24 @@ export interface OversizeFilterResult {
 }
 
 function isSharedMemoryGraph(graph: string | undefined): boolean {
-  return !!graph && graph.includes(SHARED_MEMORY_INFIX);
+  return !!graph && SHARED_MEMORY_SEGMENT_RE.test(graph);
 }
 
 function isVerifiableMemoryGraph(graph: string | undefined): boolean {
-  return !!graph && graph.includes(VERIFIABLE_MEMORY_INFIX);
-}
-
-function isExternalLiteralRefTerm(object: string): boolean {
-  return object.endsWith(`^^<${EXTERNAL_LITERAL_REF_DATATYPE}>`);
+  return !!graph && VERIFIABLE_MEMORY_SEGMENT_RE.test(graph);
 }
 
 /**
  * Literal MUTF-8 size of a quad object term, or `undefined` when the term is
- * not a literal (IRIs/blank nodes always pass) or is an external-literal ref.
+ * not a literal (IRIs / blank nodes always pass).
+ *
+ * NOTE: every literal is measured — including `externalLiteralRef` placeholder
+ * terms. A real ref is ~100 bytes so it passes anyway; the earlier
+ * datatype-suffix exemption was a peer-exploitable bypass (a hostile peer could
+ * attach the ref datatype to a 70KB value and evade both the pre-filter and the
+ * backstop, re-arming the retry loop — review finding).
  */
 function literalBytes(object: string): number | undefined {
-  if (isExternalLiteralRefTerm(object)) return undefined;
   return rdfLiteralTermMutf8ByteLength(object);
 }
 
@@ -169,8 +182,11 @@ export interface OversizeGuardHooks {
  * class (permanent, size-based refusals) into converge-minus-poison; it must
  * never mask transient store failures.
  *
- * Returns the quads actually handed to the store (post-filter), so callers
- * keep accurate inserted-count accounting.
+ * Returns the quads actually handed to the store (post-filter) — callers use it
+ * for cache-invalidation / meta-dirty marking. (The runners' inserted-count
+ * SUMMARY metric still keys off pre-filter length, so it can slightly over-count
+ * on an all-oversize page; that is log-only, with no convergence/cursor/backoff
+ * effect — review-confirmed cosmetic, tracked separately.)
  */
 export async function insertWithOversizeGuard(
   insert: (quads: Quad[]) => Promise<void>,
