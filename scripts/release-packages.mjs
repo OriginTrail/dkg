@@ -314,7 +314,10 @@ function commandVerifyTag(args) {
 export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture) {
   const cliDir = path.join(rootDir, 'packages', 'cli');
   const networkDir = path.join(rootDir, 'network');
-  const required = ['project.json'];
+  // build-info.json is release-critical: /api/status, `dkg doctor`, and startup
+  // telemetry report the running commit/dist-tag from it. It is written by
+  // `release:build-info`, so that step must run before this preflight.
+  const required = ['project.json', 'build-info.json'];
   if (fs.existsSync(networkDir)) {
     for (const file of fs.readdirSync(networkDir)) {
       if (file.endsWith('.json')) required.push(`network/${file}`);
@@ -340,11 +343,11 @@ function commandVerifyPack() {
   if (missing.length > 0) {
     console.error('Release pack check failed — @origintrail-official/dkg tarball is missing runtime assets:');
     for (const asset of missing) console.error(`- ${asset}`);
-    console.error('Run `pnpm --filter @origintrail-official/dkg build` (or its prepack) to materialize them before publishing.');
+    console.error('Materialize them before publishing: network/*.json + project.json come from `pnpm --filter @origintrail-official/dkg build` (or its prepack); build-info.json comes from `pnpm release:build-info --dist-tag <tag>`.');
     process.exitCode = 1;
     return;
   }
-  console.log('Release pack check passed: @origintrail-official/dkg tarball includes project.json + all network/*.json overlays.');
+  console.log('Release pack check passed: @origintrail-official/dkg tarball includes project.json, build-info.json, and all network/*.json overlays.');
 }
 
 function usage() {

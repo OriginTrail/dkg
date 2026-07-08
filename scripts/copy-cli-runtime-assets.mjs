@@ -16,54 +16,71 @@
 // defaults with no network overlay). Running this from `prepack` as well makes
 // materialization unconditional at pack time, independent of the build cache.
 //
-// Paths are resolved from this script's own location, so it is correct
-// regardless of the current working directory (prepack runs with cwd =
-// packages/cli; a manual run may use the repo root).
+// Paths are resolved from `rootDir` (default: this script's own location), so
+// it is correct regardless of the current working directory (prepack runs with
+// cwd = packages/cli; a manual run may use the repo root).
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = path.resolve(SCRIPT_DIR, '..');
-const CLI_DIR = path.join(ROOT_DIR, 'packages', 'cli');
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const DEFAULT_ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
 
-const sourceNetworkDir = path.join(ROOT_DIR, 'network');
-const targetNetworkDir = path.join(CLI_DIR, 'network');
-const sourceProjectJson = path.join(ROOT_DIR, 'project.json');
-const targetProjectJson = path.join(CLI_DIR, 'project.json');
+/**
+ * Materialize packages/cli's runtime-config assets from the repo root.
+ *
+ * The target `network/` directory is MIRRORED, not appended to: it is removed
+ * and recreated so a root overlay that was later deleted cannot linger in
+ * `packages/cli/network` and leak into the tarball (files: ["network"] ships
+ * the whole directory). Throws on any missing/empty source so a broken tree
+ * fails loudly instead of packing a partial asset set.
+ */
+export function copyCliRuntimeAssets({ rootDir = DEFAULT_ROOT_DIR } = {}) {
+  const cliDir = path.join(rootDir, 'packages', 'cli');
+  const sourceNetworkDir = path.join(rootDir, 'network');
+  const targetNetworkDir = path.join(cliDir, 'network');
+  const sourceProjectJson = path.join(rootDir, 'project.json');
+  const targetProjectJson = path.join(cliDir, 'project.json');
 
-function fail(message) {
-  console.error(`copy-cli-runtime-assets: ${message}`);
-  process.exit(1);
+  if (!fs.existsSync(sourceNetworkDir) || !fs.statSync(sourceNetworkDir).isDirectory()) {
+    throw new Error(`copy-cli-runtime-assets: repo-root network/ directory not found at ${sourceNetworkDir}`);
+  }
+  const networkJsonFiles = fs
+    .readdirSync(sourceNetworkDir)
+    .filter((file) => file.endsWith('.json'))
+    .sort();
+  if (networkJsonFiles.length === 0) {
+    throw new Error(`copy-cli-runtime-assets: no network/*.json overlays found in ${sourceNetworkDir}`);
+  }
+  if (!fs.existsSync(sourceProjectJson)) {
+    throw new Error(`copy-cli-runtime-assets: repo-root project.json not found at ${sourceProjectJson}`);
+  }
+
+  // Mirror the generated directory: clear it so removed overlays don't persist.
+  fs.rmSync(targetNetworkDir, { recursive: true, force: true });
+  fs.mkdirSync(targetNetworkDir, { recursive: true });
+  for (const file of networkJsonFiles) {
+    fs.copyFileSync(path.join(sourceNetworkDir, file), path.join(targetNetworkDir, file));
+  }
+  fs.copyFileSync(sourceProjectJson, targetProjectJson);
+
+  return { rootDir, cliDir, networkJsonFiles };
 }
 
-if (!fs.existsSync(sourceNetworkDir) || !fs.statSync(sourceNetworkDir).isDirectory()) {
-  fail(`repo-root network/ directory not found at ${sourceNetworkDir}`);
+const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH;
+if (invokedDirectly) {
+  try {
+    const { rootDir, cliDir, networkJsonFiles } = copyCliRuntimeAssets();
+    const relTarget = path.relative(rootDir, cliDir) || '.';
+    // Log to stderr, not stdout: this runs as `prepack`, and `npm pack --json`
+    // emits its machine-readable report on stdout — anything we print there
+    // would corrupt it for the `release:verify-pack` preflight that parses it.
+    console.error(
+      `copy-cli-runtime-assets: copied ${networkJsonFiles.length} network overlay(s) + project.json into ${relTarget}/`,
+    );
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }
-
-const networkJsonFiles = fs
-  .readdirSync(sourceNetworkDir)
-  .filter((file) => file.endsWith('.json'));
-
-if (networkJsonFiles.length === 0) {
-  fail(`no network/*.json overlays found in ${sourceNetworkDir}`);
-}
-
-if (!fs.existsSync(sourceProjectJson)) {
-  fail(`repo-root project.json not found at ${sourceProjectJson}`);
-}
-
-fs.mkdirSync(targetNetworkDir, { recursive: true });
-for (const file of networkJsonFiles) {
-  fs.copyFileSync(path.join(sourceNetworkDir, file), path.join(targetNetworkDir, file));
-}
-fs.copyFileSync(sourceProjectJson, targetProjectJson);
-
-const relTarget = path.relative(ROOT_DIR, CLI_DIR) || '.';
-// Log to stderr, not stdout: this runs as `prepack`, and `npm pack --json`
-// emits its machine-readable report on stdout — anything we print there would
-// corrupt it for the `release:verify-pack` preflight that parses that JSON.
-console.error(
-  `copy-cli-runtime-assets: copied ${networkJsonFiles.length} network overlay(s) + project.json into ${relTarget}/`,
-);
