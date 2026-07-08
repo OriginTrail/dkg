@@ -1,4 +1,14 @@
 import { randomUUID } from 'crypto';
+import { fetch as undiciFetch, Agent } from 'undici';
+
+// Node's built-in fetch aborts if response HEADERS take >5 min — but the
+// 10.0.3 one-call publish route only answers AFTER the node finishes its ACK
+// collection (up to ~8 min when ACKs are failing). That surfaced as
+// "UND_ERR_HEADERS_TIMEOUT" and hid the node's real storage_ack error.
+// This fetch waits long enough for the node's own verdict to arrive.
+const HTTP_TIMEOUT_MS = Number(process.env.V10_HTTP_TIMEOUT_MS || 12 * 60 * 1000);
+const longAgent = new Agent({ headersTimeout: HTTP_TIMEOUT_MS, bodyTimeout: HTTP_TIMEOUT_MS });
+export const longFetch = (url, opts = {}) => undiciFetch(url, { ...opts, dispatcher: longAgent });
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -150,7 +160,7 @@ async function httpRequest(method, path, body, { acceptStatuses } = {}) {
   if (body !== undefined) opts.body = JSON.stringify(body);
   let res;
   try {
-    res = await fetch(`${DKG_API_URL}${path}`, opts);
+    res = await longFetch(`${DKG_API_URL}${path}`, opts);
   } catch (e) {
     // "TypeError: fetch failed" hides the real transport error in e.cause —
     // surface it in the message so every log/summary shows the actual reason.
@@ -507,9 +517,12 @@ export async function logError(error, nodeName, step, errorStats, kaNumber = nul
   const service = categorizeErrorService(error);
   const serverPart = compact(normalizeErrorMessage(serverError), 220);
   const testPart = compact(normalizeErrorMessage(testError), 150);
-  const aggregatedKey = serverPart === testPart
+  // step prefix = DB column routing (publish_error / query_error / ...); the
+  // insert script strips it, so the stored field is exactly the combined pair.
+  const combined = serverPart === testPart
     ? `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - same as server error`
     : `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - ${testPart}`;
+  const aggregatedKey = `${step} — ${combined}`;
   let detailedKey = aggregatedKey;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 

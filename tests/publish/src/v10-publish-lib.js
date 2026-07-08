@@ -30,6 +30,7 @@ import { strict as assert } from 'assert';
 import 'dotenv/config';
 import fs from 'fs';
 import {
+  longFetch,
   buildQuads,
   safeRate,
   formatDuration,
@@ -40,6 +41,10 @@ import {
 const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
 const KA_COUNT = Number(process.env.TEST_KA_BATCHES || 10);
 const OP_TIMEOUT_MS = Number(process.env.V10_OP_TIMEOUT_MS || 6 * 60 * 1000);
+// publish must outlast the node's ACK collection (~8 min worst case) so the
+// 207 with the node's real error (storage_ack_insufficient, ...) arrives
+// instead of a client-side timeout that hides it.
+const PUBLISH_TIMEOUT_MS = Math.max(OP_TIMEOUT_MS, Number(process.env.V10_PUBLISH_TIMEOUT_MS || 11 * 60 * 1000));
 
 // Context-graph provisioning. Publishing to Verifiable Memory needs the CG to be
 // registered on-chain. V10_CG_REGISTER=true registers a fresh CG (~100 TRAC on the
@@ -65,12 +70,12 @@ const READ_RETRIES = Number(process.env.V10_READ_RETRIES || 4);
 const READ_RETRY_MS = Number(process.env.V10_READ_RETRY_MS || 3000);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function withTimeout(promise, label, nodeName) {
+function withTimeout(promise, label, nodeName, timeoutMs = OP_TIMEOUT_MS) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`Timeout after ${Math.round(OP_TIMEOUT_MS / 60000)} minutes during "${label}" on ${nodeName}`)),
-      OP_TIMEOUT_MS,
+      () => reject(new Error(`Timeout after ${Math.round(timeoutMs / 60000)} minutes during "${label}" on ${nodeName}`)),
+      timeoutMs,
     );
   });
   // clearTimeout once the race settles: otherwise a resolved op leaves a live
@@ -108,7 +113,7 @@ export function makeNodeClient(baseUrl, token) {
     if (body !== undefined) opts.body = JSON.stringify(body);
     let res;
     try {
-      res = await fetch(`${baseUrl}${path}`, opts);
+      res = await longFetch(`${baseUrl}${path}`, opts);
     } catch (e) {
       // "TypeError: fetch failed" hides the real transport error in e.cause —
       // surface it in the message so every log/summary shows the actual reason.
@@ -368,7 +373,7 @@ export function defineChainPublishSuite(config) {
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
           const pubStart = Date.now();
           try {
-            const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name);
+            const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name, PUBLISH_TIMEOUT_MS);
             assert.ok(result, 'Publish returned no result');
             if (result.status !== 'confirmed') {
               // Test-side message stays SHORT; the node's own lifecycle error

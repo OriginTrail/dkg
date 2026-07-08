@@ -259,17 +259,23 @@ for (const file of files) {
             //   query remote (sync)  -> non_publisher_get_error  (checked BEFORE plain "query")
             //   VM GET (legacy: SWM GET / local get) -> publisher_get_error
             //   query                -> query_error
+            // The step prefix exists ONLY for this routing — strip it (and the
+            // trailing " for KA #N", already carried by ka_label) so the stored
+            // field is exactly "SERVER ERROR LOG - ... | TEST ERROR LOG - ...".
+            const cleanMsg = errorMsg
+                .replace(/^(publish|query remote(?: \(sync\))?|vm get|swm get|query)\s*—\s*/i, '')
+                .replace(/\s*for KA #\d+$/i, '');
             const lower = errorMsg.toLowerCase();
             if (lower.startsWith('publish')) {
-                kaErrors[kaNumber].publish_error = errorMsg;
+                kaErrors[kaNumber].publish_error = cleanMsg;
             } else if (lower.startsWith('query remote') || lower.includes('query remote')) {
-                kaErrors[kaNumber].non_publisher_get_error = errorMsg;
+                kaErrors[kaNumber].non_publisher_get_error = cleanMsg;
             } else if (lower.startsWith('vm get') || lower.startsWith('swm get') || lower.includes('local get')) {
-                kaErrors[kaNumber].publisher_get_error = errorMsg;
+                kaErrors[kaNumber].publisher_get_error = cleanMsg;
             } else if (lower.startsWith('query')) {
-                kaErrors[kaNumber].query_error = errorMsg;
+                kaErrors[kaNumber].query_error = cleanMsg;
             } else if (lower.includes('get')) {
-                kaErrors[kaNumber].non_publisher_get_error = errorMsg;
+                kaErrors[kaNumber].non_publisher_get_error = cleanMsg;
             }
         }
 
