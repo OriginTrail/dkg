@@ -104,10 +104,15 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
 
         assert.ok(result);
         if (result.status !== 'confirmed') {
-          const lifecycleErrors = Array.isArray(result.errors) && result.errors.length
-                          ? ` — lifecycle errors: ${result.errors.map((e) => (e && (e.message || e.error || JSON.stringify(e)))).join(' | ').slice(0, 400)}`
-                          : '';
-          throw new Error(`Publish returned "${result.status}" instead of "confirmed" (kaId: ${result.kaId}, httpStatus: ${result.httpStatus})${result.error ? ` — ${result.error}` : ''}${lifecycleErrors}`);
+          // Test-side message stays SHORT; the node's own lifecycle error rides
+          // on err.serverError → logError's SERVER ERROR LOG line.
+          const err = new Error(`Publish returned "${result.status}" instead of "confirmed" (kaId: ${result.kaId}, httpStatus: ${result.httpStatus})${result.error ? ` — ${result.error}` : ''}`);
+          if (Array.isArray(result.errors) && result.errors.length) {
+            err.serverError = result.errors
+              .map((e) => (e && (e.message || e.error || JSON.stringify(e))))
+              .join(' | ');
+          }
+          throw err;
         }
         assert.ok(result.kaId !== undefined && result.kaId !== '0', `Publish response missing valid kaId (got ${result.kaId})`);
         kaId = result.kaId;

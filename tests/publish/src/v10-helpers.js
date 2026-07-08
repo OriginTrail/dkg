@@ -428,84 +428,89 @@ export function normalizeErrorMessage(message) {
     .trim();
 }
 
-// diag (optional): { baseUrl } — the failing node's API base URL, enables the
-// live re-probe. Async because it may pull the node's server logs from Loki;
-// all diagnostics are fail-soft and add ~1-8s only on the error path.
-export async function logError(error, nodeName, step, errorStats, kaNumber = null, diag = {}) {
-  const when = Date.now();
-  console.log(`\n❌ Error on ${nodeName} during ${step}`);
-  console.log(`Type: ${error.name}`);
-
-  // Displayed message: first line, minus the ethers boilerplate tails
-  // ("(action=...)" / "(transaction=\"0x...\", info={...})" — hundreds of chars
-  // of calldata hex that say nothing). The USEFUL numbers inside (have/want)
-  // are re-surfaced as a readable Diagnosis line below.
-  let cleanMessage = error.message
+// Make an error line human-readable without losing meaning:
+//  - drop the ethers "(action=...)"/"(transaction=\"0x...\")" calldata tails
+//  - insufficient-funds: replace the raw wei blob with readable ETH amounts
+//  - QuorumUnmetError: unwrap "[QuorumUnmetError(collected=..., peers=[...])]"
+//    into a compact "(peers: a→reason; b→reason)" tail
+//  - collapse to one line
+export function makeReadableError(raw) {
+  let s = String(raw ?? '')
     .replace(/\s*\((?:action|transaction)=["'][\s\S]*$/i, '')
-    .split('\n')[0];
-  console.log(`Message: ${cleanMessage}`);
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  // insufficient-gas special case: pull "have X want Y" out of the raw ethers
-  // blob and print it as ETH so the operator sees the wallet state at a glance.
-  const fundsMatch = /have (\d+) want (\d+)/.exec(error.message);
-  if (/insufficient funds/i.test(error.message) && fundsMatch) {
-    const toEth = (wei) => (Number(wei) / 1e18).toFixed(8).replace(/0+$/, '0');
-    console.log(
-      `Diagnosis: the signing wallet holds ${toEth(fundsMatch[1])} ETH but this tx needs ${toEth(fundsMatch[2])} ETH — ` +
-      `the node rotated onto a DRAINED operational wallet. Top up the node's wallets (PCA covers TRAC only, never gas).`,
+  // insufficient funds: "address 0x... have 2439821196809 want 130018081746000"
+  // → "wallet has 0.00000244 ETH, tx needs 0.00013002 ETH"
+  const funds = /insufficient funds[^.[(]*?have (\d+) want (\d+)/i.exec(s);
+  if (funds) {
+    const toEth = (wei) => {
+      const v = Number(wei) / 1e18;
+      return v >= 0.0001 ? v.toFixed(5) : v.toFixed(8).replace(/0+$/, '0');
+    };
+    s = s.replace(
+      /insufficient funds[^.[(]*?have \d+ want \d+/i,
+      `insufficient funds for intrinsic transaction cost — wallet has ${toEth(funds[1])} ETH, tx needs ${toEth(funds[2])} ETH`,
     );
   }
 
-  // --- deep diagnostics: real cause, plain-English meaning, live state ------
-  const desc = describeError(error, diag.baseUrl);
-  for (const line of desc.causeLines) console.log(`Cause: ${line}`);
-  if (error.statusCode) {
-    console.log(`Diagnosis: HTTP ${error.statusCode} returned BY the node — the request reached the server, and the message above is the server's own error. The server logs below cover this request.`);
-  } else if (desc.diagnosis) {
-    console.log(`Diagnosis: ${desc.diagnosis}`);
+  // QuorumUnmetError bracket → compact per-peer tail. The sentence before it
+  // already says "got X/Y valid ACKs ... quorum no longer reachable"; keep the
+  // peers (that's the actionable part) but drop the wrapper + dial= noise.
+  const qm = /\s*\[QuorumUnmetError\([^)]*peers=\[([^\]]*)\]\)\]/.exec(s);
+  if (qm) {
+    const peers = qm[1]
+      .split(';')
+      .map((p) => p.trim().replace(/^(\S+)\s*\((?:dial=\w+,\s*)?reason=([^)]+)\)$/, '$1→$2'))
+      .filter(Boolean)
+      .join('; ');
+    s = s.replace(qm[0], peers ? ` (peers: ${peers})` : '');
   }
-  if (desc.isNetwork && !error.statusCode) {
-    console.log(`Note: transport-level failure — the request never got an HTTP response, so there is no per-request server log entry; the server logs below show what the node was doing at the time instead.`);
-  }
-  try {
-    if (diag.baseUrl) {
-      const probe = await probeNode(diag.baseUrl);
-      if (probe) console.log(`Node probe: ${probe.detail}`);
-    }
-    const serverLogs = await fetchServerLogs(nodeName, when);
-    if (serverLogs) {
-      console.log(`Server logs: ${serverLogs.note}`);
-      for (const l of serverLogs.lines) console.log(`   ${l.ts} [${l.level || '?'}] ${String(l.line).slice(0, 300)}`);
-      console.log(`Grafana (this node, this window): ${grafanaLogsLink(nodeName, when)}`);
-    }
-  } catch { /* diagnostics never fail the test */ }
+  // drop a "Declines: ..." run-on when the peers tail already carries the reasons
+  if (qm) s = s.replace(/\s*Declines:[^([]*?(?=\(peers:)/, ' ');
+
+  return s.trim();
+}
+
+// diag (optional): { baseUrl } — kept for call-site compatibility; the output
+// is intentionally MINIMAL now: exactly two lines per failure.
+//   SERVER ERROR LOG - the node's own error (lifecycle error / HTTP error body)
+//   TEST ERROR LOG   - the harness-side error (what the test observed)
+// When there is no distinct server-side error (pure transport failure), both
+// lines carry the same message — by design, so the pair is always present.
+export async function logError(error, nodeName, step, errorStats, kaNumber = null, diag = {}) { // eslint-disable-line no-unused-vars
+  console.log(`\n❌ Error on ${nodeName} during ${step}${kaNumber ? ` (KA #${kaNumber})` : ''}`);
+
+  const testError = makeReadableError(error.message.split('\n')[0]);
+  // Server-side error, in preference order: explicit lifecycle error attached
+  // at the throw site → HTTP error body from the node → (none) mirror the test
+  // error so both lines always exist.
+  const serverRaw = error.serverError
+    ?? (error.body && (error.body.error || error.body.contextGraphError))
+    ?? (error.statusCode ? error.message.split('\n')[0] : null);
+  const serverError = makeReadableError(serverRaw ?? testError);
+
+  console.log(`SERVER ERROR LOG - ${serverError}`);
+  console.log(`TEST ERROR LOG - ${testError}`);
 
   if (!errorStats[nodeName]) errorStats[nodeName] = {};
 
-  // Summary/dashboard message: SHORT and diagnostic. The full verbose detail
-  // (cause chain, probe, server logs) stays in the console block above; the
-  // aggregated key feeds the end-of-run breakdown AND the Grafana error tables,
-  // where long text doesn't fit. Cap at ~150 chars, word-safe.
-  const compact = (s, n = 150) => {
+  // Grafana/DB: ONE field carrying both errors. Aggregation still buckets
+  // repeat failures via normalizeErrorMessage (ids/hashes/amounts collapsed).
+  const compact = (s, n) => {
     const t = String(s).trim();
     if (t.length <= n) return t;
     const cut = t.slice(0, n);
     const lastSpace = cut.lastIndexOf(' ');
     return `${cut.slice(0, lastSpace > n - 40 ? lastSpace : n).trimEnd()}…`;
   };
-  const cleanErrorMessage = normalizeErrorMessage(error.message.split('\n')[0]);
   const service = categorizeErrorService(error);
-
-  // fold the real network cause into the summary key so the end-of-run error
-  // breakdown says "fetch failed [connect ETIMEDOUT 100.x:9200]" not just
-  // "fetch failed" — but ONLY when the message doesn't already carry the cause
-  // (the enriched req() messages do, and "x [x]" reads as noise).
-  const causeText = !error.statusCode && desc.code ? (summarizeCause(error) || desc.code) : '';
-  const causeSuffix = causeText && !cleanErrorMessage.toLowerCase().includes(String(causeText).toLowerCase())
-    ? ` [${causeText}]` : '';
-  const summaryMessage = compact(`${cleanErrorMessage}${causeSuffix}`);
-  const aggregatedKey = `${step} — ${error.name}: ${summaryMessage}`;
-  let detailedKey = `${step} — ${error.name}: ${summaryMessage}`;
+  const serverPart = compact(normalizeErrorMessage(serverError), 220);
+  const testPart = compact(normalizeErrorMessage(testError), 150);
+  const aggregatedKey = serverPart === testPart
+    ? `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - same as server error`
+    : `SERVER ERROR LOG - ${serverPart} | TEST ERROR LOG - ${testPart}`;
+  let detailedKey = aggregatedKey;
   if (kaNumber) detailedKey += ` for KA #${kaNumber}`;
 
   if (!errorStats[nodeName].aggregated) errorStats[nodeName].aggregated = {};
