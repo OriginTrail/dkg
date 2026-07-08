@@ -150,25 +150,28 @@ export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: K
 }
 
 function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {
-  const fields: Array<[string, KaLifecycleMetadataValue]> = [
-    ['assetUal', input.assetUal],
-    ['stage', input.stage],
-    ['event', input.event],
-    ['role', input.role],
-    ['localPeerId', input.localPeerId],
-    ['localNodeIdentityId', input.localNodeIdentityId],
-    ['peer', input.peer],
-    ['peerNodeIdentityId', input.peerNodeIdentityId],
+  const fields: Array<[string, KaLifecycleMetadataValue, boolean]> = [
+    ['assetUal', input.assetUal, true],
+    ['stage', input.stage, true],
+    ['event', input.event, true],
+    ['role', input.role, true],
+    ['localPeerId', input.localPeerId, true],
+    ['localNodeIdentityId', input.localNodeIdentityId, true],
+    ['peer', input.peer, true],
+    ['peerNodeIdentityId', input.peerNodeIdentityId, true],
   ];
-  if (input.metadata) fields.push(...Object.entries(input.metadata));
+  if (input.metadata) {
+    for (const [key, value] of Object.entries(input.metadata)) fields.push([key, value, false]);
+  }
   return `ka_lifecycle ${fields
     .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}=${formatKaLifecycleValue(key, value)}`)
+    .map(([key, value, keepFull]) => `${key}=${formatKaLifecycleValue(key, value, keepFull)}`)
     .join(' ')}`;
 }
 
-function formatKaLifecycleValue(key: string, value: KaLifecycleMetadataValue): string {
+function formatKaLifecycleValue(key: string, value: KaLifecycleMetadataValue, keepFull: boolean): string {
   if (KA_LIFECYCLE_UNSAFE_METADATA_KEY.test(key)) return KA_LIFECYCLE_REDACTED;
+  if (keepFull) return String(value);
   if (typeof value !== 'string') return String(value);
   if (value.length <= KA_LIFECYCLE_METADATA_MAX_CHARS) return value;
   return `${value.slice(0, KA_LIFECYCLE_METADATA_MAX_CHARS)}...[truncated:${value.length}]`;
