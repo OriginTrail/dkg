@@ -177,7 +177,7 @@ export class StorePriorityScheduler {
   }
 
   private effectiveBackgroundReserve(): number {
-    return Math.min(this.backgroundReservedSlots, this.nonAckLimit());
+    return Math.min(this.backgroundReservedSlots, Math.max(0, this.nonAckLimit() - 1));
   }
 
   private start(entry: QueueEntry<unknown>): void {

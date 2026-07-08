@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/ack-peer-selection.test.ts',
       'test/trust-metadata.test.ts',
       'test/dkg-publisher-compat.test.ts',
       'test/shared-memory-publish-boundary.test.ts',

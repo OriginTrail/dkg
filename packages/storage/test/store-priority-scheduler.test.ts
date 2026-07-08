@@ -132,4 +132,67 @@ describe('StorePriorityScheduler', () => {
       'normal-3',
     ]);
   });
+
+  it('does not reserve the only non-ACK slot for background work', async () => {
+    const scheduler = new StorePriorityScheduler(2, 1);
+    const events: string[] = [];
+    let releaseAck!: () => void;
+    let releaseBackground!: () => void;
+
+    const ack = scheduler.run('ack', 'storage-ack.persist', async () => {
+      events.push('ack:start');
+      await new Promise<void>((resolve) => {
+        releaseAck = resolve;
+      });
+      events.push('ack:end');
+      return 'ack';
+    });
+
+    const background1 = scheduler.run('background', 'sync.catch-up.1', async () => {
+      events.push('background-1:start');
+      await new Promise<void>((resolve) => {
+        releaseBackground = resolve;
+      });
+      events.push('background-1:end');
+      return 'background-1';
+    });
+    await tick();
+
+    const background2 = scheduler.run('background', 'sync.catch-up.2', async () => {
+      events.push('background-2:start');
+      return 'background-2';
+    });
+    const normal = scheduler.run('normal', 'query.default', async () => {
+      events.push('normal:start');
+      return 'normal';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      ackInflight: 1,
+      backgroundInflight: 1,
+      backgroundQueued: 1,
+      normalQueued: 1,
+      backgroundReservedSlots: 0,
+    });
+
+    releaseBackground();
+    await tick();
+
+    expect(events).toEqual([
+      'ack:start',
+      'background-1:start',
+      'background-1:end',
+      'normal:start',
+      'background-2:start',
+    ]);
+
+    releaseAck();
+    await expect(Promise.all([ack, background1, background2, normal])).resolves.toEqual([
+      'ack',
+      'background-1',
+      'background-2',
+      'normal',
+    ]);
+  });
 });
