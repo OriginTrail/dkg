@@ -2,7 +2,7 @@
 
 This document defines the release and rollout workflow for the blue-green auto-update system.
 
-## 1) Source of truth and branch flow
+## 1) Source of truth, branch flow, and release gates
 
 - Work is merged to `main` via pull requests.
 - Release tags are created from commits already on `main`.
@@ -10,20 +10,23 @@ This document defines the release and rollout workflow for the blue-green auto-u
   - by branch/ref (`dkg update`), or
   - by explicit version (`dkg update <version>`).
 
-To land current work on `main`:
+The release order is:
 
-1. Ensure PR branch is up to date and CI green.
-2. Get review approval.
-3. Merge the PR into `main` (squash/rebase/merge per repo policy).
-4. Create the release tag from the chosen `main` commit.
+1. Merge all release-bound work to `main`, resolving every bug found by code review and CI before merge.
+2. Run the comprehensive devnet test suite against the resulting `main` commit.
+3. If devnet passes, publish a canary/prerelease and promote it to the `testnet` update channel; run the testnet smoke test.
+4. If the testnet smoke test passes, publish the stable release and promote the `mainnet` update channel.
+5. Run the mainnet smoke test and validate the published packages, GitHub Release, and update channel.
+
+If any gate fails, fix it through a reviewed PR into `main` and restart from the relevant gate. Do not tag or publish from a feature branch.
 
 ## 2) Versioning and tag naming (SemVer)
 
 Use `v`-prefixed tags:
 
-- Beta: `v9.0.0-beta.1`, `v9.0.0-beta.2`, ...
-- Release candidate: `v9.0.0-rc.1`, `v9.0.0-rc.2`, ...
-- Stable: `v9.0.0`, `v9.0.1`, ...
+- Beta: `v10.0.0-beta.1`, `v10.0.0-beta.2`, ...
+- Release candidate: `v10.0.0-rc.1`, `v10.0.0-rc.2`, ...
+- Stable: `v10.0.0`, `v10.0.1`, ...
 
 Rule: a stable release tag (`vX.Y.Z`) should only be created for production-ready builds.
 
@@ -48,7 +51,9 @@ Before tagging or publishing, verify the single-version invariant across the roo
 pnpm release:verify-versions --version X.Y.Z
 ```
 
-## 4) Pre-release tagging workflow
+## 4) Comprehensive devnet gate on `main`
+
+Before any canary tag is created, verify the exact `main` commit that will be tagged:
 
 From repo root:
 
@@ -59,25 +64,38 @@ git pull --ff-only origin main
 git rev-parse --short HEAD
 ```
 
-Create and push prerelease tag:
+Run the comprehensive devnet suite on that checkout:
 
 ```bash
-git tag -a v9.0.0-beta.2 -m "DKG v9.0.0 beta 2"
-git push origin v9.0.0-beta.2
+./scripts/devnet.sh clean
+DEVNET_ENABLE_PUBLISHER=1 ./scripts/devnet.sh start 6
+./scripts/devnet-comprehensive.sh
+./scripts/devnet.sh stop
+```
+
+Keep the generated devnet report with the release notes. If this gate fails, fix `main` through PR review and rerun the gate before tagging.
+
+## 5) Canary tagging workflow
+
+Create and push the canary/prerelease tag from the devnet-validated `main` commit:
+
+```bash
+git tag -a v10.0.0-rc.1 -m "DKG v10.0.0 rc 1"
+git push origin v10.0.0-rc.1
 ```
 
 For signed tags (recommended for production-grade verification):
 
 ```bash
-git tag -s v9.0.0-beta.2 -m "DKG v9.0.0 beta 2"
-git push origin v9.0.0-beta.2
+git tag -s v10.0.0-rc.1 -m "DKG v10.0.0 rc 1"
+git push origin v10.0.0-rc.1
 ```
 
-## 5) Publishing to npm (fully manual)
+## 6) Publishing to npm (fully manual)
 
 npm publishing is **fully manual**. There is **no automated npm-publish or tag-triggered release workflow**: npm's mandatory 2FA/OTP makes token-based CI publishing unworkable, and the old GitHub Release workflow was removed so the repository does not carry two competing release paths. Everything below is done by a maintainer from a clean checkout of the signed tag.
 
-### 5a) Publish the packages
+### 6a) Publish the package set
 
 From a clean checkout at the tagged commit:
 
@@ -92,7 +110,7 @@ pnpm -r publish --no-git-checks --tag latest
 
 npm prompts for your **OTP** (2FA). All publishable public `@origintrail-official/*` packages publish in one command; private workspaces are skipped automatically. `pnpm` skips versions already on the registry, so a re-run after a partial publish is safe. `pnpm release:build-info` writes `packages/cli/build-info.json` before packaging, so npm-installed daemons report the tag commit, build time, and publish dist-tag through `/api/status`.
 
-For a prerelease, use the prerelease npm tag and still move the `testnet` update channel:
+For a canary/prerelease, use the prerelease npm tag and move only the `testnet` update channel:
 
 ```bash
 git checkout vX.Y.Z-rc.1
@@ -106,18 +124,20 @@ pnpm release:promote --version X.Y.Z-rc.1 --tags testnet --otp <fresh 2FA code>
 
 Use `beta` or `alpha` in place of `rc` when that is the prerelease channel. The prerelease npm tag (`rc` / `beta` / `alpha`) is for humans and direct installs; `testnet` is what `network/testnet.json` auto-update follows.
 
-### 5b) Move the network dist-tags (stable production promotion)
+After promoting `testnet`, update a real testnet node to the canary and run the testnet smoke test. Do not continue to the stable/mainnet release until the smoke test passes.
 
-`--tag latest` only sets `latest`. Node auto-update channels + SDK pins follow the `mainnet` (Base / Gnosis / NeuroWeb) and `testnet` dist-tags, which are carried on **every** published package — so move them on all of them, not just the flagship:
+### 6b) Move the mainnet dist-tag (stable production promotion)
+
+`--tag latest` only sets `latest`. Mainnet node auto-update channels + SDK pins follow the `mainnet` dist-tag, which is carried on **every** published package — so move it on all of them, not just the flagship:
 
 ```bash
 pnpm release:packages
-pnpm release:promote --version X.Y.Z --tags mainnet,testnet --otp <fresh 2FA code>
+pnpm release:promote --version X.Y.Z --tags mainnet --otp <fresh 2FA code>
 ```
 
-One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-run with a fresh code (`npm dist-tag add` is idempotent). Moving `mainnet` is the **production go-live** — do it only after 5a is verified.
+One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-run with a fresh code (`npm dist-tag add` is idempotent). Moving `mainnet` is the **production go-live** — do it only after the testnet canary smoke test and stable package verification have passed.
 
-### 5c) Create the GitHub Release (manual)
+### 6c) Create the GitHub Release (manual)
 
 Because there is no tag-triggered release workflow, make the Release by hand from the signed tag, with notes taken from the matching `CHANGELOG.md` section (theme header, npm + channel line, PR-tagged bullets, a `compare/vPREV...vNEW` link):
 
@@ -128,16 +148,18 @@ gh release create vX.Y.Z --repo OriginTrail/dkg --verify-tag \
 
 Use `--latest=false` when back-filling an older version so it doesn't steal the "Latest" badge. MarkItDown binaries are not attached by this manual process; the published `@origintrail-official/dkg` postinstall downloads them best-effort, so `npm i` is unaffected if they're absent.
 
-### 5d) Verify
+### 6d) Verify and smoke test
 
 ```bash
-pnpm release:verify-published --version X.Y.Z --tags latest,mainnet,testnet
+pnpm release:verify-published --version X.Y.Z --tags latest,mainnet
 # prerelease example:
 pnpm release:verify-published --version X.Y.Z-rc.1 --tags rc,testnet
 gh release view vX.Y.Z --repo OriginTrail/dkg
 ```
 
-## 6) Node update policy
+After the `mainnet` dist-tag moves, update at least one mainnet node, execute the mainnet smoke test, and validate `/api/status` reports the expected version, commit, dist-tag, and package build metadata.
+
+## 7) Node update policy
 
 - Stable cohort:
   - follow stable tags/branch
@@ -150,8 +172,8 @@ Update commands:
 
 ```bash
 dkg update --check
-dkg update 9.0.0-beta.2 --check
-dkg update 9.0.0-beta.2 --allow-prerelease
+dkg update 10.0.0-rc.1 --check
+dkg update 10.0.0-rc.1 --allow-prerelease
 ```
 
 Tag verification:
@@ -160,10 +182,10 @@ Tag verification:
 - For local/dev unsigned tags only, use:
 
 ```bash
-dkg update 9.0.0-beta.2 --allow-prerelease --no-verify-tag
+dkg update 10.0.0-rc.1 --allow-prerelease --no-verify-tag
 ```
 
-## 7) Post-update verification
+## 8) Post-update verification
 
 Git-based blue-green updates run runtime packages and the Node UI static bundle as separate timed build steps, then verify `packages/node-ui/dist-ui/index.html` before activation. `build:runtime` remains a UI-inclusive compatibility wrapper so nodes updating from an older updater still prepare the UI through the target ref's build script.
 
@@ -181,7 +203,7 @@ SLOT="$(readlink -f "$DKG_HOME/releases/current")"
 test -f "$SLOT/packages/node-ui/dist-ui/index.html" && echo "Node UI static bundle ready"
 ```
 
-## 8) Rollback
+## 9) Rollback
 
 If issues are detected:
 
@@ -197,7 +219,7 @@ Then start node again:
 dkg start
 ```
 
-## 9) Builder upgrade guides (per release)
+## 10) Builder upgrade guides (per release)
 
 Every breaking or builder-impacting release ships a focused upgrade guide alongside the CHANGELOG entry. The guide lives at `docs/UPGRADE_<PRIOR>_TO_<NEW>.md` (e.g. `docs/UPGRADE_RC11_TO_RC12.md`).
 
@@ -211,17 +233,12 @@ A good upgrade guide:
 
 Cross-link the new guide from [`docs/RELEASE.md`](docs/RELEASE.md) § "Upgrading from a prior release" before tagging.
 
-## 10) Promotion policy
+## 11) Promotion policy
 
-Recommended progression:
+Required progression:
 
-1. `beta.N` on canary nodes
-2. `rc.N` on wider non-critical cohort
-3. stable `vX.Y.Z` for full rollout
-
-Promote only after successful:
-
-- automated tests
-- isolated local update run
-- canary network runtime validation
-- npm package/channel verification (`pnpm release:verify-published ...`)
+1. Merge release-bound PRs to `main` only after review feedback and CI failures are resolved.
+2. Run the comprehensive devnet test suite on `main`.
+3. Publish a canary/prerelease to `testnet` and pass the testnet smoke test.
+4. Publish/promote the stable version to `mainnet` only after the testnet smoke test passes.
+5. Run the mainnet smoke test and final package/channel validation (`pnpm release:verify-published ...`).
