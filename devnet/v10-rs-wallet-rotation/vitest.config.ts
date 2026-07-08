@@ -12,7 +12,10 @@ import { resolve } from 'node:path';
  */
 export default defineConfig({
   test: {
-    include: [resolve(import.meta.dirname, 'automated.test.ts')],
+    include: [
+      resolve(import.meta.dirname, 'automated.test.ts'),
+      resolve(import.meta.dirname, 'observation-policy.test.ts'),
+    ],
     testTimeout: 900_000,
     hookTimeout: 300_000,
     pool: 'forks',
