@@ -20,6 +20,7 @@ import {
   contextGraphCatalogUri,
   sharedMemoryReadBothFilter,
   isSwmMerkleExcludedQuad,
+  STORAGE_ACK_MAX_STAGING_BYTES,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -804,7 +805,6 @@ export class StorageACKHandler {
       // The inline payload is the PUBLIC catalog N-quads. Bound the size and
       // require a non-empty payload — the curated commitment is verified
       // against it, so an empty payload is a malformed request.
-      const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
       if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
         return this.encodeDecline(
           cgId,
@@ -812,10 +812,10 @@ export class StorageACKHandler {
           'curated ACK requires the public catalog N-quads inline (empty stagingQuads)',
         );
       }
-      if (intent.stagingQuads.length > MAX_CATALOG_BYTES) {
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `curated catalog stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_CATALOG_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
       const claimedByteSize = typeof intent.publicByteSize === 'number'
@@ -970,12 +970,11 @@ export class StorageACKHandler {
 
 
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      // Size limit: reject payloads over 4 MB to prevent memory exhaustion
-      const MAX_STAGING_BYTES = 4 * 1024 * 1024;
-      if (intent.stagingQuads.length > MAX_STAGING_BYTES) {
+      // Size limit: reject oversized inline payloads to prevent memory exhaustion.
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_STAGING_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
 
@@ -1381,7 +1380,6 @@ export class StorageACKHandler {
         intent.newCatalogRoot.length === 32 &&
         intent.newCatalogRoot.some((b) => b !== 0)
       ) {
-        const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
         if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
           return this.encodeDecline(
             cgId,
@@ -1389,10 +1387,10 @@ export class StorageACKHandler {
             'curated UPDATE ACK requires the public catalog N-quads inline (empty stagingQuads)',
           );
         }
-        if (intent.stagingQuads.length > MAX_CATALOG_BYTES) {
+        if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
           throw new Error(
             `curated UPDATE catalog stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-            `${MAX_CATALOG_BYTES} byte limit — rejecting request`,
+            `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
           );
         }
         // byteSize parity: a curated update prices off the catalog footprint, so
@@ -1467,11 +1465,10 @@ export class StorageACKHandler {
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      const MAX_STAGING_BYTES = 4 * 1024 * 1024;
-      if (intent.stagingQuads.length > MAX_STAGING_BYTES) {
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `UpdateStorageACK: stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_STAGING_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
       const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));

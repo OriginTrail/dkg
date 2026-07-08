@@ -1412,11 +1412,50 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(receivedStagingQuads).toBeDefined();
     expect(receivedStagingQuads!.length).toBeGreaterThan(0);
     expect(receivedMerkleLeafCount).toBeGreaterThan(0);
-    const decoded = new TextDecoder().decode(receivedStagingQuads);
+    const decoded = new TextDecoder().decode(receivedStagingQuads!);
     expect(decoded).toContain('V10 Staging Test');
 
     const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
     expect(started).toContain('collect_v10_acks');
+  });
+
+  it('V10: public fromSharedMemory publishes inline small staging quads on first ACK attempt', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    let receivedStagingQuads: Uint8Array | undefined;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
+      receivedStagingQuads = params.stagingQuads;
+      expect(params.ackMode.kind).toBe('public');
+      return realProvider(params);
+    };
+
+    const submitted = q(ENTITY, 'http://schema.org/name', '"fromSharedMemory Inline"');
+    const result = await pubS(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [submitted],
+      fromSharedMemory: true,
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(receivedStagingQuads).toBeDefined();
+    expect(receivedStagingQuads!.length).toBeGreaterThan(0);
+
+    const decoded = new TextDecoder().decode(receivedStagingQuads);
+    expect(decoded).toContain(
+      `<${submitted.subject}> <${submitted.predicate}> ${submitted.object} <${submitted.graph}> .`,
+    );
   });
 
   it('V10: public publishes still support legacy positional v10ACKProvider callbacks', async () => {
