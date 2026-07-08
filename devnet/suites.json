@@ -31,6 +31,7 @@
     "rfc51-publishing-allocation",
     "rich-scenario",
     "rpc-quiet-window",
+    "storage-ack-store-outage",
     "v10-core-flows",
     "v10-end-to-end",
     "v10-rs-prune",

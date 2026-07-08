@@ -63,6 +63,7 @@
     "test:devnet:mixed-version": "vitest run --config devnet/mixed-version/vitest.config.ts",
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
+    "test:devnet:storage-ack-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts",
     "test:devnet:v10-rs-prune": "vitest run --config devnet/v10-rs-prune/vitest.config.ts",
     "test:devnet:v10-rs-wallet-rotation": "vitest run --config devnet/v10-rs-wallet-rotation/vitest.config.ts",
     "test:all": "pnpm test && pnpm test:evm",
