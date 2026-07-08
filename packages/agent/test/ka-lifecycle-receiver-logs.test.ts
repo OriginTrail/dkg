@@ -102,6 +102,13 @@ function reconcileLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
   ));
 }
 
+function syncLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
+  return entries.filter((entry) => (
+    entry.message.includes('ka_lifecycle') &&
+    entry.message.includes('stage=sync')
+  ));
+}
+
 async function insertAgentGate(
   agent: DKGAgent,
   contextGraphId: string,
@@ -1047,6 +1054,84 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('kaId=7'));
     expect(messages).toContainEqual(expect.stringContaining('action=promote'));
     expect(messages).toContainEqual(expect.stringContaining('result=reconciled'));
+  });
+
+  it('logs durable sync receive and apply by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const publishedMeta = {
+      subject: ASSET_UAL,
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${'ab'.repeat(32)}"`,
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    };
+    const publishedData = {
+      subject: ROOT_ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Synced lifecycle"',
+      graph: contextGraphDataUri(CONTEXT_GRAPH_ID),
+    };
+    const internals = agent as unknown as {
+      fetchSyncPages: () => Promise<{
+        quads: unknown[];
+        bytesReceived: number;
+        resumedFromOffset: number;
+        nextOffset: number;
+        checkpointKey: string;
+        completed: boolean;
+        timedOut: boolean;
+      }>;
+      processDurableBatchInWorker: () => Promise<{
+        verifiedData: typeof publishedData[];
+        verifiedMeta: typeof publishedMeta[];
+        totalFetchedDataQuads: number;
+        totalFetchedMetaQuads: number;
+        rejectedKcs: number;
+        emptyResponses: number;
+        metaOnlyResponses: number;
+        dataRejectedMissingMeta: number;
+      }>;
+      insertSyncedQuadsAndInvalidateListCache: (quads: unknown[]) => Promise<void>;
+      syncFromPeerDetailed(remotePeerId: string, contextGraphIds: string[]): Promise<unknown>;
+    };
+    internals.fetchSyncPages = async () => ({
+      quads: [],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'sync-lifecycle-checkpoint',
+      completed: true,
+      timedOut: false,
+    });
+    internals.processDurableBatchInWorker = async () => ({
+      verifiedData: [publishedData],
+      verifiedMeta: [publishedMeta],
+      totalFetchedDataQuads: 1,
+      totalFetchedMetaQuads: 1,
+      rejectedKcs: 0,
+      emptyResponses: 0,
+      metaOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+    internals.insertSyncedQuadsAndInvalidateListCache = async () => undefined;
+    const entries = captureLogs();
+
+    try {
+      await internals.syncFromPeerDetailed(PUBLISHER_PEER_ID, [CONTEXT_GRAPH_ID]);
+    } finally {
+      await agent.stop().catch(() => undefined);
+    }
+
+    const messages = syncLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=sync_receive'));
+    expect(messages).toContainEqual(expect.stringContaining('event=sync_apply'));
+    expect(messages).toContainEqual(expect.stringContaining('role=sync'));
+    expect(messages).toContainEqual(expect.stringContaining(`localPeerId=${LOCAL_PEER_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('localNodeIdentityId=42'));
+    expect(messages).toContainEqual(expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining(`contextGraphId=${CONTEXT_GRAPH_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('action=apply'));
+    expect(messages).toContainEqual(expect.stringContaining('result=inserted'));
   });
 
   it('logs already-confirmed finalization by assetUal', async () => {
