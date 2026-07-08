@@ -902,6 +902,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         workspaceRecipientPrivateKeys: () => this.getLocalWorkspaceRecipientPrivateKeys(),
         workspaceSenderKeyDecryptor: (message: SwmSenderKeyMessageMsg, contextGraphId: string, ctx: OperationContext) =>
           this.decryptWorkspacePayloadWithSenderKey(message, contextGraphId, ctx),
+        assetUalForKaIdentity: async ({ agentAddress, kaNumber }) => {
+          const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+            ? await this.chain.getDKGKnowledgeAssetsAddress()
+            : await this.chain.getKnowledgeAssetsLifecycleAddress();
+          const kaId = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(kaNumber);
+          return buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+        },
         publicSnapshotStore: this.publicSnapshotStore,
       });
     }

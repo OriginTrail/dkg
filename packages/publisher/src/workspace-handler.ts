@@ -47,6 +47,10 @@ export type WorkspaceSenderKeyDecryptor = (
   ctx: OperationContext,
 ) => Promise<Uint8Array>;
 
+export type WorkspaceAssetUalResolver = (
+  input: { agentAddress: string; kaNumber: string },
+) => string | undefined | Promise<string | undefined>;
+
 export interface ContextGraphMetaOracleRecord {
   allowedPeers?: readonly string[];
   allowedAgents?: readonly string[];
@@ -253,6 +257,7 @@ export class SharedMemoryHandler {
     contextGraphId: string,
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
   private readonly workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
+  private readonly assetUalForKaIdentity?: WorkspaceAssetUalResolver;
   private readonly now: () => number;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private readonly log = new Logger('SharedMemoryHandler');
@@ -343,6 +348,7 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
       workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
+      assetUalForKaIdentity?: WorkspaceAssetUalResolver;
       now?: () => number;
       publicSnapshotStore?: WorkspacePublicSnapshotStore;
       /**
@@ -382,6 +388,7 @@ export class SharedMemoryHandler {
     this.beaconCuratorOracle = options?.beaconCuratorOracle;
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
+    this.assetUalForKaIdentity = options?.assetUalForKaIdentity;
     this.now = options?.now ?? (() => Date.now());
     this.publicSnapshotStore = options?.publicSnapshotStore;
     // PR #570 Codex follow-up (final, post-merge): validate the
@@ -975,6 +982,7 @@ export class SharedMemoryHandler {
         ctx = createOperationContext('share', request.operationId);
       }
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
+      const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
@@ -1211,6 +1219,7 @@ export class SharedMemoryHandler {
         });
         return {
           applied: true,
+          assetUal,
           cgId: contextGraphId,
           shareOperationId,
           publisherPeerId,
@@ -1251,6 +1260,21 @@ export class SharedMemoryHandler {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
       return { applied: false, reason, retryable: true };
+    }
+  }
+
+  private async resolveAssetUalForKaIdentity(
+    agentAddress: string | undefined,
+    kaNumber: string | undefined,
+    ctx: OperationContext,
+  ): Promise<string | undefined> {
+    if (!agentAddress || !kaNumber || !this.assetUalForKaIdentity) return undefined;
+    try {
+      return await this.assetUalForKaIdentity({ agentAddress, kaNumber });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `SWM assetUal derivation failed: ${reason}`);
+      return undefined;
     }
   }
 
