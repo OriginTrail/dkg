@@ -19,6 +19,7 @@ import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
   getConfirmedStatusQuad,
+  pruneSupersededAgentRegistryMeta,
   type KAMetadata,
 } from './metadata.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -316,6 +317,21 @@ export class PublishHandler {
         },
         kaMetadata,
       );
+      // #1233 follow-up — bound agents/_meta: this direct-protocol receive path
+      // is load-bearing (the `metadataQuads` we insert are the SAME object the
+      // tentative lifecycle expires/pends on below), so it cannot be skipped for
+      // the agents CG. Instead, evict this agent's PRIOR tentative tracking
+      // record(s) before inserting the fresh heartbeat's record, so the agents
+      // system CG (which never confirms on-chain) keeps at most one live record
+      // per agent instead of accumulating one per heartbeat. No-op for every
+      // other CG; the record inserted below stays the live tentative record.
+      await pruneSupersededAgentRegistryMeta({
+        store: this.store,
+        contextGraphId,
+        metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
+        rootEntities: manifest.map((m) => m.rootEntity),
+        keepUal: request.ual,
+      });
       await this.store.insert(metadataQuads);
 
       // ── Tentative lifecycle timeout ──

@@ -40,6 +40,8 @@ export default defineConfig({
       "test/publish-literal-size.test.ts",
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
+      "test/agents-meta-sync-config.test.ts",
+      "test/sync-responder-agents-meta-serve-skip.test.ts",
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

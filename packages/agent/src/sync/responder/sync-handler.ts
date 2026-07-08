@@ -3,9 +3,11 @@ import {
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
+  isAgentRegistryContextGraph,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { parseBooleanEnv } from '../requester/agents-meta-sync-config.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -220,6 +222,21 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
       signal.removeEventListener('abort', onAbort);
     });
   });
+}
+
+/**
+ * Runtime kill-switch for the agents/_meta serve-skip (#1233). Resolved on EVERY
+ * request (not cached at module load) so the highest-blast-radius change here is
+ * reversible WITHOUT a restart: default (unset/anything but "1") withholds the
+ * agents registry `_meta` snapshot; `DKG_SERVE_AGENTS_META=1` restores the old
+ * serve-everything behaviour. Mirrors the `=== '1'` idiom used by the other
+ * `DKG_*` boolean flags (e.g. DKG_WARM_CORE_CONNECTIONS, DKG_DEBUG_SYNC_PROGRESS).
+ */
+function serveAgentsMetaEnabled(): boolean {
+  // Accept the same truthy spellings as the fetch flag (1/true/on/yes) for
+  // consistency; unset/unrecognized ⇒ serve-skip. Read per-request so the
+  // kill-switch is reversible at runtime without a restart.
+  return parseBooleanEnv(process.env.DKG_SERVE_AGENTS_META) === true;
 }
 
 export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
@@ -449,33 +466,51 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
         if (nquads.length === 0) return new TextEncoder().encode('');
       } else if (phase === 'meta') {
-        const queryStartedAt = Date.now();
-        const session = prepareResponderSession(
-          'Durable meta',
-          `${peerId}:durable-meta:${contextGraphId}`,
-          request.syncSessionId,
-          offset,
-        );
-        const rows = await readDurableMetaPage({
-          store,
-          contextGraphId,
-          registeredSubGraphNames: await subGraphRegistrationMemo.get(
+        // agents/_meta serve-skip. The agents registry system CG's durable
+        // `_meta` graph has NO consumer — agent facts are served from the DATA
+        // phase — yet it grows without bound on every heartbeat (#1233). Serving
+        // it re-propagates that bloat across the mesh, so cores WITHHOLD the
+        // agents `_meta` snapshot by default: skip materializing/serializing it
+        // and leave `nquads` empty, which returns an empty (completed) meta page.
+        // The requester tolerates this exactly like a legitimately-empty meta
+        // graph — it treats an empty body as clean EOF (page-fetch.ts:
+        // `if (!nquadsText) break`). Only THIS durable-meta snapshot for the
+        // agents CG is withheld: the DATA phase, and every other CG's meta, are
+        // untouched. Reversible at runtime via `DKG_SERVE_AGENTS_META=1`.
+        if (!serveAgentsMetaEnabled() && isAgentRegistryContextGraph(contextGraphId)) {
+          logDebug(
+            createOperationContext('sync'),
+            `Sync responder withholding durable meta for agents registry "${contextGraphId}" (serve-skip; set DKG_SERVE_AGENTS_META=1 to serve)`,
+          );
+        } else {
+          const queryStartedAt = Date.now();
+          const session = prepareResponderSession(
+            'Durable meta',
+            `${peerId}:durable-meta:${contextGraphId}`,
+            request.syncSessionId,
+            offset,
+          );
+          const rows = await readDurableMetaPage({
+            store,
             contextGraphId,
-            { refresh: offset === 0, signal },
-          ),
-          offset,
-          limit,
-          signal,
-          rowListMemo: session ? durableMetaRowsMemo : undefined,
-          rowListCacheKey: session?.rowListCacheKey,
-          refreshRowList: session?.refreshRowList,
-        });
-        const queryDurationMs = Date.now() - queryStartedAt;
-        const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
-        if (serialized) nquads.push(serialized);
-        const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+            registeredSubGraphNames: await subGraphRegistrationMemo.get(
+              contextGraphId,
+              { refresh: offset === 0, signal },
+            ),
+            offset,
+            limit,
+            signal,
+            rowListMemo: session ? durableMetaRowsMemo : undefined,
+            rowListCacheKey: session?.rowListCacheKey,
+            refreshRowList: session?.refreshRowList,
+          });
+          const queryDurationMs = Date.now() - queryStartedAt;
+          const serializeStartedAt = Date.now();
+          const serialized = serializeResponderRows(rows);
+          if (serialized) nquads.push(serialized);
+          const serializeDurationMs = Date.now() - serializeStartedAt;
+          logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        }
       } else {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
