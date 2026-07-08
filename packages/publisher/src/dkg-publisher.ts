@@ -3549,6 +3549,18 @@ export class DKGPublisher implements Publisher {
         // unchanged so callers preserve `instanceof` checks.
         const tag = err instanceof Error ? err.name : 'unknown';
         const msg = err instanceof Error ? err.message : String(err);
+        emitPublishLifecycle({
+          stage: 'chain',
+          event: 'failure',
+          level: 'error',
+          metadata: {
+            outcome: 'failure',
+            contextGraphId: v10CgId.toString(),
+            ackCount: v10ACKs?.length ?? 0,
+            errorClass: tag,
+            reason: msg,
+          },
+        });
         this.log.warn(ctx, `On-chain publish failed (${tag}): ${msg}`);
         throw err instanceof Error ? err : new Error(msg);
       }
