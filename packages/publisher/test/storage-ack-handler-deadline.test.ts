@@ -207,6 +207,7 @@ describe('StorageACKHandler — ack-handler deadline (slow-store dead-air fix)',
           backgroundQueued: 7,
           maxConcurrent: 8,
           ackReservedSlots: 1,
+          backgroundReservedSlots: 1,
         }),
       },
     );

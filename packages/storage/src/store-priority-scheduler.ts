@@ -11,6 +11,7 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  backgroundReservedSlots: number;
 }
 
 interface QueueEntry<T> {
@@ -26,12 +27,20 @@ interface QueueEntry<T> {
 
 const DEFAULT_MAX_CONCURRENT = 8;
 const DEFAULT_ACK_RESERVED_SLOTS = 1;
+const DEFAULT_BACKGROUND_RESERVED_SLOTS = 1;
 
 function parsePositiveIntegerEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function metricOperation(operation: string): string {
@@ -64,6 +73,10 @@ export class StorePriorityScheduler {
       DEFAULT_ACK_RESERVED_SLOTS,
     ),
     private readonly now = () => performance.now(),
+    private readonly backgroundReservedSlots = parseNonNegativeIntegerEnv(
+      'DKG_STORE_BACKGROUND_RESERVED_SLOTS',
+      DEFAULT_BACKGROUND_RESERVED_SLOTS,
+    ),
   ) {}
 
   get snapshot(): StorePrioritySchedulerSnapshot {
@@ -75,7 +88,8 @@ export class StorePriorityScheduler {
       normalQueued: this.queues.normal.length,
       backgroundQueued: this.queues.background.length,
       maxConcurrent: this.maxConcurrent,
-      ackReservedSlots: Math.min(this.ackReservedSlots, Math.max(0, this.maxConcurrent - 1)),
+      ackReservedSlots: this.effectiveAckReserve(),
+      backgroundReservedSlots: this.effectiveBackgroundReserve(),
     };
   }
 
@@ -140,10 +154,30 @@ export class StorePriorityScheduler {
     if (totalInflight >= this.maxConcurrent) return false;
     if (priority === 'ack') return true;
 
-    const effectiveAckReserve = Math.min(this.ackReservedSlots, Math.max(0, this.maxConcurrent - 1));
-    const nonAckLimit = Math.max(1, this.maxConcurrent - effectiveAckReserve);
+    const nonAckLimit = this.nonAckLimit();
     const nonAckInflight = this.normalInflight + this.backgroundInflight;
-    return nonAckInflight < nonAckLimit;
+    if (nonAckInflight >= nonAckLimit) return false;
+    if (priority === 'normal' && this.shouldHoldBackgroundFloor()) return false;
+    return true;
+  }
+
+  private shouldHoldBackgroundFloor(): boolean {
+    const backgroundReserve = this.effectiveBackgroundReserve();
+    return backgroundReserve > 0 &&
+      this.queues.background.length > 0 &&
+      this.backgroundInflight < backgroundReserve;
+  }
+
+  private effectiveAckReserve(): number {
+    return Math.min(this.ackReservedSlots, Math.max(0, this.maxConcurrent - 1));
+  }
+
+  private nonAckLimit(): number {
+    return Math.max(1, this.maxConcurrent - this.effectiveAckReserve());
+  }
+
+  private effectiveBackgroundReserve(): number {
+    return Math.min(this.backgroundReservedSlots, this.nonAckLimit());
   }
 
   private start(entry: QueueEntry<unknown>): void {

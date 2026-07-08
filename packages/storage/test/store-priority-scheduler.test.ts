@@ -71,4 +71,65 @@ describe('StorePriorityScheduler', () => {
       scheduler.run('ack', 'storage-ack.after-throw', async () => 'ok'),
     ).resolves.toBe('ok');
   });
+
+  it('reserves a non-ACK slot for queued background work behind normal traffic', async () => {
+    const scheduler = new StorePriorityScheduler(2, 0);
+    const events: string[] = [];
+    let releaseNormal1!: () => void;
+    let releaseNormal2!: () => void;
+
+    const normal1 = scheduler.run('normal', 'query.default.1', async () => {
+      events.push('normal-1:start');
+      await new Promise<void>((resolve) => {
+        releaseNormal1 = resolve;
+      });
+      events.push('normal-1:end');
+      return 'normal-1';
+    });
+    const normal2 = scheduler.run('normal', 'query.default.2', async () => {
+      events.push('normal-2:start');
+      await new Promise<void>((resolve) => {
+        releaseNormal2 = resolve;
+      });
+      events.push('normal-2:end');
+      return 'normal-2';
+    });
+    await tick();
+
+    const background = scheduler.run('background', 'sync.catch-up', async () => {
+      events.push('background:start');
+      return 'background';
+    });
+    const normal3 = scheduler.run('normal', 'query.default.3', async () => {
+      events.push('normal-3:start');
+      return 'normal-3';
+    });
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({
+      normalInflight: 2,
+      normalQueued: 1,
+      backgroundQueued: 1,
+      backgroundReservedSlots: 1,
+    });
+
+    releaseNormal1();
+    await tick();
+
+    expect(events).toEqual([
+      'normal-1:start',
+      'normal-2:start',
+      'normal-1:end',
+      'background:start',
+      'normal-3:start',
+    ]);
+
+    releaseNormal2();
+    await expect(Promise.all([normal1, normal2, background, normal3])).resolves.toEqual([
+      'normal-1',
+      'normal-2',
+      'background',
+      'normal-3',
+    ]);
+  });
 });

@@ -49,6 +49,7 @@ export interface StorePressureSnapshot {
   backgroundQueued: number;
   maxConcurrent: number;
   ackReservedSlots: number;
+  backgroundReservedSlots?: number;
 }
 
 export interface QueryOptions {
