@@ -68,6 +68,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
+import { isQuorumUnmetError } from './ack-errors.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -2849,6 +2850,35 @@ export class DKGPublisher implements Publisher {
         // from "QuorumUnmetError(collected=0/3, peers=[...])"
         // without any further plumbing.
         const tag = err instanceof Error ? err.name : 'unknown';
+        if (isQuorumUnmetError(err)) {
+          for (const peerOutcome of err.peerOutcomes) {
+            if (!peerOutcome.reason?.startsWith('STORAGE_ACK_DECLINE')) continue;
+            emitPublishLifecycle({
+              stage: 'storage_ack',
+              event: 'decline',
+              level: 'warn',
+              peer: peerOutcome.peerId,
+              metadata: {
+                outcome: 'decline',
+                reason: peerOutcome.reason,
+                dialOk: peerOutcome.dialOk,
+                protocolSupported: peerOutcome.protocolSupported,
+                swmHostModeAdvertised: peerOutcome.swmHostModeAdvertised,
+              },
+            });
+          }
+          emitPublishLifecycle({
+            stage: 'storage_ack',
+            event: 'quorum',
+            level: 'warn',
+            metadata: {
+              outcome: 'failure',
+              quorumCollected: err.collected,
+              quorumRequired: err.required,
+              peerDialled: err.dialled,
+            },
+          });
+        }
         emitPublishLifecycle({
           stage: 'storage_ack',
           event: 'failure',
