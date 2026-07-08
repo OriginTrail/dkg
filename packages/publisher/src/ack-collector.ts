@@ -163,6 +163,7 @@ function transientDeclineRetryReason(code: string): string {
 }
 const MAX_DECLINE_CODE_CHARS = 64;
 const MAX_DECLINE_MESSAGE_CHARS = 240;
+const MAX_DECLINE_LOG_MESSAGE_CHARS = 160;
 
 /**
  * Map a terminal {@link QuorumUnmetError} to the low-cardinality
@@ -186,6 +187,10 @@ function sanitizeDeclineField(value: string, maxChars: number): string {
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (compacted.length <= maxChars) return compacted;
   return `${compacted.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function declineLogMessage(message: string): string {
+  return sanitizeDeclineField(message, MAX_DECLINE_LOG_MESSAGE_CHARS);
 }
 
 /**
@@ -828,9 +833,10 @@ export class ACKCollector {
               declineRetries += 1;
               const waitMs = transientDeclineBackoffMs(declineRetries);
               const retryReason = transientDeclineRetryReason(code);
+              const logMessage = declineLogMessage(declineMessage);
               log(
                 `[ACKCollector] Transient decline from ${peerId.slice(-8)}: ${code}` +
-                (declineMessage ? ` — ${declineMessage}` : '') +
+                (logMessage ? ` — ${logMessage}` : '') +
                 `; retrying because ${retryReason} ` +
                 `(retry ${declineRetries}/${MAX_TRANSIENT_DECLINE_RETRIES}, waiting ${waitMs}ms)`,
               );
@@ -849,9 +855,10 @@ export class ACKCollector {
               continue;
             }
 
+            const logMessage = declineLogMessage(declineMessage);
             log(
               `[ACKCollector] Decline from ${peerId.slice(-8)}: ${code}` +
-              (declineMessage ? ` — ${declineMessage}` : ''),
+              (logMessage ? ` — ${logMessage}` : ''),
             );
             return null;
           }
