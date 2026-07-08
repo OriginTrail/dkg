@@ -169,6 +169,51 @@ describe('runDurableSync sinceBatchId threading', () => {
       remotePeerId: 'peerR',
     }));
   });
+
+  it('emits published KA sync request and response lifecycle events by assetUal', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      event: string;
+      action: string;
+      result: string;
+      contextGraphId: string;
+      remotePeerId: string;
+    }> = [];
+    const publishedMeta = {
+      subject: ASSET_UAL,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${'ab'.repeat(32)}"`,
+      graph: 'did:dkg:context-graph:mfacts/_meta',
+    };
+    const { context } = makeContext({
+      processResult: {
+        verifiedData: [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"Fact"', graph: 'did:dkg:context-graph:mfacts' }],
+        verifiedMeta: [publishedMeta],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+      },
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    });
+
+    await runDurableSync(context);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      event: 'sync_request',
+      action: 'request',
+      result: 'sent',
+      contextGraphId: 'mfacts',
+      remotePeerId: 'peerR',
+    }));
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      event: 'sync_response',
+      action: 'response',
+      result: 'fetched',
+      contextGraphId: 'mfacts',
+      remotePeerId: 'peerR',
+    }));
+  });
 });
 
 describe('runDurableSync agents meta routing', () => {
