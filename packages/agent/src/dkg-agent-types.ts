@@ -1077,6 +1077,14 @@ export interface DKGAgentConfig {
     approvalPolicy?: ApprovalPolicy;
     /** Optional ContextGraphNameRegistry `eth_getLogs` block-window tuning. */
     cgRegistryScanPageSize?: number;
+    /**
+     * Funding floors (wei) for funding-aware operational-wallet selection,
+     * threaded straight to `EVMAdapterConfig.minPublisher*Wei`. Both default to
+     * `0n` (only strictly-empty wallets are skipped); a wallet below the floor is
+     * deprioritized, not excluded (best-funded fallback still sends).
+     */
+    minPublisherNativeWei?: bigint;
+    minPublisherTracWei?: bigint;
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
