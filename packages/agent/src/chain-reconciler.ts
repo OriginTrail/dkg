@@ -46,7 +46,7 @@ export type OrdinalOutcome =
   | { status: 'pending'; assetUal?: string; kaId?: string; reason?: string }
   | { status: 'skip'; assetUal?: string; kaId?: string; reason?: string };
 
-export type ReconcileLifecycleAction = 'promote' | 'already-present' | 'defer' | 'cursor-advance';
+export type ReconcileLifecycleAction = 'sweep' | 'promote' | 'already-present' | 'defer' | 'cursor-advance';
 
 export interface ReconcileLifecycleEvent {
   assetUal: string;
@@ -157,6 +157,8 @@ export async function reconcileContextGraph(
     for (const ordinal of ordinals) {
       const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
       if (outcome.assetUal) {
+        const blockNumber = 'blockNumber' in outcome ? outcome.blockNumber : undefined;
+        const reason = 'reason' in outcome ? outcome.reason : undefined;
         assets.push({
           assetUal: outcome.assetUal,
           status: outcome.status,
@@ -164,8 +166,21 @@ export async function reconcileContextGraph(
           onChainCgId: onChainCgId.toString(),
           ordinal,
           kaId: outcome.kaId,
-          blockNumber: 'blockNumber' in outcome ? outcome.blockNumber : undefined,
-          reason: 'reason' in outcome ? outcome.reason : undefined,
+          blockNumber,
+          reason,
+        });
+        deps.logLifecycle?.({
+          assetUal: outcome.assetUal,
+          action: 'sweep',
+          result: 'scanned',
+          localCgId,
+          onChainCgId: onChainCgId.toString(),
+          ordinal,
+          kaId: outcome.kaId,
+          blockNumber,
+          head,
+          watermark: state.watermark,
+          reason,
         });
         const action = lifecycleActionForOutcome(outcome.status);
         if (action) {
@@ -177,10 +192,10 @@ export async function reconcileContextGraph(
             onChainCgId: onChainCgId.toString(),
             ordinal,
             kaId: outcome.kaId,
-            blockNumber: 'blockNumber' in outcome ? outcome.blockNumber : undefined,
+            blockNumber,
             head,
             watermark: state.watermark,
-            reason: 'reason' in outcome ? outcome.reason : undefined,
+            reason,
           });
         }
       }
