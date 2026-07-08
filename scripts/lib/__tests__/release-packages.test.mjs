@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildInfoPayload,
   discoverPublishablePackages,
+  findMissingCliPackAssets,
   findReleaseVersionMismatches,
   verifyReleaseTag,
   writeBuildInfo,
@@ -199,3 +200,32 @@ test('promote survives interactive npm calls for the whole package set', () => {
     fs.rmSync(shimDir, { recursive: true, force: true });
   }
 });
+
+function writeCliPackFixture(root) {
+  fs.mkdirSync(path.join(root, 'network'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'network', 'testnet.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'network', 'mainnet-base.json'), '{}\n');
+  fs.writeFileSync(path.join(root, 'project.json'), '{}\n');
+}
+
+test('flags a cli tarball missing network overlays + project.json (the 10.0.4 drop)', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  const packReport = () => JSON.stringify([{ files: [{ path: 'dist/cli.js' }, { path: 'package.json' }] }]);
+  const missing = findMissingCliPackAssets(root, packReport);
+  assert.deepEqual(
+    [...missing].sort(),
+    ['network/mainnet-base.json', 'network/testnet.json', 'project.json'],
+  );
+}));
+
+test('passes when the cli tarball includes every network overlay + project.json', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  // npm reports Windows paths with backslashes — the check must normalize them.
+  const packReport = () => JSON.stringify([{ files: [
+    { path: 'project.json' },
+    { path: 'network\\testnet.json' },
+    { path: 'network/mainnet-base.json' },
+    { path: 'dist/cli.js' },
+  ] }]);
+  assert.deepEqual(findMissingCliPackAssets(root, packReport), []);
+}));

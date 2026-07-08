@@ -62,6 +62,8 @@ function runCapture(cmd, args, options = {}) {
     encoding: 'utf8',
     stdio: 'pipe',
     env: { ...process.env, ...(options.env ?? {}) },
+    // Needed to resolve `npm`/`npm.cmd` on Windows; harmless on POSIX.
+    shell: options.shell ?? false,
   });
   if (result.error) throw result.error;
   if (result.status !== 0) {
@@ -302,11 +304,55 @@ function commandVerifyTag(args) {
   console.log(`Release tag verification passed: ${tag} is annotated, signature-bearing, on origin unmoved, and reachable from ${bases.join(', ')}.`);
 }
 
+/**
+ * The runtime-config assets that `@origintrail-official/dkg` (packages/cli)
+ * must ship in its tarball. These are copied in from the repo root at pack time
+ * (see scripts/copy-cli-runtime-assets.mjs); they were silently dropped from
+ * the 10.0.4 publish, so this preflight hard-fails a release that would ship
+ * without them.
+ */
+export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture) {
+  const cliDir = path.join(rootDir, 'packages', 'cli');
+  const networkDir = path.join(rootDir, 'network');
+  const required = ['project.json'];
+  if (fs.existsSync(networkDir)) {
+    for (const file of fs.readdirSync(networkDir)) {
+      if (file.endsWith('.json')) required.push(`network/${file}`);
+    }
+  }
+  // `npm pack --dry-run --json` reports exactly what would be published,
+  // running the package's `prepack` first — so this reflects the real tarball.
+  const raw = runner('npm', ['pack', '--dry-run', '--json'], {
+    cwd: cliDir,
+    shell: process.platform === 'win32',
+  });
+  const report = JSON.parse(raw);
+  const packed = new Set(
+    (Array.isArray(report) ? report : [report])
+      .flatMap((entry) => entry.files ?? [])
+      .map((file) => file.path.replace(/\\/g, '/')),
+  );
+  return required.filter((asset) => !packed.has(asset));
+}
+
+function commandVerifyPack() {
+  const missing = findMissingCliPackAssets(ROOT_DIR);
+  if (missing.length > 0) {
+    console.error('Release pack check failed — @origintrail-official/dkg tarball is missing runtime assets:');
+    for (const asset of missing) console.error(`- ${asset}`);
+    console.error('Run `pnpm --filter @origintrail-official/dkg build` (or its prepack) to materialize them before publishing.');
+    process.exitCode = 1;
+    return;
+  }
+  console.log('Release pack check passed: @origintrail-official/dkg tarball includes project.json + all network/*.json overlays.');
+}
+
 function usage() {
   console.log(`Usage:
   node scripts/release-packages.mjs list [--json]
   node scripts/release-packages.mjs verify-versions --version X.Y.Z
   node scripts/release-packages.mjs verify-tag --tag vX.Y.Z [--version X.Y.Z] [--base origin/main]
+  node scripts/release-packages.mjs verify-pack
   node scripts/release-packages.mjs build-info --dist-tag latest|rc|beta|alpha [--commit SHA] [--ci-run ID]
   node scripts/release-packages.mjs promote --version X.Y.Z --tags mainnet,testnet --otp 123456 [--dry-run]
   node scripts/release-packages.mjs verify-published --version X.Y.Z [--tags latest,mainnet,testnet]`);
@@ -324,6 +370,9 @@ async function main() {
       break;
     case 'verify-tag':
       commandVerifyTag(args);
+      break;
+    case 'verify-pack':
+      commandVerifyPack();
       break;
     case 'build-info':
       commandBuildInfo(args);

@@ -42,6 +42,7 @@
     "release:packages": "node scripts/release-packages.mjs list",
     "release:verify-versions": "node scripts/release-packages.mjs verify-versions",
     "release:verify-tag": "node scripts/release-packages.mjs verify-tag",
+    "release:verify-pack": "node scripts/release-packages.mjs verify-pack",
     "release:build-info": "node scripts/release-packages.mjs build-info",
     "release:promote": "node scripts/release-packages.mjs promote",
     "release:verify-published": "node scripts/release-packages.mjs verify-published",
