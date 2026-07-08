@@ -267,16 +267,24 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
   it('STATIC NETWORK: getEvmChainId still surfaces endpoint exhaustion during validation', async () => {
     installMeter();
-    const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
-    servers.push(rpc);
-    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, chainId: 'evm:31337' }));
+    const rpcA = await startLoopbackRpc({ throttle: ['eth_chainId'] });
+    const rpcB = await startLoopbackRpc({ throttle: ['eth_chainId'] });
+    servers.push(rpcA, rpcB);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpcA.url,
+      rpcUrls: [rpcA.url, rpcB.url],
+      chainId: 'evm:31337',
+    }));
     adapters.push(a);
 
     await expect(a.getEvmChainId()).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
 
+    const ethChainIdHits = rpcA.hits('eth_chainId') + rpcB.hits('eth_chainId');
+    const totalHits = rpcA.totalHits() + rpcB.totalHits();
     const usage = a.drainRpcUsage();
-    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
-    expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+    expect(ethChainIdHits).toBe(2);
+    expect(usage.byMethod['eth_chainId'] ?? 0).toBe(ethChainIdHits);
+    expect(rpcUsageWindowTotal(usage)).toBe(totalHits);
   });
 
   it('RETRIES BILL: ethers 429-retry attempts below _send are counted (tracker == server hits)', async () => {

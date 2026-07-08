@@ -678,7 +678,7 @@ jobs:
     # mechanism for scanner versions and hashes." Dependabot does not
     # cover scanner versions that are pinned inside workflow YAML as
     # env vars (actionlint binary release, hash-pinned PyPI wheels for
-    # zizmor, the npx-resolved @cyclonedx/cdxgen version). This job
+    # zizmor). This job
     # walks each pin, queries the upstream registry for the latest
     # release, and surfaces drift as a job-summary warning. It is
     # informational (`continue-on-error: true`) — the goal is to
@@ -749,24 +749,6 @@ jobs:
             fi
           else
             report 'zizmor' "${ZIZMOR_PINNED:-?}" "${ZIZMOR_LATEST:-?}" '⚠ unable to compare'
-          fi
-
-          # @cyclonedx/cdxgen: pinned via the `npx --yes
-          # @cyclonedx/cdxgen@<ver>` line in release.yml. Parse it back
-          # out of that file so the check stays correct when release.yml
-          # is bumped.
-          if [ -f "${GITHUB_WORKSPACE}/.github/workflows/release.yml" ]; then
-            CDXGEN_PINNED=$(grep -oE '@cyclonedx/cdxgen@[^[:space:]"]+' "${GITHUB_WORKSPACE}/.github/workflows/release.yml" | head -1 | sed 's|@cyclonedx/cdxgen@||')
-            CDXGEN_LATEST=$(curl -fsSL https://registry.npmjs.org/@cyclonedx/cdxgen | jq -r '.["dist-tags"].latest')
-            if [ -n "${CDXGEN_PINNED}" ] && [ -n "${CDXGEN_LATEST}" ]; then
-              if [ "${CDXGEN_PINNED}" = "${CDXGEN_LATEST}" ]; then
-                report '@cyclonedx/cdxgen' "${CDXGEN_PINNED}" "${CDXGEN_LATEST}" '✓ current'
-              else
-                report '@cyclonedx/cdxgen' "${CDXGEN_PINNED}" "${CDXGEN_LATEST}" '⚠ behind'
-              fi
-            else
-              report '@cyclonedx/cdxgen' "${CDXGEN_PINNED:-?}" "${CDXGEN_LATEST:-?}" '⚠ unable to compare'
-            fi
           fi
 
           # crytic/slither-action: pinned by commit SHA in
