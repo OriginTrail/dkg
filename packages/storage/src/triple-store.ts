@@ -40,6 +40,17 @@ export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
 export type StoreWorkPriority = 'ack' | 'normal' | 'background';
 
+export interface StorePressureSnapshot {
+  ackInflight: number;
+  normalInflight: number;
+  backgroundInflight: number;
+  ackQueued: number;
+  normalQueued: number;
+  backgroundQueued: number;
+  maxConcurrent: number;
+  ackReservedSlots: number;
+}
+
 export interface QueryOptions {
   /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
   source?: string;
@@ -65,6 +76,13 @@ export interface TripleStore {
    * and after a blocking call returns (`pre-dispatch`).
    */
   readonly queryCancellation?: QueryCancellationMode;
+
+  /**
+   * Optional live pressure snapshot for stores that own or wrap an admission
+   * scheduler. ACK deadline diagnostics use this capability instead of
+   * reaching into a specific adapter's process-global scheduler.
+   */
+  getPressureSnapshot?(): StorePressureSnapshot | undefined;
 
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;

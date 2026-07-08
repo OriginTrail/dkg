@@ -7,6 +7,7 @@ import type {
   QueryOptions,
   QueryResult,
   SelectResult,
+  StorePressureSnapshot,
   TripleStore,
 } from './triple-store.js';
 
@@ -31,6 +32,10 @@ export interface SharedMemoryLiteralBlobStoreOptions {
 export class SharedMemoryLiteralBlobStore implements TripleStore {
   get queryCancellation() {
     return this.inner.queryCancellation;
+  }
+
+  getPressureSnapshot(): StorePressureSnapshot | undefined {
+    return this.inner.getPressureSnapshot?.();
   }
 
   readonly innerStore: TripleStore;

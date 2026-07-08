@@ -2,6 +2,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
   SelectResult,
@@ -41,6 +42,10 @@ export class BlazegraphStore implements TripleStore {
       work,
       options?.signal,
     );
+  }
+
+  getPressureSnapshot(): StorePressureSnapshot {
+    return externalStorePriorityScheduler.snapshot;
   }
 
   // -------------------------------------------------------------------

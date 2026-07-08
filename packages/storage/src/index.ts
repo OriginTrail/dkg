@@ -4,6 +4,7 @@ export {
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
+  type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
   type AskResult,

@@ -1,10 +1,10 @@
 import {
-  getExternalStorePrioritySchedulerSnapshot,
   loadSelectedSharedMemoryQuads,
   type SharedMemoryReadSelection,
   type TripleStore,
   type Quad,
   type QueryOptions,
+  type StorePressureSnapshot,
 } from '@origintrail-official/dkg-storage';
 import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
@@ -135,6 +135,12 @@ class StoreUnavailableError extends Error {
 
 function ackStoreOptions(source: string): QueryOptions {
   return { priority: 'ack', source };
+}
+
+function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined): string {
+  if (!snapshot) return 'storePressure=unavailable';
+  return `ackInflight=${snapshot.ackInflight} ackQueued=${snapshot.ackQueued} ` +
+    `normalQueued=${snapshot.normalQueued} backgroundQueued=${snapshot.backgroundQueued}`;
 }
 
 export interface StorageACKHandlerConfig {
@@ -324,6 +330,14 @@ export interface StorageACKHandlerConfig {
    * INVALID_SIGNATURE). Set to 0 to disable the deadline. Tests override it.
    */
   ackHandlerDeadlineMs?: number;
+  /**
+   * Optional store-pressure diagnostic provider for ACK deadline declines.
+   * Agents may inject a store-owned or wrapper-owned snapshot here; otherwise
+   * the handler asks the supplied TripleStore for its optional pressure
+   * capability. The handler deliberately does not read any storage adapter's
+   * process-global scheduler directly.
+   */
+  getStorePressure?: () => StorePressureSnapshot | undefined;
 }
 
 /**
@@ -366,6 +380,14 @@ export class StorageACKHandler {
     this.store = store;
     this.config = config;
     this.eventBus = eventBus;
+  }
+
+  private getStorePressureSnapshot(): StorePressureSnapshot | undefined {
+    try {
+      return this.config.getStorePressure?.() ?? this.store.getPressureSnapshot?.();
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -733,15 +755,14 @@ export class StorageACKHandler {
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<Uint8Array>((resolve) => {
       deadlineTimer = setTimeout(() => {
-        const storePressure = getExternalStorePrioritySchedulerSnapshot();
+        const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
         resolve(
           this.declineTemporarilyUnavailable(
             cgIdForDecline ?? '',
             'ack handler deadline exceeded',
             new Error(
               `ACK handler exceeded ${deadlineMs}ms (store slow / saturated; ` +
-              `ackInflight=${storePressure.ackInflight} ackQueued=${storePressure.ackQueued} ` +
-              `normalQueued=${storePressure.normalQueued} backgroundQueued=${storePressure.backgroundQueued})`,
+              `${storePressure})`,
             ),
           ),
         );

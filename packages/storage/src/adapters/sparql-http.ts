@@ -29,6 +29,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
@@ -202,6 +203,10 @@ export class SparqlHttpStore implements TripleStore {
       work,
       options?.signal,
     );
+  }
+
+  getPressureSnapshot(): StorePressureSnapshot {
+    return externalStorePriorityScheduler.snapshot;
   }
 
   private async postQuery(sparql: string, accept: string, options?: SparqlHttpQueryOptions): Promise<Response> {

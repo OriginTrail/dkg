@@ -61,6 +61,23 @@ function storeWithHangingQuery(base: OxigraphStore): TripleStore {
   });
 }
 
+function nonExternalHangingStore(): TripleStore {
+  return {
+    queryCancellation: 'interruptible',
+    insert: async () => {},
+    delete: async () => {},
+    deleteByPattern: async () => 0,
+    query: () => new Promise<never>(() => {}),
+    hasGraph: async () => false,
+    createGraph: async () => {},
+    dropGraph: async () => {},
+    listGraphs: async () => [],
+    deleteBySubjectPrefix: async () => 0,
+    countQuads: async () => 0,
+    close: async () => {},
+  };
+}
+
 async function createHandler(
   store: TripleStore,
   configOverrides: Partial<StorageACKHandlerConfig> = {},
@@ -148,6 +165,61 @@ describe('StorageACKHandler — ack-handler deadline (slow-store dead-air fix)',
       code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
       contextGraphId,
     });
+  });
+
+  it('deadline diagnostics do not read the external scheduler for a non-external mock store', async () => {
+    const onDecline = vi.fn();
+    const handler = await createHandler(
+      nonExternalHangingStore(),
+      { onDecline, ackHandlerDeadlineMs: 50 },
+    );
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(onDecline).toHaveBeenCalledOnce();
+    const details = onDecline.mock.calls[0]?.[0];
+    expect(details).toMatchObject({
+      code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+      contextGraphId,
+    });
+    expect(details.message).toContain('storePressure=unavailable');
+    expect(details.message).not.toContain('ackInflight=0');
+    expect(details.message).not.toContain('ackQueued=0');
+  });
+
+  it('deadline diagnostics can use an injected store-pressure provider', async () => {
+    const onDecline = vi.fn();
+    const handler = await createHandler(
+      nonExternalHangingStore(),
+      {
+        onDecline,
+        ackHandlerDeadlineMs: 50,
+        getStorePressure: () => ({
+          ackInflight: 2,
+          normalInflight: 3,
+          backgroundInflight: 4,
+          ackQueued: 5,
+          normalQueued: 6,
+          backgroundQueued: 7,
+          maxConcurrent: 8,
+          ackReservedSlots: 1,
+        }),
+      },
+    );
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(onDecline).toHaveBeenCalledOnce();
+    expect(onDecline.mock.calls[0]?.[0].message).toContain(
+      'ackInflight=2 ackQueued=5 normalQueued=6 backgroundQueued=7',
+    );
   });
 
   it('a healthy fast handler is unaffected by the deadline (returns its real reply)', async () => {

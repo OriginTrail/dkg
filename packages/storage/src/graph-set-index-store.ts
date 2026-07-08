@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -51,6 +51,10 @@ export interface GraphSetIndexStoreOptions {
 export class GraphSetIndexStore implements TripleStore {
   get queryCancellation() {
     return this.inner.queryCancellation;
+  }
+
+  getPressureSnapshot(): StorePressureSnapshot | undefined {
+    return this.inner.getPressureSnapshot?.();
   }
 
   private readonly inner: TripleStore;

@@ -1,8 +1,8 @@
 import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
-import type { StoreWorkPriority } from './triple-store.js';
+import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
 
-export interface StorePrioritySchedulerSnapshot {
+export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
   normalInflight: number;
   backgroundInflight: number;
