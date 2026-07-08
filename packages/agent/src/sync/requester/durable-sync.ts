@@ -7,6 +7,9 @@ import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure } 
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 
+const DKG_NS = 'http://dkg.io/ontology/';
+const MERKLE_ROOT_PREDICATE = `${DKG_NS}merkleRoot`;
+
 export interface DurableSyncSummary {
   insertedTriples: number;
   fetchedMetaTriples: number;
@@ -26,6 +29,23 @@ export interface DurableSyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
+}
+
+export type DurableSyncLifecycleAction = 'receive' | 'apply' | 'skip' | 'failure';
+
+export interface DurableSyncLifecycleEvent {
+  assetUal: string;
+  event: string;
+  action: DurableSyncLifecycleAction;
+  result: string;
+  contextGraphId: string;
+  remotePeerId: string;
+  fetchedMetaTriples: number;
+  fetchedDataTriples: number;
+  insertedMetaTriples?: number;
+  insertedDataTriples?: number;
+  rejectedKcs?: number;
+  reason?: string;
 }
 
 interface DurableSyncContext {
@@ -76,6 +96,7 @@ interface DurableSyncContext {
   storeInsert: (quads: Quad[]) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
+  logLifecycle?: (event: DurableSyncLifecycleEvent) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -97,6 +118,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     storeInsert,
     deleteCheckpoint,
     setCheckpoint,
+    logLifecycle,
     logInfo,
     logWarn,
     logDebug,
@@ -205,6 +227,20 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
+      const publishedAssetUals = publishedAssetUalsFromMeta(processed.verifiedMeta);
+      for (const assetUal of publishedAssetUals) {
+        logLifecycle?.({
+          assetUal,
+          event: 'sync_receive',
+          action: 'receive',
+          result: 'verified',
+          contextGraphId: pid,
+          remotePeerId,
+          fetchedMetaTriples: processed.totalFetchedMetaQuads,
+          fetchedDataTriples: processed.totalFetchedDataQuads,
+          rejectedKcs: processed.rejectedKcs,
+        });
+      }
       summary.bytesReceived += metaResult.bytesReceived + dataResult.bytesReceived;
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
@@ -242,6 +278,21 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         await storeInsert(processed.verifiedMeta);
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
+      }
+      for (const assetUal of publishedAssetUals) {
+        logLifecycle?.({
+          assetUal,
+          event: 'sync_apply',
+          action: 'apply',
+          result: 'inserted',
+          contextGraphId: pid,
+          remotePeerId,
+          fetchedMetaTriples: processed.totalFetchedMetaQuads,
+          fetchedDataTriples: processed.totalFetchedDataQuads,
+          insertedMetaTriples: processed.verifiedMeta.length,
+          insertedDataTriples: processed.verifiedData.length,
+          rejectedKcs: processed.rejectedKcs,
+        });
       }
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
@@ -294,4 +345,14 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   }
 
   return summary;
+}
+
+function publishedAssetUalsFromMeta(metaQuads: readonly Quad[]): string[] {
+  const out = new Set<string>();
+  for (const quad of metaQuads) {
+    if (quad.predicate === MERKLE_ROOT_PREDICATE && quad.subject.startsWith('did:dkg:')) {
+      out.add(quad.subject);
+    }
+  }
+  return [...out];
 }
