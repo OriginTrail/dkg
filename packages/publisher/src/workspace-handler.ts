@@ -536,6 +536,7 @@ export class SharedMemoryHandler {
       fromPeerId?: string;
       subGraphName?: string;
       rootEntityCount?: number;
+      statementCount?: number;
       insertedCount?: number;
       outcome?: string;
       retryable?: boolean;
@@ -562,6 +563,7 @@ export class SharedMemoryHandler {
         publisherPeerId: input.publisherPeerId,
         subGraphName: input.subGraphName,
         rootEntityCount: input.rootEntityCount,
+        statementCount: input.statementCount,
         insertedCount: input.insertedCount,
         outcome: input.outcome,
         retryable: input.retryable,
@@ -1209,6 +1211,17 @@ export class SharedMemoryHandler {
           withWriteLocksRejection = 'validation';
           return false;
         }
+        this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
+          assetUal,
+          contextGraphId,
+          shareOperationId,
+          publisherPeerId,
+          fromPeerId,
+          subGraphName,
+          rootEntityCount: manifestForValidation.length,
+          statementCount: quads.length,
+          outcome: 'accepted',
+        });
         onPhase?.('validate', 'end');
 
         if (casConditions && casConditions.length > 0) {
