@@ -134,6 +134,44 @@ describe('KA receiver lifecycle logs', () => {
     );
   });
 
+  it('logs a permanent SWM substrate rejection by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const entries = captureLogs();
+
+    (agent as unknown as {
+      getOrCreateSharedMemoryHandler(): {
+        handle(data: Uint8Array, fromPeerId: string): Promise<unknown>;
+      };
+    }).getOrCreateSharedMemoryHandler = () => ({
+      handle: async () => ({
+        applied: false,
+        retryable: false,
+        assetUal: ASSET_UAL,
+        cgId: CONTEXT_GRAPH_ID,
+        shareOperationId: 'share-op-asset-7',
+        publisherPeerId: PUBLISHER_PEER_ID,
+        reason: 'validation rejected payload',
+      }),
+    });
+
+    await (agent as unknown as {
+      handleSwmUpdate(data: Uint8Array, fromPeerId: string): Promise<Uint8Array>;
+    }).handleSwmUpdate(new Uint8Array([1, 2, 3]), PUBLISHER_PEER_ID);
+
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=swm_update_rejected'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('outcome=rejected'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('reason=validation rejected payload'),
+    );
+  });
+
   it('threads SWM assetUal from workspace request identity fields', async () => {
     const store = new OxigraphStore();
     let resolverInput: { agentAddress: string; kaNumber: string } | undefined;
