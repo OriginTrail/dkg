@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, logKaLifecycleEvent, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -788,11 +788,12 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    */
   public async maybeEmitSwmShareAck(this: DKGAgent, outcome: {
     applied: true;
+    assetUal?: string;
     cgId?: string;
     shareOperationId?: string;
     publisherPeerId?: string;
   }): Promise<void> {
-    const { shareOperationId, publisherPeerId } = outcome;
+    const { assetUal, cgId, shareOperationId, publisherPeerId } = outcome;
     if (!shareOperationId || !publisherPeerId) return;
     let selfPeerId: string;
     try {
@@ -803,6 +804,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     if (publisherPeerId === selfPeerId) return;
 
     const ackBytes = encodeSwmShareAck({ shareOperationId, ackPeerId: selfPeerId });
+    const ackCtx = createOperationContext('share', shareOperationId);
     // rc.9 PR-D codex follow-up #D1: use fire-and-forget
     // `sendToPeer` instead of durable `sendReliable`. Pre-D1
     // the ack went through the substrate outbox — but
@@ -825,10 +827,44 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       await this.messenger.sendToPeer(publisherPeerId, PROTOCOL_SWM_SHARE_ACK, ackBytes, {
         timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
       });
+      if (assetUal) {
+        logKaLifecycleEvent(this.log, ackCtx, {
+          assetUal,
+          stage: 'swm_share',
+          event: 'swm_share_ack_sent',
+          role: 'receiver',
+          localPeerId: selfPeerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: publisherPeerId,
+          metadata: {
+            contextGraphId: cgId,
+            shareOperationId,
+            outcome: 'sent',
+          },
+        });
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      if (assetUal) {
+        logKaLifecycleEvent(this.log, ackCtx, {
+          assetUal,
+          stage: 'swm_share',
+          event: 'swm_share_ack_failed',
+          role: 'receiver',
+          localPeerId: selfPeerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: publisherPeerId,
+          level: 'warn',
+          metadata: {
+            contextGraphId: cgId,
+            shareOperationId,
+            outcome: 'failed',
+            reason,
+          },
+        });
+      }
       this.log.warn(
-        createOperationContext('share', shareOperationId),
+        ackCtx,
         `SWM share ack to ${publisherPeerId} failed (best-effort, watchdog will retry the share if quorum slips): ${reason}`,
       );
     }
