@@ -8,6 +8,7 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   decodeSwmSenderKeyMessage,
+  encodeFinalizationMessage,
   encodePublishIntent,
   encodeWorkspacePublishRequest,
   type LogRecord,
@@ -21,6 +22,7 @@ import {
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
 } from '@origintrail-official/dkg-publisher';
+import { FinalizationHandler } from '../src/finalization-handler.js';
 import { DKGAgent } from '../src/index.js';
 
 const LOCAL_PEER_ID = '12D3KooWKaLifecycleReceiver';
@@ -67,6 +69,13 @@ function storageAckLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
   return entries.filter((entry) => (
     entry.message.includes('ka_lifecycle') &&
     entry.message.includes('stage=storage_ack')
+  ));
+}
+
+function finalizationLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
+  return entries.filter((entry) => (
+    entry.message.includes('ka_lifecycle') &&
+    entry.message.includes('stage=finalization')
   ));
 }
 
@@ -273,6 +282,60 @@ describe('KA receiver lifecycle logs', () => {
     );
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`),
+    );
+  });
+
+  it('logs already-confirmed finalization by assetUal', async () => {
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: ASSET_UAL,
+      predicate: 'http://dkg.io/ontology/status',
+      object: '"confirmed"',
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID, '42'),
+    }]);
+    const handler = new (FinalizationHandler as any)(
+      store,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ual: ASSET_UAL,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kcMerkleRoot: new Uint8Array(32),
+      txHash: '0x' + 'ab'.repeat(32),
+      blockNumber: 100,
+      batchId: 7,
+      startKAId: 7,
+      endKAId: 7,
+      publisherAddress: AUTHOR_AGENT_ADDRESS,
+      rootEntities: [ROOT_ENTITY],
+      timestampMs: Date.now(),
+      operationId: 'finalization-lifecycle-test',
+      targetContextGraphId: '42',
+    }), CONTEXT_GRAPH_ID);
+
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=finalization_already_confirmed'),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('role=receiver'),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`localPeerId=${LOCAL_PEER_ID}`),
+    );
+    expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('localNodeIdentityId=42'),
     );
   });
 });
