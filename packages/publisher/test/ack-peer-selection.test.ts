@@ -57,13 +57,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     expect(out).toEqual([RELAYS[0], STAKED[0], STAKED[1], STAKED[2]]);
   });
 
-  it('quorum-satisfied shortcut cannot exclude connected listed relays when the confirmed set is foreign-poisoned', () => {
-    // Post-restart identify race: 3 stale foreign-network cores classify
-    // first (identify-derived core claims are chain-agnostic), the real
-    // relays are connected but not yet classified. The shortcut fires on
-    // the foreign trio — it must still include the connected listed relays,
-    // or chain verification rejects all 3 ACKs and quorum dies with valid
-    // signers connected (the regression PR #1482 originally guarded).
+  it('quorum-satisfied confirmed-core tier does not fan out to preferred rest peers', () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const out = selectACKCandidatePeers({
       connectedPeers: [...foreign, RELAYS[0], RELAYS[1]],
@@ -71,10 +65,10 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       knownCorePeerIds: new Set(foreign),
       requiredACKs: 3,
     });
-    expect(out).toEqual([...foreign, RELAYS[0], RELAYS[1]]);
+    expect(out).toEqual(foreign);
   });
 
-  it('quorum-satisfied shortcut keeps unlisted connected peers when using preference-only relays', () => {
+  it('quorum-satisfied confirmed-core tier does not fan out to unrelated connected peers', () => {
     const foreign = ['foreign-1', 'foreign-2', 'foreign-3'];
     const unlisted = 'staked-core-4';
     const out = selectACKCandidatePeers({
@@ -83,10 +77,10 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       knownCorePeerIds: new Set(foreign),
       requiredACKs: 3,
     });
-    expect(out).toEqual([...foreign, unlisted]);
+    expect(out).toEqual(foreign);
   });
 
-  it('V2 rounds: v2-advertised tier first, then fallback candidates', () => {
+  it('V2 rounds return only the v2-advertised tier when it reaches quorum', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: [...STAKED, RELAYS[0], RELAYS[1], 'edge-x'],
       preferredACKPeerIds: RELAYS,
@@ -95,14 +89,14 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       requiredACKs: 3,
       protocol: PROTOCOL_STORAGE_ACK_V2,
     });
-    expect(out).toEqual([RELAYS[1], STAKED[0], STAKED[1], RELAYS[0], STAKED[2], 'edge-x']);
+    expect(out).toEqual([RELAYS[1], STAKED[0], STAKED[1]]);
   });
 
-  it('V2 rounds keep fallback candidates when the advertised tier already reaches quorum', () => {
+  it('V2 rounds include fallback candidates when the advertised tier is below quorum', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
       knownCorePeerIds: new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G']),
-      knownCorePeerIdsV2: new Set(['A', 'B', 'C']),
+      knownCorePeerIdsV2: new Set(['A', 'B']),
       requiredACKs: 3,
       protocol: PROTOCOL_STORAGE_ACK_V2,
     });
@@ -113,10 +107,19 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const connected = ['core-1', 'core-2', 'core-3', 'core-4', 'core-5', 'core-6', 'core-7'];
     const out = selectACKCandidatePeers({
       connectedPeers: connected,
-      knownCorePeerIds: new Set(['core-1', 'core-2', 'core-3']),
+      knownCorePeerIds: new Set(['core-1', 'core-2']),
       requiredACKs: 3,
     });
     expect(out).toEqual(connected);
+  });
+
+  it('confirmed-core quorum does not dial edge or stale fallback peers', () => {
+    const out = selectACKCandidatePeers({
+      connectedPeers: ['core1', 'core2', 'core3', 'edge1', 'edge2'],
+      knownCorePeerIds: new Set(['core1', 'core2', 'core3']),
+      requiredACKs: 3,
+    });
+    expect(out).toEqual(['core1', 'core2', 'core3']);
   });
 
   it('without a preference list, behavior is unchanged (cores first, everyone dialable)', () => {

@@ -154,12 +154,21 @@ export function selectACKCandidatePeersWithDiagnostics(
   } else if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
     const v2Advertised = tiers.find((tier) => tier.name === 'v2Advertised')?.peers ?? [];
     peers = rankPreferredWithinTier(v2Advertised, preferredACKPeers);
-    appendFallback(
-      peers,
-      flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
-    );
+    if (peers.length < input.requiredACKs) {
+      appendFallback(
+        peers,
+        flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
+      );
+    }
   } else {
-    peers = flattenTiers(tiers, preferredACKPeers);
+    const confirmedCore = tiers.find((tier) => tier.name === 'confirmedCore')?.peers ?? [];
+    peers = rankPreferredWithinTier(confirmedCore, preferredACKPeers);
+    if (peers.length < input.requiredACKs) {
+      appendFallback(
+        peers,
+        flattenTiers(tiers.filter((tier) => tier.name !== 'confirmedCore'), preferredACKPeers),
+      );
+    }
   }
 
   const tierMap = tierByPeer(tiers);
