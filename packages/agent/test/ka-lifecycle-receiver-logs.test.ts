@@ -95,6 +95,13 @@ function finalizationLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
   ));
 }
 
+function reconcileLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
+  return entries.filter((entry) => (
+    entry.message.includes('ka_lifecycle') &&
+    entry.message.includes('stage=reconcile')
+  ));
+}
+
 async function insertAgentGate(
   agent: DKGAgent,
   contextGraphId: string,
@@ -989,6 +996,57 @@ describe('KA receiver lifecycle logs', () => {
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('retryable=true'),
     );
+  });
+
+  it('logs chain reconcile promote decisions by assetUal', async () => {
+    const agent = await createReceiverAgent();
+    const internals = agent as unknown as {
+      subscribedContextGraphs: Map<string, { subscribed: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
+      chain: MockChainAdapter & {
+        getContextGraphKCCount?: (onChainCgId: bigint) => Promise<number>;
+        getBlockNumber?: () => Promise<number | undefined>;
+      };
+      reconcileChainOrdinal: (
+        localCgId: string,
+        onChainCgId: bigint,
+        ordinal: number,
+        headBlock: number | undefined,
+      ) => Promise<{ status: 'reconciled'; blockNumber: number; assetUal: string; kaId: string }>;
+      runVmReconcileForCg(localCgId: string): Promise<void>;
+    };
+    internals.subscribedContextGraphs.set(CONTEXT_GRAPH_ID, {
+      subscribed: true,
+      onChainId: '77',
+      lastReconciledOrdinal: 0,
+    });
+    internals.chain.getContextGraphKCCount = async () => 1;
+    internals.chain.getBlockNumber = async () => undefined;
+    internals.reconcileChainOrdinal = async () => ({
+      status: 'reconciled',
+      blockNumber: 12,
+      assetUal: ASSET_UAL,
+      kaId: '7',
+    });
+    const entries = captureLogs();
+
+    try {
+      await internals.runVmReconcileForCg(CONTEXT_GRAPH_ID);
+    } finally {
+      await agent.stop().catch(() => undefined);
+    }
+
+    const messages = reconcileLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=reconcile_promote'));
+    expect(messages).toContainEqual(expect.stringContaining('role=sync'));
+    expect(messages).toContainEqual(expect.stringContaining(`localPeerId=${LOCAL_PEER_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('localNodeIdentityId=42'));
+    expect(messages).toContainEqual(expect.stringContaining(`contextGraphId=${CONTEXT_GRAPH_ID}`));
+    expect(messages).toContainEqual(expect.stringContaining('onChainCgId=77'));
+    expect(messages).toContainEqual(expect.stringContaining('ordinal=0'));
+    expect(messages).toContainEqual(expect.stringContaining('kaId=7'));
+    expect(messages).toContainEqual(expect.stringContaining('action=promote'));
+    expect(messages).toContainEqual(expect.stringContaining('result=reconciled'));
   });
 
   it('logs already-confirmed finalization by assetUal', async () => {
