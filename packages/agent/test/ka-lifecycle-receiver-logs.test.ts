@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -66,6 +67,14 @@ function captureLogs(): LogRecord[] {
   const entries: LogRecord[] = [];
   Logger.setSink((entry) => entries.push(entry));
   return entries;
+}
+
+function readOptionalUtf8(path: URL): string | undefined {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 function swmLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
@@ -378,6 +387,24 @@ describe('KA receiver lifecycle logs', () => {
     expect(proof.grep).toContain('localPeerId=12D3KooWKaLifecycleReceiver');
     expect(proof.grep).not.toContain('raw proof payload');
     expect(proof.grep).not.toContain(`${ASSET_UAL}-other`);
+  });
+
+  it('documents the KA lifecycle log proof handoff sources and grep surface', () => {
+    const handoff = readOptionalUtf8(new URL('../../../docs/use-dkg/ka-publish-lifecycle-log-proof.md', import.meta.url));
+
+    expect(handoff).toBeDefined();
+    if (!handoff) return;
+    expect(handoff).toContain('CONTEXT.md');
+    expect(handoff).toContain('docs/adr/0001-log-ka-publish-lifecycle-by-asset-ual.md');
+    expect(handoff).toContain('grep');
+    expect(handoff).toContain('ka_lifecycle');
+    expect(handoff).toContain('assetUal');
+    expect(handoff).toContain('identity');
+    expect(handoff).toContain('storage_ack');
+    expect(handoff).toContain('finalization');
+    expect(handoff).toContain('sync');
+    expect(handoff).toContain('reconcile');
+    expect(handoff).toContain('raw payload');
   });
 
   it('keeps Sender Key v1 cryptographic binding compatible when assetUal is carried for logs', () => {
