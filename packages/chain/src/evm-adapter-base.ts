@@ -1760,11 +1760,44 @@ export class EVMChainAdapterBase {
    * removes). Eligibility fails closed to the primary signer (see selectSigner).
    */
   protected async nextRandomSamplingSigner(): Promise<Wallet> {
-    return this.selectSigner({
-      txClass: 'rotatable-free',
-      funding: { kind: 'native-only', nativeFloorWei: this.minPublisherNativeWei },
-      preferIdle: true,
-    });
+    // Bounded loop: every failed revalidation EVICTS the chosen wallet from
+    // the registered set (strictly shrinking pool) and the primary signer
+    // returns unconditionally, so this cannot spin.
+    for (;;) {
+      const chosen = await this.selectSigner({
+        txClass: 'rotatable-free',
+        funding: { kind: 'native-only', nativeFloorWei: this.minPublisherNativeWei },
+        preferIdle: true,
+      });
+      // The primary signer is the identity anchor (registered at profile
+      // creation); if IT stopped resolving, the node is broken at a level
+      // rotation cannot fix — keep existing behavior.
+      if (chosen.address === this.signer.address) return chosen;
+      // Durable close for the OUT-OF-BAND removal race:
+      // `registeredOperationalAddresses` only observes same-process
+      // add/remove, so a wallet removed from THIS identity (and possibly
+      // re-registered to ANOTHER) by a second node instance or a direct admin
+      // tx stays in the set — and an RS tx it signs would act for the OTHER
+      // identity (`RandomSampling` keys off `getIdentityId(msg.sender)`),
+      // silently burning that identity's proof period. Revalidate only the
+      // CHOSEN wallet on-chain (one fresh read per RS selection). FAIL OPEN on
+      // read errors (an RPC blip must not stall proofs); fail CLOSED on a
+      // definitive mismatch: evict + re-select.
+      let onChainId: bigint | null;
+      try {
+        onChainId = await this.refreshIdentityIdForAddress(chosen.address);
+      } catch {
+        onChainId = null;
+      }
+      if (onChainId === null) return chosen;
+      const ourId = await this.getIdentityId().catch(() => 0n);
+      if (ourId === 0n || onChainId === ourId) return chosen;
+      this.registeredOperationalAddresses.delete(chosen.address.toLowerCase());
+      console.warn(
+        `[chain] RS signer ${chosen.address} no longer resolves to this node's identity ` +
+        `(on-chain identityId=${onChainId}, ours=${ourId}) — evicted from RS rotation; re-selecting.`,
+      );
+    }
   }
 
   /**
