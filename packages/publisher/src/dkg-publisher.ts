@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY, type KaLifecycleLogLevel, type KaLifecycleMetadataValue, type KaLifecycleStage } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -2607,6 +2607,59 @@ export class DKGPublisher implements Publisher {
     // ZeroContextGraphId. Always prefer the explicit target override.
     const v10CgDomain = String(onChainContextGraphId ?? contextGraphId);
     const swmGraphId = contextGraphId;
+    const attributionIdentityId: bigint = hasAttributionOverride
+      ? options.publisherNodeIdentityIdOverride!
+      : this.publisherNodeIdentityId;
+    const localPeerIdForLifecycle = normalizedPublisherPeerId || 'unknown';
+    let lifecycleAssetUal: string | undefined;
+    let identityLifecycleEmitted = false;
+    const rememberLifecycleAssetUal = async (kaId: bigint | undefined): Promise<string | undefined> => {
+      if (lifecycleAssetUal || kaId === undefined) return lifecycleAssetUal;
+      try {
+        lifecycleAssetUal = await this.resolveKaUal(kaId);
+      } catch {
+        lifecycleAssetUal = undefined;
+      }
+      return lifecycleAssetUal;
+    };
+    const emitPublishLifecycle = (input: {
+      stage: KaLifecycleStage;
+      event: string;
+      level?: KaLifecycleLogLevel;
+      peer?: string;
+      peerNodeIdentityId?: string;
+      metadata?: Record<string, KaLifecycleMetadataValue>;
+    }): void => {
+      if (!lifecycleAssetUal) return;
+      logKaLifecycleEvent(this.log, ctx, {
+        assetUal: lifecycleAssetUal,
+        stage: input.stage,
+        event: input.event,
+        role: 'publisher',
+        localPeerId: localPeerIdForLifecycle,
+        localNodeIdentityId: attributionIdentityId.toString(),
+        peer: input.peer,
+        peerNodeIdentityId: input.peerNodeIdentityId,
+        level: input.level,
+        metadata: input.metadata,
+      });
+    };
+    if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
+      await rememberLifecycleAssetUal(options.precomputedAttestation.reservedKaId);
+      emitPublishLifecycle({
+        stage: 'identity',
+        event: 'asset_ual_allocated',
+        metadata: {
+          contextGraphId,
+          kaId: options.precomputedAttestation.reservedKaId.toString(),
+          publisherAddress,
+          entityCount,
+          publicRecordCount: allSkolemizedQuads.length,
+          hiddenCommitmentCount: privateRoots.length,
+        },
+      });
+      identityLifecycleEmitted = true;
+    }
 
     // Numeric-negative and numeric-zero CG ids are programming errors —
     // reject them here BEFORE burning CPU on ACK collection or on-chain
@@ -2666,6 +2719,27 @@ export class DKGPublisher implements Publisher {
           subGraphName: options.subGraphName,
           merkleLeafCount: kcMerkleLeafCount,
         };
+        const lifecycleAckMode = useCuratedCatalog
+          ? 'curated_catalog'
+          : privateRoots.length > 0
+            ? 'folded_private'
+            : 'public';
+        emitPublishLifecycle({
+          stage: 'storage_ack',
+          event: 'request',
+          metadata: {
+            contextGraphId: v10CgDomain,
+            swmGraphId,
+            subGraphName: options.subGraphName,
+            ackMode: lifecycleAckMode,
+            kaCount,
+            rootEntityCount: rootEntities.length,
+            publicByteSize: effectiveByteSize.toString(),
+            tokenAmount: precomputedTokenAmount.toString(),
+            merkleLeafCount: kcMerkleLeafCount,
+            outcome: 'request',
+          },
+        });
         if (useCuratedCatalog) {
           if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
             throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
@@ -2708,6 +2782,19 @@ export class DKGPublisher implements Publisher {
         const provenance = v10ACKs
           .map((a) => `${a.peerId.slice(-8)}:${a.subscriptionSource ?? '?'}`)
           .join(', ');
+        for (const ack of v10ACKs) {
+          emitPublishLifecycle({
+            stage: 'storage_ack',
+            event: 'success',
+            peer: ack.peerId,
+            peerNodeIdentityId: ack.nodeIdentityId.toString(),
+            metadata: {
+              outcome: 'success',
+              quorumCollected: v10ACKs.length,
+              subscriptionSource: ack.subscriptionSource,
+            },
+          });
+        }
         this.log.info(
           ctx,
           `V10: Collected ${v10ACKs.length} core node ACKs [${provenance}]`,
@@ -2729,6 +2816,16 @@ export class DKGPublisher implements Publisher {
         // from "QuorumUnmetError(collected=0/3, peers=[...])"
         // without any further plumbing.
         const tag = err instanceof Error ? err.name : 'unknown';
+        emitPublishLifecycle({
+          stage: 'storage_ack',
+          event: 'failure',
+          level: 'warn',
+          metadata: {
+            outcome: 'failure',
+            errorClass: tag,
+            reason: err instanceof Error ? err.message : String(err),
+          },
+        });
         this.log.warn(
           ctx,
           `V10 ACK collection failed (${tag}): ${err instanceof Error ? err.message : String(err)}`,
@@ -2796,9 +2893,6 @@ export class DKGPublisher implements Publisher {
     // "override absent". The daemon's own identity is still used
     // elsewhere (signer resolution); this only affects the on-chain
     // `PublishParams.publisherNodeIdentityId`.
-    const attributionIdentityId: bigint = hasAttributionOverride
-      ? options.publisherNodeIdentityIdOverride!
-      : this.publisherNodeIdentityId;
     let usedV10Path = false;
 
     // Gate: skip on-chain only when we can't resolve a target CG id or
@@ -3139,6 +3233,22 @@ export class DKGPublisher implements Publisher {
           // precomputedAttestation (the agent is the single allocation point).
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
+        await rememberLifecycleAssetUal(reservedKaId);
+        if (!identityLifecycleEmitted && reservedKaId !== undefined) {
+          emitPublishLifecycle({
+            stage: 'identity',
+            event: 'asset_ual_allocated',
+            metadata: {
+              contextGraphId,
+              kaId: reservedKaId.toString(),
+              publisherAddress,
+              entityCount,
+              publicRecordCount: allSkolemizedQuads.length,
+              hiddenCommitmentCount: privateRoots.length,
+            },
+          });
+          identityLifecycleEmitted = true;
+        }
         try {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
           // curated catalog path, the chain submit MUST carry the same
@@ -3165,6 +3275,18 @@ export class DKGPublisher implements Publisher {
               );
             }
           }
+          emitPublishLifecycle({
+            stage: 'chain',
+            event: 'submit',
+            metadata: {
+              contextGraphId: v10CgId.toString(),
+              kaId: reservedKaId?.toString(),
+              byteSize: effectiveByteSize.toString(),
+              tokenAmount: tokenAmount.toString(),
+              ackCount: v10ACKs.length,
+              merkleLeafCount: kcMerkleLeafCount,
+            },
+          });
           onChainResult = await this.chain.createKnowledgeAssets!({
             publishOperationId,
             contextGraphId: v10CgId,
@@ -3227,6 +3349,19 @@ export class DKGPublisher implements Publisher {
           throw new Error('Publish succeeded but DKGKnowledgeAssets address is unavailable for UAL assignment');
         }
         ual = `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
+        lifecycleAssetUal = ual;
+        emitPublishLifecycle({
+          stage: 'chain',
+          event: 'confirm',
+          metadata: {
+            contextGraphId: v10CgId.toString(),
+            kaId: kaId.toString(),
+            txHash: onChainResult.txHash,
+            blockNumber: onChainResult.blockNumber,
+            txIndex: onChainResult.txIndex,
+            tokenAmount: tokenAmount.toString(),
+          },
+        });
 
         for (const km of kaMetadata) {
           km.kcUal = ual;
@@ -3311,6 +3446,17 @@ export class DKGPublisher implements Publisher {
         // the success branch, so a failed ACK/chain publish never exposes one
         // (CLEAR/REPLACE — see persistCatalogEntry).
         await persistCatalogEntry();
+        emitPublishLifecycle({
+          stage: 'vm',
+          event: 'promote',
+          metadata: {
+            kaId: kaId.toString(),
+            vmGraph,
+            vmRecordCount: vmQuads.length,
+            rootEntityCount: manifestEntries.length,
+            status: 'confirmed',
+          },
+        });
 
         status = 'confirmed';
         onPhase?.('chain:submit', 'end');
@@ -3397,6 +3543,16 @@ export class DKGPublisher implements Publisher {
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
     };
+    emitPublishLifecycle({
+      stage: 'finalization',
+      event: 'complete',
+      metadata: {
+        kaId: result.kaId.toString(),
+        status: result.status,
+        ackCount: result.v10ACKs?.length ?? 0,
+        localChainSkipReason: result.localChainSkipReason,
+      },
+    });
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
       ...result,
