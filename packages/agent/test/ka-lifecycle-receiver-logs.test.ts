@@ -334,7 +334,7 @@ describe('KA receiver lifecycle logs', () => {
           merkleRoot: params.merkleRoot,
           contextGraphId: params.contextGraphId,
           publisherPeerId: PUBLISHER_PEER_ID,
-          publicByteSize: params.publicByteSize,
+          publicByteSize: Number(params.publicByteSize),
           isPrivate: false,
           kaCount: params.kaCount,
           rootEntities: params.rootEntities,

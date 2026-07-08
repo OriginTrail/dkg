@@ -37,6 +37,8 @@ export interface KaLifecycleLogProof {
   grepLines: string[];
   stageTrail: string[];
   eventTrail: string[];
+  roleTrail: string[];
+  sourceTrail: string[];
   missingRequiredStages: string[];
   hasAckLog: boolean;
   hasStateChangeLog: boolean;
@@ -71,6 +73,8 @@ export function buildKaLifecycleLogProof(
     .filter((entry): entry is KaLifecycleProofEntry => entry?.fields.assetUal === assetUal);
   const stageTrail = unique(entries.map((entry) => entry.fields.stage).filter(Boolean));
   const eventTrail = entries.map((entry) => entry.fields.event).filter(Boolean);
+  const roleTrail = unique(entries.map((entry) => entry.fields.role).filter(Boolean));
+  const sourceTrail = unique(entries.map((entry) => entry.source).filter(Boolean));
   return {
     assetUal,
     entries,
@@ -80,6 +84,8 @@ export function buildKaLifecycleLogProof(
     },
     stageTrail,
     eventTrail,
+    roleTrail,
+    sourceTrail,
     missingRequiredStages: KA_LIFECYCLE_PROOF_REQUIRED_STAGES.filter((stage) => !stageTrail.includes(stage)),
     hasAckLog: entries.some((entry) => entry.fields.stage === 'storage_ack' || /ack/i.test(entry.fields.event ?? '')),
     hasStateChangeLog: entries.some((entry) => STATE_CHANGE_EVENTS.has(entry.fields.event ?? '')),
