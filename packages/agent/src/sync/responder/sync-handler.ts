@@ -11,7 +11,6 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { SyncRequestEnvelope } from '../auth/request-build.js';
-import { shouldWithholdAgentsDurableMeta } from '../agents-meta-policy.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
@@ -39,7 +38,7 @@ type PreparedResponderSession = {
   refreshRowList: boolean;
 };
 
-export interface RegisterSyncHandlerParams {
+interface RegisterSyncHandlerParams {
   /**
    * `register` callable. In production this is bound to the RAW
    * ProtocolRouter (via an adapter that re-exposes the string `peerId`),
@@ -79,57 +78,6 @@ export interface RegisterSyncHandlerParams {
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
-}
-
-/**
- * Explicit, typed dependencies for {@link buildSyncResponderRegistration}: the full
- * responder params EXCEPT the serve-skip predicate, plus a `serveAgentsMetaEnv`
- * reader. The env is injected (not read here) so the boundary where daemon runtime
- * config enters the system stays at the caller and this sync-layer factory is
- * unit-testable without `process.env` or a partial `DKGAgent`.
- */
-export interface SyncResponderRegistrationDeps
-  extends Omit<RegisterSyncHandlerParams, 'shouldWithholdDurableMeta'> {
-  /**
-   * Reads `DKG_SERVE_AGENTS_META` and is invoked FRESH per sync request, so the
-   * serve-skip kill-switch stays runtime-hot (reversible with no node restart). The
-   * production caller passes `() => process.env.DKG_SERVE_AGENTS_META`.
-   */
-  serveAgentsMetaEnv: () => string | undefined;
-}
-
-/**
- * Assemble the sync-responder registration from explicit deps — the SINGLE
- * production source of the responder params (`start()` passes the result straight
- * into {@link registerSyncHandler}). Lives in the sync layer (not on the 5k-line
- * lifecycle class) so sync policy stays with the sync code and the exact wired
- * params — including the injected serve-skip predicate `shouldWithholdDurableMeta`
- * (#1233) — are unit-testable from a plain deps object. The predicate delegates to
- * the pure `shouldWithholdAgentsDurableMeta` resolver, reading the env via the
- * injected `serveAgentsMetaEnv` reader FRESH per call (runtime-hot).
- */
-export function buildSyncResponderRegistration(
-  deps: SyncResponderRegistrationDeps,
-): RegisterSyncHandlerParams {
-  const { serveAgentsMetaEnv, ...rest } = deps;
-  return {
-    ...rest,
-    // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
-    // unless the operator opts in. Env read via the injected reader, FRESH per call.
-    shouldWithholdDurableMeta: (contextGraphId) =>
-      shouldWithholdAgentsDurableMeta(contextGraphId, serveAgentsMetaEnv()),
-  };
-}
-
-/**
- * Default production reader for the serve-skip kill-switch env var, injected by
- * `start()` as the `serveAgentsMetaEnv` dep. Extracted + exported (rather than an
- * inline thunk at the call site) so the EXACT `DKG_SERVE_AGENTS_META` name and its
- * fresh-per-call read are unit-testable — a typo here would silently disable the
- * #1233 serve-skip with every suite green.
- */
-export function readServeAgentsMetaEnv(): string | undefined {
-  return process.env.DKG_SERVE_AGENTS_META;
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;

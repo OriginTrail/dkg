@@ -32,51 +32,37 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
 // `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by
 // the root-set shape. Run UNSERIALIZED they delete each other's just-inserted
 // record and a shared root ends with ZERO `_meta` rows. So we lock at the SAME
-// granularity as the prune's blast radius — ONE lock per individual root, acquired
-// in sorted order (deadlock-free) — so any two writes sharing a root serialize
-// while writes for disjoint roots stay concurrent. Locking the mutation boundary
-// (per root) rather than the incidental single-root heartbeat shape matters
-// because the direct-protocol receive handler does not enforce singleton
-// agents-CG writes. PER-PROCESS is sufficient: an agent's heartbeats land on the
-// same receiving node and the prune only touches that node's local store. Each map
-// entry self-evicts once its chain drains, so it stays bounded.
-const _agentMetaLocks = new Map<string, Promise<unknown>>();
+// granularity as the prune's blast radius — one lock per individual root — so any
+// two writes sharing a root serialize while writes for disjoint roots stay
+// concurrent. Locking the mutation boundary (per root) rather than the incidental
+// single-root heartbeat shape matters because the direct-protocol receive handler
+// does not enforce singleton agents-CG writes.
+//
+// This is the SAME gate-based multi-key lock idiom as `withWriteLocks` in
+// dkg-publisher.ts / workspace-handler.ts (one concurrency model in the codebase,
+// not a second recursive one): sort+dedupe the keys, snapshot the predecessor gate
+// per key, install ONE shared gate for every key (synchronously, so there is no
+// partial-hold + wait → deadlock-free), await the predecessors, run `fn`, then
+// release the gate and evict the keys it still owns. PER-PROCESS is sufficient: an
+// agent's heartbeats land on the same receiving node and the prune only touches
+// that node's local store. Entries self-evict, so the map stays bounded.
+const _agentMetaWriteLocks = new Map<string, Promise<void>>();
 
-async function withAgentMetaLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = _agentMetaLocks.get(key);
-  // Build our work promise BEFORE awaiting `prev` so a concurrent caller chains
-  // after us rather than both seeing `prev` and running in parallel.
-  const run = (async () => {
-    if (prev) {
-      try { await prev; } catch { /* the prior holder handled its own error */ }
-    }
-    return fn();
-  })();
-  _agentMetaLocks.set(key, run);
+async function withAgentMetaWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+  const uniqueKeys = [...new Set(keys)].sort();
+  const predecessor = Promise.all(uniqueKeys.map((k) => _agentMetaWriteLocks.get(k) ?? Promise.resolve()));
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  for (const k of uniqueKeys) _agentMetaWriteLocks.set(k, gate);
+  await predecessor;
   try {
-    return await run;
+    return await fn();
   } finally {
-    if (_agentMetaLocks.get(key) === run) _agentMetaLocks.delete(key);
+    release();
+    for (const k of uniqueKeys) {
+      if (_agentMetaWriteLocks.get(k) === gate) _agentMetaWriteLocks.delete(k);
+    }
   }
-}
-
-/**
- * Acquire one lock per individual root in `rootEntities`, in sorted order (so
- * lock-ordering is deterministic → deadlock-free), then run `fn` while holding all
- * of them. Two calls whose root sets INTERSECT share ≥1 root lock and serialize;
- * calls for disjoint roots run concurrently. This matches the prune predicate,
- * which deletes by any matching member root. Empty roots → no lock (the prune is a
- * no-op for empty roots, so there is nothing to serialize).
- */
-function withAgentMetaRootLocks<T>(
-  contextGraphId: string,
-  rootEntities: readonly string[],
-  fn: () => Promise<T>,
-): Promise<T> {
-  const keys = [...new Set(rootEntities)].sort().map((root) => `${contextGraphId}:${root}`);
-  const acquire = (i: number): Promise<T> =>
-    i >= keys.length ? fn() : withAgentMetaLock(keys[i], () => acquire(i + 1));
-  return acquire(0);
 }
 
 /**
@@ -144,12 +130,13 @@ export async function insertBoundedAgentRegistryMeta(opts: {
   }
 
   // Serialize insert+prune at the SAME granularity as the prune's blast radius —
-  // one lock per individual root, acquired in sorted order (see
-  // withAgentMetaRootLocks). Any two writes sharing a root (identical OR overlapping
-  // sets, e.g. {X} vs {X,Y}) serialize so they can't insert-then-prune each other
-  // down to zero records; writes for disjoint roots stay concurrent. The lock(s)
-  // span insert→prune and are released only after the prune try/catch.
-  await withAgentMetaRootLocks(contextGraphId, rootEntities, async () => {
+  // one lock per individual root (see withAgentMetaWriteLocks). Any two writes
+  // sharing a root (identical OR overlapping sets, e.g. {X} vs {X,Y}) serialize so
+  // they can't insert-then-prune each other down to zero records; writes for
+  // disjoint roots stay concurrent. The locks span insert→prune and are released
+  // only after the prune try/catch.
+  const lockKeys = rootEntities.map((root) => `${contextGraphId}:${root}`);
+  await withAgentMetaWriteLocks(lockKeys, async () => {
     // Insert FIRST so a prune failure can never leave the agent with no record.
     // An insert failure PROPAGATES (caller aborts; nothing durable changed).
     await store.insert(metadataQuads);

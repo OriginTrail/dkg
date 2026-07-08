@@ -211,12 +211,12 @@ import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
+import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
-import { registerSyncHandler, buildSyncResponderRegistration, readServeAgentsMetaEnv } from './sync/responder/sync-handler.js';
+import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
 import {
@@ -1714,7 +1714,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // parseSyncRequest expects — and the adapter re-exposes the string
     // peerId contract registerSyncHandler relies on. (Reverts rc.9 PR-E
     // for sync only; other substrate protocols keep their dedup.)
-    registerSyncHandler(buildSyncResponderRegistration({
+    registerSyncHandler({
       register: (protocol, handler) =>
         this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
       protocolSync: PROTOCOL_SYNC,
@@ -1726,14 +1726,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-      // Env boundary at the lifecycle wiring: the injected reader is called FRESH
-      // per request, so the serve-skip kill-switch (#1233) is reversible at runtime
-      // (no restart). `readServeAgentsMetaEnv` is the single named, unit-tested
-      // production reader (a typo'd var name would silently disable serve-skip).
-      serveAgentsMetaEnv: readServeAgentsMetaEnv,
+      // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
+      // unless the operator opts in. The env boundary lives HERE at the lifecycle
+      // wiring — the injected reader `() => process.env.DKG_SERVE_AGENTS_META` is
+      // called FRESH per request, so the kill-switch is reversible at runtime (no
+      // restart); the pure `createAgentsDurableMetaWithholdPredicate` factory stays
+      // env-agnostic.
+      shouldWithholdDurableMeta: createAgentsDurableMetaWithholdPredicate(
+        () => process.env.DKG_SERVE_AGENTS_META,
+      ),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
-    }));
+    });
 
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
