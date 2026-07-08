@@ -103,7 +103,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 
-  it('a configured ACK preference list orders listed peers first and bounds fallback spray (2026-07-07 incident)', async () => {
+  it('a configured ACK preference list orders listed peers first and retains below-quorum fallback candidates (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
       confirmedCores: [CORE[2]],
@@ -112,12 +112,13 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
 
     // Listed peers are preferred within each tier (confirmed cores, then
-    // rest), and fallback stays bounded at 2x quorum so a stale confirmed
-    // set cannot fan out to every connected peer.
+    // rest). Because the confirmed tier is below quorum, every connected
+    // fallback candidate remains dialable; this intentionally avoids the old
+    // 2x-quorum cap making quorum unreachable under correlated failures.
     expect(a.getACKCandidatePeers()).toEqual([
       CORE[2],
       CORE[0], CORE[1], CORE[3],
-      foreign[0], foreign[1],
+      foreign[0], foreign[1], foreign[2],
     ]);
   });
 
@@ -191,6 +192,25 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
       CORE[1],
       CORE[3],
       ...EDGE,
+    ]);
+  });
+
+  it('V2 folded-private ACK fallback is retained, not capped, while advertised V2 peers are below quorum', async () => {
+    const extraEdge = 'edge-3';
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: [...CORE, ...EDGE, extraEdge],
+      lastKnownRequiredACKs: 3,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[1],
+      CORE[2],
+      CORE[3],
+      ...EDGE,
+      extraEdge,
     ]);
   });
 
