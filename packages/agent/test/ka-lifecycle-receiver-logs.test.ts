@@ -8,13 +8,19 @@ import {
   contextGraphDataUri,
   contextGraphMetaUri,
   decodeSwmSenderKeyMessage,
+  encodePublishIntent,
   encodeWorkspacePublishRequest,
   type LogRecord,
   type OperationContext,
   type SwmSenderKeyMessageMsg,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SharedMemoryHandler } from '@origintrail-official/dkg-publisher';
+import {
+  SharedMemoryHandler,
+  StorageACKHandler,
+  computeFlatKCRootV10,
+  computeFlatKCMerkleLeafCountV10,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 
 const LOCAL_PEER_ID = '12D3KooWKaLifecycleReceiver';
@@ -54,6 +60,13 @@ function senderKeyLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
   return entries.filter((entry) => (
     entry.message.includes('ka_lifecycle') &&
     entry.message.includes('stage=sender_key')
+  ));
+}
+
+function storageAckLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
+  return entries.filter((entry) => (
+    entry.message.includes('ka_lifecycle') &&
+    entry.message.includes('stage=storage_ack')
   ));
 }
 
@@ -206,6 +219,60 @@ describe('KA receiver lifecycle logs', () => {
     );
     expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('role=receiver'),
+    );
+  });
+
+  it('logs StorageACK success by assetUal', async () => {
+    const store = new OxigraphStore();
+    const swmGraph = 'did:dkg:context-graph:42/_shared_memory';
+    const swmQuads = [{
+      subject: ROOT_ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Storage ACK lifecycle"',
+      graph: swmGraph,
+    }];
+    await store.insert(swmQuads);
+
+    const merkleRoot = computeFlatKCRootV10(swmQuads, []);
+    const merkleLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    const handler = new StorageACKHandler(store, {
+      nodeRole: 'core',
+      nodeIdentityId: 42n,
+      signerWallet: ethers.Wallet.createRandom(),
+      contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      localPeerId: LOCAL_PEER_ID,
+      ackHandlerDeadlineMs: 0,
+    } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
+    const entries = captureLogs();
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId: '42',
+      publisherPeerId: PUBLISHER_PEER_ID,
+      publicByteSize: 1024,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [ROOT_ENTITY],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount,
+      assetUal: ASSET_UAL,
+    } as unknown as Parameters<typeof encodePublishIntent>[0]);
+
+    await handler.handler(intent, { toString: () => PUBLISHER_PEER_ID });
+
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=storage_ack_signed'),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('localNodeIdentityId=42'),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`),
     );
   });
 });
