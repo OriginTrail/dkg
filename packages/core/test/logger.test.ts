@@ -253,6 +253,43 @@ describe('KA lifecycle logging', () => {
     expect(message.length).toBeLessThan(700);
   });
 
+  it('keeps full asset and peer identifiers even when metadata strings are bounded', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const longAssetUal = `did:dkg:otp:2043/0xasset/${'a'.repeat(220)}`;
+    const longLocalPeerId = `12D3KooW${'l'.repeat(220)}`;
+    const longLocalNodeIdentityId = `node-identity-${'n'.repeat(220)}`;
+    const longPeer = `12D3KooW${'p'.repeat(220)}`;
+    const longPeerNodeIdentityId = `peer-node-identity-${'r'.repeat(220)}`;
+
+    const log = new Logger('KALifecycle');
+    captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-3', operationName: 'publish' }, {
+        assetUal: longAssetUal,
+        stage: 'finalization',
+        event: 'gossip.received',
+        role: 'receiver',
+        localPeerId: longLocalPeerId,
+        localNodeIdentityId: longLocalNodeIdentityId,
+        peer: longPeer,
+        peerNodeIdentityId: longPeerNodeIdentityId,
+        metadata: {
+          peerDetail: `remote-peer-said-${'z'.repeat(360)}`,
+        },
+      }),
+    );
+
+    const message = entries[0].message;
+    expect(message).toContain(`assetUal=${longAssetUal}`);
+    expect(message).toContain(`localPeerId=${longLocalPeerId}`);
+    expect(message).toContain(`localNodeIdentityId=${longLocalNodeIdentityId}`);
+    expect(message).toContain(`peer=${longPeer}`);
+    expect(message).toContain(`peerNodeIdentityId=${longPeerNodeIdentityId}`);
+    expect(message).toContain('peerDetail=');
+    expect(message).toContain('[truncated:');
+  });
+
   it('supports the agreed lifecycle stage and role tokens', () => {
     const { entries, sink } = collectSink();
     Logger.setSink(sink);
