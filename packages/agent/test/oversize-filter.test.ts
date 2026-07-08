@@ -27,6 +27,7 @@ import {
   type OversizeDrop,
 } from '../src/sync/oversize-filter.js';
 import { OversizeTombstoneLog } from '../src/sync/oversize-tombstones.js';
+import { runOversizeSweep } from '../src/sync/oversize-sweep.js';
 import { isSyncPermanentRejection, isSyncBackoffWorthyError } from '../src/sync/error-tags.js';
 import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -310,5 +311,84 @@ describe('production wiring — the real sync-ingest seam calls the guard', () =
     } finally {
       await agent.stop().catch(() => {});
     }
+  });
+});
+
+describe('runOversizeSweep (boot-time resident-poison removal)', () => {
+  const bigTerm = `"${'x'.repeat(120_000)}"`;
+  const overSelectedButLegal = `"${'y'.repeat(25_000)}"`; // >19k chars over-select, but 25,002 bytes < 60,000 → must survive
+  const makeStore = (graphQuads: Record<string, Quad[]>) => {
+    const deletions: Array<Partial<Quad>> = [];
+    return {
+      deletions,
+      store: {
+        listGraphs: async () => Object.keys(graphQuads),
+        query: async (sparql: string) => {
+          const m = /GRAPH <([^>]+)>/.exec(sparql);
+          const quads = (graphQuads[m![1]!] ?? []).filter((q) => {
+            const val = q.object.startsWith('"') ? q.object.slice(1, q.object.lastIndexOf('"')) : '';
+            return val.length > 19_000;
+          });
+          return { type: 'quads', quads };
+        },
+        deleteByPattern: async (pattern: Partial<Quad>) => { deletions.push(pattern); return 1; },
+      },
+    };
+  };
+  const drops: Array<{ seam: string; kind: string }> = [];
+  const hooks = {
+    recordDrops: (ds: OversizeDrop[], seam: string) => ds.forEach((d) => drops.push({ seam, kind: d.kind })),
+    logInfo: () => {},
+    logWarn: () => {},
+  };
+
+  it('removes exact offenders only, skips exempt graphs, writes the marker, and no-ops on the second run', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const dataDir = await mkdtemp(`${tmpdir()}/oversweep-`);
+    drops.length = 0;
+    const { store, deletions } = makeStore({
+      [DATA_GRAPH]: [quad(bigTerm), quad(overSelectedButLegal, DATA_GRAPH, 'http://ex.org/legal')],
+      [SWM_GRAPH]: [quad(bigTerm, SWM_GRAPH)],
+      [VM_GRAPH]: [quad(bigTerm, VM_GRAPH)],
+    });
+
+    const first = await runOversizeSweep({ store, dataDir, ...hooks });
+    expect(first.ran).toBe(true);
+    expect(first.sweptQuads).toBe(1); // only the true offender in the mutable data graph
+    expect(deletions).toHaveLength(1);
+    expect(deletions[0]).toMatchObject({ graph: DATA_GRAPH, object: bigTerm });
+    expect(first.scannedGraphs).toBe(1); // SWM + VM graphs never scanned
+    expect(drops).toEqual([{ seam: 'sweep', kind: 'oversize' }]);
+
+    const second = await runOversizeSweep({ store, dataDir, ...hooks });
+    expect(second.ran).toBe(false); // marker gates the re-run
+    expect(deletions).toHaveLength(1);
+  });
+
+  it('skips entirely without a dataDir (in-memory store)', async () => {
+    const { store, deletions } = makeStore({ [DATA_GRAPH]: [quad(bigTerm)] });
+    const r = await runOversizeSweep({ store, dataDir: undefined, ...hooks });
+    expect(r.ran).toBe(false);
+    expect(deletions).toEqual([]);
+  });
+
+  it('does NOT write the marker on failure — retries next boot', async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const dataDir = await mkdtemp(`${tmpdir()}/oversweep-fail-`);
+    const failing = {
+      listGraphs: async () => [DATA_GRAPH],
+      query: async () => { throw new Error('store exploded'); },
+      deleteByPattern: async () => 1,
+    };
+    const r1 = await runOversizeSweep({ store: failing, dataDir, ...hooks });
+    expect(r1.ran).toBe(true);
+    expect(r1.sweptQuads).toBe(0);
+    // Marker absent → a healthy second run still executes.
+    const { store, deletions } = makeStore({ [DATA_GRAPH]: [quad(bigTerm)] });
+    const r2 = await runOversizeSweep({ store, dataDir, ...hooks });
+    expect(r2.ran).toBe(true);
+    expect(deletions).toHaveLength(1);
   });
 });
