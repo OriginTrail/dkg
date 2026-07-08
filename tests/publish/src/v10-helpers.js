@@ -479,6 +479,14 @@ export function makeReadableError(raw) {
   // drop a "Declines: ..." run-on when the peers tail already carries the reasons
   if (qm) s = s.replace(/\s*Declines:[^([]*?(?=\(peers:)/, ' ');
 
+  // Keep only the CORE error: drop per-peer decline dumps and peers tails —
+  // "storage_ack_timeout: only 0/3 ACKs received within 120000ms." is the
+  // signal; the 16-peer decline list is noise (console AND Grafana).
+  s = s
+    .replace(/\s*Declines?:[\s\S]*$/i, '')
+    .replace(/\s*\(peers:[\s\S]*$/i, '')
+    .replace(/\s*\[QuorumUnmetError[\s\S]*$/i, '');
+
   return s.trim();
 }
 
