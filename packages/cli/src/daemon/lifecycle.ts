@@ -1581,6 +1581,8 @@ export async function runDaemonInner(
       chainId: chainBase.chainId,
       approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
       cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
+      minPublisherNativeWei: chainBase.minPublisherNativeWei,
+      minPublisherTracWei: chainBase.minPublisherTracWei,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
