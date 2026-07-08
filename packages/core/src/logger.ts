@@ -47,6 +47,10 @@ export interface KaLifecycleLogEvent {
   metadata?: Record<string, KaLifecycleMetadataValue>;
 }
 
+const KA_LIFECYCLE_REDACTED = '[REDACTED]';
+const KA_LIFECYCLE_METADATA_MAX_CHARS = 160;
+const KA_LIFECYCLE_UNSAFE_METADATA_KEY = /(?:ciphertext|nquads?|quads?|triples?|payload|plaintext|private|secret|raw)/i;
+
 /**
  * Structured logger that prefixes every message with a timestamp,
  * operation name, and operation ID for cross-node log correlation.
@@ -140,6 +144,13 @@ function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {
   if (input.metadata) fields.push(...Object.entries(input.metadata));
   return `ka_lifecycle ${fields
     .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}=${String(value)}`)
+    .map(([key, value]) => `${key}=${formatKaLifecycleValue(key, value)}`)
     .join(' ')}`;
+}
+
+function formatKaLifecycleValue(key: string, value: KaLifecycleMetadataValue): string {
+  if (KA_LIFECYCLE_UNSAFE_METADATA_KEY.test(key)) return KA_LIFECYCLE_REDACTED;
+  if (typeof value !== 'string') return String(value);
+  if (value.length <= KA_LIFECYCLE_METADATA_MAX_CHARS) return value;
+  return `${value.slice(0, KA_LIFECYCLE_METADATA_MAX_CHARS)}...[truncated:${value.length}]`;
 }
