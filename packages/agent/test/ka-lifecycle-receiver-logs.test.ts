@@ -341,8 +341,67 @@ describe('KA receiver lifecycle logs', () => {
     expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('event=sender_key_payload_decrypted'),
     );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+  expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('role=receiver'),
+    );
+  });
+
+  it('logs Sender Key setup receive by assetUal', async () => {
+    const agent = await DKGAgent.create({
+      name: `ka-lifecycle-sender-key-setup-${Math.random().toString(36).slice(2)}`,
+      chainAdapter: new MockChainAdapter(),
+    });
+    agent.publisher.setIdentityId(42n);
+    Object.defineProperty((agent as unknown as { node: object }).node, 'peerId', {
+      value: { toString: () => LOCAL_PEER_ID },
+      configurable: true,
+    });
+    const localRecord = await agent.registerAgent('sender-key-setup-local');
+    const contextGraphId = 'ka-lifecycle-sender-key-setup-cg';
+    await insertAgentGate(agent, contextGraphId, localRecord.agentAddress);
+
+    const storageAddress = await agent.chain.getDKGKnowledgeAssetsAddress!();
+    const kaId = (BigInt(ethers.getAddress(localRecord.agentAddress)) << 96n) | 7n;
+    const assetUal = buildKnowledgeAssetUal(agent.chain.chainId, storageAddress, kaId);
+    const plaintext = encodeWorkspacePublishRequest({
+      shareOperationId: 'sender-key-setup-share-op',
+      contextGraphId,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Sender Key setup lifecycle" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: localRecord.agentAddress,
+      kaNumber: '7',
+    });
+    const entries = captureLogs();
+
+    await (agent as unknown as {
+      encryptWorkspacePayloadWithSenderKey(input: {
+        contextGraphId: string;
+        plaintext: Uint8Array;
+        senderAgentAddress: string;
+        operationId: string;
+      }): Promise<Uint8Array>;
+    }).encryptWorkspacePayloadWithSenderKey({
+      contextGraphId,
+      plaintext,
+      senderAgentAddress: localRecord.agentAddress,
+      operationId: 'sender-key-setup-lifecycle-test',
+    });
+
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${assetUal}`),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=sender_key_setup_received'),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('recipientAgentAddress='),
+    );
+    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('outcome=accepted'),
     );
   });
 
