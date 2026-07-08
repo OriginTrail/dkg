@@ -4,7 +4,7 @@ import {
   sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
   contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
-  DKGEvent, Logger, createOperationContext,
+  DKGEvent, Logger, createOperationContext, logKaLifecycleEvent,
   assertSafeIri, isSafeIri,
   type EventBus,
   type OperationContext,
@@ -49,6 +49,11 @@ export type ResolveContextGraphOnChainId = (
 
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
 
+export interface FinalizationLifecycleLogOptions {
+  localPeerId?: string;
+  localNodeIdentityId?: string | number | bigint;
+}
+
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (value.startsWith('"')) {
@@ -77,6 +82,7 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
+  private readonly lifecycleLogOptions: FinalizationLifecycleLogOptions | undefined;
   private readonly log = new Logger('FinalizationHandler');
   private readonly processedUals = new Set<string>();
   // Forward-prevention for the cgId-resolution race (RS heal): chain-authoritative
@@ -91,12 +97,42 @@ export class FinalizationHandler {
     eventBus?: EventBus,
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
     markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    lifecycleLogOptions?: FinalizationLifecycleLogOptions,
   ) {
     this.store = store;
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
+    this.lifecycleLogOptions = lifecycleLogOptions;
+  }
+
+  private logLifecycleEvent(
+    ctx: OperationContext,
+    event: string,
+    msg: {
+      ual?: string;
+      contextGraphId?: string;
+      targetContextGraphId?: string;
+      txHash?: string;
+      publisherAddress?: string;
+    },
+  ): void {
+    if (!msg.ual) return;
+    logKaLifecycleEvent(this.log, ctx, {
+      assetUal: msg.ual,
+      stage: 'finalization',
+      event,
+      role: 'receiver',
+      localPeerId: this.lifecycleLogOptions?.localPeerId ?? 'unknown',
+      localNodeIdentityId: this.lifecycleLogOptions?.localNodeIdentityId?.toString() ?? 'unknown',
+      metadata: {
+        contextGraphId: msg.contextGraphId,
+        targetContextGraphId: msg.targetContextGraphId,
+        txHash: msg.txHash,
+        publisherAddress: msg.publisherAddress,
+      },
+    });
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -209,6 +245,10 @@ export class FinalizationHandler {
       );
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
+        this.logLifecycleEvent(ctx, 'finalization_already_confirmed', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+        });
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
         return;
       }

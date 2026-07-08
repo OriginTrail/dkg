@@ -1613,6 +1613,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // fires and the RS prover sees the KC.
         (cgName: string) => this.getContextGraphOnChainId(cgName),
         (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
+        {
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+        },
       );
     }
     return this.finalizationHandler;
