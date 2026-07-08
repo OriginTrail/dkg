@@ -14,6 +14,10 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
+// SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
+// NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
+const SHARED_MEMORY_DATA_SEGMENT_RE = /\/_shared_memory(\/|$)/;
+
 type OxStore = InstanceType<typeof oxigraph.Store>;
 type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
@@ -194,11 +198,14 @@ export class OxigraphStore implements TripleStore {
     // accept + re-serve oversized literals that Blazegraph peers can
     // physically never store — the split-brain half of the 2026-07-08
     // mainnet poison incident. Assert at the same Java MUTF-8 hard limit so
-    // no backend silently persists what another must refuse. `_shared_memory`
-    // graphs are exempt: their large literals are legitimately handled by the
+    // no backend silently persists what another must refuse. The
+    // `_shared_memory` DATA segment (bucket + per-KA descendants) is exempt:
+    // its large literals are legitimately handled by the
     // SharedMemoryLiteralBlobStore wrapper (externalize-on-insert,
-    // rehydrate-on-query), whose INNER store is exactly this adapter.
-    const guarded = quads.filter((q) => !q.graph?.includes('/_shared_memory'));
+    // rehydrate-on-query), whose INNER store is exactly this adapter. The match
+    // is a path SEGMENT (parity with the sync guard) so the sibling
+    // `…/_shared_memory_meta` graph is NOT exempted — it is not externalized.
+    const guarded = quads.filter((q) => !(q.graph && SHARED_MEMORY_DATA_SEGMENT_RE.test(q.graph)));
     if (guarded.length > 0) {
       assertQuadLiteralsMutf8Safe(guarded, {
         maxBytes: JAVA_WRITE_UTF_MAX_BYTES,

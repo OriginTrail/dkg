@@ -28,11 +28,20 @@ describe('OxigraphStore.insert oversize parity', () => {
     expect(r.type === 'bindings' && r.bindings).toHaveLength(0); // assert precedes load — nothing partial
   });
 
-  it('still accepts oversized literals in _shared_memory graphs (blob-store inner-store flow)', async () => {
+  it('still accepts oversized literals in _shared_memory DATA graphs (bucket + per-KA — blob-store inner-store flow)', async () => {
     const s = new OxigraphStore();
-    await s.insert([q(oversized, 'http://ex.org/cg/_shared_memory/0xabc')]);
+    await s.insert([
+      q(oversized, 'http://ex.org/cg/_shared_memory'),           // bucket
+      q(oversized, 'http://ex.org/cg/_shared_memory/0xa/7', 'http://ex.org/s3'), // per-KA
+    ]);
     const r = await s.query('SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
-    expect(r.type === 'bindings' && r.bindings).toHaveLength(1);
+    expect(r.type === 'bindings' && r.bindings).toHaveLength(2);
+  });
+
+  it('REJECTS oversized literals in _shared_memory_meta (sibling segment, not blob-externalized)', async () => {
+    const s = new OxigraphStore();
+    await expect(s.insert([q(oversized, 'http://ex.org/cg/_shared_memory_meta')]))
+      .rejects.toMatchObject({ code: 'OVERSIZED_RDF_LITERAL' });
   });
 
   it('accepts large-but-legal literals everywhere (25KB)', async () => {
