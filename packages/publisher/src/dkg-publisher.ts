@@ -2459,9 +2459,26 @@ export class DKGPublisher implements Publisher {
         stagingByteSize = publicByteSize;
       }
     } else {
-      stagingQuads = isPublishFromSharedMemory
-        ? undefined
-        : new TextEncoder().encode(nquadsStr);
+      // A2 (§1.1 fix): public CGs ALWAYS ship plaintext quads inline — the
+      // SAME bytes the NO_DATA_IN_SWM self-heal retry (fromSharedMemory:false)
+      // and the curated catalog path above already send. Relying on a core's
+      // local SWM copy declines NO_DATA_IN_SWM / times out the round whenever
+      // the core never subscribed to the public CG's workspace topic (the
+      // common case on public networks: cores only auto-subscribe curated
+      // workspace topics). byteSize (`publicByteSize`/`effectiveByteSize`),
+      // `kcMerkleRoot` and the ACK digest all derive from `nquadsStr`, so this
+      // is byte-identical to the self-heal path — just on attempt 1, which
+      // avoids the failed first round + 120s storage_ack_timeout.
+      // Exception: above the core's inline cap (`MAX_STAGING_BYTES`, 4 MiB) keep
+      // the SWM-lookup fallback so a large publish can still ACK from cores that
+      // synced the data (the bound-graph SWM lookup in A3 keeps that path fast).
+      const inlinePublicQuads = new TextEncoder().encode(nquadsStr);
+      // MUST stay in sync with storage-ack-handler.ts MAX_STAGING_BYTES.
+      const MAX_INLINE_STAGING_BYTES = 4 * 1024 * 1024;
+      stagingQuads =
+        isPublishFromSharedMemory && inlinePublicQuads.length > MAX_INLINE_STAGING_BYTES
+          ? undefined
+          : inlinePublicQuads;
     }
 
     // Pre-compute tokenAmount and epochs so they can be included in the
