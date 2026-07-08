@@ -115,8 +115,9 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     expect(s1.address).not.toBe(s2.address);
     const events: string[] = [];
     const build = (id: string) => async () => {
-      events.push(`build:${id}`);
+      events.push(`start:${id}`);
       await tick(20);
+      events.push(`end:${id}`);
       return { signedTx: `tx-${id}`, txHash: `0x${id}` };
     };
     (a as any).sendSignedTransactionAndWait = recorder(async (signedTx: string) => fakeReceipt(signedTx));
@@ -126,8 +127,11 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       (a as any).dispatchSerializedV10Write(s2, 'publish', undefined, build('b'), neverNull),
     ]);
 
-    // Both builds started before either finished → genuinely concurrent.
-    expect(events.slice(0, 2).sort()).toEqual(['build:a', 'build:b']);
+    // Both builds started before EITHER finished → genuinely concurrent. A
+    // global (single-key) serializer would produce start,end,start,end and
+    // fail here — the end-event assertions are what give this test teeth.
+    expect(events.slice(0, 2).sort()).toEqual(['start:a', 'start:b']);
+    expect(events.slice(2).sort()).toEqual(['end:a', 'end:b']);
   });
 
   it('keeps the pending nonce monotonic for same-wallet writes (the #953 regression guard)', async () => {
@@ -369,6 +373,7 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     (a as any).sendContractTransactionUnlocked = recorder(async (_c: unknown, method: string) => {
       events.push(`start:${method}`);
       await tick(20);
+      events.push(`end:${method}`);
       return fakeReceipt(method);
     });
 
@@ -377,8 +382,10 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       (a as any).sendContractTransaction({}, 'm2', [], s2, 'm2'),
     ]);
 
-    // Both started before either finished → genuinely concurrent (distinct keys).
+    // Both started before EITHER finished → genuinely concurrent (distinct
+    // keys). A single global lock would produce start,end,start,end and fail.
     expect(events.slice(0, 2).sort()).toEqual(['start:m1', 'start:m2']);
+    expect(events.slice(2).sort()).toEqual(['end:m1', 'end:m2']);
   });
 
   it('V10 approval uses the scoped in-lock sender and never re-enters the public serializer', async () => {
@@ -426,6 +433,52 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       signer,
       'approve V10 publish TRAC',
     ]);
+  });
+
+  it('forced re-approve (#888) routes through the caller-scoped approvalSender, never the public serializer', async () => {
+    // Pins the wiring `populateAndSignV10WithAllowanceRecovery` →
+    // `ensureV10ApproveTrac(…, approvalSender)`: if the recovery path ever
+    // fell back to the default `this.sendContractTransaction`, the in-lock
+    // publish would re-enter the per-wallet serializer and self-deadlock.
+    const a = new EVMChainAdapter(minimalConfig());
+    const signer = new ethers.Wallet(DEPLOYER_PK);
+    const tokenWithSigner = connectable({});
+    (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
+    // Stale-zero allowance read triggers the approve; the #888 post-approve
+    // confirmation poll sees the target immediately (separate read path).
+    (a as any).readContract = recorder(async () => 0n);
+    (a as any).confirmAllowanceVisible = recorder(async () => undefined);
+    const publicSend = recorder(async () => {
+      throw new Error('public serializer re-entered');
+    });
+    (a as any).sendContractTransaction = publicSend;
+    const scopedSend = recorder(async () => fakeReceipt('approve'));
+    let populateCalls = 0;
+    (a as any).populateAndSignAcrossProviders = recorder(async () => {
+      populateCalls += 1;
+      if (populateCalls === 1) {
+        throw Object.assign(new Error('execution reverted'), { revert: { name: 'TooLowAllowance' } });
+      }
+      return { signedTx: 'pub', txHash: '0xpub' };
+    });
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer,
+      {} as any,
+      'publish',
+      {},
+      V10_KA_ADDRESS,
+      1n,
+      'approve V10 publish TRAC (forced re-approve, #888)',
+      scopedSend,
+    );
+
+    expect(result).toEqual({ signedTx: 'pub', txHash: '0xpub' });
+    expect(populateCalls).toBe(2);
+    expect(publicSend.calls).toEqual([]);
+    expect(scopedSend.calls).toHaveLength(1);
+    expect(scopedSend.calls[0].slice(1, 2)).toEqual(['approve']);
+    expect(scopedSend.calls[0][3]).toBe(signer);
   });
 
   it('a publish (dispatchSerializedV10Write) and an RS-style send SERIALIZE on the same wallet (cross-type #953)', async () => {
