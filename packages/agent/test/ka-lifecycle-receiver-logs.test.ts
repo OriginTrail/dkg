@@ -4,6 +4,7 @@ import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/
 import {
   DKG_ONTOLOGY,
   Logger,
+  STORAGE_ACK_DECLINE_CODES,
   TypedEventBus,
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -396,6 +397,52 @@ describe('KA receiver lifecycle logs', () => {
     );
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`),
+    );
+  });
+
+  it('logs StorageACK decline reason and retry metadata by assetUal', async () => {
+    const store = new OxigraphStore();
+    const handler = new StorageACKHandler(store, {
+      nodeRole: 'core',
+      nodeIdentityId: 42n,
+      signerWallet: ethers.Wallet.createRandom(),
+      contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      localPeerId: LOCAL_PEER_ID,
+      ackHandlerDeadlineMs: 0,
+    } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
+    const entries = captureLogs();
+    const intent = encodePublishIntent({
+      merkleRoot: new Uint8Array(32),
+      contextGraphId: '42',
+      publisherPeerId: PUBLISHER_PEER_ID,
+      publicByteSize: 1024,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [ROOT_ENTITY],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: 1,
+      assetUal: ASSET_UAL,
+    } as unknown as Parameters<typeof encodePublishIntent>[0]);
+
+    await handler.handler(intent, { toString: () => PUBLISHER_PEER_ID });
+
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=storage_ack_declined'),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`declineCode=${STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM}`),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('declineMessage=No data found in SWM'),
+    );
+    expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('retryable=true'),
     );
   });
 
