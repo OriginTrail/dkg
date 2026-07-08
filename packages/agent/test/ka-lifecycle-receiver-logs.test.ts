@@ -584,6 +584,14 @@ describe('KA receiver lifecycle logs', () => {
     expect(handoff).toContain('sync');
     expect(handoff).toContain('reconcile');
     expect(handoff).toContain('raw payload');
+    expect(handoff).toContain('## Recorded Devnet Grep Evidence');
+    expect(handoff).toContain('.devnet/node1/daemon.log: ka_lifecycle');
+    expect(handoff).toContain('.devnet/node2/daemon.log: ka_lifecycle');
+    expect(handoff).toContain('stage=identity event=asset_ual_allocated role=publisher');
+    expect(handoff).toContain('stage=storage_ack event=storage_ack_signed role=receiver');
+    expect(handoff).toContain('stage=finalization event=finalization_applied role=receiver');
+    expect(handoff).toContain('stage=sync event=sync_apply role=sync');
+    expect(handoff).toContain('stage=reconcile event=reconcile_promote role=sync');
   });
 
   it('keeps Sender Key v1 cryptographic binding compatible when assetUal is carried for logs', () => {
