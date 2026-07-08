@@ -98,6 +98,13 @@ export async function handleNodeUIRequest(
   telemetrySettings?: TelemetrySettingsCallbacks,
   corsOrigin?: string | null,
   relayStatsProvider?: RelayStatsProvider,
+  /**
+   * Called when a metric-serving route (/api/metrics[/history]) is actually
+   * served here — i.e. after the daemon's rate-limit/admission/auth gates have
+   * accepted the request. Lets the metrics collector treat the caller as a live
+   * consumer without the daemon duplicating route knowledge. (#1066 Item 1)
+   */
+  markMetricsConsumer?: () => void,
 ): Promise<boolean> {
   (res as any).__corsOrigin = corsOrigin ?? null;
   const path = url.pathname;
@@ -105,20 +112,28 @@ export async function handleNodeUIRequest(
   // --- Metrics ---
 
   if (req.method === 'GET' && path === '/api/metrics') {
+    markMetricsConsumer?.();
+    // Serve the latest tick-written snapshot rather than live-collecting.
+    // A live collect() re-runs the full-store COUNT scans on every request, so
+    // an external poller (Grafana / health probe) could hammer a saturated
+    // store. The periodic collector already refreshes the snapshot (effective
+    // 30s TTL) and a store outage still surfaces as null columns rather than
+    // being masked. (#1066 Item 1)
+    const snap = db.getLatestSnapshot();
+    if (snap) return json(res, 200, snap);
+    // Cold start only: no snapshot yet (before the first tick). Fall back to a
+    // single live collect so the first request isn't empty; steady state never
+    // reaches here, so external pollers never trigger a per-request scan.
     if (metricsCollector) {
       try {
-        const live = await metricsCollector.collect();
-        return json(res, 200, live);
-      } catch {
-        const snap = db.getLatestSnapshot();
-        return json(res, 200, snap ?? {});
-      }
+        return json(res, 200, await metricsCollector.collect());
+      } catch { /* fall through to empty */ }
     }
-    const snap = db.getLatestSnapshot();
-    return json(res, 200, snap ?? {});
+    return json(res, 200, {});
   }
 
   if (req.method === 'GET' && path === '/api/metrics/history') {
+    markMetricsConsumer?.();
     const from = parseInt(url.searchParams.get('from') ?? '0', 10) || (Date.now() - 86_400_000);
     const to = parseInt(url.searchParams.get('to') ?? '0', 10) || Date.now();
     const maxPoints = parseInt(url.searchParams.get('maxPoints') ?? '500', 10);

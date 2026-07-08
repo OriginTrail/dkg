@@ -596,6 +596,95 @@ describe('handleNodeUIRequest CORS origin handling', () => {
   });
 });
 
+describe('handleNodeUIRequest /api/metrics snapshot-first behaviour (#1066 Item 1)', () => {
+  it('serves the latest snapshot without live-collecting when a snapshot exists', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => ({ ts: 123, total_triples: 42, peer_count: 3 }),
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(42);
+    expect(body.ts).toBe(123);
+    // No per-request full-store scan — the periodic collector is the only scanner.
+    expect(collectCalls).toBe(0);
+  });
+
+  it('cold start: falls back to a single live collect when no snapshot exists yet', async () => {
+    let collectCalls = 0;
+    const fakeDb = {
+      getMetrics: () => [], getErrorHotspots: () => [],
+      getLatestSnapshot: () => undefined,
+    } as any;
+    const fakeCollector = { collect: async () => { collectCalls++; return { ts: 999, total_triples: 7 }; } } as any;
+    harness.setArgs([
+      fakeDb, '.', undefined, fakeCollector, undefined, undefined, undefined, undefined, undefined,
+    ] as any);
+
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.total_triples).toBe(7);
+    expect(collectCalls).toBe(1);
+  });
+});
+
+describe('handleNodeUIRequest metrics-consumer presence wiring (#1066 Item 1)', () => {
+  // markMetricsConsumer is the 11th positional arg (after relayStatsProvider).
+  // This proves the runtime wiring: a served metric route marks the presence
+  // object the collector consults; other routes do not. Because the daemon
+  // calls handleNodeUIRequest only after rate-limit/admission/auth accept the
+  // request, marking here is inherently post-auth (a rejected request never
+  // reaches this handler, so it cannot open the store-metrics gate).
+  const fakeDb = () => ({
+    getMetrics: () => [], getErrorHotspots: () => [],
+    getLatestSnapshot: () => ({ ts: 1, total_triples: 1 }),
+    getSnapshotHistory: () => [],
+  } as any);
+
+  it('GET /api/metrics marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('GET /api/metrics/history marks a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    const res = await fetch(`${baseUrl}/api/metrics/history`);
+    expect(res.status).toBe(200);
+    expect(marks).toBe(1);
+  });
+
+  it('a non-metrics route does NOT mark a metrics consumer', async () => {
+    let marks = 0;
+    harness.setArgs([
+      fakeDb(), '.', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      () => { marks++; },
+    ] as any);
+    // /api/relay/stats is handled here (404 without a relay provider) but is
+    // not a metric route, so it must not open the gate.
+    const res = await fetch(`${baseUrl}/api/relay/stats`);
+    expect(res.status).toBe(404);
+    expect(marks).toBe(0);
+  });
+});
+
 describe('handleNodeUIRequest replication routes (Phase F)', () => {
   let db: DashboardDB;
   let dir: string;

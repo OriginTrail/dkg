@@ -24,6 +24,7 @@ import {
   parseRdfInt,
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
+import { createMetricsPresence } from "./metrics-presence.js";
 import {
   appendFile,
   chmod,
@@ -2345,10 +2346,26 @@ export async function runDaemonInner(
     },
   };
 
+  // Connected node-UI SSE dashboard clients. Declared here (before the metrics
+  // collector) so the presence gate below can consult it; the /api/events
+  // handler further down populates it.
+  const sseClients = new Set<ServerResponse>();
+
+  // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
+  // full-store scans, so the collector skips them when nothing is consuming
+  // metrics — no open dashboard SSE stream and no recent /api/metrics[/history]
+  // read. Bounds those scans to <=1 per tick under load (instead of one per
+  // request) and to zero when idle. Override with DKG_METRICS_ALWAYS_COLLECT=1.
+  const metricsPresence = createMetricsPresence({
+    sseClientCount: () => sseClients.size,
+    alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
+  });
+
   const metricsCollector = new MetricsCollector(
     dashDb,
     metricsSource,
     dkgDir(),
+    () => metricsPresence.hasRecentConsumer(),
   );
   metricsCollector.start();
   log("Metrics collector started (30s interval)");
@@ -2678,8 +2695,9 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  const sseClients = new Set<ServerResponse>();
+  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients.
+  // `sseClients` is declared earlier (by the metrics collector) so the metrics
+  // presence gate can consult it.
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
@@ -3288,7 +3306,13 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      // Metrics presence (#1066 Item 1): a served read of /api/metrics[/history]
+      // marks a consumer, keeping the collector's store scans warm for Grafana /
+      // health probes as well as the dashboard. Marking happens INSIDE the route
+      // handler (below) so it only fires after rate-limit, admission, and auth
+      // have accepted the request — a rejected/unauthenticated request cannot
+      // open the store-metrics gate.
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
       await handleRequest(
