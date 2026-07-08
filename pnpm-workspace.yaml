@@ -9,7 +9,7 @@ packages:
   - "devnet/v10-core-flows"
   - "devnet/v10-end-to-end"
   - "devnet/v10-stress"
-  - "devnet/conviction-lazy-settle"
+  - "devnet/conviction-emission-bell"
   - "devnet/rfc51-publishing-allocation"
   - "devnet/edge-update-flow"
   - "devnet/greenfield-10min"
