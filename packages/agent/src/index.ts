@@ -211,3 +211,10 @@ export {
   buildPublicProjection,
   type PublicProjectionInput,
 } from './context-graph-public-projection.js';
+// 2026-07-07 sync-storm mitigation (C-1) — the bounded catch-up fan-out mapper
+// and its shared cap (DKG_CATCHUP_MAX_CONCURRENT_PEERS, default 4). Exported on
+// the public surface because the CLI daemon's Worker-based catch-up runner
+// (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
+// registry-scale per-peer fan-out and must be bounded by the SAME knob, without
+// deep-importing the compiled `dist/` module.
+export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
