@@ -207,6 +207,7 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
@@ -3418,8 +3419,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             await graphManager.ensureContextGraph(contextGraphId);
           },
           storeInsert: async (quads) => {
-            await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+            // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
+            // literals BEFORE insert so the SWM page cursor advances instead
+            // of the store throwing and the page re-fetching forever.
+            const inserted = await insertWithOversizeGuard(
+              (kept) => this.store.insert(kept),
+              quads,
+              { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+              'swm-sync',
+            );
+            this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           },
           publicSnapshotStore: this.publicSnapshotStore,
           deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
@@ -3513,10 +3522,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
       store: {
         insert: async (quads) => {
-          await this.store.insert(quads);
-          if (quads.length > 0) {
+          // Oversize guard (OT-RFC-56) — recovered rows are peer data too.
+          const inserted = await insertWithOversizeGuard(
+            (kept) => this.store.insert(kept),
+            quads,
+            { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+            'swm-recovery',
+          );
+          if (inserted.length > 0) {
             this.invalidateListContextGraphsCache();
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+            this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           }
         },
         deleteByPattern: (pattern) => this.store.deleteByPattern(pattern),

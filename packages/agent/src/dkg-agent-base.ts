@@ -211,6 +211,8 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
@@ -949,11 +951,40 @@ export class DKGAgentBase {
     this.listContextGraphsInFlight.clear();
   }
 
+  /**
+   * Oversize tombstone log — lazily constructed so every sync-ingest seam
+   * shares one bounded ring + JSONL file (OT-RFC-56 §4.2). See
+   * sync/oversize-filter.ts for the guard this records for.
+   */
+  private oversizeTombstoneLogInstance?: OversizeTombstoneLog;
+  protected get oversizeTombstoneLog(): OversizeTombstoneLog {
+    if (!this.oversizeTombstoneLogInstance) {
+      this.oversizeTombstoneLogInstance = new OversizeTombstoneLog({
+        dataDir: this.config.dataDir,
+        logWarn: (message) => this.log.warn(createOperationContext('sync'), message),
+      });
+    }
+    return this.oversizeTombstoneLogInstance;
+  }
+
+  /**
+   * Sync-ingest store insert (durable sync + registry meta pulls). Guarded by
+   * the oversize filter (OT-RFC-56): quads whose literal exceeds the protocol
+   * size invariant are dropped + tombstoned BEFORE the insert, so the sync
+   * offset cursor advances past pages containing them instead of the store
+   * throwing and the page being re-fetched from every peer forever (the
+   * 2026-07-08 mainnet poison-literal retry storm).
+   */
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
-    await this.store.insert(quads);
-    if (quads.length > 0) {
+    const inserted = await insertWithOversizeGuard(
+      (kept) => this.store.insert(kept),
+      quads,
+      { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+      'durable-sync',
+    );
+    if (inserted.length > 0) {
       this.invalidateListContextGraphsCache();
-      this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
   protected readonly gossipRegistered = new Set<string>();
