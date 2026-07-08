@@ -187,6 +187,14 @@ function finalizationChainWithEvent(input: {
   };
 }
 
+function finalizationChainResolvingTarget(targetContextGraphId = '42') {
+  return {
+    chainId: '31337',
+    getKAContextGraphId: async () => BigInt(targetContextGraphId),
+    async *listenForEvents() {},
+  };
+}
+
 describe('KA receiver lifecycle logs', () => {
   afterEach(() => {
     Logger.setSink(null);
@@ -1110,5 +1118,41 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('outcome=promoted'));
     expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
+  });
+
+  it('logs finalization catch failures by assetUal with resolved target context graph', async () => {
+    const store = new OxigraphStore();
+    const query = store.query.bind(store);
+    store.query = async (...args: Parameters<typeof store.query>) => {
+      const options = args[1] as { source?: string } | undefined;
+      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+        throw new Error('SWM finalization slice unavailable');
+      }
+      return query(...args);
+    };
+    const handler = new FinalizationHandler(
+      store,
+      finalizationChainResolvingTarget('42') as any,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(makeFinalizationMessage({
+      operationId: 'finalization-catch-lifecycle-test',
+      targetContextGraphId: undefined,
+    })), CONTEXT_GRAPH_ID);
+
+    const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=finalization_failed'));
+    expect(messages).toContainEqual(expect.stringContaining('targetContextGraphId=42'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
+    expect(messages).toContainEqual(expect.stringContaining('reason=SWM finalization slice unavailable'));
   });
 });
