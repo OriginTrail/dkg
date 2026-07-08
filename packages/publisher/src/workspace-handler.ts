@@ -1,7 +1,7 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import type { EventBus } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer, DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT } from '@origintrail-official/dkg-core';
 import type { PhaseCallback } from './publisher.js';
 import {
   decodeGossipEnvelope,
@@ -50,6 +50,13 @@ export type WorkspaceSenderKeyDecryptor = (
 export type WorkspaceAssetUalResolver = (
   input: { agentAddress: string; kaNumber: string },
 ) => string | undefined | Promise<string | undefined>;
+
+type SharedMemoryLifecycleValue = string | number | bigint | (() => string | number | bigint | undefined);
+
+export interface SharedMemoryLifecycleLogOptions {
+  localPeerId?: SharedMemoryLifecycleValue;
+  localNodeIdentityId?: SharedMemoryLifecycleValue;
+}
 
 export interface ContextGraphMetaOracleRecord {
   allowedPeers?: readonly string[];
@@ -266,6 +273,7 @@ export class SharedMemoryHandler {
   ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
   private readonly workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
   private readonly assetUalForKaIdentity?: WorkspaceAssetUalResolver;
+  private readonly lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
   private readonly now: () => number;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   private readonly log = new Logger('SharedMemoryHandler');
@@ -357,6 +365,7 @@ export class SharedMemoryHandler {
       ) => readonly WorkspaceRecipientEncryptionKey[] | Promise<readonly WorkspaceRecipientEncryptionKey[]>;
       workspaceSenderKeyDecryptor?: WorkspaceSenderKeyDecryptor;
       assetUalForKaIdentity?: WorkspaceAssetUalResolver;
+      lifecycleLogOptions?: SharedMemoryLifecycleLogOptions;
       now?: () => number;
       publicSnapshotStore?: WorkspacePublicSnapshotStore;
       /**
@@ -397,6 +406,7 @@ export class SharedMemoryHandler {
     this.workspaceRecipientPrivateKeys = options?.workspaceRecipientPrivateKeys;
     this.workspaceSenderKeyDecryptor = options?.workspaceSenderKeyDecryptor;
     this.assetUalForKaIdentity = options?.assetUalForKaIdentity;
+    this.lifecycleLogOptions = options?.lifecycleLogOptions;
     this.now = options?.now ?? (() => Date.now());
     this.publicSnapshotStore = options?.publicSnapshotStore;
     // PR #570 Codex follow-up (final, post-merge): validate the
@@ -508,6 +518,57 @@ export class SharedMemoryHandler {
       );
     }
     return floored;
+  }
+
+  private resolveLifecycleValue(value: SharedMemoryLifecycleValue | undefined): string | undefined {
+    const resolved = typeof value === 'function' ? value() : value;
+    return resolved === undefined ? undefined : resolved.toString();
+  }
+
+  private logSwmLifecycleEvent(
+    ctx: OperationContext,
+    event: string,
+    input: {
+      assetUal?: string;
+      contextGraphId?: string;
+      shareOperationId?: string;
+      publisherPeerId?: string;
+      fromPeerId?: string;
+      subGraphName?: string;
+      rootEntityCount?: number;
+      insertedCount?: number;
+      outcome?: string;
+      retryable?: boolean;
+      reason?: string;
+      validationErrorCount?: number;
+    },
+    level?: 'info' | 'warn' | 'error',
+  ): void {
+    const localPeerId = this.resolveLifecycleValue(this.lifecycleLogOptions?.localPeerId);
+    const localNodeIdentityId = this.resolveLifecycleValue(this.lifecycleLogOptions?.localNodeIdentityId);
+    if (!input.assetUal || !localPeerId || !localNodeIdentityId) return;
+    logKaLifecycleEvent(this.log, ctx, {
+      assetUal: input.assetUal,
+      stage: 'swm_share',
+      event,
+      role: 'receiver',
+      localPeerId,
+      localNodeIdentityId,
+      peer: input.fromPeerId ?? input.publisherPeerId,
+      level,
+      metadata: {
+        contextGraphId: input.contextGraphId,
+        shareOperationId: input.shareOperationId,
+        publisherPeerId: input.publisherPeerId,
+        subGraphName: input.subGraphName,
+        rootEntityCount: input.rootEntityCount,
+        insertedCount: input.insertedCount,
+        outcome: input.outcome,
+        retryable: input.retryable,
+        reason: input.reason,
+        validationErrorCount: input.validationErrorCount,
+      },
+    });
   }
 
   /**
@@ -1011,6 +1072,16 @@ export class SharedMemoryHandler {
       });
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
+      this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
+        assetUal,
+        contextGraphId,
+        shareOperationId,
+        publisherPeerId,
+        fromPeerId,
+        subGraphName,
+        rootEntityCount: manifest?.length ?? 0,
+        outcome: 'received',
+      });
 
       if (!shareOperationId) {
         const reason = `missing shareOperationId for context graph "${contextGraphId}"`;

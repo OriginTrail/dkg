@@ -945,6 +945,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           const kaId = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(kaNumber);
           return buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
         },
+        lifecycleLogOptions: {
+          localPeerId: () => this.peerId,
+          localNodeIdentityId: () => this.identityId.toString(),
+        },
         publicSnapshotStore: this.publicSnapshotStore,
       });
     }
