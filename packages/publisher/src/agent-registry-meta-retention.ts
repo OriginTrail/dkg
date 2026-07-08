@@ -26,6 +26,36 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
   }
 }
 
+// Per-(agents-CG, root-set) serialization (#1533 review). Two concurrent
+// same-agent heartbeats each insert a fresh UAL and then prune "everything for
+// this agent but mine". Run UNSERIALIZED they delete each other's record and the
+// agent ends with ZERO `_meta` rows. This chained-promise mutex (mirrors
+// `withMaterializationLock` in metadata.ts) makes same-root insert+prune run
+// sequentially — the 2nd call sees the 1st's record as a prior and deletes it,
+// keeping its own — so ≥1 record always survives; different roots stay
+// concurrent. PER-PROCESS is sufficient: an agent's heartbeats land on the same
+// receiving node and the prune only touches that node's local store. The map
+// self-evicts once a key's chain drains, so it stays bounded.
+const _agentMetaLocks = new Map<string, Promise<unknown>>();
+
+async function withAgentMetaLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = _agentMetaLocks.get(key);
+  // Build our work promise BEFORE awaiting `prev` so a concurrent caller chains
+  // after us rather than both seeing `prev` and running in parallel.
+  const run = (async () => {
+    if (prev) {
+      try { await prev; } catch { /* the prior holder handled its own error */ }
+    }
+    return fn();
+  })();
+  _agentMetaLocks.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (_agentMetaLocks.get(key) === run) _agentMetaLocks.delete(key);
+  }
+}
+
 /**
  * Insert a heartbeat's `_meta` tracking rows and THEN bound the agents-registry
  * `_meta` graph — the correct ordering for the invariant "an agent always has at
@@ -49,13 +79,18 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
  *     timeout cleanup never registers). Boundedness is only degraded for one
  *     round; the next heartbeat re-prunes.
  *
+ * Concurrency: same-agent calls are serialized per root-set (a per-process
+ * mutex) so two overlapping heartbeats can't insert-then-prune each other down to
+ * zero records; different agents run concurrently.
+ *
  * For non-agents CGs the prune is a no-op (see
  * {@link pruneSupersededAgentRegistryMeta}), so this is just the insert.
  *
  * @param opts.recordUal REQUIRED — the UAL of the record in `metadataQuads`. It
  *   is both the record being inserted and the one protected from the prune, so
- *   it MUST equal the `<ual>` subject of `metadataQuads` (a drift would let the
- *   prune delete the just-inserted record).
+ *   it MUST be a subject of `metadataQuads`; this is ENFORCED (throws) on the
+ *   agents path, because a drift (insert A, protect B) would let the prune delete
+ *   the just-inserted record.
  */
 export async function insertBoundedAgentRegistryMeta(opts: {
   store: TripleStore;
@@ -66,24 +101,60 @@ export async function insertBoundedAgentRegistryMeta(opts: {
   metadataQuads: Quad[];
 }): Promise<void> {
   const { store, contextGraphId, metaGraph, rootEntities, recordUal, metadataQuads } = opts;
-  // Insert FIRST so a prune failure can never leave the agent with no record.
-  // An insert failure PROPAGATES (caller aborts; nothing durable changed).
-  await store.insert(metadataQuads);
-  // The record is now durable, so a prune failure MUST NOT abort the caller's
-  // downstream lifecycle registration — swallow it with a loud warn and let the
-  // next heartbeat re-prune. `recordUal` protects the row we just wrote.
-  try {
-    await pruneSupersededAgentRegistryMeta({
-      store, contextGraphId, metaGraph, rootEntities, keepUal: recordUal,
-    });
-  } catch (err) {
-    log.warn(
-      createOperationContext('system'),
-      `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
-        `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
-        `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+
+  // Non-agents CGs never prune (see pruneSupersededAgentRegistryMeta), so there
+  // is no self-deletion race and no protected-record contract — just insert.
+  if (!isAgentRegistryContextGraph(contextGraphId)) {
+    await store.insert(metadataQuads);
+    return;
+  }
+
+  // Programmer-error boundary (#1533): `recordUal` is the record the prune
+  // protects, so it MUST be the record we're inserting. A drift (insert A, protect
+  // B) would let the prune delete the just-inserted A. Fail loudly rather than
+  // silently corrupt. (Agents path only — non-agents don't prune.)
+  if (!metadataQuads.some((q) => q.subject === recordUal)) {
+    throw new Error(
+      `insertBoundedAgentRegistryMeta: recordUal <${recordUal}> is not a subject of metadataQuads`,
     );
   }
+
+  // Serialize insert+prune per agent-root-set so two concurrent same-agent
+  // heartbeats can't delete each other's record (see the mutex note above). The
+  // lock spans insert→prune and is released only after the prune try/catch.
+  //
+  // Key granularity — the lock key is the sorted root-SET, which serializes calls
+  // carrying the IDENTICAL set. That exactly matches the real workload: agents/_meta
+  // is only ever written by the single-agent profile heartbeat (`rootEntities` is
+  // the singleton `[agentDID]`), so same-agent calls always share one key (→
+  // serialized) and different agents get disjoint keys (→ concurrent, and their
+  // prunes touch disjoint records anyway). NOTE for future maintainers: the prune's
+  // blast radius is per-INDIVIDUAL-root (it deletes any record whose member matches
+  // ANY root in `rootEntities`), so if agents/_meta ever gains a MULTI-root writer,
+  // two calls with intersecting-but-unequal sets ({X} vs {X,Y}) would escape this
+  // set-key and could prune each other to zero — at that point key per-individual
+  // root (locks acquired in sorted order to stay deadlock-free), not per-set.
+  const lockKey = `${contextGraphId}:${[...new Set(rootEntities)].sort().join(',')}`;
+  await withAgentMetaLock(lockKey, async () => {
+    // Insert FIRST so a prune failure can never leave the agent with no record.
+    // An insert failure PROPAGATES (caller aborts; nothing durable changed).
+    await store.insert(metadataQuads);
+    // The record is now durable, so a prune failure MUST NOT abort the caller's
+    // downstream lifecycle registration — swallow it with a loud warn and let the
+    // next heartbeat re-prune. `recordUal` protects the row we just wrote.
+    try {
+      await pruneSupersededAgentRegistryMeta({
+        store, contextGraphId, metaGraph, rootEntities, keepUal: recordUal,
+      });
+    } catch (err) {
+      log.warn(
+        createOperationContext('system'),
+        `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
+          `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
+          `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+      );
+    }
+  });
 }
 
 /**

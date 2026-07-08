@@ -211,7 +211,7 @@ import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
+import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1714,25 +1714,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // parseSyncRequest expects — and the adapter re-exposes the string
     // peerId contract registerSyncHandler relies on. (Reverts rc.9 PR-E
     // for sync only; other substrate protocols keep their dedup.)
-    registerSyncHandler({
-      register: (protocol, handler) =>
-        this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
-      protocolSync: PROTOCOL_SYNC,
-      syncDeniedResponse: SYNC_DENIED_RESPONSE,
-      syncPageSize: SYNC_PAGE_SIZE,
-      sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
-      store: this.store,
-      publicSnapshotStore: this.publicSnapshotStore,
-      peerId: this.peerId,
-      parseSyncRequest: this.parseSyncRequest.bind(this),
-      authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
-      // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
-      // unless the operator opts in. The predicate reads `DKG_SERVE_AGENTS_META`
-      // FRESH per call, so the kill-switch is reversible at runtime (no restart).
-      shouldWithholdDurableMeta: createAgentsDurableMetaWithholdPredicate(),
-      logWarn: (ctx, message) => this.log.warn(ctx, message),
-      logDebug: (ctx, message) => this.log.debug(ctx, message),
-    });
+    registerSyncHandler(this.buildSyncResponderRegistration());
 
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
@@ -3615,6 +3597,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const divisor = Math.max(1, remainingContextGraphs);
     const budgetMs = Math.max(SYNC_MIN_GRAPH_BUDGET_MS, Math.floor(SYNC_TOTAL_TIMEOUT_MS / divisor));
     return Date.now() + budgetMs;
+  }
+
+  /**
+   * Assemble the sync-responder registration params. `start()` passes the returned
+   * object straight into `registerSyncHandler`, so this is the SINGLE production
+   * source of the responder wiring — including the injected serve-skip predicate
+   * `shouldWithholdDurableMeta` (#1233). Its closure reads `DKG_SERVE_AGENTS_META`
+   * FRESH per call HERE at the lifecycle boundary (runtime-hot; the pure
+   * `shouldWithholdAgentsDurableMeta` resolver stays env-free, taking the value as
+   * an argument). Extracted as a real builder so the EXACT wired params are
+   * unit-testable without driving all of `start()` (real libp2p/store init).
+   */
+  buildSyncResponderRegistration(this: DKGAgent): Parameters<typeof registerSyncHandler>[0] {
+    return {
+      register: (protocol, handler) =>
+        this.router.register(protocol, (data, peerIdObj, options) => handler(data, peerIdObj.toString(), options)),
+      protocolSync: PROTOCOL_SYNC,
+      syncDeniedResponse: SYNC_DENIED_RESPONSE,
+      syncPageSize: SYNC_PAGE_SIZE,
+      sharedMemoryTtlMs: this.config.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS,
+      store: this.store,
+      publicSnapshotStore: this.publicSnapshotStore,
+      peerId: this.peerId,
+      parseSyncRequest: this.parseSyncRequest.bind(this),
+      authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
+      // unless the operator opts in. Env read HERE at the lifecycle boundary,
+      // FRESH per call, so the kill-switch is reversible at runtime (no restart).
+      shouldWithholdDurableMeta: (contextGraphId) =>
+        shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      logWarn: (ctx, message) => this.log.warn(ctx, message),
+      logDebug: (ctx, message) => this.log.debug(ctx, message),
+    };
   }
 
   /**

@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SYSTEM_CONTEXT_GRAPHS, Logger } from '@origintrail-official/dkg-core';
+import {
+  SYSTEM_CONTEXT_GRAPHS,
+  Logger,
+  TypedEventBus,
+  encodePublishRequest,
+  decodePublishAck,
+} from '@origintrail-official/dkg-core';
 import { generateTentativeMetadata, type KAMetadata } from '../src/index.js';
 import {
   pruneSupersededAgentRegistryMeta,
   insertBoundedAgentRegistryMeta,
 } from '../src/agent-registry-meta-retention.js';
+import { PublishHandler } from '../src/publish-handler.js';
 
 // #1233 follow-up — the residual, LOAD-BEARING `_meta` write sites (the
 // direct-protocol receive handler + the confirmed-metadata restatement) cannot
@@ -412,6 +419,69 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     ).toBe(3);
   });
 
+  it('(A) serializes concurrent same-agent heartbeats — collapses to exactly the newest record', async () => {
+    // Two concurrent heartbeats for the SAME agent (fresh UAL each). Without the
+    // per-root mutex both insert, then each prunes the OTHER's record → the agent
+    // ends with ZERO records. The store below defers every prune (`update`) past
+    // the microtask queue via setTimeout(0), so BOTH inserts deterministically
+    // land before EITHER prune's DELETE — the exact interleaving that zeroes the
+    // graph unserialized. The mutex serialises insert+prune, so the 2nd call (B)
+    // chains after the 1st (A), inserts its own record, then prunes A → exactly
+    // ONE record survives and it is deterministically the newest (B): `call('A')`
+    // is dispatched first, so it acquires the lock first and B prunes last.
+    // Asserting the exact survivor (not merely ≥1) also catches a "serialized but
+    // unbounded" regression that leaves both records live.
+    const base = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    const raceStore = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
+        if (p === 'update') return async (sparql: string) => {
+          await new Promise((res) => setTimeout(res, 0)); // defer the prune past both inserts
+          return base.update(sparql);
+        };
+        return Reflect.get(t, p, r);
+      },
+    }) as unknown as OxigraphStore;
+
+    const call = (ual: string) =>
+      insertBoundedAgentRegistryMeta({
+        store: raceStore,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        rootEntities: [agent],
+        recordUal: ual,
+        metadataQuads: metaQuadsFor(AGENTS, agent, ual),
+      });
+
+    await Promise.all([call(mkUal('A')), call(mkUal('B'))]);
+
+    expect(
+      await tentativeUals(base, AGENTS),
+      'concurrent same-agent heartbeats collapse to exactly the newest record (B); ' +
+        'this is [] without the mutex and [A,B] if serialized-but-unbounded',
+    ).toEqual([mkUal('B')]);
+  });
+
+  it('(C) throws when recordUal is not a subject of metadataQuads (drift guard)', async () => {
+    const store = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    // metadataQuads describe UAL "real", but we (wrongly) ask to protect "other".
+    await expect(
+      insertBoundedAgentRegistryMeta({
+        store,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        rootEntities: [agent],
+        recordUal: mkUal('other'),
+        metadataQuads: metaQuadsFor(AGENTS, agent, mkUal('real')),
+      }),
+    ).rejects.toThrow(/recordUal .* is not a subject of metadataQuads/);
+
+    // The mismatch is caught BEFORE any write — nothing was inserted.
+    expect(await store.countQuads(metaOf(AGENTS))).toBe(0);
+  });
+
   it('(2) warns (not a silent drop) on an unsafe root, and still prunes the safe ones', async () => {
     const store = new OxigraphStore();
     const agent = agentDid(0xa1);
@@ -440,5 +510,62 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
       await store.countQuads(metaOf(AGENTS)),
       'the safe root is still pruned — the pass is not silently aborted',
     ).toBe(0);
+  });
+
+  it('(E) production path: PublishHandler.handler on an agents-CG publish does NOT reject when the prune fails, and still registers the tentative lifecycle', async () => {
+    // Regression guard for the WIRING: the receive path must use
+    // insertBoundedAgentRegistryMeta (insert-first + swallowed post-insert prune
+    // failure). If it reverts to prune-before-insert or lets the prune error
+    // propagate, the ACK rejects and pendingPublishes/expireTentativePublish never
+    // register → the tentative publish is orphaned (#1533).
+    const base = new OxigraphStore();
+    // Every store method delegates to base EXCEPT update(), which throws — that is
+    // the engine the agents/_meta prune uses, so the prune fails AFTER a durable
+    // insert while the rest of handlePublish runs normally.
+    const pruneFailsStore = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'update') return async () => { throw new Error('update boom'); };
+        const v = Reflect.get(t, p, r);
+        return typeof v === 'function' ? v.bind(base) : v;
+      },
+    }) as unknown as OxigraphStore;
+    const handler = new PublishHandler(pruneFailsStore, new TypedEventBus());
+
+    const publisherAddress = '0x1111111111111111111111111111111111111111';
+    const rootEntity = agentDid(0xa1);
+    const ntriples = `<${rootEntity}> <http://schema.org/name> "AgentBot" .`;
+    const ual = `did:dkg:mock:31337/${publisherAddress}/1`;
+    const reqBytes = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(ntriples),
+      contextGraphId: AGENTS,
+      kas: [{ tokenId: 1, rootEntity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress,
+      startKAId: 1,
+      endKAId: 1,
+      chainId: 'mock:31337',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+    });
+
+    const records: Array<{ level: string; message: string }> = [];
+    Logger.setSink((rec) => { records.push({ level: rec.level, message: rec.message }); });
+    // MUST NOT reject even though the agents/_meta prune (update) throws.
+    const ackData = await (async () => {
+      try {
+        return await handler.handler(reqBytes, 'test-peer' as any);
+      } finally {
+        Logger.setSink(null);
+      }
+    })();
+
+    const ack = decodePublishAck(ackData);
+    expect(ack.accepted, 'the ACK is accepted despite the prune failure').toBe(true);
+    expect(handler.hasPendingPublishes, 'the tentative-publish lifecycle was registered').toBe(true);
+    expect(
+      records.some((r) => r.level === 'warn' && /bound skipped this round/i.test(r.message)),
+      'the swallowed prune failure was surfaced by the helper',
+    ).toBe(true);
   });
 });
