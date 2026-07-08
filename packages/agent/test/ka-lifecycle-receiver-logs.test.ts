@@ -314,6 +314,52 @@ describe('KA receiver lifecycle logs', () => {
     });
   });
 
+  it('logs SWM receive lifecycle by assetUal after request identity decode', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+      lifecycleLogOptions: {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+    const entries = captureLogs();
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-receive-lifecycle',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle receive" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    await handler.handle(msg, PUBLISHER_PEER_ID);
+
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`assetUal=${ASSET_UAL}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('event=swm_update_received'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`localPeerId=${LOCAL_PEER_ID}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('localNodeIdentityId=42'),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`),
+    );
+    expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
+      expect.stringContaining('shareOperationId=share-op-receive-lifecycle'),
+    );
+  });
+
   it('logs SWM Share ACK send by assetUal', async () => {
     const agent = await createReceiverAgent();
     const sent: Array<{ peerId: string; protocol: string; data: Uint8Array }> = [];
