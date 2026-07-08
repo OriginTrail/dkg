@@ -1,7 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import { shouldWithholdAgentsDurableMeta } from '../src/sync/requester/agents-meta-sync-config.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -12,12 +13,15 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
  * KC/KA `_meta` record that has NO consumer (agent facts are served from the
  * DATA phase), so `agents/_meta` grows without bound. A core that keeps SERVING
  * that snapshot re-propagates the bloat across the mesh. The durable-meta
- * responder therefore withholds it BY DEFAULT — returning an empty (completed)
- * meta page — while leaving the DATA phase and every other CG's meta untouched.
+ * responder therefore withholds it — returning an empty (completed) meta page —
+ * while leaving the DATA phase and every other CG's meta untouched.
  *
- * The skip is gated behind the runtime kill-switch `DKG_SERVE_AGENTS_META`
- * (this is the highest-blast-radius change, so it must be reversible without a
- * restart): default withholds; `DKG_SERVE_AGENTS_META=1` serves as before.
+ * Per PR #1526 review: the responder does NOT read policy env itself. The
+ * withhold decision is an INJECTED predicate (`shouldWithholdDurableMeta`); the
+ * env-backed default (`DKG_SERVE_AGENTS_META` kill-switch) lives in the pure
+ * `shouldWithholdAgentsDurableMeta` resolver, wired at the daemon call site.
+ * These tests therefore drive the responder by injecting the predicate directly
+ * (no process.env mutation) and unit-test the env-backed resolver separately.
  */
 
 const AGENTS_CG = SYSTEM_CONTEXT_GRAPHS.AGENTS; // 'agents'
@@ -64,14 +68,15 @@ function lineGraphsFromNquads(text: string): Set<string> {
   return graphs;
 }
 
-describe('sync responder durable-meta phase — agents/_meta serve-skip', () => {
+describe('sync responder durable-meta phase — injected serve-skip predicate', () => {
   let store: OxigraphStore;
   let cap: ReturnType<typeof captureHandler>;
-  let originalServeFlag: string | undefined;
+  // Injected policy predicate; each test sets it before invoking. The responder
+  // captures it by reference, so reassignment after registration is honoured.
+  let shouldWithhold: (contextGraphId: string) => boolean;
 
   beforeEach(async () => {
-    originalServeFlag = process.env.DKG_SERVE_AGENTS_META;
-    delete process.env.DKG_SERVE_AGENTS_META;
+    shouldWithhold = () => false; // inert default: withhold nothing
 
     store = new OxigraphStore();
     await store.insert([
@@ -96,17 +101,15 @@ describe('sync responder durable-meta phase — agents/_meta serve-skip', () => 
       peerId: 'self-peer',
       parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
       authorizeSyncRequest: async () => true,
+      shouldWithholdDurableMeta: (contextGraphId) => shouldWithhold(contextGraphId),
       logWarn: noopLog,
       logDebug: noopLog,
     });
   });
 
-  afterEach(() => {
-    if (originalServeFlag === undefined) delete process.env.DKG_SERVE_AGENTS_META;
-    else process.env.DKG_SERVE_AGENTS_META = originalServeFlag;
-  });
+  it('withholds durable meta for a CG the predicate flags (empty completed page)', async () => {
+    shouldWithhold = (cg) => cg === AGENTS_CG;
 
-  it('withholds durable meta for the agents registry CG by default (empty completed page)', async () => {
     const out = await cap.invoke({
       contextGraphId: AGENTS_CG,
       offset: 0,
@@ -119,7 +122,9 @@ describe('sync responder durable-meta phase — agents/_meta serve-skip', () => 
     expect(out.trim()).toBe('');
   });
 
-  it('still serves durable meta for a normal user CG by default', async () => {
+  it('still serves durable meta for a CG the predicate does NOT flag', async () => {
+    shouldWithhold = (cg) => cg === AGENTS_CG; // flags agents only, not user-cg
+
     const out = await cap.invoke({
       contextGraphId: USER_CG,
       offset: 0,
@@ -133,22 +138,8 @@ describe('sync responder durable-meta phase — agents/_meta serve-skip', () => 
     expect(out).toContain(USER_ENTITY);
   });
 
-  it('leaves the agents-CG DATA phase intact while meta is withheld', async () => {
-    const out = await cap.invoke({
-      contextGraphId: AGENTS_CG,
-      offset: 0,
-      limit: 5000,
-      includeSharedMemory: false,
-      phase: 'data',
-    });
-
-    const graphs = lineGraphsFromNquads(out);
-    expect(graphs.has(AGENTS_ENTITY)).toBe(true);
-    expect(out).toContain(`${DKG_NS}nodeRole`);
-  });
-
-  it('serves agents durable meta normally when DKG_SERVE_AGENTS_META=1 (kill-switch)', async () => {
-    process.env.DKG_SERVE_AGENTS_META = '1';
+  it('serves agents durable meta when the predicate withholds nothing (kill-switch open)', async () => {
+    shouldWithhold = () => false;
 
     const out = await cap.invoke({
       contextGraphId: AGENTS_CG,
@@ -161,5 +152,43 @@ describe('sync responder durable-meta phase — agents/_meta serve-skip', () => 
     const graphs = lineGraphsFromNquads(out);
     expect(graphs.has(AGENTS_META)).toBe(true);
     expect(out).toContain(`${DKG_NS}createdAt`);
+  });
+
+  it('leaves the DATA phase intact even for a CG whose meta is withheld', async () => {
+    shouldWithhold = () => true; // withhold ALL meta
+
+    const out = await cap.invoke({
+      contextGraphId: AGENTS_CG,
+      offset: 0,
+      limit: 5000,
+      includeSharedMemory: false,
+      phase: 'data',
+    });
+
+    const graphs = lineGraphsFromNquads(out);
+    expect(graphs.has(AGENTS_ENTITY)).toBe(true);
+    expect(out).toContain(`${DKG_NS}nodeRole`);
+  });
+});
+
+describe('shouldWithholdAgentsDurableMeta — env-backed default policy', () => {
+  it('withholds the agents CG _meta by default (flag unset/empty/falsey)', () => {
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, undefined)).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '')).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '0')).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'false')).toBe(true);
+  });
+
+  it('serves the agents CG _meta when DKG_SERVE_AGENTS_META is truthy (kill-switch)', () => {
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '1')).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'true')).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'on')).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'yes')).toBe(false);
+  });
+
+  it('never withholds a non-agents CG regardless of the flag', () => {
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, undefined)).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, '0')).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, '1')).toBe(false);
   });
 });

@@ -41,6 +41,7 @@ export default defineConfig({
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
       "test/agents-meta-sync-config.test.ts",
+      "test/agents-meta-sync-wiring.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
     ],
     testTimeout: 60_000,

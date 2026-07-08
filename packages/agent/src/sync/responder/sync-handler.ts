@@ -3,11 +3,9 @@ import {
   QuietRetryableHandlerError,
   withSpan,
   getMetrics,
-  isAgentRegistryContextGraph,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { parseBooleanEnv } from '../requester/agents-meta-sync-config.js';
 import {
   serializeWorkspacePublicSnapshotQuads,
   type WorkspacePublicSnapshotStore,
@@ -67,6 +65,17 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /**
+   * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
+   * `_meta` snapshot for `contextGraphId` — the responder then replies with an
+   * empty (completed) meta page instead of materializing/serving it. Kept as an
+   * injected dependency so daemon config policy (the `DKG_SERVE_AGENTS_META`
+   * kill-switch + the agents-registry-CG check) lives at the wiring site, NOT in
+   * the sync responder. Omitted / returns falsy ⇒ serve normally (the pre-#1233
+   * behaviour), so callers that don't wire it are unaffected. The production
+   * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
+   */
+  shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
 }
@@ -224,21 +233,6 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
-/**
- * Runtime kill-switch for the agents/_meta serve-skip (#1233). Resolved on EVERY
- * request (not cached at module load) so the highest-blast-radius change here is
- * reversible WITHOUT a restart: default (unset/anything but "1") withholds the
- * agents registry `_meta` snapshot; `DKG_SERVE_AGENTS_META=1` restores the old
- * serve-everything behaviour. Mirrors the `=== '1'` idiom used by the other
- * `DKG_*` boolean flags (e.g. DKG_WARM_CORE_CONNECTIONS, DKG_DEBUG_SYNC_PROGRESS).
- */
-function serveAgentsMetaEnabled(): boolean {
-  // Accept the same truthy spellings as the fetch flag (1/true/on/yes) for
-  // consistency; unset/unrecognized ⇒ serve-skip. Read per-request so the
-  // kill-switch is reversible at runtime without a restart.
-  return parseBooleanEnv(process.env.DKG_SERVE_AGENTS_META) === true;
-}
-
 export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   const {
     register,
@@ -250,6 +244,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     publicSnapshotStore,
     parseSyncRequest,
     authorizeSyncRequest,
+    shouldWithholdDurableMeta,
     logWarn,
     logDebug,
   } = params;
@@ -466,21 +461,22 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
         if (nquads.length === 0) return new TextEncoder().encode('');
       } else if (phase === 'meta') {
-        // agents/_meta serve-skip. The agents registry system CG's durable
-        // `_meta` graph has NO consumer — agent facts are served from the DATA
-        // phase — yet it grows without bound on every heartbeat (#1233). Serving
-        // it re-propagates that bloat across the mesh, so cores WITHHOLD the
-        // agents `_meta` snapshot by default: skip materializing/serializing it
-        // and leave `nquads` empty, which returns an empty (completed) meta page.
-        // The requester tolerates this exactly like a legitimately-empty meta
-        // graph — it treats an empty body as clean EOF (page-fetch.ts:
-        // `if (!nquadsText) break`). Only THIS durable-meta snapshot for the
-        // agents CG is withheld: the DATA phase, and every other CG's meta, are
-        // untouched. Reversible at runtime via `DKG_SERVE_AGENTS_META=1`.
-        if (!serveAgentsMetaEnabled() && isAgentRegistryContextGraph(contextGraphId)) {
+        // Durable-meta serve-skip (#1233). When the injected policy predicate
+        // says to withhold this CG's `_meta` (production: the agents registry
+        // system CG, whose `_meta` is bloated per-heartbeat KA/KC records with NO
+        // cross-node consumer — agent facts are served from the DATA phase — and
+        // serving it just re-propagates the bloat across the mesh), skip
+        // materializing/serializing it and leave `nquads` empty, which returns an
+        // empty (completed) meta page. The requester tolerates this exactly like
+        // a legitimately-empty meta graph — it treats an empty body as clean EOF
+        // (page-fetch.ts: `if (!nquadsText) break`). Only THIS durable-meta
+        // snapshot is withheld: the DATA phase, and any CG the predicate does not
+        // flag, are untouched. The predicate reads the `DKG_SERVE_AGENTS_META`
+        // kill-switch per call at the wiring site, so it is reversible at runtime.
+        if (shouldWithholdDurableMeta?.(contextGraphId)) {
           logDebug(
             createOperationContext('sync'),
-            `Sync responder withholding durable meta for agents registry "${contextGraphId}" (serve-skip; set DKG_SERVE_AGENTS_META=1 to serve)`,
+            `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
           );
         } else {
           const queryStartedAt = Date.now();

@@ -19,9 +19,9 @@ import {
   generateTentativeMetadata,
   getTentativeStatusQuad,
   getConfirmedStatusQuad,
-  pruneSupersededAgentRegistryMeta,
   type KAMetadata,
 } from './metadata.js';
+import { pruneSupersededAgentRegistryMeta } from './agent-registry-meta-retention.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { PublishJournal, type JournalEntry } from './publish-journal.js';
 

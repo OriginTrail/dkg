@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import {
-  generateTentativeMetadata,
-  pruneSupersededAgentRegistryMeta,
-  type KAMetadata,
-} from '../src/index.js';
+import { SYSTEM_CONTEXT_GRAPHS, Logger } from '@origintrail-official/dkg-core';
+import { generateTentativeMetadata, type KAMetadata } from '../src/index.js';
+import { pruneSupersededAgentRegistryMeta } from '../src/agent-registry-meta-retention.js';
 
 // #1233 follow-up — the residual, LOAD-BEARING `_meta` write sites (the
 // direct-protocol receive handler + the confirmed-metadata restatement) cannot
@@ -218,5 +215,71 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
 
     // …and the UPDATE actually evicted the superseded prior record.
     expect(await base.countQuads(metaOf(AGENTS)), 'the prior record was deleted by the UPDATE').toBe(0);
+  });
+
+  it('(B) evicts the WHOLE record for legacy/multi-root shape (member on <ual>/n with dkg:partOf)', async () => {
+    // Legacy / multi-root shape: the member entity sits on the `<ual>/1` TOKEN
+    // subject (carrying `dkg:partOf <ual>`), while the KC-level rows (status,
+    // merkleRoot, …) sit on the parent `<ual>`. The prune must resolve the member
+    // back to the record ROOT and delete BOTH — otherwise the parent rows leak
+    // (PR #1526 #1). The buggy first version bound `?ual = <ual>/1` and deleted
+    // only the token subtree, stranding the parent.
+    const store = new OxigraphStore();
+    const g = metaOf(AGENTS);
+    const DKG = 'http://dkg.io/ontology/';
+    const agentX = agentDid(0xbb);
+    const ual = mkUal('legacy');
+    const token = `${ual}/1`;
+
+    await store.insert([
+      { subject: token, predicate: `${DKG}entity`, object: agentX, graph: g },
+      { subject: token, predicate: `${DKG}partOf`, object: ual, graph: g },
+      { subject: ual, predicate: `${DKG}status`, object: '"tentative"', graph: g },
+      { subject: ual, predicate: `${DKG}merkleRoot`, object: '"deadbeef"', graph: g },
+    ]);
+    expect(await store.countQuads(g)).toBe(4);
+
+    await pruneSupersededAgentRegistryMeta({
+      store,
+      contextGraphId: AGENTS,
+      metaGraph: g,
+      rootEntities: [agentX],
+      keepUal: mkUal('current'),
+    });
+
+    expect(
+      await ask(store, `ASK { GRAPH <${g}> { <${token}> ?p ?o } }`),
+      'the <ual>/n token rows are removed',
+    ).toBe(false);
+    expect(
+      await ask(store, `ASK { GRAPH <${g}> { <${ual}> ?p ?o } }`),
+      'the parent <ual> status/merkleRoot rows are removed (the legacy-shape leak fix)',
+    ).toBe(false);
+    expect(await store.countQuads(g), 'the whole legacy record is evicted, no leak').toBe(0);
+  });
+
+  it('(C) does NOT silently skip: warns loudly (no throw) when the store lacks server-side update()', async () => {
+    // A store missing update() on the agents path is an invariant violation
+    // (every real backend implements it). The prune must NOT throw (a defensive
+    // bound must never break publishing) but MUST make the skip visible.
+    const records: Array<{ level: string; module: string; message: string }> = [];
+    Logger.setSink((r) => { records.push(r); });
+    try {
+      const noUpdateStore = {} as unknown as OxigraphStore; // no update() method
+      await expect(
+        pruneSupersededAgentRegistryMeta({
+          store: noUpdateStore,
+          contextGraphId: AGENTS,
+          metaGraph: metaOf(AGENTS),
+          rootEntities: [agentDid(0xa1)],
+          keepUal: mkUal('x'),
+        }),
+      ).resolves.toBeUndefined(); // no throw, no-op
+    } finally {
+      Logger.setSink(null);
+    }
+    const warn = records.find((r) => r.level === 'warn' && /SKIPPED/.test(r.message));
+    expect(warn, 'a loud warn was emitted about the skipped agents/_meta bound').toBeDefined();
+    expect(warn?.module).toBe('AgentRegistryMetaRetention');
   });
 });

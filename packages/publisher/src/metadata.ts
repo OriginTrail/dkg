@@ -3,7 +3,6 @@ import { GraphManager } from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
-  isAgentRegistryContextGraph,
   assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphSharedMemoryUri,
@@ -297,84 +296,6 @@ export function generateConfirmedFullMetadata(
     ...generateKCMetadata(meta, kaEntries),
     ...generateConfirmedMetadata(meta.ual, meta.contextGraphId, provenance),
   ];
-}
-
-/**
- * #1233 follow-up — BOUND the agents-registry `_meta` graph at the load-bearing
- * write sites that #1234 deliberately did NOT skip.
- *
- * The `agents` system context graph never registers on-chain, so its per-publish
- * tentative `_meta` tracking record is never superseded by a confirm and never
- * naturally rotates: every agent heartbeat mints a FRESH `<ual>` and would append
- * a whole new record-set, growing `agents/_meta` without bound (the residual half
- * of #1233). The two highest-volume paths (local publish terminal + gossip
- * receiver) are write-skipped in #1234; the remaining paths are load-bearing —
- * they drive the tentative→confirm/expire lifecycle and prior-root cleanup, so a
- * blanket skip would desync that state machine (`packages/core/src/genesis.ts`
- * §isAgentRegistryContextGraph). They therefore PRUNE instead of skipping.
- *
- * Before the caller inserts a heartbeat's fresh tracking rows, this evicts the
- * PRIOR tracking rows for the SAME agent — matched on the member `rootEntity`
- * (the stable agent DID that every heartbeat re-states, unlike the per-heartbeat
- * UAL). At most the newest record per agent survives, so the graph stays bounded
- * to O(agents) instead of O(agents × heartbeats). That surviving record IS the
- * live tentative record the lifecycle needs — only already-superseded history is
- * removed, so tentative→confirm/expire is unaffected.
- *
- * No-op for every non-agents CG (full per-KA `_meta` history is preserved).
- *
- * @param opts.metaGraph the `_meta` graph the caller is about to write into.
- * @param opts.rootEntities the root entities of the record about to be inserted
- *   (the agent DID(s) for this heartbeat).
- * @param opts.keepUal the current heartbeat's UAL — never pruned (defensive; it
- *   is normally not yet present because the prune runs before the insert).
- */
-export async function pruneSupersededAgentRegistryMeta(opts: {
-  store: TripleStore;
-  contextGraphId: string;
-  metaGraph: string;
-  rootEntities: readonly string[];
-  keepUal?: string;
-}): Promise<void> {
-  const { store, contextGraphId, metaGraph, rootEntities, keepUal } = opts;
-  if (!isAgentRegistryContextGraph(contextGraphId)) return;
-  const safeRoots = [...new Set(rootEntities)].filter(isSafeIri);
-  if (safeRoots.length === 0) return;
-  assertSafeGraphIriForSparql(metaGraph);
-
-  // COUNT-FREE by construction: ONE server-side SPARQL `DELETE … WHERE`, never a
-  // per-record `deleteByPattern`/`deleteBySubjectPrefix` loop. On the production
-  // Blazegraph/SparqlHttp backends those helpers bracket every delete with TWO
-  // full-graph `countQuads` scans (blazegraph.ts deleteByPattern/
-  // deleteBySubjectPrefix) — evicting an agent's backlog on the first heartbeat
-  // would fan out into thousands of full-graph scans on the very cores this
-  // change exists to relieve. A single UPDATE does the whole eviction inside the
-  // store with no client round-trips or counts. Same "bail if the backend can't
-  // do server-side UPDATE" contract as the RS heal (dkg-agent-swm-host.ts
-  // healStrandedScopedKCs); every production + test backend implements it, so the
-  // bound is never silently skipped in practice.
-  const storeUpdate = store.update;
-  if (typeof storeUpdate !== 'function') return;
-
-  // Match every PRIOR KC record for these agents — any `_meta` subject that
-  // re-states one of this heartbeat's root entities (read-both on the member
-  // predicate `dkg:rootEntity` ‖ `dkg:entity`) — and delete all of its rows AND
-  // its `<ual>/<n>` per-token subjects. The current heartbeat's UAL is kept via
-  // the FILTER (defensive: it is normally not present yet — this runs before the
-  // insert). Only a safe IRI is embedded; an unsafe/absent `keepUal` drops the
-  // FILTER (harmless — the current record isn't in the graph at prune time).
-  const values = safeRoots.map((r) => `<${r}>`).join(' ');
-  const safeKeepUal = keepUal && isSafeIri(keepUal) ? keepUal : undefined;
-  const keepFilter = safeKeepUal ? `FILTER(?ual != <${safeKeepUal}>)` : '';
-  const sparql = `DELETE { GRAPH <${metaGraph}> { ?s ?p ?o } }
-WHERE { GRAPH <${metaGraph}> {
-  VALUES ?root { ${values} }
-  { ?ual <${DKG_ROOT_ENTITY_LEGACY}> ?root } UNION { ?ual <${DKG_ENTITY}> ?root }
-  ${keepFilter}
-  ?s ?p ?o .
-  FILTER(?s = ?ual || STRSTARTS(STR(?s), CONCAT(STR(?ual), "/")))
-} }`;
-  await storeUpdate.call(store, sparql);
 }
 
 /**

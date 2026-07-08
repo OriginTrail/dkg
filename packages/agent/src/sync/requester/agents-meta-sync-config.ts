@@ -3,6 +3,8 @@
 // both the CLI daemon lifecycle and the in-agent lifecycle resolve the flag
 // identically, and so the precedence can be unit-tested in isolation.
 
+import { isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+
 /**
  * Parse a boolean-ish environment string into a strict boolean, or `undefined`
  * when the value is absent / unrecognized (so callers can fall through to a
@@ -45,4 +47,28 @@ export function resolveSyncAgentsMeta(
   const fromEnv = parseBooleanEnv(envValue);
   if (fromEnv !== undefined) return fromEnv;
   return false;
+}
+
+/**
+ * Resolve whether the sync RESPONDER should WITHHOLD the durable `agents/_meta`
+ * snapshot from a requesting peer (#1233). This is the SERVE-side counterpart to
+ * `resolveSyncAgentsMeta` (the FETCH-side skip): the agents `_meta` is bloated
+ * (per-heartbeat KA/KC lifecycle records) and has no cross-node consumer, so a
+ * core that keeps serving it merely re-propagates the bloat across the mesh.
+ *
+ * Kept as a pure function (env passed IN, not read here) so the responder stays
+ * free of daemon config policy — the responder receives this as an injected
+ * predicate — and so the precedence is unit-testable in isolation.
+ *
+ * Withhold when it's the agents registry CG AND the operator has NOT opted in to
+ * serving it (`DKG_SERVE_AGENTS_META` truthy — `1`/`true`/`on`/`yes`). Any
+ * non-agents CG is NEVER withheld. Callers pass `process.env.DKG_SERVE_AGENTS_META`
+ * fresh on every request, so the kill-switch is reversible at runtime.
+ */
+export function shouldWithholdAgentsDurableMeta(
+  contextGraphId: string,
+  serveEnvValue: string | undefined,
+): boolean {
+  if (!isAgentRegistryContextGraph(contextGraphId)) return false;
+  return parseBooleanEnv(serveEnvValue) !== true;
 }
