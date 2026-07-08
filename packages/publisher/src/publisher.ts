@@ -86,6 +86,8 @@ export interface V10ACKProviderBaseParams {
   subGraphName?: string;
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
   merkleLeafCount: number;
+  /** Canonical KA UAL used by receiver-side lifecycle logs. */
+  assetUal?: string;
 }
 
 export type V10ACKProviderParams =
