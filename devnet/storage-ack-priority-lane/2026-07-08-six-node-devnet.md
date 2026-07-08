@@ -154,3 +154,139 @@ Result from all six node APIs:
 - A plain `/api/query` without `view: "verifiable-memory"` only surfaced the smoke triple on node 1. The correct VM read path for this test is the explicit `verifiable-memory` view.
 - The generated `packages/evm-module/deployments/localhost_contracts.json` diff was left unstaged because it is a local devnet deployment side effect.
 - Temporary `node_modules` symlinks were also left unstaged; they were used only so this clean worktree could reuse the already-installed dependency tree from `/Users/otlegend/projects/dkg-v9`.
+
+## Rebase Rerun - 2026-07-08
+
+Purpose: repeat the six-node StorageACK priority-lane smoke after rebasing
+`codex/storageack-priority-lane` onto `origin/main` at
+`1f0d57118 fix: sever agents/_meta from the sync plane (Tier 1 -- mainnet sync-storm relief) (#1526)`.
+
+Pre-receipt code under test:
+
+- `6133ff73c test(devnet): record storage ack priority six-node smoke`
+- `8aa058484 feat(agent): add sync backpressure controls`
+- `06a5326d8 feat(publisher): prioritize storage ack handling`
+- `64659febb feat(storage): add priority store scheduler`
+
+Validation before rerun:
+
+- `pnpm install --frozen-lockfile --store-dir /Users/otlegend/projects/dkg-v9/.pnpm-store`: passed
+- `pnpm run build:runtime`: passed
+
+Fresh devnet command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DEVNET_DIR=/private/tmp/dkg-v9-storageack-priority-lane-devnet6 \
+HARDHAT_PORT=18695 \
+API_PORT_BASE=20101 \
+LIBP2P_PORT_BASE=21101 \
+DEVNET_OXIGRAPH_BASE=30100 \
+UI_PORT=58723 \
+./scripts/devnet.sh start 6
+```
+
+Startup result:
+
+- Hardhat RPC: `http://127.0.0.1:18695`
+- `minimumRequiredSignatures` set to `3`
+- Docker was unavailable, so the run used the no-Docker fallback matrix:
+  - Nodes 1-2: managed `oxigraph-server`
+  - Nodes 3-4: in-process `oxigraph`
+  - Nodes 5-6: in-process `oxigraph-worker`
+- Four core nodes were staked with 50k TRAC and had asks set.
+- `devnet-test` registered on-chain as context graph `v10Id=1`.
+- `devnet-isolation` registered on-chain as context graph `v10Id=2`.
+- Both registered context graphs were visible from all six nodes before the smoke publish.
+
+Node status after publish:
+
+| Node | Role | API | Peer suffix | Connected peers | Chain |
+| --- | --- | --- | --- | ---: | --- |
+| 1 | core | `20101` | `HfwZYoiw` | 5 | `evm:31337` |
+| 2 | core | `20102` | `b3AqWuwv` | 5 | `evm:31337` |
+| 3 | core | `20103` | `GPFqG5wg` | 5 | `evm:31337` |
+| 4 | core | `20104` | `sfbPaaAo` | 5 | `evm:31337` |
+| 5 | edge | `20105` | `pFzH1rvk` | 5 | `evm:31337` |
+| 6 | edge | `20106` | `MbCigZFC` | 5 | `evm:31337` |
+
+Create, finalize, and share command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DKG_HOME=/private/tmp/dkg-v9-storageack-priority-lane-devnet6/node1 \
+node packages/cli/dist/cli.js ka create storageack-priority-smoke-20260708-devnet6 \
+  --context-graph-id devnet-test \
+  --share \
+  --subject urn:test:storageack-priority:20260708:devnet6 \
+  --predicate urn:test:predicate \
+  --object storageack-priority-devnet-smoke-rerun
+```
+
+Create/share result:
+
+- Name: `storageack-priority-smoke-20260708-devnet6`
+- Status: `swm-shared`
+- Merkle root: `0x7b07e3e8442e613b84f741d0504440b6d171d494ecc1b8ab2c025f18ab54a144`
+- Share operation: `mrc89bbz-xbzejl`
+
+Publish command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DKG_HOME=/private/tmp/dkg-v9-storageack-priority-lane-devnet6/node1 \
+node packages/cli/dist/cli.js ka publish storageack-priority-smoke-20260708-devnet6 \
+  --context-graph-id devnet-test \
+  --json
+```
+
+Publish result:
+
+- Status: `confirmed`
+- Block: `457`
+- KA ID: `17780653607465831313448336904752238123646344621951817177127594600371117359104`
+- UAL: `did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/17780653607465831313448336904752238123646344621951817177127594600371117359104`
+- Transaction: `0x57d90d9c628a500cbd965171cf806c48d9aa29a09e3cef0b57c845f9ca22be08`
+
+StorageACK evidence from node 1:
+
+```text
+2026-07-08 17:23:30 [ACKCollector] Collecting ACKs via direct P2P (merkleRoot=0x7b07e3e8442e613b...)
+2026-07-08 17:23:30 [ACKCollector] Selected 5/5 ACK candidate peer(s) (required=3, protocol=/dkg/10.0.1/storage-ack, selected=b3AqWuwv:rest,GPFqG5wg:rest,sfbPaaAo:rest,pFzH1rvk:rest,MbCigZFC:rest, filtered=none)
+2026-07-08 17:23:30 [ACKCollector] Requesting ACKs from 5 core peers (need 3)
+2026-07-08 17:23:30 [ACKCollector] Valid ACK from GPFqG5wg (identity=3, signer=0x47aB143d... source=member)
+2026-07-08 17:23:30 [ACKCollector] Valid ACK from b3AqWuwv (identity=2, signer=0xa3eec76B... source=member)
+2026-07-08 17:23:30 [ACKCollector] Valid ACK from sfbPaaAo (identity=4, signer=0xAdfB5E8b... source=member)
+2026-07-08 17:23:30 [ACKCollector] Collected 3 ACKs successfully
+2026-07-08 17:23:30 [DKGPublisher] V10: Collected 3 core node ACKs [GPFqG5wg:member, b3AqWuwv:member, sfbPaaAo:member]
+2026-07-08 17:23:30 [DKGPublisher] On-chain confirmed: UAL=did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/17780653607465831313448336904752238123646344621951817177127594600371117359104 batchId=17780653607465831313448336904752238123646344621951817177127594600371117359104 tx=0x57d90d9c628a500cbd965171cf806c48d9aa29a09e3cef0b57c845f9ca22be08
+```
+
+Handler registration evidence:
+
+- Node 1 registered V10 StorageACK handler with identity `1`.
+- Node 2 registered V10 StorageACK handler with identity `2`.
+- Node 3 registered V10 StorageACK handler with identity `3`.
+- Node 4 registered V10 StorageACK handler with identity `4`.
+- Nodes 5 and 6 were edge nodes and skipped StorageACK handler registration as expected.
+
+Read-back command shape:
+
+```json
+{
+  "contextGraphId": "devnet-test",
+  "view": "verifiable-memory",
+  "sparql": "ASK WHERE { <urn:test:storageack-priority:20260708:devnet6> <urn:test:predicate> ?o . }"
+}
+```
+
+Result from all six node APIs:
+
+| Node | HTTP | ASK result |
+| --- | ---: | --- |
+| 1 | 200 | `true` |
+| 2 | 200 | `true` |
+| 3 | 200 | `true` |
+| 4 | 200 | `true` |
+| 5 | 200 | `true` |
+| 6 | 200 | `true` |
