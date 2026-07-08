@@ -51,17 +51,6 @@ function flattenTiers(tiers: readonly ACKCandidateTier[], preferred: ReadonlySet
   return tiers.flatMap((tier) => rankPreferredWithinTier(tier.peers, preferred));
 }
 
-function appendUnique(target: string[], ids: readonly string[]): void {
-  for (const id of ids) {
-    if (!target.includes(id)) target.push(id);
-  }
-}
-
-function appendFallback(selected: string[], fallback: readonly string[]): string[] {
-  appendUnique(selected, fallback);
-  return selected;
-}
-
 function buildCandidateTiers(input: {
   connected: readonly string[];
   knownCorePeerIds?: ReadonlySet<string>;
@@ -148,28 +137,7 @@ export function selectACKCandidatePeersWithDiagnostics(
     protocol: input.protocol,
   });
 
-  let peers: string[];
-  if (allowlistEnabled) {
-    peers = flattenTiers(tiers, preferredACKPeers);
-  } else if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
-    const v2Advertised = tiers.find((tier) => tier.name === 'v2Advertised')?.peers ?? [];
-    peers = rankPreferredWithinTier(v2Advertised, preferredACKPeers);
-    if (peers.length < input.requiredACKs) {
-      appendFallback(
-        peers,
-        flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
-      );
-    }
-  } else {
-    const confirmedCore = tiers.find((tier) => tier.name === 'confirmedCore')?.peers ?? [];
-    peers = rankPreferredWithinTier(confirmedCore, preferredACKPeers);
-    if (peers.length < input.requiredACKs) {
-      appendFallback(
-        peers,
-        flattenTiers(tiers.filter((tier) => tier.name !== 'confirmedCore'), preferredACKPeers),
-      );
-    }
-  }
+  const peers = flattenTiers(tiers, preferredACKPeers);
 
   const tierMap = tierByPeer(tiers);
   const selected = new Set(peers);

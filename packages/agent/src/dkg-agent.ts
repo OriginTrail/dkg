@@ -1659,7 +1659,7 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
-   * Candidate peer pool for ACK collection (#1093).
+   * Candidate peer pool for ACK collection (#1093 / #1482).
    *
    * `knownCorePeerIds` is populated from identify-time protocol lists in
    * `runSyncOnConnect`, but identify races `connection:open` — so the set
@@ -1669,15 +1669,17 @@ export class DKGAgent extends DKGAgentBase {
    * as it was non-empty, which permanently capped the ACK pool below
    * quorum (`pool_below_quorum`) and bricked publishing on core nodes.
    *
-   * Fix: only trust the confirmed-core subset when it can actually
-   * satisfy the quorum. Below that, return confirmed cores FIRST
-   * followed by the remaining connected ACK-eligible peers. External callers
-   * can still set `ackCandidatePeerIds` as a true allowlist; configured public
-   * networks use `preferredACKPeerIds` for relay ranking without excluding
-   * connected non-relay cores. Signer validity is enforced per collected ACK
-   * against chain truth (operational key + sharding-table membership), so a
-   * stale foreign-network connection costs a wasted dial, while hard-gating on
-   * the bundled relay list bricked publishing when those relays were degraded
+   * Fix: return confirmed cores FIRST followed by the remaining connected
+   * ACK-eligible peers. Do not narrow to a quorum-sized identify-derived tier:
+   * the collector fixes the pool once and retries within it, so one stale or
+   * saturated classified peer can make quorum impossible while healthy
+   * connected-but-unclassified cores sit idle. External callers can still set
+   * `ackCandidatePeerIds` as a true allowlist; configured public networks use
+   * `preferredACKPeerIds` for relay ranking without excluding connected
+   * non-relay cores. Signer validity is enforced per collected ACK against
+   * chain truth (operational key + sharding-table membership), so a stale
+   * foreign-network connection costs a wasted dial, while hard-gating on the
+   * bundled relay list bricked publishing when those relays were degraded
    * (2026-07-07 Base/Gnosis mainnet incident).
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
@@ -1694,16 +1696,10 @@ export class DKGAgent extends DKGAgentBase {
    * collector-side signature/root checks and on-chain ACK verification
    * are authoritative.
    *
-   * Codex review (PR #1107): the quorum threshold here must track the
-   * CHAIN's runtime `requiredACKs` (ParametersStorage
-   * minimumRequiredSignatures), not the hard-coded default — on networks
-   * configured above 3 signatures, a 3-strong confirmed-core subset is
-   * still below quorum and returning only it re-introduces
-   * `pool_below_quorum`. The V10 ACK provider refreshes
-   * `lastKnownRequiredACKs` from chain BEFORE each collect() (the
-   * collector's getConnectedCorePeers callback runs after), so this sync
-   * read sees the current value; the default only covers the first call
-   * on chains without the getter.
+   * `requiredACKs` is still passed through for candidate diagnostics/logging
+   * and to keep the selector contract aligned with the collector, but it must
+   * not cap the pool. The collector's per-peer verification and on-chain ACK
+   * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
@@ -1870,9 +1866,8 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
-      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
-      // requiredACKs instead of the hard-coded default.
+      // Cache the runtime quorum BEFORE collect() so candidate diagnostics
+      // report the chain's real requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;
       }
@@ -2021,9 +2016,8 @@ export class DKGAgent extends DKGAgentBase {
           throw wrapAsRpcPreconditionIfApplicable(err, 'getMinimumRequiredSignatures');
         }
       }
-      // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
-      // requiredACKs instead of the hard-coded default.
+      // Cache the runtime quorum BEFORE collect() so candidate diagnostics
+      // report the chain's real requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;
       }
