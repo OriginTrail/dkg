@@ -498,6 +498,12 @@ describe('Phase D — Cores host public CGs and fill their own gaps', () => {
     // signal a recycled PID.
     clearNodePidFiles(victim);
 
+    // HYGIENE (found in the 10.0.4 battle-test): wrap the rest so the victim
+    // core is ALWAYS restored. On a minSig devnet, taking one core offline can
+    // drop the publish below ACK quorum → the step-2 assertion throws → the
+    // restart is skipped → the victim stays dead → EVERY subsequent devnet
+    // suite fails for lack of quorum. The finally below closes that.
+    try {
     // 2. Publish a fresh KA to the CG from node1 while the victim is down.
     const pub = await publishFromCore(nodes[1]!, 'gap');
     expect(pub.status).toBe('confirmed');
@@ -553,6 +559,23 @@ describe('Phase D — Cores host public CGs and fill their own gaps', () => {
     );
     expect(filled, `node${victim} VM witness landed but no chain-path evidence for ka=${kaId}`).toBeTruthy();
     console.log(`Phase D fill-the-gap PASS via ${(filled as any).via} — ${(filled as any).evidence}`);
+    } finally {
+      // Always bring the victim back, even if the publish or gap-fill threw.
+      // Idempotent: no-op when the in-test restart above already succeeded.
+      try {
+        if (!(await nodeReachable(victimNode))) {
+          clearNodePidFiles(victim);
+          execFileSync('bash', [DEVNET_SH, 'restart-node', String(victim)], {
+            cwd: REPO_ROOT, stdio: 'inherit', env: { ...process.env, ...devnetPortEnv() },
+          });
+          await waitFor(`node${victim} restored (cleanup)`, 120_000, 2_000, async () =>
+            (await nodeReachable(victimNode)) ? true : null,
+          );
+        }
+      } catch (cleanupErr) {
+        console.warn(`Phase D cleanup: failed to restore node${victim}: ${(cleanupErr as Error).message}`);
+      }
+    }
   }, 600_000);
 });
 
