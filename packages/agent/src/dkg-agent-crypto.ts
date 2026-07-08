@@ -1249,12 +1249,14 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx);
     }
 
+    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(input.plaintext);
     const encrypted = await encryptSwmSenderKeyMessage({
       chainKey: state.chainKey,
       plaintext: input.plaintext,
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
       subGraphName: state.subGraphName,
+      assetUal,
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
@@ -2214,27 +2216,55 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     ctx: OperationContext,
   ): Promise<Uint8Array> {
     await this.loadSwmSenderKeyState();
+    const messageIndex = uint64ForProto(message.messageIndex);
+    let senderAgentAddress = message.senderAgentAddress;
+    const logDecryptFailure = (reason: string): void => {
+      if (!message.assetUal) return;
+      logKaLifecycleEvent(this.log, ctx, {
+        assetUal: message.assetUal,
+        stage: 'sender_key',
+        event: 'sender_key_payload_decrypt_failed',
+        role: 'receiver',
+        localPeerId: this.peerId,
+        localNodeIdentityId: this.identityId.toString(),
+        level: 'warn',
+        metadata: {
+          contextGraphId,
+          subGraphName: message.subGraphName,
+          senderAgentAddress,
+          epochId: message.epochId,
+          messageIndex,
+          membershipHash: message.membershipHash,
+          reason,
+        },
+      });
+    };
     if (message.contextGraphId !== contextGraphId) {
-      throw new Error(`Sender Key message contextGraphId "${message.contextGraphId}" does not match envelope "${contextGraphId}"`);
+      const reason = `Sender Key message contextGraphId "${message.contextGraphId}" does not match envelope "${contextGraphId}"`;
+      logDecryptFailure(reason);
+      throw new Error(reason);
     }
-    const senderAgentAddress = ethers.getAddress(message.senderAgentAddress);
+    senderAgentAddress = ethers.getAddress(message.senderAgentAddress);
     const state = this.swmSenderKeyReceiveStates.get(
       swmReceiverStateKey(contextGraphId, message.subGraphName, senderAgentAddress, message.epochId),
     );
     if (!state) {
+      const reason = `No local Sender Key state for ${senderAgentAddress} epoch ${message.epochId}`;
+      logDecryptFailure(reason);
       this.log.warn(
         ctx,
         `SWM sender-key broadcast receive denied: reason=no-state senderAgent=${senderAgentAddress} ` +
         `contextGraph=${contextGraphId}${message.subGraphName ? `/${message.subGraphName}` : ''} ` +
-        `epoch=${message.epochId} messageIndex=${uint64ForProto(message.messageIndex)} membershipHash=${message.membershipHash}`,
+        `epoch=${message.epochId} messageIndex=${messageIndex} membershipHash=${message.membershipHash}`,
       );
-      throw new Error(`No local Sender Key state for ${senderAgentAddress} epoch ${message.epochId}`);
+      throw new Error(reason);
     }
     if (state.membershipHash !== message.membershipHash) {
-      throw new Error(`Sender Key membership hash mismatch for ${senderAgentAddress} epoch ${message.epochId}`);
+      const reason = `Sender Key membership hash mismatch for ${senderAgentAddress} epoch ${message.epochId}`;
+      logDecryptFailure(reason);
+      throw new Error(reason);
     }
 
-    const messageIndex = uint64ForProto(message.messageIndex);
     let chainKey = state.skippedChainKeys.get(messageIndex);
     let usedSkippedKey = false;
     if (chainKey) {
@@ -2242,11 +2272,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       state.skippedChainKeys.delete(messageIndex);
     } else {
       if (messageIndex < state.nextMessageIndex) {
-        throw new Error(`Sender Key replay rejected for index ${messageIndex}`);
+        const reason = `Sender Key replay rejected for index ${messageIndex}`;
+        logDecryptFailure(reason);
+        throw new Error(reason);
       }
       const gap = messageIndex - state.nextMessageIndex;
       if (gap > SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT) {
-        throw new Error(`Sender Key message gap ${gap} exceeds skipped-message cache limit`);
+        const reason = `Sender Key message gap ${gap} exceeds skipped-message cache limit`;
+        logDecryptFailure(reason);
+        throw new Error(reason);
       }
       chainKey = state.chainKey;
       for (let index = state.nextMessageIndex; index < messageIndex; index++) {
@@ -2255,11 +2289,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
     }
 
-    const decrypted = await decryptSwmSenderKeyMessage({
-      chainKey,
-      message,
-      senderSigningPublicKey: state.senderSigningPublicKey,
-    });
+    let decrypted: Awaited<ReturnType<typeof decryptSwmSenderKeyMessage>>;
+    try {
+      decrypted = await decryptSwmSenderKeyMessage({
+        chainKey,
+        message,
+        senderSigningPublicKey: state.senderSigningPublicKey,
+      });
+    } catch (err) {
+      logDecryptFailure(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
 
     if (!usedSkippedKey) {
       state.chainKey = decrypted.nextChainKey;

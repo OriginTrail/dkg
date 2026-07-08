@@ -83,6 +83,7 @@ export interface EncryptSwmSenderKeyMessageInput {
   senderSigningSecretKey: Uint8Array;
   contextGraphId: string;
   subGraphName?: string;
+  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
@@ -256,6 +257,7 @@ export async function encryptSwmSenderKeyMessage(
     type: SWM_SENDER_KEY_MESSAGE_TYPE,
     contextGraphId: input.contextGraphId,
     subGraphName: input.subGraphName,
+    assetUal: input.assetUal,
     senderAgentAddress: input.senderAgentAddress,
     epochId: input.epochId,
     membershipHash: input.membershipHash,
@@ -278,6 +280,7 @@ export async function encryptSwmSenderKeyMessage(
       type: SWM_SENDER_KEY_MESSAGE_TYPE,
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
+      assetUal: input.assetUal,
       senderAgentAddress: input.senderAgentAddress,
       epochId: input.epochId,
       membershipHash: input.membershipHash,
@@ -301,6 +304,7 @@ export async function decryptSwmSenderKeyMessage(
   const expectedNonce = deriveMessageNonce(input.chainKey, {
     contextGraphId: input.message.contextGraphId,
     subGraphName: input.message.subGraphName,
+    assetUal: input.message.assetUal,
     senderAgentAddress: input.message.senderAgentAddress,
     epochId: input.message.epochId,
     membershipHash: input.message.membershipHash,
@@ -392,6 +396,7 @@ function deriveMessageNonce(
     type: SWM_SENDER_KEY_MESSAGE_TYPE,
     contextGraphId: fields.contextGraphId,
     subGraphName: fields.subGraphName,
+    assetUal: fields.assetUal,
     senderAgentAddress: fields.senderAgentAddress,
     epochId: fields.epochId,
     membershipHash: fields.membershipHash,
