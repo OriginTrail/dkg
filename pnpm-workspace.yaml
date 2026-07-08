@@ -16,6 +16,7 @@ packages:
   - "devnet/rich-scenario"
   - "devnet/rpc-quiet-window"
   - "devnet/v10-rs-prune"
+  - "devnet/v10-rs-wallet-rotation"
   - "devnet/_bootstrap"
   - "devnet/pr1386-term-canon"
   - "devnet/pr1385-subgraph-rs"

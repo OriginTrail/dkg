@@ -57,6 +57,7 @@
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
     "test:devnet:v10-rs-prune": "vitest run --config devnet/v10-rs-prune/vitest.config.ts",
+    "test:devnet:v10-rs-wallet-rotation": "vitest run --config devnet/v10-rs-wallet-rotation/vitest.config.ts",
     "test:all": "pnpm test && pnpm test:evm",
     "test:devnet:pr1386-term-canon": "vitest run --config devnet/pr1386-term-canon/vitest.config.ts",
     "test:devnet:pr1385-subgraph-rs": "vitest run --config devnet/pr1385-subgraph-rs/vitest.config.ts",
