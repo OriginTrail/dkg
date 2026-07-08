@@ -21,7 +21,7 @@ import {
 } from '../scripts/bundle-markitdown-binaries.mjs';
 
 describe('bundle-markitdown-binaries helpers', () => {
-  const CLI_VERSION = '10.0.0-rc.3';
+  const CLI_VERSION = '10.0.0-canary.3';
   const RELEASE_METADATA_TEXT = `${JSON.stringify({ source: 'release', cliVersion: CLI_VERSION }, null, 2)}\n`;
   let tmpPaths: string[] = [];
 
@@ -33,16 +33,16 @@ describe('bundle-markitdown-binaries helpers', () => {
   it('reads the CLI version from package.json', async () => {
     const pkgDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-pkg-'));
     tmpPaths.push(pkgDir);
-    await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ version: '10.0.0-rc.2' }, null, 2));
+    await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ version: '10.0.0-canary.2' }, null, 2));
 
-    expect(readCliVersion(pkgDir)).toBe('10.0.0-rc.2');
+    expect(readCliVersion(pkgDir)).toBe('10.0.0-canary.2');
   });
 
   it('parses standard sha256 files', () => {
     expect(parseSha256File('abc123  markitdown-linux-x64\n')).toBe('abc123');
-    expect(releaseTagForVersion('10.0.0-rc.2')).toBe('v10.0.0-rc.2');
-    expect(releaseBaseUrl('10.0.0-rc.2')).toBe(
-      'https://github.com/OriginTrail/dkg/releases/download/v10.0.0-rc.2',
+    expect(releaseTagForVersion('10.0.0-canary.2')).toBe('v10.0.0-canary.2');
+    expect(releaseBaseUrl('10.0.0-canary.2')).toBe(
+      'https://github.com/OriginTrail/dkg/releases/download/v10.0.0-canary.2',
     );
     expect(releaseAssetUrl('https://example.invalid/release', 'markitdown-linux-x64')).toBe(
       'https://example.invalid/release/markitdown-linux-x64',
@@ -185,7 +185,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     const staleHash = sha256Hex(staleBytes);
     await writeFile(binaryPath, staleBytes);
     await writeFile(checksumPathFor(binaryPath), `${staleHash}  ${assetName}\n`, 'utf-8');
-    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: '10.0.0-rc.2' }, null, 2)}\n`, 'utf-8');
+    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: '10.0.0-canary.2' }, null, 2)}\n`, 'utf-8');
 
     const refreshedBytes = Buffer.from('# refreshed markdown\n', 'utf-8');
     const refreshedHash = sha256Hex(refreshedBytes);
@@ -346,7 +346,7 @@ describe('bundle-markitdown-binaries helpers', () => {
       }
       if (req.url === `/release/${assetName}.meta.json`) {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(`${JSON.stringify({ source: 'release', cliVersion: '10.0.0-rc.2' }, null, 2)}\n`);
+        res.end(`${JSON.stringify({ source: 'release', cliVersion: '10.0.0-canary.2' }, null, 2)}\n`);
         return;
       }
       res.writeHead(404);

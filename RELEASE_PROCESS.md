@@ -24,8 +24,9 @@ If any gate fails, fix it through a reviewed PR into `main` and restart from the
 
 Use `v`-prefixed tags:
 
+- Canary: `v10.0.0-canary.1`, `v10.0.0-canary.2`, ...
 - Beta: `v10.0.0-beta.1`, `v10.0.0-beta.2`, ...
-- Release candidate: `v10.0.0-rc.1`, `v10.0.0-rc.2`, ...
+- Release candidate, only once the build is intended to be final: `v10.0.0-rc.1`, `v10.0.0-rc.2`, ...
 - Stable: `v10.0.0`, `v10.0.1`, ...
 
 Rule: a stable release tag (`vX.Y.Z`) should only be created for production-ready builds.
@@ -80,15 +81,15 @@ Keep the generated devnet report with the release notes. If this gate fails, fix
 Create and push the canary/prerelease tag from the devnet-validated `main` commit:
 
 ```bash
-git tag -a v10.0.0-rc.1 -m "DKG v10.0.0 rc 1"
-git push origin v10.0.0-rc.1
+git tag -a v10.0.0-canary.1 -m "DKG v10.0.0 canary 1"
+git push origin v10.0.0-canary.1
 ```
 
 For signed tags (recommended for production-grade verification):
 
 ```bash
-git tag -s v10.0.0-rc.1 -m "DKG v10.0.0 rc 1"
-git push origin v10.0.0-rc.1
+git tag -s v10.0.0-canary.1 -m "DKG v10.0.0 canary 1"
+git push origin v10.0.0-canary.1
 ```
 
 ## 6) Publishing to npm (fully manual)
@@ -116,17 +117,17 @@ npm prompts for your **OTP** (2FA). All publishable public `@origintrail-officia
 For a canary/prerelease, use the prerelease npm tag and move only the `testnet` update channel:
 
 ```bash
-pnpm release:verify-tag --tag vX.Y.Z-rc.1 --version X.Y.Z-rc.1
-git checkout vX.Y.Z-rc.1
+pnpm release:verify-tag --tag vX.Y.Z-canary.1 --version X.Y.Z-canary.1
+git checkout vX.Y.Z-canary.1
 pnpm install --frozen-lockfile
 pnpm build
-pnpm release:verify-versions --version X.Y.Z-rc.1
-pnpm release:build-info --dist-tag rc
-pnpm -r publish --no-git-checks --tag rc
-pnpm release:promote --version X.Y.Z-rc.1 --tags testnet --otp <fresh 2FA code>
+pnpm release:verify-versions --version X.Y.Z-canary.1
+pnpm release:build-info --dist-tag canary
+pnpm -r publish --no-git-checks --tag canary
+pnpm release:promote --version X.Y.Z-canary.1 --tags testnet --otp <fresh 2FA code>
 ```
 
-Use `beta` or `alpha` in place of `rc` when that is the prerelease channel. The prerelease npm tag (`rc` / `beta` / `alpha`) is for humans and direct installs; `testnet` is what `network/testnet.json` auto-update follows.
+The prerelease npm tag (`canary` / `beta` / `rc` / `alpha`) is for humans and direct installs; `testnet` is what `network/testnet.json` auto-update follows. Reserve `rc` for a build that has already passed canary validation and is intended to become the stable release if no final issues appear.
 
 After promoting `testnet`, update a real testnet node to the canary and run the testnet smoke test. Do not continue to the stable/mainnet release until the smoke test passes.
 
@@ -157,7 +158,7 @@ Use `--latest=false` when back-filling an older version so it doesn't steal the 
 ```bash
 pnpm release:verify-published --version X.Y.Z --tags latest,mainnet
 # prerelease example:
-pnpm release:verify-published --version X.Y.Z-rc.1 --tags rc,testnet
+pnpm release:verify-published --version X.Y.Z-canary.1 --tags canary,testnet
 gh release view vX.Y.Z --repo OriginTrail/dkg
 ```
 
@@ -169,15 +170,15 @@ After the `mainnet` dist-tag moves, update at least one mainnet node, execute th
   - follow stable tags/branch
   - `allowPrerelease=false`
 - Canary cohort:
-  - allowed to run beta/rc versions
+  - allowed to run canary/beta/rc versions
   - `allowPrerelease=true`
 
 Update commands:
 
 ```bash
 dkg update --check
-dkg update 10.0.0-rc.1 --check
-dkg update 10.0.0-rc.1 --allow-prerelease
+dkg update 10.0.0-canary.1 --check
+dkg update 10.0.0-canary.1 --allow-prerelease
 ```
 
 Tag verification:
@@ -186,7 +187,7 @@ Tag verification:
 - For local/dev unsigned tags only, use:
 
 ```bash
-dkg update 10.0.0-rc.1 --allow-prerelease --no-verify-tag
+dkg update 10.0.0-canary.1 --allow-prerelease --no-verify-tag
 ```
 
 ## 8) Post-update verification
