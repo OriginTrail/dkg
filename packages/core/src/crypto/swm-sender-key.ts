@@ -59,6 +59,7 @@ export interface ComputeSwmSenderKeyMembershipHashInput {
 export interface EncryptSwmSenderKeyPackageInput {
   contextGraphId: string;
   subGraphName?: string;
+  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
@@ -180,6 +181,7 @@ export async function encryptSwmSenderKeyPackage(
     type: SWM_SENDER_KEY_PACKAGE_TYPE,
     contextGraphId: input.contextGraphId,
     subGraphName: input.subGraphName,
+    assetUal: input.assetUal,
     senderAgentAddress: input.senderAgentAddress,
     epochId: input.epochId,
     membershipHash: input.membershipHash,

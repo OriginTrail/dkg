@@ -1210,6 +1210,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
     });
+    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(input.plaintext);
 
     const membershipHash = computeSwmSenderKeyMembershipHash({
       contextGraphId: input.contextGraphId,
@@ -1241,6 +1242,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         sender,
         recipients: resolution.recipients,
         membershipHash,
+        assetUal,
         ctx,
       });
       this.swmSenderKeySendStates.set(stateKey, state);
@@ -1249,7 +1251,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       await this.drainPendingSenderKeyForRecipients(resolution.recipients, ctx);
     }
 
-    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(input.plaintext);
     const encrypted = await encryptSwmSenderKeyMessage({
       chainKey: state.chainKey,
       plaintext: input.plaintext,
@@ -1283,6 +1284,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     sender: AgentKeyRecord & { privateKey: string };
     recipients: readonly WorkspaceAgentRecipient[];
     membershipHash: string;
+    assetUal?: string;
     ctx: OperationContext;
   }): Promise<LocalSwmSenderKeySendState> {
     const senderAgentAddress = ethers.getAddress(input.sender.agentAddress);
@@ -1332,6 +1334,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
           state,
           recipient,
           senderPrivateKey: input.sender.privateKey,
+          assetUal: input.assetUal,
         });
         const packageBytes = encodeSwmSenderKeyPackage(pkg);
 
@@ -1855,6 +1858,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     state: LocalSwmSenderKeySendState;
     recipient: WorkspaceAgentRecipient;
     senderPrivateKey: string;
+    assetUal?: string;
   }): Promise<SwmSenderKeyPackageMsg> {
     if (!input.recipient.publicKeyBytes) {
       throw new Error(`Missing public encryption key bytes for DKG agent ${input.recipient.agentAddress}`);
@@ -1862,6 +1866,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const pkg = await encryptSwmSenderKeyPackage({
       contextGraphId: input.state.contextGraphId,
       subGraphName: input.state.subGraphName,
+      assetUal: input.assetUal,
       senderAgentAddress: input.state.senderAgentAddress,
       epochId: input.state.epochId,
       membershipHash: input.state.membershipHash,
@@ -2017,12 +2022,47 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return FANOUT_RESPONSE_REJECTED;
   }
 
+  logSwmSenderKeySetupLifecycle(this: DKGAgent,
+    ctx: OperationContext,
+    pkg: SwmSenderKeyPackageMsg,
+    event: string,
+    fromPeerId: string,
+    metadata?: Record<string, string | number | boolean | undefined>,
+    level?: 'info' | 'warn' | 'error',
+  ): void {
+    if (!pkg.assetUal) return;
+    logKaLifecycleEvent(this.log, ctx, {
+      assetUal: pkg.assetUal,
+      stage: 'sender_key',
+      event,
+      role: 'receiver',
+      localPeerId: this.peerId,
+      localNodeIdentityId: this.identityId.toString(),
+      peer: fromPeerId,
+      level,
+      metadata: {
+        contextGraphId: pkg.contextGraphId,
+        subGraphName: pkg.subGraphName,
+        senderAgentAddress: pkg.senderAgentAddress,
+        recipientAgentAddress: pkg.recipientAgentAddress,
+        recipientKeyId: pkg.recipientKeyId,
+        epochId: pkg.epochId,
+        membershipHash: pkg.membershipHash,
+        ...metadata,
+      },
+    });
+  }
+
   public async handleSwmSenderKeyPackage(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const ctx = createOperationContext('share');
     let pkg: SwmSenderKeyPackageMsg | undefined;
     try {
       pkg = decodeSwmSenderKeyPackage(data);
       await this.acceptSwmSenderKeyPackage(pkg, fromPeerId, ctx);
+      this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_ack_sent', fromPeerId, {
+        accepted: true,
+        outcome: 'accepted',
+      });
       return encodeSwmSenderKeyPackageAck({
         version: SWM_SENDER_KEY_PACKAGE_VERSION,
         type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
@@ -2036,7 +2076,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      const reasonCode = this.swmSenderKeySetupAckReasonCode(err);
       if (pkg) {
+        this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_declined', fromPeerId, {
+          accepted: false,
+          outcome: 'declined',
+          reason,
+          reasonCode,
+          retryable: this.isRetryableSwmSenderKeySetupAckReason(reasonCode),
+        }, err instanceof StaleSenderKeyTargetError ? 'info' : 'warn');
+        this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_ack_declined', fromPeerId, {
+          accepted: false,
+          outcome: 'declined',
+          reason,
+          reasonCode,
+          retryable: this.isRetryableSwmSenderKeySetupAckReason(reasonCode),
+        }, err instanceof StaleSenderKeyTargetError ? 'info' : 'warn');
         // A sender-key setup may legitimately be fanned out across every
         // cached snapshot of our agent's public encryption keys. Each
         // bootstrap that targets a fingerprint we don't host as an
@@ -2067,7 +2122,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
         accepted: false,
         reason,
-        reasonCode: this.swmSenderKeySetupAckReasonCode(err),
+        reasonCode,
         contextGraphId: pkg?.contextGraphId,
         subGraphName: pkg?.subGraphName,
         senderAgentAddress: pkg?.senderAgentAddress,
@@ -2202,6 +2257,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     await this.saveSwmSenderKeyState();
 
+    this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_received', fromPeerId, {
+      outcome: 'accepted',
+    });
     this.log.info(
       ctx,
       `SWM sender-key setup receive accepted: senderAgent=${senderAgentAddress} recipientAgent=${recipientAgentAddress} ` +
