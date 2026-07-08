@@ -323,13 +323,44 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       if (parsed.totalQuads < syncPageSize) break;
     }
   } catch (err) {
+    const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
     if (usesPageSession && isSyncResponderSessionSupersededError(err)) {
+      // Exact-message match — only fires IN-PROCESS (same-node tests). Over the
+      // wire the responder's "superseded" text is destroyed by the router's
+      // stream.abort (it becomes a generic reset), which is why the
+      // `resumedFromOffset > 0` branch below is the real network-path fix.
       unfinishedSyncResponderSessions.delete(checkpointKey);
       checkpointStore.delete(checkpointKey);
-    } else if (usesPageSession && responderSession && !recovery && !(err as Error & { syncDenied?: boolean }).syncDenied) {
-      // Recovery never persists a responder session to resume (see the timeout
-      // branch below + Codex #1173).
-      rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+    } else if (usesPageSession && responderSession && !recovery && !denied) {
+      if (resumedFromOffset > 0) {
+        // R1 fix (2026-07-07 sync storm). This round RESUMED a saved session at
+        // offset>0 and then aborted. The responder supersedes any resume whose
+        // session token it no longer holds (a concurrent flow to the same
+        // peer+CG+phase rotated it), throwing "session superseded" — but that
+        // message never survives the router's stream.abort, so from here a
+        // supersede is indistinguishable from a plain mid-stream transport
+        // drop. Re-saving is a trap in BOTH readings: the retry resumes at
+        // offset>0 with a session id the responder won't honour (offset>0 +
+        // non-active token => it supersedes AGAIN), looping for the full
+        // session TTL (~10 min) while peer backoff compounds. Drop BOTH the
+        // session and the checkpoint (exactly as the in-process superseded
+        // branch above does) so the retry mints a fresh id and sends offset 0
+        // => the responder refreshes its row list and serves from the start —
+        // real progress instead of a stuck loop, and the loop-kill stops the
+        // backoff from compounding. A FRESH round (resumedFromOffset === 0)
+        // that merely advanced then blipped is NOT dropped: its resume is
+        // likely valid, and a supersede there just costs one wasted resume
+        // attempt before this branch catches it next round. Precise
+        // per-supersede handling that never loses resume is the
+        // in-band-sentinel follow-up.
+        unfinishedSyncResponderSessions.delete(checkpointKey);
+        checkpointStore.delete(checkpointKey);
+      } else {
+        // Fresh round (no resume) — keep the session so a retry can resume from
+        // where it got to. Recovery never persists a responder session to
+        // resume (see the timeout branch below + Codex #1173).
+        rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
+      }
     }
     throw err;
   }
