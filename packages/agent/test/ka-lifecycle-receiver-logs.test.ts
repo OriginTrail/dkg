@@ -275,6 +275,45 @@ describe('KA receiver lifecycle logs', () => {
     });
   });
 
+  it('threads SWM assetUal onto retryable catch outcomes after request identity is decoded', async () => {
+    class FailingSwmStore extends OxigraphStore {
+      override async insert(quads: Parameters<OxigraphStore['insert']>[0]): Promise<void> {
+        if (quads.some((quad) => quad.graph.includes('_shared_memory') && quad.subject === ROOT_ENTITY)) {
+          throw new Error('transient SWM store failure');
+        }
+        await super.insert(quads);
+      }
+    }
+    const store = new FailingSwmStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-malformed-retry',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle" .`,
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    const outcome = await handler.handle(msg, PUBLISHER_PEER_ID);
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: true,
+      assetUal: ASSET_UAL,
+      cgId: CONTEXT_GRAPH_ID,
+      shareOperationId: 'share-op-malformed-retry',
+      publisherPeerId: PUBLISHER_PEER_ID,
+    });
+  });
+
   it('logs SWM Share ACK send by assetUal', async () => {
     const agent = await createReceiverAgent();
     const sent: Array<{ peerId: string; protocol: string; data: Uint8Array }> = [];
