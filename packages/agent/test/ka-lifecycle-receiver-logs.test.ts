@@ -11,6 +11,7 @@ import {
   computeSwmSenderKeyPackageEncryptionAAD,
   contextGraphDataUri,
   contextGraphMetaUri,
+  contextGraphWorkspaceGraphUri,
   decodeSwmSenderKeyPackageAck,
   decodeSwmSenderKeyMessage,
   encodeFinalizationMessage,
@@ -22,6 +23,7 @@ import {
   generateSwmSenderChainKey,
   generateSwmSenderEpochId,
   generateWorkspaceRecipientEncryptionKey,
+  type FinalizationMessageMsg,
   type LogRecord,
   type OperationContext,
   type SwmSenderKeyMessageAADFields,
@@ -136,6 +138,53 @@ async function buildSenderKeyPackage(input: {
     await input.senderWallet.signMessage(computeSwmSenderKeyPackageAAD(pkg)),
   );
   return pkg;
+}
+
+function makeFinalizationMessage(overrides: Partial<FinalizationMessageMsg> = {}): FinalizationMessageMsg {
+  return {
+    ual: ASSET_UAL,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    kcMerkleRoot: new Uint8Array(32),
+    txHash: '0x' + 'ab'.repeat(32),
+    blockNumber: 100,
+    batchId: 7,
+    startKAId: 7,
+    endKAId: 7,
+    publisherAddress: AUTHOR_AGENT_ADDRESS,
+    rootEntities: [ROOT_ENTITY],
+    timestampMs: Date.now(),
+    operationId: 'finalization-lifecycle-test',
+    targetContextGraphId: '42',
+    ...overrides,
+  };
+}
+
+function finalizationChainWithEvent(input: {
+  txHash: string;
+  blockNumber: number;
+  merkleRoot: Uint8Array;
+  publisherAddress: string;
+  startKAId: bigint;
+  endKAId: bigint;
+}) {
+  return {
+    chainId: '31337',
+    isV10Ready: () => true,
+    async *listenForEvents() {
+      yield {
+        blockNumber: input.blockNumber,
+        data: {
+          txHash: input.txHash,
+          merkleRoot: ethers.hexlify(input.merkleRoot),
+          publisherAddress: input.publisherAddress,
+          startKAId: input.startKAId.toString(),
+          endKAId: input.endKAId.toString(),
+          author: AUTHOR_AGENT_ADDRESS,
+          txIndex: 0,
+        },
+      };
+    },
+  };
 }
 
 describe('KA receiver lifecycle logs', () => {
@@ -1010,5 +1059,56 @@ describe('KA receiver lifecycle logs', () => {
     expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('reason=no shared memory data'),
     );
+  });
+
+  it('logs applied finalization by assetUal after durable promotion', async () => {
+    const store = new OxigraphStore();
+    const rootEntity = `${ROOT_ENTITY}/finalized`;
+    const swmQuads = [{
+      subject: rootEntity,
+      predicate: 'http://schema.org/name',
+      object: '"Finalized lifecycle"',
+      graph: contextGraphWorkspaceGraphUri(CONTEXT_GRAPH_ID),
+    }];
+    await store.insert(swmQuads);
+    const merkleRoot = computeFlatKCRootV10(
+      swmQuads.map((quad) => ({ ...quad, graph: '' })),
+      [],
+    );
+    const txHash = '0x' + 'de'.repeat(32);
+    const blockNumber = 144;
+    const handler = new FinalizationHandler(
+      store,
+      finalizationChainWithEvent({
+        txHash,
+        blockNumber,
+        merkleRoot,
+        publisherAddress: AUTHOR_AGENT_ADDRESS,
+        startKAId: 7n,
+        endKAId: 7n,
+      }) as any,
+      undefined,
+      undefined,
+      undefined,
+      {
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+      },
+    );
+    const entries = captureLogs();
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(makeFinalizationMessage({
+      kcMerkleRoot: merkleRoot,
+      txHash,
+      blockNumber,
+      rootEntities: [rootEntity],
+    })), CONTEXT_GRAPH_ID);
+
+    const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
+    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).toContainEqual(expect.stringContaining('event=finalization_applied'));
+    expect(messages).toContainEqual(expect.stringContaining('outcome=promoted'));
+    expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
+    expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
   });
 });
