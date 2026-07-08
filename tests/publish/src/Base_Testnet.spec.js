@@ -23,9 +23,10 @@ const nodes = [
 defineChainPublishSuite({
   title: 'DKG Asset Lifecycle on Base Testnet',
   blockchainName: 'v10:base:84532',
-  // 'megagiga' is an existing public CG on Base Sepolia (testnet) — publish into it
-  // directly; testnet TRAC is free via the faucet.
-  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'megagiga',
+  // 'jenkins-publish-tests' is our public open-publish CG on Base Sepolia (the old
+  // 'megagiga' no longer exists on the beacons after their stores were rebuilt).
+  // The suite's ensure-CG step creates+registers it if missing.
+  contextGraphId: process.env.DKG_CONTEXT_GRAPH_ID || 'jenkins-publish-tests',
   // Fallback UAL for read ops when a publish fails. Set via DKG_FALLBACK_UAL once
   // real Base Sepolia testnet nodes exist (publish one KA, use its UAL here).
   fallbackUal: process.env.DKG_FALLBACK_UAL || '',
