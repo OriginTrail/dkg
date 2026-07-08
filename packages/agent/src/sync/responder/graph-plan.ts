@@ -93,7 +93,10 @@ export function createResponderGraphListMemo(
       const now = Date.now();
       if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
       if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
-      const load = store.listGraphs(syncResponderStoreOptions(options?.signal, 'sync.responder.listGraphs'))
+      // This load is shared by concurrent responders. Do not bind it to the
+      // first stream's abort signal; waiters race their own abort locally via
+      // raceAgainstAbort/throwIfAborted below.
+      const load = store.listGraphs(syncResponderStoreOptions(undefined, 'sync.responder.listGraphs'))
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
           cached = sorted;
