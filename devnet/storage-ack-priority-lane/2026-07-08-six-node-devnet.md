@@ -149,6 +149,155 @@ Result from all six node APIs:
 | 5 | 200 | `true` |
 | 6 | 200 | `true` |
 
+## Post-#1532 Rebase Rerun - 2026-07-08
+
+Purpose: repeat the six-node StorageACK priority-lane smoke after rebasing
+`codex/storageack-priority-lane` onto `main` at
+`6a91a16db fix(sync,storage): oversize-literal boot sweep + producer guards (OT-RFC-56 Fix 2 & 3 -> main) (#1532)`.
+
+Code under test:
+
+- `6822b622b fix(publisher): bound ack decline log messages`
+- Branch: `codex/storageack-priority-lane`
+- Runtime commit reported by all six node APIs: `6822b622`
+
+Conflict disposition during rebase:
+
+- `packages/agent/src/dkg-agent-base.ts` kept the main branch oversize-literal guard and preserved priority-aware store insertion options.
+- `packages/agent/src/dkg-agent-lifecycle.ts` kept the main branch oversize-literal guard/tombstoning and preserved background-priority sync/backpressure wrappers.
+
+Validation before rerun:
+
+- `pnpm run build:runtime`: passed
+
+Fresh devnet command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DEVNET_DIR=/private/tmp/dkg-v9-storageack-priority-lane-devnet8 \
+HARDHAT_PORT=18715 \
+API_PORT_BASE=20301 \
+LIBP2P_PORT_BASE=21301 \
+DEVNET_OXIGRAPH_BASE=30300 \
+UI_PORT=58743 \
+./scripts/devnet.sh start 6
+```
+
+Startup result:
+
+- Hardhat RPC: `http://127.0.0.1:18715`
+- `minimumRequiredSignatures` set to `3`
+- Docker was unavailable, so the run used the no-Docker fallback matrix:
+  - Nodes 1-2: managed `oxigraph-server`
+  - Nodes 3-4: in-process `oxigraph`
+  - Nodes 5-6: in-process `oxigraph-worker`
+- Four core nodes were staked with 50k TRAC and had asks set.
+- `devnet-test` registered on-chain as context graph `v10Id=1`.
+- `devnet-isolation` registered on-chain as context graph `v10Id=2`.
+- Both registered context graphs were visible from all six nodes before the smoke publish.
+
+Node status after publish:
+
+| Node | Role | API | Peer suffix | Connected peers | Store backend | Chain | Commit |
+| --- | --- | --- | --- | ---: | --- | --- | --- |
+| 1 | core | `20301` | `uimtogc1` | 5 | `oxigraph-server` | `evm:31337` | `6822b622` |
+| 2 | core | `20302` | `wCbgnTri` | 5 | `oxigraph-server` | `evm:31337` | `6822b622` |
+| 3 | core | `20303` | `rbnVq8JY` | 5 | `oxigraph` | `evm:31337` | `6822b622` |
+| 4 | core | `20304` | `7UZyGrBi` | 5 | `oxigraph` | `evm:31337` | `6822b622` |
+| 5 | edge | `20305` | `naXCrH93` | 5 | `oxigraph-worker` | `evm:31337` | `6822b622` |
+| 6 | edge | `20306` | `DYuVLxzQ` | 5 | `oxigraph-worker` | `evm:31337` | `6822b622` |
+
+Create, finalize, and share command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DKG_HOME=/private/tmp/dkg-v9-storageack-priority-lane-devnet8/node1 \
+DKG_API_PORT=20301 \
+DKG_NO_BLUE_GREEN=1 \
+node packages/cli/dist/cli.js ka create storageack-priority-smoke-20260708-devnet8 \
+  --context-graph-id devnet-test \
+  --share \
+  --subject urn:test:storageack-priority:20260708:devnet8 \
+  --predicate urn:test:predicate \
+  --object storageack-priority-devnet-smoke-rerun-post-1532
+```
+
+Create/share result:
+
+- Name: `storageack-priority-smoke-20260708-devnet8`
+- Status: `swm-shared`
+- Merkle root: `0xfe3da759580d4e6f1509980b26cc8d7e8498555f2f357f9f915ee3d3aa062da7`
+- Share operation: `mrcbgszd-j7a7s2`
+
+Publish command:
+
+```bash
+PATH=/Users/otlegend/.nvm/versions/node/v24.11.1/bin:$PATH \
+DKG_HOME=/private/tmp/dkg-v9-storageack-priority-lane-devnet8/node1 \
+DKG_API_PORT=20301 \
+DKG_NO_BLUE_GREEN=1 \
+node packages/cli/dist/cli.js ka publish storageack-priority-smoke-20260708-devnet8 \
+  --context-graph-id devnet-test \
+  --json
+```
+
+Publish result:
+
+- Status: `confirmed`
+- Block: `457`
+- KA ID: `31802553612409110147400160117539291587049415395332293760138796083312079142912`
+- UAL: `did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/31802553612409110147400160117539291587049415395332293760138796083312079142912`
+- Assertion URI: `did:dkg:context-graph:devnet-test/assertion/0x464f9B82aAc9e973Fb97C444963150Ff92F799B2/storageack-priority-smoke-20260708-devnet8`
+- Transaction: `0x1b02a007801cb7578a91a00d7b72c98f31e70395a92a2b6bee58b89055241e24`
+
+StorageACK evidence from node 1:
+
+```text
+2026-07-08 18:53:18 [ACKCollector] Collecting ACKs via direct P2P (merkleRoot=0xfe3da759580d4e6f...)
+2026-07-08 18:53:18 [ACKCollector] Selected 5/5 ACK candidate peer(s) (required=3, protocol=/dkg/10.0.1/storage-ack, selected=wCbgnTri:rest,rbnVq8JY:rest,7UZyGrBi:rest,naXCrH93:rest,DYuVLxzQ:rest, filtered=none)
+2026-07-08 18:53:18 [ACKCollector] Requesting ACKs from 5 core peers (need 3)
+2026-07-08 18:53:18 [ACKCollector] Valid ACK from 7UZyGrBi (identity=4, signer=0x1E35CF4D... source=member)
+2026-07-08 18:53:18 [ACKCollector] Valid ACK from rbnVq8JY (identity=3, signer=0xe9cB2C1c... source=member)
+2026-07-08 18:53:18 [ACKCollector] Valid ACK from wCbgnTri (identity=2, signer=0x96c06436... source=member)
+2026-07-08 18:53:18 [ACKCollector] Collected 3 ACKs successfully
+2026-07-08 18:53:18 [DKGPublisher] V10: Collected 3 core node ACKs [7UZyGrBi:member, rbnVq8JY:member, wCbgnTri:member]
+2026-07-08 18:53:18 [DKGPublisher] On-chain confirmed: UAL=did:dkg:evm:31337/0x70ee76691bdd9696552af8d4fd634b3cf79dd529/31802553612409110147400160117539291587049415395332293760138796083312079142912 batchId=31802553612409110147400160117539291587049415395332293760138796083312079142912 tx=0x1b02a007801cb7578a91a00d7b72c98f31e70395a92a2b6bee58b89055241e24
+```
+
+Handler registration evidence:
+
+- Node 1 registered V10 StorageACK handler with identity `1`.
+- Node 2 registered V10 StorageACK handler with identity `2`.
+- Node 3 registered V10 StorageACK handler with identity `3`.
+- Node 4 registered V10 StorageACK handler with identity `4`.
+- Nodes 5 and 6 were edge nodes and skipped StorageACK handler registration as expected.
+
+Read-back command shape:
+
+```json
+{
+  "contextGraphId": "devnet-test",
+  "view": "verifiable-memory",
+  "sparql": "ASK WHERE { <urn:test:storageack-priority:20260708:devnet8> <urn:test:predicate> ?o . }"
+}
+```
+
+Result from all six node APIs:
+
+| Node | HTTP | ASK result |
+| --- | ---: | --- |
+| 1 | 200 | `true` |
+| 2 | 200 | `true` |
+| 3 | 200 | `true` |
+| 4 | 200 | `true` |
+| 5 | 200 | `true` |
+| 6 | 200 | `true` |
+
+Notes:
+
+- A first post-rebase devnet start on `/private/tmp/dkg-v9-storageack-priority-lane-devnet7` completed startup, but the shell-managed background processes were cleaned up when the command exited. The recorded receipt above is from `/private/tmp/dkg-v9-storageack-priority-lane-devnet8`, which was kept alive through the publish and read-back probes.
+- The generated `packages/evm-module/deployments/localhost_contracts.json` diff was left unstaged because it is a local devnet deployment side effect.
+
 ## Notes
 
 - A plain `/api/query` without `view: "verifiable-memory"` only surfaced the smoke triple on node 1. The correct VM read path for this test is the explicit `verifiable-memory` view.
