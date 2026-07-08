@@ -431,6 +431,7 @@ export class FinalizationHandler {
               blockNumber,
               batchId,
               outcome,
+              retryable: false,
             });
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
