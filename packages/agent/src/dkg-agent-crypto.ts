@@ -2073,6 +2073,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         epochId: pkg.epochId,
         membershipHash: pkg.membershipHash,
         recipientAgentAddress: pkg.recipientAgentAddress,
+        assetUal: pkg.assetUal,
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
@@ -2129,6 +2130,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         epochId: pkg?.epochId,
         membershipHash: pkg?.membershipHash,
         recipientAgentAddress: pkg?.recipientAgentAddress,
+        assetUal: pkg?.assetUal,
       });
     }
   }

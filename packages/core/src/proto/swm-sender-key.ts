@@ -52,7 +52,8 @@ export const SwmSenderKeyPackageAckSchema = new Type('SwmSenderKeyPackageAck')
   .add(new Field('epochId', 8, 'string'))
   .add(new Field('membershipHash', 9, 'string'))
   .add(new Field('recipientAgentAddress', 10, 'string'))
-  .add(new Field('reasonCode', 11, 'string'));
+  .add(new Field('reasonCode', 11, 'string'))
+  .add(new Field('assetUal', 12, 'string'));
 
 export const SwmSenderKeyMessageSchema = new Type('SwmSenderKeyMessage')
   .add(new Field('version', 1, 'string'))
@@ -114,6 +115,7 @@ export interface SwmSenderKeyPackageAckMsg {
   epochId?: string;
   membershipHash?: string;
   recipientAgentAddress?: string;
+  assetUal?: string;
 }
 
 export type KnownSwmSenderKeyPackageAckReasonCode =
@@ -267,6 +269,7 @@ export function encodeSwmSenderKeyPackageAck(msg: SwmSenderKeyPackageAckMsg): Ui
       epochId: msg.epochId ?? '',
       membershipHash: msg.membershipHash ?? '',
       recipientAgentAddress: msg.recipientAgentAddress ?? '',
+      assetUal: msg.assetUal ?? '',
     }),
   ).finish();
 }
@@ -286,6 +289,7 @@ export function decodeSwmSenderKeyPackageAck(buf: Uint8Array): SwmSenderKeyPacka
     epochId: stringField(decoded.epochId) || undefined,
     membershipHash: stringField(decoded.membershipHash) || undefined,
     recipientAgentAddress: stringField(decoded.recipientAgentAddress) || undefined,
+    assetUal: stringField(decoded.assetUal) || undefined,
   };
 }
 
