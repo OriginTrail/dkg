@@ -27,6 +27,7 @@ afterAll(async () => {
 const agents: DKGAgent[] = [];
 const stores: TripleStore[] = [];
 const tempDataDirs: string[] = [];
+const CHAIN_JSONLD_TIMEOUT_MS = 120_000;
 
 async function createTempDataDir(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -95,7 +96,7 @@ describe('publishJsonLd', () => {
     if (result.type === 'boolean') {
       expect(result.value).toBe(true);
     }
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('bare JSON-LD doc defaults to private quads (with synthetic public anchor)', async () => {
     const { agent, store } = await createAgent('BarePrivateBot');
@@ -122,7 +123,7 @@ describe('publishJsonLd', () => {
     if (publicResult.type === 'boolean') {
       expect(publicResult.value).toBe(true);
     }
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('envelope { public } puts quads in public set', async () => {
     const { agent, store } = await createAgent('PubEnvBot');
@@ -150,7 +151,7 @@ describe('publishJsonLd', () => {
     if (askResult.type === 'boolean') {
       expect(askResult.value).toBe(true);
     }
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('envelope { public, private } splits quads correctly', async () => {
     const { agent, store } = await createAgent('SplitBot');
@@ -185,7 +186,7 @@ describe('publishJsonLd', () => {
     if (privateGraph.type === 'boolean') {
       expect(privateGraph.value).toBe(true);
     }
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('private-only envelope generates synthetic public anchor', async () => {
     const { agent, store } = await createAgent('PrivOnlyBot');
@@ -211,7 +212,7 @@ describe('publishJsonLd', () => {
     );
     expect(anchorResult.type).toBe('boolean');
     if (anchorResult.type === 'boolean') expect(anchorResult.value).toBe(true);
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('preserves typed literals in quad objects', async () => {
     const { agent, store } = await createAgent('LiteralBot');
@@ -240,7 +241,7 @@ describe('publishJsonLd', () => {
       expect(dateResult.bindings.length).toBeGreaterThan(0);
       expect(dateResult.bindings[0].d).toContain('2024-01-01T00:00:00Z');
     }
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('throws on JSON-LD that produces no quads', async () => {
     const { agent } = await createAgent('ErrorBot');
@@ -249,7 +250,7 @@ describe('publishJsonLd', () => {
     await expect(agent.publish('error-test', {})).rejects.toThrow(
       'JSON-LD document produced no RDF quads',
     );
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('existing Quad[] publish still works unchanged', async () => {
     const { agent } = await createAgent('QuadBot');
@@ -260,7 +261,7 @@ describe('publishJsonLd', () => {
       { subject: 'did:dkg:test:X', predicate: 'http://schema.org/name', object: '"X"', graph: '' },
     ]);
     expect(result.status).toBe('confirmed');
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async private-only JSON-LD anchors the real private root and enqueues a Lift job', async () => {
     const { agent, store } = await createAgent('AsyncPrivateOnlyBot');
@@ -307,7 +308,7 @@ describe('publishJsonLd', () => {
     );
     expect(privatePayload.type).toBe('boolean');
     if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async bare JSON-LD writes only an anchor in shared/private graphs before lift', async () => {
     const { agent, store } = await createAgent('AsyncBarePrivateBot');
@@ -351,7 +352,7 @@ describe('publishJsonLd', () => {
     );
     expect(privatePayload.type).toBe('boolean');
     if (privatePayload.type === 'boolean') expect(privatePayload.value).toBe(false);
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the async-lift seal now allocates + binds the per-author
   // reservedKaId, so the on-chain mint accepts it (no KaIdNamespaceMismatch) and
@@ -415,7 +416,7 @@ describe('publishJsonLd', () => {
     const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kaId));
     expect(onChainAuthor.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
-  }, 60_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the async-lift seal binds a per-author reservedKaId; recovery
   // rebuilds the digest with that 5th field (read off the persisted seal).
@@ -487,7 +488,7 @@ describe('publishJsonLd', () => {
       }).serialized,
     );
     expect(recoveredFromSeal.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects authorAgentAddress for unknown / self-sovereign agents', async () => {
     // Mirrors the sync `assertionFinalize` error semantics: the daemon
@@ -532,7 +533,7 @@ describe('publishJsonLd', () => {
         { localOnly: true, authorAgentAddress: selfSovereign.agentAddress },
       ),
     ).rejects.toThrow(/self-sovereign/);
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the async-lift seal is built at enqueue (agent canonicalizes +
   // signs over the resolved slice's merkle + the allocated reservedKaId).
@@ -571,7 +572,7 @@ describe('publishJsonLd', () => {
     expect(BigInt(seal!.reservedKaId!) >> 96n).toBe(
       BigInt(ethers.getAddress(seal!.authorAddress)),
     );
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish on a non-V10 chain enqueues without a seal (no on-chain publish to seal for)', async () => {
     // Seal only built when chain is V10-ready AND CG has on-chain id. Non-V10 → publisher takes tentative-only path.
@@ -597,7 +598,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).seal).toBeUndefined();
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — backstop: the WM/SWM write is committed BEFORE seal-building and
   // publishAsync has no outer rollback, so an unexpected throw inside buildAsyncLiftSeal
@@ -636,7 +637,7 @@ describe('publishJsonLd', () => {
     // Sealless: the lift carries no seal, so the publisher stages WM/SWM without an
     // on-chain VM anchor (exactly the prior always-sealless async behaviour).
     expect(expectRawLiftRequest(job).seal).toBeUndefined();
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the sealless backstop is ONLY for the implicit machine-capture
   // path. An EXPLICIT authorship request (custodial authorAgentAddress / self-sovereign
@@ -667,7 +668,7 @@ describe('publishJsonLd', () => {
         { localOnly: true, authorAgentAddress: tenant.agentAddress },
       ),
     ).rejects.toThrow(/simulated signer failure/);
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — V10-ready + on-chain CG ⇒ the agent signs the canonical merkle
   // (with the allocated reservedKaId) at enqueue; the publisher consumes it verbatim.
@@ -696,7 +697,7 @@ describe('publishJsonLd', () => {
     const request = expectRawLiftRequest(job);
     expect(request.seal).toBeDefined();
     expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the EPCIS/Kafka capture shape (private-only) earns a seal too:
   // the merkle covers the private root, and a reservedKaId is allocated + bound.
@@ -720,7 +721,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).seal).toBeDefined();
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — disk-externalized public snapshots still resolve into the seal's
   // merkle at enqueue, so the seal (with its reservedKaId) is built as usual.
@@ -766,7 +767,7 @@ describe('publishJsonLd', () => {
     const request = expectRawLiftRequest(job);
     expect(request.seal).toBeDefined();
     expect(request.seal?.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/i);
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish accepts preSignedAuthorAttestation and threads it byte-for-byte into LiftRequest.seal', async () => {
     // Sync parity: caller pre-signs off-node, agent threads bytes verbatim. Publisher preflight validates at processNext.
@@ -817,7 +818,7 @@ describe('publishJsonLd', () => {
     expect(seal?.schemeVersion).toBe(1);
     // §F2 — the attested reservedKaId is threaded byte-for-byte onto the seal.
     expect(seal?.reservedKaId).toBe(`${presignedReservedKaId}`);
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects preSignedAuthorAttestation + authorAgentAddress as mutually exclusive', async () => {
     // Sync parity: pick one signing path (caller-provided seal OR daemon custodial).
@@ -853,7 +854,7 @@ describe('publishJsonLd', () => {
         },
       ),
     ).rejects.toThrow(/mutually exclusive/);
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the callback receives typed data that already binds the
   // allocated reservedKaId; recovery rebuilds the digest with that 5th field.
@@ -942,7 +943,7 @@ describe('publishJsonLd', () => {
     expect(recovered.toLowerCase()).not.toBe(
       new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address.toLowerCase(),
     );
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish rejects authorSignTypedData without authorAgentAddress', async () => {
     // Callback alone has no address to fill into seal.authorAddress — mutex fail-fast.
@@ -970,7 +971,7 @@ describe('publishJsonLd', () => {
         },
       ),
     ).rejects.toThrow(/authorSignTypedData requires authorAgentAddress/);
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the self-sovereign callback signs over the bound reservedKaId,
   // so the publisher mints exactly that id and KC.author == the self-sovereign agent.
@@ -1043,7 +1044,7 @@ describe('publishJsonLd', () => {
     const onChainAuthor = await chainAdapter.getLatestMerkleRootAuthor(BigInt(kaId));
     expect(onChainAuthor.toLowerCase()).toBe(selfSov.agentAddress.toLowerCase());
     expect(onChainAuthor.toLowerCase()).not.toBe(publisherAddress.toLowerCase());
-  }, 60_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish threads opts.priorVersion into LiftRequest.priorVersion', async () => {
     // `priorVersion` threads through enqueue unchanged for MUTATE/REVOKE transitions.
@@ -1073,7 +1074,7 @@ describe('publishJsonLd', () => {
     const request = expectRawLiftRequest(job);
     expect(request.priorVersion).toBe('did:dkg:mock:31337/0xabc/7');
     expect(request.transitionType).toBe('MUTATE');
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish threads opts.entityProofs into LiftRequest.entityProofs', async () => {
     // V10 selective-disclosure flag persists through enqueue.
@@ -1100,7 +1101,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).entityProofs).toBe(true);
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish threads opts.publisherNodeIdentityIdOverride (bigint) into LiftRequest (stringified)', async () => {
     // RFC-001 §4 attribution override. BigInt → string for JSON persistence; mapper parses back.
@@ -1127,7 +1128,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('42');
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish preserves publisherNodeIdentityIdOverride === 0n (mode d "no attribution")', async () => {
     // RFC-001 §4 mode d: explicit `0n` survives (≠ undefined which means "use daemon identity").
@@ -1154,7 +1155,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).publisherNodeIdentityIdOverride).toBe('0');
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish enqueues sealless when no signer is available (sync parity)', async () => {
     // Chain-prereq failures downgrade to sealless enqueue. Publisher decides at processNext.
@@ -1186,7 +1187,7 @@ describe('publishJsonLd', () => {
     } finally {
       publisher.publisherFallbackAuthorAddress = original;
     }
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   // OT-RFC-43 §F2 — the async-lift seal's publisher-fallback signer path mirrors
   // sync `assertionFinalize`: both fallback + sign are called WITHOUT a cgId.
@@ -1238,7 +1239,7 @@ describe('publishJsonLd', () => {
       publisher.publisherFallbackAuthorAddress = originalFallback;
       publisher.signAuthorAttestationAsPublisher = originalSign;
     }
-  }, 30_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish enqueues sealless when CG is not registered on-chain (sync parity)', async () => {
     // CG without on-chain id → no seal, publisher goes tentative (matches sync `agent.publish`).
@@ -1262,7 +1263,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const job = await asyncPublisher.getStatus(captureID);
     expect(expectRawLiftRequest(job).seal).toBeUndefined();
-  }, 15_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish seal reflects subtracted set when canonical root already confirmed (codex PR #455 #3)', async () => {
     // Agent must mirror publisher's `subtractFinalizedExactQuads` so both compute the same merkle.
@@ -1305,7 +1306,7 @@ describe('publishJsonLd', () => {
     // If subtraction is removed from the agent pipeline, the seal
     // would be present here.
     expect(expectRawLiftRequest(job).seal).toBeUndefined();
-  }, 20_000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 
   it('async publish records and resolves subGraphName for staged public and private data', async () => {
     const { agent, store } = await createAgent('AsyncSubGraphBot');
@@ -1338,5 +1339,5 @@ describe('publishJsonLd', () => {
     const request = expectRawLiftRequest(job);
     expect(request.subGraphName).toBe('research');
     expect(request.roots).toContain(root);
-  }, 15000);
+  }, CHAIN_JSONLD_TIMEOUT_MS);
 });

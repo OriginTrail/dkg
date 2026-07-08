@@ -640,33 +640,15 @@ export function orderACKCandidatePeerIds(input: {
   connectedPeerIds: readonly string[];
   selfPeerId: string;
   knownCorePeerIds?: ReadonlySet<string>;
-  ackCandidatePeerIds?: readonly string[];
+  preferredACKPeerIds?: readonly string[];
 }): string[] {
-  const connected = input.connectedPeerIds.filter((id) => id !== input.selfPeerId);
-  const allowedACKPeers = new Set(
-    (input.ackCandidatePeerIds ?? []).map((id) => id.trim()).filter((id) => id.length > 0),
-  );
-  const eligible = allowedACKPeers.size > 0
-    ? connected.filter((id) => allowedACKPeers.has(id))
-    : connected;
-  const knownCorePeerIds = input.knownCorePeerIds;
-
-  if (allowedACKPeers.size > 0) {
-    const confirmed = knownCorePeerIds
-      ? eligible.filter((id) => knownCorePeerIds.has(id))
-      : [];
-    const rest = knownCorePeerIds
-      ? eligible.filter((id) => !knownCorePeerIds.has(id))
-      : eligible;
-    return [...confirmed, ...rest];
-  }
-
-  if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-    const filtered = connected.filter((id) => knownCorePeerIds.has(id));
-    if (filtered.length > 0) return filtered;
-  }
-
-  return connected;
+  return selectACKCandidatePeers({
+    connectedPeers: input.connectedPeerIds,
+    selfPeerId: input.selfPeerId,
+    knownCorePeerIds: input.knownCorePeerIds,
+    preferredACKPeerIds: input.preferredACKPeerIds,
+    requiredACKs: Number.MAX_SAFE_INTEGER,
+  });
 }
 
 export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
@@ -1394,13 +1376,13 @@ export async function runDaemonInner(
     usingNetworkRelays = true;
     log(`Using relay(s) from network config (${network.networkName})`);
   }
-  const ackCandidatePeerIds = resolveACKCandidatePeerIds({
+  const preferredACKPeerIds = resolveACKCandidatePeerIds({
     usingNetworkRelays,
     networkRelays: network?.relays,
   });
-  if (ackCandidatePeerIds.length > 0) {
+  if (preferredACKPeerIds.length > 0) {
     log(
-      `ACK candidate peer allowlist: ${ackCandidatePeerIds.length} peer(s) from network config (${network?.networkName ?? "unknown"})`,
+      `ACK candidate peer preference: ${preferredACKPeerIds.length} relay peer(s) from network config (${network?.networkName ?? "unknown"}) ranked first; candidacy is not restricted — all connected peers stay eligible`,
     );
   }
 
@@ -1532,7 +1514,7 @@ export async function runDaemonInner(
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
-    ackCandidatePeerIds: ackCandidatePeerIds.length > 0 ? ackCandidatePeerIds : undefined,
+    preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     relayServerCapacity: config.relayServerCapacity,
@@ -2001,7 +1983,7 @@ export async function runDaemonInner(
                   knownCorePeerIdsV2,
                   requiredACKs: (agent as any).lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
                   protocol,
-                  ackCandidatePeerIds,
+                  preferredACKPeerIds,
                 });
               },
               log,
