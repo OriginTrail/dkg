@@ -24,6 +24,19 @@ describe('nodeHasDirectPublicAddress', () => {
     expect(nodeHasDirectPublicAddress([`/dns4/core.example.org/tcp/9090/p2p/${PEER}`])).toBe(true);
   });
 
+  it('false for a /dnsaddr-only self-address (a pointer, not proof of direct dialability)', () => {
+    // /dnsaddr TXT records may resolve to circuit-only or private addrs; a
+    // NAT'd node announcing one must still maintain its relay reservations.
+    expect(nodeHasDirectPublicAddress([`/dnsaddr/core.example.org/p2p/${PEER}`])).toBe(false);
+  });
+
+  it('true when a concrete public transport sits alongside a /dnsaddr', () => {
+    expect(nodeHasDirectPublicAddress([
+      `/dnsaddr/core.example.org/p2p/${PEER}`,
+      `/ip4/${CORE}/tcp/9090/p2p/${PEER}`,
+    ])).toBe(true);
+  });
+
   it('false for a circuit self-address only (reachable ONLY through a relay = NAT\'d)', () => {
     // A /p2p-circuit self-addr is proof of the opposite — this node DOES need
     // its reservation, so the watchdog must keep maintaining it.

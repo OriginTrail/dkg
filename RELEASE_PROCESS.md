@@ -78,14 +78,7 @@ Keep the generated devnet report with the release notes. If this gate fails, fix
 
 ## 5) Canary tagging workflow
 
-Create and push the canary/prerelease tag from the devnet-validated `main` commit:
-
-```bash
-git tag -a v10.0.0-canary.1 -m "DKG v10.0.0 canary 1"
-git push origin v10.0.0-canary.1
-```
-
-For signed tags (recommended for production-grade verification):
+Create and push the canary/prerelease tag from the devnet-validated `main` commit. Tags **must be signed** (`git tag -s`): the `release:verify-tag` publish preflight in §6a rejects any tag without a PGP/SSH signature block, so an unsigned `git tag -a` tag cannot be published — it fails the release run at the first step.
 
 ```bash
 git tag -s v10.0.0-canary.1 -m "DKG v10.0.0 canary 1"
