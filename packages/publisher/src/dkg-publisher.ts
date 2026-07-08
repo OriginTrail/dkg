@@ -2852,15 +2852,22 @@ export class DKGPublisher implements Publisher {
         const tag = err instanceof Error ? err.name : 'unknown';
         if (isQuorumUnmetError(err)) {
           for (const peerOutcome of err.peerOutcomes) {
-            if (!peerOutcome.reason?.startsWith('STORAGE_ACK_DECLINE')) continue;
+            const reason = peerOutcome.reason;
+            const outcome = reason?.startsWith('STORAGE_ACK_DECLINE')
+              ? 'decline'
+              : reason === 'no_response'
+                ? 'timeout'
+                : reason === 'ACK' || reason?.startsWith('ACK:')
+                  ? 'success'
+                  : 'failure';
             emitPublishLifecycle({
               stage: 'storage_ack',
-              event: 'decline',
+              event: outcome,
               level: 'warn',
               peer: peerOutcome.peerId,
               metadata: {
-                outcome: 'decline',
-                reason: peerOutcome.reason,
+                outcome,
+                reason,
                 dialOk: peerOutcome.dialOk,
                 protocolSupported: peerOutcome.protocolSupported,
                 swmHostModeAdvertised: peerOutcome.swmHostModeAdvertised,
