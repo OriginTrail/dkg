@@ -528,6 +528,30 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     expect(await store.countQuads(metaOf(AGENTS))).toBe(0);
   });
 
+  it('(C2) throws when the record encodes NO rootEntity rows (no lock/prune domain)', async () => {
+    // recordUal IS a subject (status row) so the drift guard passes, but the record
+    // has no `dkg:rootEntity` member row → an empty covered-root set. The helper must
+    // FAIL LOUDLY (before any write) rather than silently take no locks + prune
+    // nothing, which would opt out of the retention invariant it owns (#1534 review).
+    const store = new OxigraphStore();
+    const ual = mkUal('rootless');
+    const rootlessQuads: Quad[] = [
+      { subject: ual, predicate: STATUS, object: '"tentative"', graph: metaOf(AGENTS) },
+      { subject: ual, predicate: 'http://dkg.io/ontology/merkleRoot', object: '"deadbeef"', graph: metaOf(AGENTS) },
+    ];
+    await expect(
+      insertBoundedAgentRegistryMeta({
+        store,
+        contextGraphId: AGENTS,
+        metaGraph: metaOf(AGENTS),
+        recordUal: ual,
+        metadataQuads: rootlessQuads,
+      }),
+    ).rejects.toThrow(/no .*rootEntity.* member rows|no lock\/prune domain/i);
+
+    expect(await store.countQuads(metaOf(AGENTS)), 'nothing was written — caught before insert').toBe(0);
+  });
+
   it('(2) warns (not a silent drop) on an unsafe root, and still prunes the safe ones', async () => {
     const store = new OxigraphStore();
     const agent = agentDid(0xa1);

@@ -56,6 +56,36 @@ function agentMetaLocksFor(store: TripleStore): Map<string, Promise<void>> {
 }
 
 /**
+ * Extract the roots a record covers from its own quads — the single source of truth
+ * for {@link insertBoundedAgentRegistryMeta}'s lock keys and prune scope (so neither
+ * can drift from the inserted record). Every root a record encodes has a bare
+ * `<recordUal> dkg:rootEntity <root>` member row, emitted per root by BOTH metadata
+ * generators (`generateTentativeMetadata`/`generateConfirmedFullMetadata` →
+ * `entityMemberQuads`), so filtering those captures exactly the record's roots.
+ *
+ * THROWS if the record encodes no such rows. On the agents path an empty root set
+ * means the record has no lock/prune domain — taking no locks and pruning nothing
+ * would SILENTLY opt out of the retention invariant this helper owns, so we fail
+ * loudly (a programmer error / malformed record, caught before any write, like the
+ * `recordUal`-subject guard). The accepted predicate is `dkg:rootEntity`
+ * (DKG_ROOT_ENTITY_LEGACY) — the canonical bare-member predicate the generators emit.
+ */
+function deriveCoveredRootsOrThrow(recordUal: string, metadataQuads: Quad[]): string[] {
+  const roots = [...new Set(
+    metadataQuads
+      .filter((q) => q.subject === recordUal && q.predicate === DKG_ROOT_ENTITY_LEGACY)
+      .map((q) => q.object),
+  )];
+  if (roots.length === 0) {
+    throw new Error(
+      `insertBoundedAgentRegistryMeta: metadataQuads encode no <${recordUal}> ` +
+        `<${DKG_ROOT_ENTITY_LEGACY}> <root> member rows — the record has no lock/prune domain`,
+    );
+  }
+  return roots;
+}
+
+/**
  * Insert a heartbeat's `_meta` tracking rows and THEN bound the agents-registry
  * `_meta` graph — the correct ordering for the invariant "an agent always has at
  * least one live record".
@@ -127,16 +157,10 @@ export async function insertBoundedAgentRegistryMeta(opts: {
   }
 
   // Derive the roots THIS record covers from its own quads — the single source of
-  // truth. Every root the record encodes has a bare `<recordUal> dkg:rootEntity
-  // <root>` member row (metadata.ts entityMemberQuads, emitted by BOTH the tentative
-  // and confirmed-full generators), so this captures exactly the record's roots. The
-  // lock keys AND the prune scope both come from here, so neither can drift from the
-  // inserted record.
-  const coveredRoots = [...new Set(
-    metadataQuads
-      .filter((q) => q.subject === recordUal && q.predicate === DKG_ROOT_ENTITY_LEGACY)
-      .map((q) => q.object),
-  )];
+  // truth for the lock keys and the prune scope, so neither can drift from the
+  // inserted record. Fails loudly if the record encodes no roots (see
+  // {@link deriveCoveredRootsOrThrow}).
+  const coveredRoots = deriveCoveredRootsOrThrow(recordUal, metadataQuads);
 
   // Serialize insert+prune per individual root, scoped to THIS store (see the note on
   // _agentMetaLocksByStore): any two writes sharing a root (identical OR overlapping
