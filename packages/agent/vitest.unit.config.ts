@@ -41,6 +41,7 @@ export default defineConfig({
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
+      "test/ka-lifecycle-log-proof.test.ts",
       "test/ka-lifecycle-receiver-logs.test.ts",
       "test/agents-meta-sync-config.test.ts",
       "test/agents-meta-sync-wiring.test.ts",

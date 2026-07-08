@@ -1,4 +1,4 @@
-import type { KaLifecycleStage, LogRecord } from '@origintrail-official/dkg-core';
+import { parseKaLifecycleFields, type KaLifecycleStage, type LogRecord } from '@origintrail-official/dkg-core';
 
 export const KA_LIFECYCLE_PROOF_SOURCE_DOCS = [
   'CONTEXT.md',
@@ -114,20 +114,6 @@ function toProofEntry(record: KaLifecycleProofRecord): KaLifecycleProofEntry | u
     message: record.message,
     fields,
   };
-}
-
-function parseKaLifecycleFields(message: string): Record<string, string> | undefined {
-  const marker = 'ka_lifecycle ';
-  const markerIndex = message.indexOf(marker);
-  if (markerIndex < 0) return undefined;
-  const fields: Record<string, string> = {};
-  const tail = message.slice(markerIndex + marker.length);
-  for (const token of tail.split(/\s+/)) {
-    const separatorIndex = token.indexOf('=');
-    if (separatorIndex <= 0) continue;
-    fields[token.slice(0, separatorIndex)] = token.slice(separatorIndex + 1);
-  }
-  return fields;
 }
 
 function unique(values: string[]): string[] {

@@ -1,5 +1,11 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import type { EventBus, StorageACKDeclineCode, StorageACKMsg, SubscriptionSource } from '@origintrail-official/dkg-core';
+import type {
+  EventBus,
+  PublishIntentMsg,
+  StorageACKDeclineCode,
+  StorageACKMsg,
+  SubscriptionSource,
+} from '@origintrail-official/dkg-core';
 import {
   Logger,
   createOperationContext,
@@ -260,6 +266,17 @@ export interface StorageACKHandlerConfig {
     gossipTopic?: string,
   ) => SubscriptionSource | undefined;
   /**
+   * Optional local resolver for canonical receiver-side KA lifecycle logs.
+   * The PublishIntent wire shape deliberately does not carry `assetUal` as a
+   * log-only field; callers may wire this only when they can derive or verify
+   * the UAL from local/on-chain state for the decoded intent + response.
+   */
+  resolveAssetUalForPublishIntent?: (input: {
+    intent: PublishIntentMsg;
+    ack: StorageACKMsg;
+    peerId: string;
+  }) => string | undefined | Promise<string | undefined>;
+  /**
    * Codex review on PR #715: the per-CG named graph that backs the
    * LU-11 ciphertext chunk store MUST use a CANONICAL form of the CG
    * id so that publishers (writing `envelope.contextGraphId` from
@@ -444,6 +461,28 @@ export class StorageACKHandler {
         subscriptionSource: declined ? undefined : ack.subscriptionSource,
       },
     });
+  }
+
+  private async resolveLifecycleAssetUalForPublishIntent(
+    intent: PublishIntentMsg | undefined,
+    ack: StorageACKMsg,
+    peerId: PeerId,
+  ): Promise<string | undefined> {
+    if (!intent || !this.config.resolveAssetUalForPublishIntent) return undefined;
+    try {
+      return await this.config.resolveAssetUalForPublishIntent({
+        intent,
+        ack,
+        peerId: peerId.toString(),
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('share'),
+        `StorageACK lifecycle assetUal resolver failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -672,13 +711,12 @@ export class StorageACKHandler {
       : undefined;
     return withSpan('publisher.storage_ack_handler', async (span) => {
       let cgIdAttr: string | undefined;
-      let assetUal: string | undefined;
+      let intentPreview: PublishIntentMsg | undefined;
       try {
         // contextGraphId is cheap to read off the decoded intent for the span
         // attribute; the full classification rides the encoded response below.
-        const intentPreview = decodePublishIntent(data);
+        intentPreview = decodePublishIntent(data);
         cgIdAttr = intentPreview.contextGraphId;
-        assetUal = intentPreview.assetUal;
         if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
       } catch {
         // Malformed request — handlePublishIntent will throw + reset below.
@@ -689,6 +727,11 @@ export class StorageACKHandler {
           cgIdAttr,
         );
         const decoded = decodeStorageACK(result);
+        const assetUal = await this.resolveLifecycleAssetUalForPublishIntent(
+          intentPreview,
+          decoded,
+          peerId,
+        );
         this.logLifecycleResponse(assetUal, peerId, decoded);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';

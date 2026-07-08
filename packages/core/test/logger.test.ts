@@ -253,6 +253,66 @@ describe('KA lifecycle logging', () => {
     expect(message.length).toBeLessThan(700);
   });
 
+  it('escapes whitespace and control characters so lifecycle values cannot inject log rows', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const injectedAssetUal = 'did:dkg:evm:31337/0xaaa/1\nka_lifecycle assetUal=did:dkg:evm:31337/0xvictim/2 stage=chain event=confirm role=publisher';
+    const log = new Logger('KALifecycle');
+    const { output } = captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-injection', operationName: 'publish' }, {
+        assetUal: injectedAssetUal,
+        stage: 'storage_ack',
+        event: 'storage_ack_declined',
+        role: 'receiver',
+        localPeerId: '12D3KooWReceiverPeerFullIdentifier',
+        localNodeIdentityId: 'node-identity-receiver-full',
+        metadata: {
+          reason: 'No local Sender Key state for 0xabc epoch e1',
+        },
+      }),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(output).toHaveLength(1);
+    expect(output[0].split('\n').filter((line) => line.includes('ka_lifecycle'))).toHaveLength(1);
+    expect(entries[0].message).not.toContain('\n');
+    expect(entries[0].message).toContain('assetUal="did:dkg:evm:31337/0xaaa/1\\nka_lifecycle');
+    expect(entries[0].message).toContain('reason="No local Sender Key state for 0xabc epoch e1"');
+  });
+
+  it('redacts sensitive payload-shaped values even under otherwise safe metadata keys', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const leakedTriple = '<urn:asset> <urn:privatePredicate> "secret" .';
+    const leakedCiphertext = `0x${'cd'.repeat(96)}`;
+    const log = new Logger('KALifecycle');
+    captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-redact-value', operationName: 'publish' }, {
+        assetUal: 'did:dkg:evm:31337/0xaaa/1',
+        stage: 'swm_share',
+        event: 'swm_update_rejected',
+        role: 'receiver',
+        localPeerId: '12D3KooWReceiverPeerFullIdentifier',
+        localNodeIdentityId: 'node-identity-receiver-full',
+        metadata: {
+          reason: `validation failed for ${leakedTriple}`,
+          declineMessage: `ciphertext mismatch ${leakedCiphertext}`,
+          peerDetail: 'private payload customer secret payload sample',
+        },
+      }),
+    );
+
+    const message = entries[0].message;
+    expect(message).not.toContain(leakedTriple);
+    expect(message).not.toContain(leakedCiphertext);
+    expect(message).not.toContain('customer secret payload sample');
+    expect(message).toContain('reason=[REDACTED]');
+    expect(message).toContain('declineMessage=[REDACTED]');
+    expect(message).toContain('peerDetail=[REDACTED]');
+  });
+
   it('keeps full asset and peer identifiers even when metadata strings are bounded', () => {
     const { entries, sink } = collectSink();
     Logger.setSink(sink);

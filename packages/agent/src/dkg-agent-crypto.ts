@@ -2022,47 +2022,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return FANOUT_RESPONSE_REJECTED;
   }
 
-  logSwmSenderKeySetupLifecycle(this: DKGAgent,
-    ctx: OperationContext,
-    pkg: SwmSenderKeyPackageMsg,
-    event: string,
-    fromPeerId: string,
-    metadata?: Record<string, string | number | boolean | undefined>,
-    level?: 'info' | 'warn' | 'error',
-  ): void {
-    if (!pkg.assetUal) return;
-    logKaLifecycleEvent(this.log, ctx, {
-      assetUal: pkg.assetUal,
-      stage: 'sender_key',
-      event,
-      role: 'receiver',
-      localPeerId: this.peerId,
-      localNodeIdentityId: this.identityId.toString(),
-      peer: fromPeerId,
-      level,
-      metadata: {
-        contextGraphId: pkg.contextGraphId,
-        subGraphName: pkg.subGraphName,
-        senderAgentAddress: pkg.senderAgentAddress,
-        recipientAgentAddress: pkg.recipientAgentAddress,
-        recipientKeyId: pkg.recipientKeyId,
-        epochId: pkg.epochId,
-        membershipHash: pkg.membershipHash,
-        ...metadata,
-      },
-    });
-  }
-
   public async handleSwmSenderKeyPackage(this: DKGAgent, data: Uint8Array, fromPeerId: string): Promise<Uint8Array> {
     const ctx = createOperationContext('share');
     let pkg: SwmSenderKeyPackageMsg | undefined;
     try {
       pkg = decodeSwmSenderKeyPackage(data);
       await this.acceptSwmSenderKeyPackage(pkg, fromPeerId, ctx);
-      this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_ack_sent', fromPeerId, {
-        accepted: true,
-        outcome: 'accepted',
-      });
       return encodeSwmSenderKeyPackageAck({
         version: SWM_SENDER_KEY_PACKAGE_VERSION,
         type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
@@ -2073,26 +2038,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         epochId: pkg.epochId,
         membershipHash: pkg.membershipHash,
         recipientAgentAddress: pkg.recipientAgentAddress,
-        assetUal: pkg.assetUal,
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       const reasonCode = this.swmSenderKeySetupAckReasonCode(err);
       if (pkg) {
-        this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_declined', fromPeerId, {
-          accepted: false,
-          outcome: 'declined',
-          reason,
-          reasonCode,
-          retryable: this.isRetryableSwmSenderKeySetupAckReason(reasonCode),
-        }, err instanceof StaleSenderKeyTargetError ? 'info' : 'warn');
-        this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_ack_declined', fromPeerId, {
-          accepted: false,
-          outcome: 'declined',
-          reason,
-          reasonCode,
-          retryable: this.isRetryableSwmSenderKeySetupAckReason(reasonCode),
-        }, err instanceof StaleSenderKeyTargetError ? 'info' : 'warn');
         // A sender-key setup may legitimately be fanned out across every
         // cached snapshot of our agent's public encryption keys. Each
         // bootstrap that targets a fingerprint we don't host as an
@@ -2130,7 +2080,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         epochId: pkg?.epochId,
         membershipHash: pkg?.membershipHash,
         recipientAgentAddress: pkg?.recipientAgentAddress,
-        assetUal: pkg?.assetUal,
       });
     }
   }
@@ -2259,9 +2208,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     await this.saveSwmSenderKeyState();
 
-    this.logSwmSenderKeySetupLifecycle(ctx, pkg, 'sender_key_setup_received', fromPeerId, {
-      outcome: 'accepted',
-    });
     this.log.info(
       ctx,
       `SWM sender-key setup receive accepted: senderAgent=${senderAgentAddress} recipientAgent=${recipientAgentAddress} ` +
@@ -2278,30 +2224,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     await this.loadSwmSenderKeyState();
     const messageIndex = uint64ForProto(message.messageIndex);
     let senderAgentAddress = message.senderAgentAddress;
-    const logDecryptFailure = (reason: string): void => {
-      if (!message.assetUal) return;
-      logKaLifecycleEvent(this.log, ctx, {
-        assetUal: message.assetUal,
-        stage: 'sender_key',
-        event: 'sender_key_payload_decrypt_failed',
-        role: 'receiver',
-        localPeerId: this.peerId,
-        localNodeIdentityId: this.identityId.toString(),
-        level: 'warn',
-        metadata: {
-          contextGraphId,
-          subGraphName: message.subGraphName,
-          senderAgentAddress,
-          epochId: message.epochId,
-          messageIndex,
-          membershipHash: message.membershipHash,
-          reason,
-        },
-      });
-    };
     if (message.contextGraphId !== contextGraphId) {
       const reason = `Sender Key message contextGraphId "${message.contextGraphId}" does not match envelope "${contextGraphId}"`;
-      logDecryptFailure(reason);
       throw new Error(reason);
     }
     senderAgentAddress = ethers.getAddress(message.senderAgentAddress);
@@ -2310,7 +2234,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     );
     if (!state) {
       const reason = `No local Sender Key state for ${senderAgentAddress} epoch ${message.epochId}`;
-      logDecryptFailure(reason);
       this.log.warn(
         ctx,
         `SWM sender-key broadcast receive denied: reason=no-state senderAgent=${senderAgentAddress} ` +
@@ -2321,7 +2244,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     if (state.membershipHash !== message.membershipHash) {
       const reason = `Sender Key membership hash mismatch for ${senderAgentAddress} epoch ${message.epochId}`;
-      logDecryptFailure(reason);
       throw new Error(reason);
     }
 
@@ -2333,13 +2255,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     } else {
       if (messageIndex < state.nextMessageIndex) {
         const reason = `Sender Key replay rejected for index ${messageIndex}`;
-        logDecryptFailure(reason);
         throw new Error(reason);
       }
       const gap = messageIndex - state.nextMessageIndex;
       if (gap > SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT) {
         const reason = `Sender Key message gap ${gap} exceeds skipped-message cache limit`;
-        logDecryptFailure(reason);
         throw new Error(reason);
       }
       chainKey = state.chainKey;
@@ -2357,7 +2277,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         senderSigningPublicKey: state.senderSigningPublicKey,
       });
     } catch (err) {
-      logDecryptFailure(err instanceof Error ? err.message : String(err));
       throw err;
     }
 

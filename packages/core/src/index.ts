@@ -16,6 +16,7 @@ export {
   KA_LIFECYCLE_STAGES,
   createOperationContext,
   logKaLifecycleEvent,
+  parseKaLifecycleFields,
   type KaLifecycleLogEvent,
   type KaLifecycleLogLevel,
   type KaLifecycleMetadataValue,

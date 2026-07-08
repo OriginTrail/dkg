@@ -93,9 +93,7 @@ export const PublishIntentSchema = new Type('PublishIntent')
   // the exact KC root as hash(public subtree, collapse(private roots)). Sent
   // only over `PROTOCOL_STORAGE_ACK_V2` so V1 cores never silently ignore the
   // commitments during rolling upgrades.
-  .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'))
-  // Optional canonical lifecycle key for receiver-side ACK logs.
-  .add(new Field('assetUal', 21, 'string'));
+  .add(new Field('privateMerkleRoots', 20, 'bytes', 'repeated'));
 
 type Long = { low: number; high: number; unsigned: boolean };
 
@@ -205,8 +203,6 @@ export interface PublishIntentMsg {
    * V1 peers are not compatible because they ignore field 20.
    */
   privateMerkleRoots?: Uint8Array[];
-  /** Canonical Knowledge Asset UAL for receiver-side lifecycle logging. */
-  assetUal?: string;
 }
 
 /** Sent in `ackProtocolVersion` for LU-11 chunked ACKs. */

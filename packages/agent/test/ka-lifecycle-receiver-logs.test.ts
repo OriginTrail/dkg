@@ -301,6 +301,10 @@ describe('KA receiver lifecycle logs', () => {
       kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
       localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
+      resolveAssetUalForPublishIntent: async () => {
+        if (!connectedAssetUal) throw new Error('connected ACK provider has not supplied assetUal');
+        return connectedAssetUal;
+      },
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], receiverBus);
     const publisherStore = new OxigraphStore();
     const publishQuads = [
@@ -344,8 +348,7 @@ describe('KA receiver lifecycle logs', () => {
           stagingQuads: params.stagingQuads,
           swmGraphId: params.swmGraphId,
           subGraphName: params.subGraphName,
-          assetUal: params.assetUal,
-        } as unknown as Parameters<typeof encodePublishIntent>[0]),
+        }),
         { toString: () => PUBLISHER_PEER_ID },
       );
       const ack = decodeStorageACK(response);
@@ -397,8 +400,7 @@ describe('KA receiver lifecycle logs', () => {
         epochs: 1,
         tokenAmountStr: '0',
         merkleLeafCount: 1,
-        assetUal: result.ual,
-      } as unknown as Parameters<typeof encodePublishIntent>[0]),
+      }),
       { toString: () => PUBLISHER_PEER_ID },
     );
 
@@ -699,7 +701,7 @@ describe('KA receiver lifecycle logs', () => {
       expect.stringContaining('outcome=rejected'),
     );
     expect(swmLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('reason=validation rejected payload'),
+      expect.stringContaining('reason="validation rejected payload"'),
     );
   });
 
@@ -1093,7 +1095,7 @@ describe('KA receiver lifecycle logs', () => {
     );
   });
 
-  it('logs Sender Key setup receive by assetUal', async () => {
+  it('does not log Sender Key setup receive by unauthenticated package assetUal', async () => {
     const agent = await DKGAgent.create({
       name: `ka-lifecycle-sender-key-setup-${Math.random().toString(36).slice(2)}`,
       chainAdapter: new MockChainAdapter(),
@@ -1138,21 +1140,15 @@ describe('KA receiver lifecycle logs', () => {
       operationId: 'sender-key-setup-lifecycle-test',
     });
 
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining(`assetUal=${assetUal}`),
-    );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('event=sender_key_setup_received'),
-    );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('recipientAgentAddress='),
-    );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('outcome=accepted'),
-    );
+    expect(senderKeyLifecycleLogs(entries).some((entry) =>
+      entry.message.includes(`assetUal=${assetUal}`),
+    )).toBe(false);
+    expect(senderKeyLifecycleLogs(entries).some((entry) =>
+      entry.message.includes('event=sender_key_setup_received'),
+    )).toBe(false);
   });
 
-  it('logs Sender Key setup decline and ACK-decline by assetUal', async () => {
+  it('does not log Sender Key setup decline by unauthenticated package assetUal', async () => {
     const agent = await createReceiverAgent();
     const senderWallet = ethers.Wallet.createRandom();
     const recipientWallet = ethers.Wallet.createRandom();
@@ -1184,20 +1180,15 @@ describe('KA receiver lifecycle logs', () => {
 
     expect(ack.accepted).toBe(false);
     expect(ack.reasonCode).toBe('recipient-not-local');
-    expect((ack as { assetUal?: string }).assetUal).toBe(ASSET_UAL);
+    expect((ack as { assetUal?: string }).assetUal).toBeUndefined();
 
     const messages = senderKeyLifecycleLogs(entries).map((entry) => entry.message);
-    expect(messages).toContainEqual(expect.stringContaining('event=sender_key_setup_declined'));
-    expect(messages).toContainEqual(expect.stringContaining('event=sender_key_setup_ack_declined'));
-    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
-    expect(messages).toContainEqual(expect.stringContaining('outcome=declined'));
-    expect(messages).toContainEqual(expect.stringContaining('accepted=false'));
-    expect(messages).toContainEqual(expect.stringContaining('reasonCode=recipient-not-local'));
-    expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
-    expect(messages).toContainEqual(expect.stringContaining(`peer=${PUBLISHER_PEER_ID}`));
+    expect(messages.some((message) => message.includes(`assetUal=${ASSET_UAL}`))).toBe(false);
+    expect(messages.some((message) => message.includes('event=sender_key_setup_declined'))).toBe(false);
+    expect(messages.some((message) => message.includes('event=sender_key_setup_ack_declined'))).toBe(false);
   });
 
-  it('logs Sender Key decrypt failure by assetUal', async () => {
+  it('does not log Sender Key decrypt failure by unauthenticated message assetUal', async () => {
     const sender = await DKGAgent.create({
       name: `ka-lifecycle-sender-key-fail-${Math.random().toString(36).slice(2)}`,
       chainAdapter: new MockChainAdapter(),
@@ -1256,15 +1247,12 @@ describe('KA receiver lifecycle logs', () => {
       { operationId: 'sender-key-failure-lifecycle-test', operationName: 'share' },
     )).rejects.toThrow(/No local Sender Key state/);
 
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining(`assetUal=${assetUal}`),
-    );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('event=sender_key_payload_decrypt_failed'),
-    );
-    expect(senderKeyLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('reason=No local Sender Key state'),
-    );
+    expect(senderKeyLifecycleLogs(entries).some((entry) =>
+      entry.message.includes(`assetUal=${assetUal}`),
+    )).toBe(false);
+    expect(senderKeyLifecycleLogs(entries).some((entry) =>
+      entry.message.includes('event=sender_key_payload_decrypt_failed'),
+    )).toBe(false);
   });
 
   it('logs StorageACK success by assetUal', async () => {
@@ -1289,6 +1277,7 @@ describe('KA receiver lifecycle logs', () => {
       kav10Address: '0x000000000000000000000000000000000000c10a',
       localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
+      resolveAssetUalForPublishIntent: async () => ASSET_UAL,
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
     const entries = captureLogs();
     const intent = encodePublishIntent({
@@ -1302,8 +1291,7 @@ describe('KA receiver lifecycle logs', () => {
       epochs: 1,
       tokenAmountStr: '1000',
       merkleLeafCount,
-      assetUal: ASSET_UAL,
-    } as unknown as Parameters<typeof encodePublishIntent>[0]);
+    });
 
     await handler.handler(intent, { toString: () => PUBLISHER_PEER_ID });
 
@@ -1332,6 +1320,7 @@ describe('KA receiver lifecycle logs', () => {
       kav10Address: '0x000000000000000000000000000000000000c10a',
       localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
+      resolveAssetUalForPublishIntent: async () => ASSET_UAL,
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
     const entries = captureLogs();
     const intent = encodePublishIntent({
@@ -1345,8 +1334,7 @@ describe('KA receiver lifecycle logs', () => {
       epochs: 1,
       tokenAmountStr: '1000',
       merkleLeafCount: 1,
-      assetUal: ASSET_UAL,
-    } as unknown as Parameters<typeof encodePublishIntent>[0]);
+    });
 
     await handler.handler(intent, { toString: () => PUBLISHER_PEER_ID });
 
@@ -1360,7 +1348,7 @@ describe('KA receiver lifecycle logs', () => {
       expect.stringContaining(`declineCode=${STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM}`),
     );
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('declineMessage=No data found in SWM'),
+      expect.stringContaining('declineMessage="No data found in SWM'),
     );
     expect(storageAckLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
       expect.stringContaining('retryable=true'),
@@ -1715,7 +1703,7 @@ describe('KA receiver lifecycle logs', () => {
       expect.stringContaining('event=finalization_no_data'),
     );
     expect(finalizationLifecycleLogs(entries).map((entry) => entry.message)).toContainEqual(
-      expect.stringContaining('reason=no shared memory data'),
+      expect.stringContaining('reason="no shared memory data"'),
     );
   });
 
@@ -1803,7 +1791,7 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('event=finalization_failed'));
     expect(messages).toContainEqual(expect.stringContaining('targetContextGraphId=42'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
-    expect(messages).toContainEqual(expect.stringContaining('reason=SWM finalization slice unavailable'));
+    expect(messages).toContainEqual(expect.stringContaining('reason="SWM finalization slice unavailable"'));
   });
 
   it('logs rejected finalization by assetUal', async () => {
@@ -1832,7 +1820,7 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('outcome=rejected'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
     expect(messages).toContainEqual(
-      expect.stringContaining('reason=contextGraphId "ka-lifecycle-cg-other" does not match topic "ka-lifecycle-cg"'),
+      expect.stringContaining('reason="contextGraphId'),
     );
   });
 
@@ -1869,7 +1857,7 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
     expect(messages).toContainEqual(expect.stringContaining('outcome=deferred'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
-    expect(messages).toContainEqual(expect.stringContaining('reason=on-chain verification failed'));
+    expect(messages).toContainEqual(expect.stringContaining('reason="on-chain verification failed"'));
   });
 
   it('logs finalization merkle mismatch by assetUal', async () => {
@@ -1905,6 +1893,6 @@ describe('KA receiver lifecycle logs', () => {
     expect(messages).toContainEqual(expect.stringContaining('swmStatementCount=1'));
     expect(messages).toContainEqual(expect.stringContaining('outcome=deferred'));
     expect(messages).toContainEqual(expect.stringContaining('retryable=true'));
-    expect(messages).toContainEqual(expect.stringContaining('reason=shared memory merkle root mismatch'));
+    expect(messages).toContainEqual(expect.stringContaining('reason="shared memory merkle root mismatch"'));
   });
 });

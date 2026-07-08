@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -7,7 +7,7 @@ import {
 } from '../src/merkle.js';
 import {
   encodePublishIntent, decodeStorageACK, computePublishACKDigest,
-  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot,
+  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
 } from '@origintrail-official/dkg-core';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -27,6 +27,7 @@ import {
 // (production guard), so the test CG id is a plain numeric string.
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
+const TEST_ASSET_UAL = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/7`;
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -59,6 +60,10 @@ function storeWithFailingOps(
 }
 
 describe('StorageACKHandler', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+  });
+
   const contextGraphId = '42';
   const cgIdBigInt = 42n;
 
@@ -152,6 +157,63 @@ describe('StorageACKHandler', () => {
         ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
     });
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
+  });
+
+  it('does not emit a canonical lifecycle assetUal from an unverified PublishIntent field', async () => {
+    const handler = await createHandler(swmQuads, {
+      localPeerId: 'receiver-peer',
+      ackHandlerDeadlineMs: 0,
+    });
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
+    expect(entries.some((message) => message.includes('stage=storage_ack'))).toBe(false);
+  });
+
+  it('emits receiver ACK lifecycle logs only when a resolver supplies a verified assetUal', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(async () => TEST_ASSET_UAL);
+    const handler = await createHandler(swmQuads, {
+      localPeerId: 'receiver-peer',
+      ackHandlerDeadlineMs: 0,
+      resolveAssetUalForPublishIntent,
+    } as any);
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
   });
 
   it('emits ackHandlerTotal{outcome} through the REAL handler (ack + decline paths)', async () => {

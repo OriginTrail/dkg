@@ -116,7 +116,7 @@ export interface ACKCollectorParams {
   subGraphName?: string;
   /** V10 flat-KC Merkle leaf count (sorted + deduped); binds StorageACK to on-chain RandomSampling. */
   merkleLeafCount: number;
-  /** Canonical KA UAL used by receiver-side lifecycle logs. */
+  /** Canonical KA UAL for publisher-local lifecycle context. Not sent on the PublishIntent wire. */
   assetUal?: string;
   ackMode?: V10ACKMode;
 }
@@ -358,7 +358,6 @@ export class ACKCollector {
       privateMerkleRoots: privateMerkleRoots.length > 0
         ? [...privateMerkleRoots]
         : undefined,
-      assetUal: params.assetUal,
     };
     const intentBytes = encodePublishIntent(p2pMsg);
 
