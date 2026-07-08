@@ -30,6 +30,46 @@ export interface LogRecord {
 
 export type LogSink = (entry: LogRecord) => void;
 
+export type KaLifecycleLogLevel = 'info' | 'warn' | 'error';
+
+export const KA_LIFECYCLE_STAGES = [
+  'identity',
+  'wm',
+  'swm_share',
+  'sender_key',
+  'storage_ack',
+  'chain',
+  'vm',
+  'finalization',
+  'sync',
+  'reconcile',
+] as const;
+
+export type KaLifecycleStage = typeof KA_LIFECYCLE_STAGES[number];
+
+export const KA_LIFECYCLE_ROLES = ['publisher', 'receiver', 'sync'] as const;
+
+export type KaLifecycleRole = typeof KA_LIFECYCLE_ROLES[number];
+
+export type KaLifecycleMetadataValue = string | number | boolean | null | undefined;
+
+export interface KaLifecycleLogEvent {
+  level?: KaLifecycleLogLevel;
+  assetUal: string;
+  stage: KaLifecycleStage;
+  event: string;
+  role: KaLifecycleRole;
+  localPeerId: string;
+  localNodeIdentityId: string;
+  peer?: string;
+  peerNodeIdentityId?: string;
+  metadata?: Record<string, KaLifecycleMetadataValue>;
+}
+
+const KA_LIFECYCLE_REDACTED = '[REDACTED]';
+const KA_LIFECYCLE_METADATA_MAX_CHARS = 160;
+const KA_LIFECYCLE_UNSAFE_METADATA_KEY = /(?:ciphertext|nquads?|quads?|triples?|payload|plaintext|private|secret|raw)/i;
+
 /**
  * Structured logger that prefixes every message with a timestamp,
  * operation name, and operation ID for cross-node log correlation.
@@ -102,4 +142,37 @@ function formatTimestamp(d: Date): string {
 
 export function createOperationContext(operationName: OperationName, sourceOperationId?: string): OperationContext {
   return { operationId: randomUUID(), operationName, sourceOperationId };
+}
+
+export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: KaLifecycleLogEvent): void {
+  const level = input.level ?? 'info';
+  log[level](ctx, formatKaLifecycleEvent(input));
+}
+
+function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {
+  const fields: Array<[string, KaLifecycleMetadataValue, boolean]> = [
+    ['assetUal', input.assetUal, true],
+    ['stage', input.stage, true],
+    ['event', input.event, true],
+    ['role', input.role, true],
+    ['localPeerId', input.localPeerId, true],
+    ['localNodeIdentityId', input.localNodeIdentityId, true],
+    ['peer', input.peer, true],
+    ['peerNodeIdentityId', input.peerNodeIdentityId, true],
+  ];
+  if (input.metadata) {
+    for (const [key, value] of Object.entries(input.metadata)) fields.push([key, value, false]);
+  }
+  return `ka_lifecycle ${fields
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value, keepFull]) => `${key}=${formatKaLifecycleValue(key, value, keepFull)}`)
+    .join(' ')}`;
+}
+
+function formatKaLifecycleValue(key: string, value: KaLifecycleMetadataValue, keepFull: boolean): string {
+  if (KA_LIFECYCLE_UNSAFE_METADATA_KEY.test(key)) return KA_LIFECYCLE_REDACTED;
+  if (keepFull) return String(value);
+  if (typeof value !== 'string') return String(value);
+  if (value.length <= KA_LIFECYCLE_METADATA_MAX_CHARS) return value;
+  return `${value.slice(0, KA_LIFECYCLE_METADATA_MAX_CHARS)}...[truncated:${value.length}]`;
 }
