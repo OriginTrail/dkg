@@ -4,11 +4,11 @@
 // AND the CLI daemon lifecycle, and is owned by none of them:
 //   - resolveSyncAgentsMeta          — FETCH-side opt-IN (should durable sync pull agents/_meta?)
 //   - shouldWithholdAgentsDurableMeta — SERVE-side opt-OUT (should the responder withhold it?)
-//   - createAgentsDurableMetaWithholdPredicate — binds the SERVE-side resolver to an
-//     injected env reader, producing the predicate the daemon passes to the responder.
-// All are environment-AGNOSTIC (env passed IN / injected as a reader, never read
-// here) so the precedence is unit-testable in isolation and neither the responder
-// nor the requester carries daemon config policy.
+// Both are pure functions (env passed IN, never read here) so the precedence is
+// unit-testable in isolation and neither the responder nor the requester carries
+// daemon config policy. The daemon lifecycle builds the responder's serve-skip
+// predicate inline by calling `shouldWithholdAgentsDurableMeta` directly with a fresh
+// `process.env.DKG_SERVE_AGENTS_META` read at its wiring boundary.
 
 import { isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
 
@@ -78,19 +78,4 @@ export function shouldWithholdAgentsDurableMeta(
 ): boolean {
   if (!isAgentRegistryContextGraph(contextGraphId)) return false;
   return parseBooleanEnv(serveEnvValue) !== true;
-}
-
-/**
- * Build the responder's `shouldWithholdDurableMeta` predicate (#1233) — the tiny
- * seam `dkg-agent-lifecycle.ts` passes DIRECTLY to `registerSyncHandler` (no
- * all-params wrapper). Takes a `readServeEnv` reader so THIS module stays
- * environment-agnostic (it never touches `process.env`; the daemon injects
- * `() => process.env.DKG_SERVE_AGENTS_META` at the lifecycle boundary) and reads it
- * FRESH on every call, keeping the serve-skip kill-switch reversible at runtime with
- * no restart. Delegates the decision to the pure `shouldWithholdAgentsDurableMeta`.
- */
-export function createAgentsDurableMetaWithholdPredicate(
-  readServeEnv: () => string | undefined,
-): (contextGraphId: string) => boolean {
-  return (contextGraphId) => shouldWithholdAgentsDurableMeta(contextGraphId, readServeEnv());
 }

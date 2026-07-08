@@ -44,7 +44,6 @@ export default defineConfig({
       "test/chain-cursor-wiring.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
-      "test/agents-meta-serve-wiring.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
     ],
     testTimeout: 60_000,

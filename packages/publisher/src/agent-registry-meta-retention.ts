@@ -7,6 +7,7 @@ import {
   Logger,
   createOperationContext,
 } from '@origintrail-official/dkg-core';
+import { withKeyedLocks } from './keyed-lock.js';
 
 const log = new Logger('AgentRegistryMetaRetention');
 
@@ -27,43 +28,18 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
 }
 
 // Per-INDIVIDUAL-root serialization (#1533/#1534 review). Two concurrent
-// agents/_meta writes whose root sets INTERSECT each insert a fresh record and
-// then prune "every record for these roots but mine" — and
-// `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by
-// the root-set shape. Run UNSERIALIZED they delete each other's just-inserted
-// record and a shared root ends with ZERO `_meta` rows. So we lock at the SAME
-// granularity as the prune's blast radius — one lock per individual root — so any
-// two writes sharing a root serialize while writes for disjoint roots stay
-// concurrent. Locking the mutation boundary (per root) rather than the incidental
-// single-root heartbeat shape matters because the direct-protocol receive handler
-// does not enforce singleton agents-CG writes.
-//
-// This is the SAME gate-based multi-key lock idiom as `withWriteLocks` in
-// dkg-publisher.ts / workspace-handler.ts (one concurrency model in the codebase,
-// not a second recursive one): sort+dedupe the keys, snapshot the predecessor gate
-// per key, install ONE shared gate for every key (synchronously, so there is no
-// partial-hold + wait → deadlock-free), await the predecessors, run `fn`, then
-// release the gate and evict the keys it still owns. PER-PROCESS is sufficient: an
-// agent's heartbeats land on the same receiving node and the prune only touches
-// that node's local store. Entries self-evict, so the map stays bounded.
-const _agentMetaWriteLocks = new Map<string, Promise<void>>();
-
-async function withAgentMetaWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
-  const uniqueKeys = [...new Set(keys)].sort();
-  const predecessor = Promise.all(uniqueKeys.map((k) => _agentMetaWriteLocks.get(k) ?? Promise.resolve()));
-  let release!: () => void;
-  const gate = new Promise<void>((r) => { release = r; });
-  for (const k of uniqueKeys) _agentMetaWriteLocks.set(k, gate);
-  await predecessor;
-  try {
-    return await fn();
-  } finally {
-    release();
-    for (const k of uniqueKeys) {
-      if (_agentMetaWriteLocks.get(k) === gate) _agentMetaWriteLocks.delete(k);
-    }
-  }
-}
+// agents/_meta writes whose root sets INTERSECT each insert a fresh record and then
+// prune "every record for these roots but mine" — and
+// `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by the
+// root-set shape. Run UNSERIALIZED they delete each other's just-inserted record and
+// a shared root ends with ZERO `_meta` rows. So we serialize at the SAME granularity
+// as the prune's blast radius (one lock key per individual root) via the shared
+// gate-based {@link withKeyedLocks} helper: writes sharing a root serialize, writes
+// over disjoint roots stay concurrent. Per-root — not the incidental single-root
+// heartbeat shape — because the direct-protocol receive handler does not enforce
+// singleton agents-CG writes. PER-PROCESS is sufficient: an agent's heartbeats land
+// on the same receiving node and the prune only touches that node's local store.
+const _agentMetaLocks = new Map<string, Promise<void>>();
 
 /**
  * Insert a heartbeat's `_meta` tracking rows and THEN bound the agents-registry
@@ -129,14 +105,13 @@ export async function insertBoundedAgentRegistryMeta(opts: {
     );
   }
 
-  // Serialize insert+prune at the SAME granularity as the prune's blast radius —
-  // one lock per individual root (see withAgentMetaWriteLocks). Any two writes
-  // sharing a root (identical OR overlapping sets, e.g. {X} vs {X,Y}) serialize so
-  // they can't insert-then-prune each other down to zero records; writes for
-  // disjoint roots stay concurrent. The locks span insert→prune and are released
+  // Serialize insert+prune per individual root (see the note on _agentMetaLocks):
+  // any two writes sharing a root (identical OR overlapping sets, e.g. {X} vs {X,Y})
+  // serialize so they can't insert-then-prune each other down to zero records; writes
+  // for disjoint roots stay concurrent. The locks span insert→prune and are released
   // only after the prune try/catch.
   const lockKeys = rootEntities.map((root) => `${contextGraphId}:${root}`);
-  await withAgentMetaWriteLocks(lockKeys, async () => {
+  await withKeyedLocks(_agentMetaLocks, lockKeys, async () => {
     // Insert FIRST so a prune failure can never leave the agent with no record.
     // An insert failure PROPAGATES (caller aborts; nothing durable changed).
     await store.insert(metadataQuads);
