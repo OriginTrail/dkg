@@ -24,6 +24,10 @@ function makeContext(options: {
     verifiedMeta?: Quad[];
     totalFetchedDataQuads?: number;
     totalFetchedMetaQuads?: number;
+    rejectedKcs?: number;
+    emptyResponses?: number;
+    metaOnlyResponses?: number;
+    dataRejectedMissingMeta?: number;
   };
   logLifecycle?: (event: {
     assetUal: string;
@@ -82,10 +86,10 @@ function makeContext(options: {
           verifiedMeta,
           totalFetchedDataQuads: options.processResult?.totalFetchedDataQuads ?? dataQuads.length,
           totalFetchedMetaQuads: options.processResult?.totalFetchedMetaQuads ?? metaQuads.length,
-          rejectedKcs: 0,
-          emptyResponses: 0,
-          metaOnlyResponses: 0,
-          dataRejectedMissingMeta: 0,
+          rejectedKcs: options.processResult?.rejectedKcs ?? 0,
+          emptyResponses: options.processResult?.emptyResponses ?? 0,
+          metaOnlyResponses: options.processResult?.metaOnlyResponses ?? 0,
+          dataRejectedMissingMeta: options.processResult?.dataRejectedMissingMeta ?? 0,
         };
       },
       storeInsert: async (quads: Quad[]) => { insertedBatches.push(quads); },
@@ -212,6 +216,45 @@ describe('runDurableSync sinceBatchId threading', () => {
       result: 'fetched',
       contextGraphId: 'mfacts',
       remotePeerId: 'peerR',
+    }));
+  });
+
+  it('emits published KA sync skip lifecycle event when data cannot be applied', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      event: string;
+      action: string;
+      result: string;
+      contextGraphId: string;
+      remotePeerId: string;
+      reason?: string;
+    }> = [];
+    const publishedMeta = {
+      subject: ASSET_UAL,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${'ab'.repeat(32)}"`,
+      graph: 'did:dkg:context-graph:mfacts/_meta',
+    };
+    const { context } = makeContext({
+      processResult: {
+        verifiedMeta: [publishedMeta],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+        dataRejectedMissingMeta: 1,
+      },
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    });
+
+    await runDurableSync(context);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      event: 'sync_skip',
+      action: 'skip',
+      result: 'deferred',
+      contextGraphId: 'mfacts',
+      remotePeerId: 'peerR',
+      reason: 'data-rejected-missing-meta',
     }));
   });
 });
