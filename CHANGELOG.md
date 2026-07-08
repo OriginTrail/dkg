@@ -1,8 +1,36 @@
 # Changelog
 
-All notable changes to the DKG V9 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [10.0.4] - 2026-07-08
+
+2026-07-07 mainnet-incident hardening + transaction-dispatcher release. Publisher-side: ACK candidacy ranks-not-gates, empty-reply retry, responder ACK deadlines, SWM merkle-filter parity. Network-side: relay-watchdog churn fix and sync-storm calming (bounded catch-up fan-out, superseded-resume loop kill). Chain-side: the universal per-wallet transaction dispatcher lands end-to-end — every node write serialized per wallet, funding-aware generalized signer selection, and Random Sampling rotating across registered operational wallets instead of pinning wallet #0. Plus the codified manual release flow with signed-tag gates. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.3).
+
+### Added
+
+- **Universal transaction dispatcher (Phases 0-4)**: every node write funnels through the per-operational-wallet serializer, closing the cross-type nonce race (#1503); funding floors (`minPublisherNativeWei`/`minPublisherTracWei`) plumbed config→adapter with fail-fast parsing of persisted string/number values, and the generalized `selectSigner(spec)` seam with typed funding modes (#1504 via #1516); **Random Sampling rotates `createChallenge`/`submitProof` across registered operational wallets** — fail-closed registered-set eligibility, per-metric funding cache so RS probes never poison publish TRAC reads, `ProfileDoesntExist` self-heal (#1506 via #1516), and on-chain identity revalidation of the chosen wallet at selection, evicting out-of-band re-registrations (#1519).
+- **Manual release promotion tooling and docs**: `release:verify-versions` / `verify-tag` (annotated+signed structure, tag-on-origin, main ancestry) / `build-info` / `promote` / `verify-published`, with the staged canary→testnet→mainnet promotion flow documented as the release process (#1498; signed-tag canary docs #1518).
+- **Devnet coverage for the incident class**: N-version harness + mixed-version interop suite with strictly-older `prev` resolution (#1513), storage-ACK store-outage suite — a real store paused mid-publish must yield a typed decline, quorum via healthy cores, and clean recovery (#1517), and an RS wallet-rotation suite (#1516).
+
+### Changed
+
+- **Release CI** now validates the manual release flow and keeps release automation focused on signed release gates instead of the removed disabled npm-publish workflow (#1498).
+- **Catch-up sync fan-out is bounded** (default 4 concurrent peers, `DKG_CATCHUP_MAX_CONCURRENT_PEERS`) on both the agent-internal paths and the daemon subscribe worker — the registry-wide unbounded fan-out was the 2026-07-07 sync-storm engine (#1511).
+
+### Fixed
+
+- **ACK peer selection** now uses the bundled relay list only for preference ordering, never eligibility: any connected, chain-valid core can complete quorum (the 2026-07-07 outage cap), while `ackCandidatePeerIds` remains a true allowlist for SDK callers that set it (#1501).
+- **Zero-length ACK replies** are treated as retryable transport failures instead of terminal `INVALID_SIGNATURE`, so a store hiccup or connection churn no longer permanently deselects a healthy peer (#1507).
+- **ACK handlers answer within a deadline** (send-timeout minus a safety margin, publish and update paths): a saturated store now produces a typed `CORE_TEMPORARILY_UNAVAILABLE` decline that rides the transient-retry ladder instead of dead-air the publisher mislabels (#1510).
+- **SWM merkle-root exclusion filter unified** publisher⇄responder via one shared helper, closing the `MERKLE_MISMATCH_IN_SWM` class for bookkeeping quads resident in the data graph (#1509; responder-boundary regression pinned in #1520).
+- **Public relay watchdog** no longer churns sibling-core connections on publicly-reachable nodes chasing a circuit reservation it can never obtain (#1508); a `/dnsaddr`-only announce no longer counts as direct reachability, so NAT'd nodes keep maintaining their reservations (#1518).
+- **Superseded-resume sync loop killed**: an aborted resumed round drops the remembered responder session and checkpoint, so the retry restarts fresh at offset 0 and makes progress instead of blind-retrying a doomed resume for the session TTL (#1512).
+
+### Deployment
+
+- **No new contract deployment.** No Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.3; existing v10 registries remain the deploy targets (re-verified across the full 10.0.4 merge set).
 
 ## [10.0.3] - 2026-07-07
 
