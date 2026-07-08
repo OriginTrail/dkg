@@ -13,6 +13,7 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
+  DEFAULT_SEND_TIMEOUT_MS,
   boundedDeclineCodeLabel,
   computeCatalogRoot,
   catalogCommittedLeaves,
@@ -314,10 +315,23 @@ export interface StorageACKHandlerConfig {
 }
 
 /**
- * Default ACK-handler deadline — below the publisher's 20s per-send timeout so
- * a slow responder decline reaches the publisher before it gives up.
+ * Safety margin between the ACK-handler deadline and the publisher's per-send
+ * timeout: the budget left for the decline to be encoded, written to the
+ * stream, and read by the publisher before it gives up on the send. Without
+ * it the deadline decline would race the publisher's own timeout and lose.
  */
-export const DEFAULT_ACK_HANDLER_DEADLINE_MS = 15_000;
+export const ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS = 5_000;
+
+/**
+ * Default ACK-handler deadline — DERIVED from the publisher's per-send timeout
+ * ({@link DEFAULT_SEND_TIMEOUT_MS}, 20s) minus
+ * {@link ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS} (5s) = 15s, so the
+ * "decline must reach the publisher before it gives up" invariant is
+ * compile-time coupled to the send timeout instead of restated as a bare
+ * literal that could silently drift.
+ */
+export const DEFAULT_ACK_HANDLER_DEADLINE_MS =
+  DEFAULT_SEND_TIMEOUT_MS - ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS;
 
 /**
  * StorageACKHandler implements the core node side of V10 spec §9.0 Phase 3.
@@ -628,7 +642,10 @@ export class StorageACKHandler {
         // Malformed request — handlePublishIntent will throw + reset below.
       }
       try {
-        const result = await this.runHandlerWithDeadline(data, peerId, cgIdAttr);
+        const result = await this.runHandlerWithDeadline(
+          this.handlePublishIntent(data, peerId),
+          cgIdAttr,
+        );
         const decoded = decodeStorageACK(result);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';
@@ -663,7 +680,8 @@ export class StorageACKHandler {
   };
 
   /**
-   * Run {@link handlePublishIntent} under a wall-clock deadline. If the store
+   * Run an in-flight ACK body ({@link handlePublishIntent} or
+   * {@link handleUpdateIntent}) under a wall-clock deadline. If the store
    * work has not produced a reply within `ackHandlerDeadlineMs` (default 15s,
    * below the publisher's 20s per-send timeout), resolve with a
    * `CORE_TEMPORARILY_UNAVAILABLE` decline so the publisher gets an actionable
@@ -677,12 +695,10 @@ export class StorageACKHandler {
    * the *slow* (non-throwing) case, which previously had no in-band signal.
    */
   private runHandlerWithDeadline = async (
-    data: Uint8Array,
-    peerId: PeerId,
+    work: Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
   ): Promise<Uint8Array> => {
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
-    const work = this.handlePublishIntent(data, peerId);
     if (deadlineMs <= 0) return work;
 
     // Swallow a late rejection from work when the deadline wins (see jsdoc).
@@ -1262,9 +1278,34 @@ export class StorageACKHandler {
    * ACKs require exactly one KA before signing.
    *
    * Mirrors the publish `handler` above; only the digest, the request
-   * fields, and the protocol id differ.
+   * fields, and the protocol id differ — including the ACK-handler
+   * deadline: without it a hanging store op (SWM fallback `store.query`,
+   * catalog persist) dead-airs update ACKs past the publisher's 20s
+   * per-send timeout exactly as publish did, and the update collector
+   * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  updateHandler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+    let cgIdForDecline: string | undefined;
+    try {
+      // contextGraphId is cheap to read off the decoded intent for the
+      // deadline decline; handleUpdateIntent re-decodes + validates below.
+      cgIdForDecline = decodeUpdateIntent(data).contextGraphId;
+    } catch {
+      // Malformed request — handleUpdateIntent will throw + reset below.
+    }
+    return this.runHandlerWithDeadline(
+      this.handleUpdateIntent(data, peerId),
+      cgIdForDecline,
+    );
+  };
+
+  /**
+   * Original update-intent handling body. Split out from
+   * {@link updateHandler} so the public entry point runs it under the
+   * shared ACK deadline; the logic here is byte-for-byte the pre-deadline
+   * behaviour.
+   */
+  private handleUpdateIntent = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
