@@ -166,13 +166,11 @@ export function selectACKCandidatePeersWithDiagnostics(
   } else if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
     const v2Advertised = tiers.find((tier) => tier.name === 'v2Advertised')?.peers ?? [];
     peers = rankPreferredWithinTier(v2Advertised, preferredACKPeers);
-    if (peers.length < input.requiredACKs) {
-      appendBoundedFallback(
-        peers,
-        flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
-        input.requiredACKs,
-      );
-    }
+    appendBoundedFallback(
+      peers,
+      flattenTiers(tiers.filter((tier) => tier.name !== 'v2Advertised'), preferredACKPeers),
+      input.requiredACKs,
+    );
   } else {
     const confirmedCore = tiers.find((tier) => tier.name === 'confirmedCore')?.peers ?? [];
     const rest = flattenTiers(tiers.filter((tier) => tier.name === 'rest'), preferredACKPeers);

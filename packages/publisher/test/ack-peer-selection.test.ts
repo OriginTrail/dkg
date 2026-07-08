@@ -86,7 +86,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     expect(out).toEqual([...foreign, unlisted]);
   });
 
-  it('V2 rounds: v2-advertised tier first, listed-first within the protocol-capable tier', () => {
+  it('V2 rounds: v2-advertised tier first, then bounded fallback candidates', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: [...STAKED, RELAYS[0], RELAYS[1], 'edge-x'],
       preferredACKPeerIds: RELAYS,
@@ -95,7 +95,18 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       requiredACKs: 3,
       protocol: PROTOCOL_STORAGE_ACK_V2,
     });
-    expect(out).toEqual([RELAYS[1], STAKED[0], STAKED[1]]);
+    expect(out).toEqual([RELAYS[1], STAKED[0], STAKED[1], RELAYS[0], STAKED[2], 'edge-x']);
+  });
+
+  it('V2 rounds keep bounded fallback candidates when the advertised tier already reaches quorum', () => {
+    const out = selectACKCandidatePeers({
+      connectedPeers: ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
+      knownCorePeerIds: new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G']),
+      knownCorePeerIdsV2: new Set(['A', 'B', 'C']),
+      requiredACKs: 3,
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+    });
+    expect(out).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
   });
 
   it('without a preference list, behavior is unchanged (cores first, everyone dialable)', () => {
