@@ -31,13 +31,14 @@ export interface DurableSyncSummary {
   backoffWorthyFailures: number;
 }
 
-export type DurableSyncLifecycleAction = 'receive' | 'apply' | 'skip' | 'failure';
+export type DurableSyncLifecycleAction = 'request' | 'response' | 'receive' | 'apply' | 'skip' | 'failure';
 
 export interface DurableSyncLifecycleEvent {
   assetUal: string;
   event: string;
   action: DurableSyncLifecycleAction;
   result: string;
+  source: string;
   contextGraphId: string;
   remotePeerId: string;
   fetchedMetaCount: number;
@@ -231,9 +232,34 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       for (const assetUal of publishedAssetUals) {
         logLifecycle?.({
           assetUal,
+          event: 'sync_request',
+          action: 'request',
+          result: 'sent',
+          source: 'durable-sync',
+          contextGraphId: pid,
+          remotePeerId,
+          fetchedMetaCount: processed.totalFetchedMetaQuads,
+          fetchedDataCount: processed.totalFetchedDataQuads,
+          rejectedKcs: processed.rejectedKcs,
+        });
+        logLifecycle?.({
+          assetUal,
+          event: 'sync_response',
+          action: 'response',
+          result: 'fetched',
+          source: 'durable-sync',
+          contextGraphId: pid,
+          remotePeerId,
+          fetchedMetaCount: processed.totalFetchedMetaQuads,
+          fetchedDataCount: processed.totalFetchedDataQuads,
+          rejectedKcs: processed.rejectedKcs,
+        });
+        logLifecycle?.({
+          assetUal,
           event: 'sync_receive',
           action: 'receive',
           result: 'verified',
+          source: 'durable-sync',
           contextGraphId: pid,
           remotePeerId,
           fetchedMetaCount: processed.totalFetchedMetaQuads,
@@ -285,6 +311,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           event: 'sync_apply',
           action: 'apply',
           result: 'inserted',
+          source: 'durable-sync',
           contextGraphId: pid,
           remotePeerId,
           fetchedMetaCount: processed.totalFetchedMetaQuads,

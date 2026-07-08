@@ -3168,6 +3168,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           peer: event.remotePeerId,
           metadata: {
             contextGraphId: event.contextGraphId,
+            source: event.source,
             action: event.action,
             result: event.result,
             fetchedMetaCount: event.fetchedMetaCount,
