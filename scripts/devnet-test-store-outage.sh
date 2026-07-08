@@ -52,12 +52,18 @@
 #   2. exactly ONE process LISTENs on that port (ambiguity → no signal);
 #   3. its command line contains `oxigraph`, the target node's own directory,
 #      and `:<port>` — positively tying the PID to THIS node's managed store.
-# Anything else → SKIP (exit 0), no signal. Shared Blazegraph and in-process
+# Anything else → SKIP (exit 3, "did not run"), no signal. Shared Blazegraph and in-process
 # oxigraph cannot isolate one core's store, and a `sparql-http` listener is
 # Docker infrastructure (docker-proxy) that cannot be attributed to a devnet
 # node — neither is ever signaled.
 #
-# Exit codes: 0 = PASS or SKIP (precondition unmet); non-zero = real failure.
+# Exit codes (otReviewAgent #1517 — a non-run must NEVER look like a pass):
+#   0 = PASS  — the outage was actually exercised and every assertion held.
+#   3 = SKIP  — a precondition was unmet, so the outage was NOT exercised. This
+#               is DISTINCT from 0 on purpose: the vitest wrapper turns it into a
+#               reported vitest SKIP (not a pass), and a validation dashboard /
+#               sweep must count it as "not run", never as outage coverage.
+#   other non-zero = a real failure (assertion broke / infra error).
 # A paused store is ALWAYS resumed on exit, including mid-assert failures.
 #
 # Env knobs: DEVNET_DIR, API_PORT_BASE, DEVNET_CONTEXT_GRAPH,
@@ -65,6 +71,12 @@
 #   STORE_OUTAGE_TARGET (node number; default = first eligible core, preferring
 #   not-node1 so the mesh anchor / default curator stays pristine),
 #   STORE_OUTAGE_MIN_SIG (default 3), STORE_OUTAGE_DECLINE_WAIT_SECS (default 75).
+#   DEVNET_REQUIRE_STORE_OUTAGE=1 — REQUIRED-LANE opt-in. Consumed by the vitest
+#     wrapper (and any CI "required devnet" lane): it turns a precondition SKIP
+#     into a HARD FAILURE, so the lane can guarantee the outage was actually
+#     exercised. This standalone script does NOT act on it — it always exits 3
+#     on a skip; the wrapper owns the skip->fail policy so the exit codes here
+#     stay unambiguous (3 always means "did not run").
 #
 # Run standalone (against a running devnet):  scripts/devnet-test-store-outage.sh
 # Or via the suite:                           pnpm test:devnet:storage-ack-store-outage
@@ -78,8 +90,16 @@ CONTEXT_GRAPH="${DEVNET_CONTEXT_GRAPH:-devnet-test}"
 MIN_SIG="${STORE_OUTAGE_MIN_SIG:-3}"       # devnet.sh pins minimumRequiredSignatures=3
 DECLINE_WAIT_SECS="${STORE_OUTAGE_DECLINE_WAIT_SECS:-75}"  # ≥ 30s store timeout + dial/log slack
 
+# A precondition-not-met SKIP exits with a DISTINCT code (3), never 0, so a
+# non-run is never mistaken for outage coverage (otReviewAgent #1517). 0 is
+# reserved for a real PASS (the outage was actually exercised); any other
+# non-zero is a real failure. The vitest wrapper maps 3 → a reported vitest
+# SKIP, and DEVNET_REQUIRE_STORE_OUTAGE=1 makes the wrapper/CI lane turn that
+# skip into a hard FAILURE (enforced in the wrapper, not here — see header).
+SKIP_EXIT=3
+
 say()  { echo "[store-outage] $*"; }
-skip() { echo "[store-outage] SKIP: $*"; exit 0; }
+skip() { echo "[store-outage] SKIP: $*"; exit "$SKIP_EXIT"; }
 fail() { echo "[store-outage] FAIL: $*" >&2; exit 1; }   # EXIT trap resumes the store
 
 STORE_PID=""
