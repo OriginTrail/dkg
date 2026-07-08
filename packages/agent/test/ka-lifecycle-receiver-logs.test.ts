@@ -6,6 +6,9 @@ import {
   Logger,
   STORAGE_ACK_DECLINE_CODES,
   TypedEventBus,
+  computeSwmSenderKeyMessageAAD,
+  computeSwmSenderKeyPackageAAD,
+  computeSwmSenderKeyPackageEncryptionAAD,
   contextGraphDataUri,
   contextGraphMetaUri,
   decodeSwmSenderKeyMessage,
@@ -14,7 +17,9 @@ import {
   encodeWorkspacePublishRequest,
   type LogRecord,
   type OperationContext,
+  type SwmSenderKeyMessageAADFields,
   type SwmSenderKeyMessageMsg,
+  type SwmSenderKeyPackageAADFields,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -96,6 +101,40 @@ async function insertAgentGate(
 describe('KA receiver lifecycle logs', () => {
   afterEach(() => {
     Logger.setSink(null);
+  });
+
+  it('keeps Sender Key v1 cryptographic binding compatible when assetUal is carried for logs', () => {
+    const packageFields: SwmSenderKeyPackageAADFields = {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: 'sender-key-compat',
+      senderAgentAddress: AUTHOR_AGENT_ADDRESS,
+      epochId: 'sender-key-compat-epoch',
+      membershipHash: 'sha256:sender-key-compat',
+      recipientAgentAddress: '0x000000000000000000000000000000000000c20A',
+      recipientKeyId: 'did:dkg:agent:0x000000000000000000000000000000000000c20A#x25519',
+      createdAtMs: 1_770_000_000_000,
+      initialMessageIndex: 0,
+      senderSigningPublicKey: new Uint8Array(32).fill(1),
+      ephemeralPublicKey: new Uint8Array(32).fill(2),
+      nonce: new Uint8Array(12).fill(3),
+      ciphertext: new Uint8Array(48).fill(4),
+    };
+    const messageFields: SwmSenderKeyMessageAADFields = {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      subGraphName: 'sender-key-compat',
+      senderAgentAddress: AUTHOR_AGENT_ADDRESS,
+      epochId: 'sender-key-compat-epoch',
+      membershipHash: 'sha256:sender-key-compat',
+      messageIndex: 7,
+      nonce: new Uint8Array(12).fill(5),
+    };
+
+    expect(computeSwmSenderKeyPackageAAD({ ...packageFields, assetUal: ASSET_UAL }))
+      .toEqual(computeSwmSenderKeyPackageAAD(packageFields));
+    expect(computeSwmSenderKeyPackageEncryptionAAD({ ...packageFields, assetUal: ASSET_UAL }))
+      .toEqual(computeSwmSenderKeyPackageEncryptionAAD(packageFields));
+    expect(computeSwmSenderKeyMessageAAD({ ...messageFields, assetUal: ASSET_UAL }))
+      .toEqual(computeSwmSenderKeyMessageAAD(messageFields));
   });
 
   it('logs a substrate-applied SWM receive by assetUal', async () => {
