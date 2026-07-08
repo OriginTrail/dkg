@@ -489,7 +489,17 @@ export function isPublicLikeAddress(addr: string): boolean {
  * is explicitly excluded here.
  */
 export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolean {
-  return selfAddrs.some((a) => !a.includes('/p2p-circuit') && isPublicLikeAddress(a));
+  return selfAddrs.some(
+    (a) =>
+      !a.includes('/p2p-circuit') &&
+      // A /dnsaddr is a POINTER, not a transport: its TXT records may resolve
+      // to circuit-only or private addresses, so announcing one is no proof of
+      // direct dialability — treating it as direct would let a NAT'd node skip
+      // reservation recovery and silently lose relay reachability. Concrete
+      // transports (/ip4, /ip6, /dns4, /dns6 + port) remain valid evidence.
+      !a.startsWith('/dnsaddr/') &&
+      isPublicLikeAddress(a),
+  );
 }
 
 export class DKGNode {
