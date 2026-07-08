@@ -201,6 +201,40 @@ describe('KA receiver lifecycle logs', () => {
     expect(outcome).toMatchObject({ applied: true, assetUal: ASSET_UAL });
   });
 
+  it('threads SWM assetUal onto validation rejection outcomes', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: async () => ASSET_UAL,
+    } as unknown as ConstructorParameters<typeof SharedMemoryHandler>[2]);
+
+    const msg = encodeWorkspacePublishRequest({
+      shareOperationId: 'share-op-validation-reject',
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: PUBLISHER_PEER_ID,
+      nquads: new TextEncoder().encode(
+        [
+          `<${ROOT_ENTITY}> <http://schema.org/name> "Receiver lifecycle" .`,
+          `<http://example.org/ka-lifecycle/stranger> <http://schema.org/name> "Reject me" .`,
+        ].join('\n'),
+      ),
+      manifest: [{ rootEntity: ROOT_ENTITY }],
+      timestampMs: Date.now(),
+      agentAddress: AUTHOR_AGENT_ADDRESS,
+      kaNumber: '7',
+    });
+
+    const outcome = await handler.handle(msg, PUBLISHER_PEER_ID);
+
+    expect(outcome).toMatchObject({
+      applied: false,
+      retryable: false,
+      assetUal: ASSET_UAL,
+      cgId: CONTEXT_GRAPH_ID,
+      shareOperationId: 'share-op-validation-reject',
+      publisherPeerId: PUBLISHER_PEER_ID,
+    });
+  });
+
   it('logs SWM Share ACK send by assetUal', async () => {
     const agent = await createReceiverAgent();
     const sent: Array<{ peerId: string; protocol: string; data: Uint8Array }> = [];
