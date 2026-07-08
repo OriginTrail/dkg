@@ -202,6 +202,50 @@ describe('KA lifecycle logging', () => {
     expect(entries[0].message).toContain('reason=missing-replication-window');
     expect(entries[0].message).toContain('retryAfterMs=2500');
   });
+
+  it('redacts unsafe payload metadata while preserving full identifiers', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const rawTriples = '<urn:asset> <urn:privatePredicate> "private payload snippet" .';
+    const ciphertext = `0x${'ab'.repeat(96)}`;
+    const privatePayloadSnippet = 'customer secret payload sample';
+    const peerDetail = `remote-peer-said-${'x'.repeat(360)}`;
+    const fullPeer = `12D3KooW${'p'.repeat(72)}`;
+
+    const log = new Logger('KALifecycle');
+    captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-2', operationName: 'publish' }, {
+        assetUal: 'did:dkg:otp:2043/0xasset/43',
+        stage: 'swm_share',
+        event: 'share.received',
+        role: 'receiver',
+        localPeerId: '12D3KooWReceiverPeerFullIdentifier',
+        localNodeIdentityId: 'node-identity-receiver-full',
+        peer: fullPeer,
+        metadata: {
+          rawTriples,
+          ciphertext,
+          privatePayloadSnippet,
+          peerDetail,
+          graphCount: 2,
+        },
+      }),
+    );
+
+    const message = entries[0].message;
+    expect(message).toContain(`peer=${fullPeer}`);
+    expect(message).toContain('graphCount=2');
+    expect(message).not.toContain(rawTriples);
+    expect(message).not.toContain(ciphertext);
+    expect(message).not.toContain(privatePayloadSnippet);
+    expect(message).not.toContain(peerDetail);
+    expect(message).toContain('rawTriples=[REDACTED]');
+    expect(message).toContain('ciphertext=[REDACTED]');
+    expect(message).toContain('privatePayloadSnippet=[REDACTED]');
+    expect(message).toContain('peerDetail=');
+    expect(message.length).toBeLessThan(700);
+  });
 });
 
 describe('createOperationContext', () => {
