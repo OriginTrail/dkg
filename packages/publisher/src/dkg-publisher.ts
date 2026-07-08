@@ -2660,6 +2660,31 @@ export class DKGPublisher implements Publisher {
       });
       identityLifecycleEmitted = true;
     }
+    emitPublishLifecycle({
+      stage: 'wm',
+      event: 'write',
+      metadata: {
+        contextGraphId,
+        recordCount: allSkolemizedQuads.length,
+        rootEntityCount: manifestEntries.length,
+        accessPolicy: effectiveAccessPolicy,
+        hiddenCommitmentCount: privateRoots.length,
+        subGraphName: options.subGraphName,
+      },
+    });
+    emitPublishLifecycle({
+      stage: 'swm_share',
+      event: 'prepared',
+      metadata: {
+        contextGraphId,
+        swmGraphId,
+        source: isPublishFromSharedMemory ? 'shared_memory' : 'inline',
+        recordCount: allSkolemizedQuads.length,
+        byteSize: effectiveByteSize.toString(),
+        encryptedInline: useEncryptedInline,
+        catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
+      },
+    });
 
     // Numeric-negative and numeric-zero CG ids are programming errors —
     // reject them here BEFORE burning CPU on ACK collection or on-chain
@@ -2795,6 +2820,14 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
+        emitPublishLifecycle({
+          stage: 'storage_ack',
+          event: 'quorum',
+          metadata: {
+            outcome: 'success',
+            quorumCollected: v10ACKs.length,
+          },
+        });
         this.log.info(
           ctx,
           `V10: Collected ${v10ACKs.length} core node ACKs [${provenance}]`,
