@@ -297,7 +297,27 @@ export interface StorageACKHandlerConfig {
     maxRetries: number;
     delayMs: number;
   };
+  /**
+   * Wall-clock deadline for a single ACK-handler invocation. If the handler's
+   * store work has not produced a reply within this budget, the handler
+   * returns a `CORE_TEMPORARILY_UNAVAILABLE` decline instead of dead-airing
+   * the stream. The publisher's per-send timeout is 20s
+   * (`DEFAULT_SEND_TIMEOUT_MS`), so the default here is deliberately BELOW it
+   * (15s) — a slow store (e.g. under a sync storm) then hands the publisher an
+   * actionable transient decline that engages its retry-with-backoff ladder,
+   * rather than a timeout the publisher can only read as a dead peer
+   * (2026-07-07 Gnosis mainnet: cores whose Blazegraph was saturated dead-aired
+   * past 20s and every round burned as TRANSPORT_ERROR / mislabeled
+   * INVALID_SIGNATURE). Set to 0 to disable the deadline. Tests override it.
+   */
+  ackHandlerDeadlineMs?: number;
 }
+
+/**
+ * Default ACK-handler deadline — below the publisher's 20s per-send timeout so
+ * a slow responder decline reaches the publisher before it gives up.
+ */
+export const DEFAULT_ACK_HANDLER_DEADLINE_MS = 15_000;
 
 /**
  * StorageACKHandler implements the core node side of V10 spec §9.0 Phase 3.
@@ -608,7 +628,7 @@ export class StorageACKHandler {
         // Malformed request — handlePublishIntent will throw + reset below.
       }
       try {
-        const result = await this.handlePublishIntent(data, peerId);
+        const result = await this.runHandlerWithDeadline(data, peerId, cgIdAttr);
         const decoded = decodeStorageACK(result);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';
@@ -640,6 +660,55 @@ export class StorageACKHandler {
         throw err;
       }
     });
+  };
+
+  /**
+   * Run {@link handlePublishIntent} under a wall-clock deadline. If the store
+   * work has not produced a reply within `ackHandlerDeadlineMs` (default 15s,
+   * below the publisher's 20s per-send timeout), resolve with a
+   * `CORE_TEMPORARILY_UNAVAILABLE` decline so the publisher gets an actionable
+   * transient response instead of dead-air. The in-flight work is left to
+   * settle in the background — any staging it has already persisted is
+   * idempotent, and a late resolve/reject is swallowed so it cannot surface as
+   * an unhandled rejection once the deadline reply has been sent.
+   *
+   * A THROWN handler error still propagates (the race rejects) → the outer
+   * handler resets the stream exactly as before; the deadline only converts
+   * the *slow* (non-throwing) case, which previously had no in-band signal.
+   */
+  private runHandlerWithDeadline = async (
+    data: Uint8Array,
+    peerId: PeerId,
+    cgIdForDecline: string | undefined,
+  ): Promise<Uint8Array> => {
+    const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
+    const work = this.handlePublishIntent(data, peerId);
+    if (deadlineMs <= 0) return work;
+
+    // Swallow a late rejection from work when the deadline wins (see jsdoc).
+    // When work WINS the race it still rejects through `Promise.race` below,
+    // so real handler errors are unaffected by this no-op handler.
+    void work.catch(() => {});
+
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<Uint8Array>((resolve) => {
+      deadlineTimer = setTimeout(() => {
+        resolve(
+          this.declineTemporarilyUnavailable(
+            cgIdForDecline ?? '',
+            'ack handler deadline exceeded',
+            new Error(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated)`),
+          ),
+        );
+      }, deadlineMs);
+      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    });
+
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+    }
   };
 
   /**
