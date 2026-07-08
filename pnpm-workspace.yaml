@@ -13,6 +13,7 @@ packages:
   - "devnet/rfc51-publishing-allocation"
   - "devnet/edge-update-flow"
   - "devnet/greenfield-10min"
+  - "devnet/storage-ack-store-outage"
   - "devnet/rich-scenario"
   - "devnet/rpc-quiet-window"
   - "devnet/v10-rs-prune"
