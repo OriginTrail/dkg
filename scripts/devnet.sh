@@ -613,6 +613,164 @@ EOCONF
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-version support (mixed-version devnet).
+#
+# By default every node launches from the freshly-built repo ("current"). To run
+# a MIXED-VERSION cluster — e.g. edges lagging the cores during a rollout — set
+# DEVNET_VERSION_LAYOUT to a comma-separated list of SELECTOR:REF entries:
+#
+#   SELECTOR : all | cores | edges | <N> | <A-B>
+#   REF      : current | prev | <git-ref, e.g. v10.0.3>
+#
+# Later entries win, so "edges one release behind the cores" is:
+#
+#   DEVNET_VERSION_LAYOUT="all:current,edges:prev"
+#
+# N-version ready — any number of refs can coexist in one cluster:
+#
+#   DEVNET_VERSION_LAYOUT="1-2:current,3-4:v10.0.3,5-6:v10.0.2"
+#
+# "prev" resolves to DEVNET_PREV_VERSION if set, else the latest release tag —
+# i.e. the version immediately preceding the code under test on main. Non-current
+# refs are checked out as git worktrees under DEVNET_VERSIONS_DIR and built once
+# (cached across runs; DEVNET_VERSION_REBUILD=1 forces a rebuild).
+# ─────────────────────────────────────────────────────────────────────────────
+DEVNET_VERSION_LAYOUT="${DEVNET_VERSION_LAYOUT:-}"
+DEVNET_VERSIONS_DIR="${DEVNET_VERSIONS_DIR:-$REPO_ROOT/.devnet-versions}"
+
+# Latest release tag (vMAJOR.MINOR.PATCH) STRICTLY BELOW the current workspace
+# version, or DEVNET_PREV_VERSION if set. 'prev' must never resolve to the
+# CURRENT version: right after a release the newest tag equals the workspace
+# version (v10.0.3 tag while package.json says 10.0.3), and a prev==current
+# layout silently builds a single-version devnet whose mixed-version suite
+# self-skips — a falsely green lane. Echoes nothing when no older tag exists
+# (callers guard on empty and point at DEVNET_PREV_VERSION).
+resolve_prev_version() {
+  if [ -n "${DEVNET_PREV_VERSION:-}" ]; then
+    echo "$DEVNET_PREV_VERSION"
+    return 0
+  fi
+  local current tag bare
+  current="$(node -p "require('$REPO_ROOT/package.json').version" 2>/dev/null || true)"
+  for tag in $(git -C "$REPO_ROOT" tag --sort=-v:refname 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+    if [ -z "$current" ]; then
+      # Workspace version unreadable — degrade to the newest tag (legacy behavior).
+      echo "$tag"
+      return 0
+    fi
+    bare="${tag#v}"
+    if [ "$bare" = "$current" ]; then continue; fi
+    if [ "$(printf '%s\n%s\n' "$bare" "$current" | sort -V | head -1)" = "$bare" ]; then
+      echo "$tag" # newest-first scan → first tag strictly below current
+      return 0
+    fi
+  done
+  echo "[devnet] resolve_prev_version: no release tag strictly below current version ${current:-unknown}; set DEVNET_PREV_VERSION explicitly" >&2
+  return 0
+}
+
+# Map a version REF to its cli.js entry point. current/empty -> the repo build.
+version_cli_entry() {
+  local ref="$1"
+  if [ -z "$ref" ] || [ "$ref" = "current" ]; then
+    echo "$REPO_ROOT/packages/cli/dist/cli.js"
+    return 0
+  fi
+  if [ "$ref" = "prev" ]; then
+    ref="$(resolve_prev_version)"
+  fi
+  echo "$DEVNET_VERSIONS_DIR/$ref/packages/cli/dist/cli.js"
+}
+
+# A node's authoritative role from its written config (default edge).
+node_role_of() {
+  local node_num="$1"
+  node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).nodeRole||'edge')}catch(e){process.stdout.write('edge')}" \
+    "$DEVNET_DIR/node${node_num}/config.json" 2>/dev/null || printf edge
+}
+
+# Resolve the version REF node <num> (role <role>) should run, per the layout.
+# Later matching entries override earlier ones.
+node_version_ref() {
+  local node_num="$1" role="$2" ref="current"
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local sel="${entry%%:*}" r="${entry#*:}"
+    case "$sel" in
+      all)   ref="$r" ;;
+      cores) if [ "$role" = "core" ]; then ref="$r"; fi ;;
+      edges) if [ "$role" = "edge" ]; then ref="$r"; fi ;;
+      *-*)   local lo="${sel%-*}" hi="${sel#*-}"
+             if [ "$node_num" -ge "$lo" ] 2>/dev/null && [ "$node_num" -le "$hi" ] 2>/dev/null; then
+               ref="$r"
+             fi ;;
+      *)     if [ "$node_num" = "$sel" ]; then ref="$r"; fi ;;
+    esac
+  done
+  IFS="$oldifs"
+  echo "$ref"
+}
+
+# The cli.js a given node should launch from.
+node_cli_entry() {
+  local node_num="$1"
+  local role
+  role="$(node_role_of "$node_num")"
+  version_cli_entry "$(node_version_ref "$node_num" "$role")"
+}
+
+# Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
+prepare_version() {
+  local ref="$1"
+  if [ "$ref" = "prev" ]; then ref="$(resolve_prev_version)"; fi
+  if [ -z "$ref" ]; then
+    echo "[devnet] prepare_version: no ref resolved (set DEVNET_PREV_VERSION, or ensure release tags exist)" >&2
+    return 1
+  fi
+  local dest="$DEVNET_VERSIONS_DIR/$ref"
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
+    log "Version '$ref' already prepared at $dest"
+    return 0
+  fi
+  mkdir -p "$DEVNET_VERSIONS_DIR"
+  if [ ! -e "$dest/package.json" ]; then
+    log "Checking out version '$ref' as a worktree at $dest ..."
+    git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
+  fi
+  log "Building version '$ref' (runs once, then cached) ..."
+  ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  log "Version '$ref' prepared at $dest"
+}
+
+# Build every distinct non-current ref referenced by the layout (idempotent).
+prepare_layout_versions() {
+  if [ -z "$DEVNET_VERSION_LAYOUT" ]; then return 0; fi
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  local built=""
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local r="${entry#*:}"
+    if [ "$r" = "current" ] || [ -z "$r" ]; then continue; fi
+    if [ "$r" = "prev" ]; then r="$(resolve_prev_version)"; fi
+    case " $built " in *" $r "*) continue ;; esac
+    built="$built $r"
+    IFS="$oldifs"
+    prepare_version "$r"
+    IFS=','
+  done
+  IFS="$oldifs"
+}
+
+cmd_prepare_version() {
+  prepare_version "${2:-prev}"
+}
+
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -679,8 +837,13 @@ start_node() {
   # byte-replayed duplicate tail segments in daemon.log — and doubled the
   # rpc_usage telemetry counts the rpc-quiet-window suite sums. console.log
   # still captures pre-tee output from an early crash.
+  # Version-layout aware: `node_cli_entry` returns the repo build for `current`
+  # nodes and a prepared alternate-version dist for mixed-version layouts.
+  local cli_entry
+  cli_entry="$(node_cli_entry "$node_num")"
+  log "Node $node_num launching from $cli_entry"
   DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
-    node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
+    node "$cli_entry" start --foreground \
     > "$node_dir/console.log" 2>&1 &
   local node_pid=$!
   echo "$node_pid" > "$pidfile"
@@ -863,9 +1026,16 @@ cmd_ui() {
 
 cmd_start() {
   log "Starting devnet with $NUM_NODES nodes..."
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    log "Mixed-version layout: $DEVNET_VERSION_LAYOUT"
+  fi
   mkdir -p "$DEVNET_DIR"
 
   ensure_built
+  # Build any alternate versions the layout references BEFORE starting nodes, so
+  # a mixed-version cluster comes up in one `start`. No-op for the default
+  # (all-current) layout.
+  prepare_layout_versions
   start_hardhat
   deploy_contracts
   start_blazegraph
@@ -1717,9 +1887,10 @@ cmd_restart_node() {
 }
 
 case "${1:-}" in
-  start)        cmd_start ;;
-  addnode)      cmd_addnode "$@" ;;
-  restart-node) cmd_restart_node "$@" ;;
+  start)            cmd_start ;;
+  addnode)          cmd_addnode "$@" ;;
+  restart-node)     cmd_restart_node "$@" ;;
+  prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;
   logs)         cmd_logs "$@" ;;
@@ -1734,6 +1905,9 @@ case "${1:-}" in
     echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
     echo "  restart-node <num>      Restart a single already-existing devnet node"
     echo "                          (pick up new code without rebuilding state)"
+    echo "  prepare-version [ref]   Check out + build an alternate version (default"
+    echo "                          'prev' = latest release tag) for mixed-version"
+    echo "                          runs. See DEVNET_VERSION_LAYOUT."
     echo "  stop                    Stop all devnet processes (incl. UI)"
     echo "  status                  Show running nodes (incl. UI) and their status"
     echo "  logs [N]                Tail logs for node N (default 1)"

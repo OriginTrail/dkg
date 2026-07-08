@@ -60,6 +60,7 @@
     "test:devnet:ack-candidate-isolation": "vitest run --config devnet/ack-candidate-isolation/vitest.config.ts",
     "test:devnet:edge-update-flow": "vitest run --config devnet/edge-update-flow/vitest.config.ts",
     "test:devnet:greenfield-10min": "vitest run --config devnet/greenfield-10min/vitest.config.ts",
+    "test:devnet:mixed-version": "vitest run --config devnet/mixed-version/vitest.config.ts",
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
     "test:devnet:v10-rs-prune": "vitest run --config devnet/v10-rs-prune/vitest.config.ts",
