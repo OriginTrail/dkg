@@ -992,19 +992,28 @@ export class SharedMemoryHandler {
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
       const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
+      const rejectOutcome = (reason: string, retryable: boolean): SharedMemoryApplyOutcome => ({
+        applied: false,
+        reason,
+        retryable,
+        assetUal,
+        cgId: contextGraphId,
+        shareOperationId,
+        publisherPeerId,
+      });
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
 
       if (!shareOperationId) {
         const reason = `missing shareOperationId for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       if (!trustedReplay && publisherPeerId !== fromPeerId) {
         const reason = `payload publisherPeerId "${publisherPeerId}" does not match sender "${fromPeerId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       // PR-A R1 NOTE: the redundant-apply counter is bumped AFTER the
@@ -1022,7 +1031,7 @@ export class SharedMemoryHandler {
       if (!trustedReplay && allowedPeers !== null && !allowedPeers.includes(fromPeerId)) {
         const reason = `peer "${fromPeerId}" not in allowlist for context graph "${contextGraphId}"`;
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
-        return { applied: false, reason, retryable: false };
+        return rejectOutcome(reason, false);
       }
 
       if (subGraphName) {
@@ -1030,7 +1039,7 @@ export class SharedMemoryHandler {
         if (!v.valid) {
           const reason = `invalid subGraphName "${subGraphName}": ${v.reason}`;
           this.log.warn(ctx, `SWM write rejected: ${reason}`);
-          return { applied: false, reason, retryable: false };
+          return rejectOutcome(reason, false);
         }
       }
 
@@ -1243,17 +1252,15 @@ export class SharedMemoryHandler {
       // outbox doesn't drop a payload that would apply after
       // out-of-order delivery converges.
       if (withWriteLocksRejection === 'cas') {
-        return {
-          applied: false,
-          reason: 'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
-          retryable: true,
-        };
+        return rejectOutcome(
+          'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
+          true,
+        );
       }
-      return {
-        applied: false,
-        reason: 'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
-        retryable: false,
-      };
+      return rejectOutcome(
+        'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
+        false,
+      );
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.
       // The dominant production case here is `workspaceSenderKeyDecryptor`
