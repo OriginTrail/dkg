@@ -8,6 +8,10 @@ import {
   type LogSink,
   type OperationContext,
 } from '../src/logger.js';
+import {
+  KA_LIFECYCLE_STAGES as ROOT_KA_LIFECYCLE_STAGES,
+  logKaLifecycleEvent as rootLogKaLifecycleEvent,
+} from '../src/index.js';
 
 interface LogEntry {
   level: string;
@@ -287,6 +291,11 @@ describe('KA lifecycle logging', () => {
       ),
     );
     expect(entries.every((entry) => entry.message.includes('role=sync'))).toBe(true);
+  });
+
+  it('exports the lifecycle helper and tokens from the package root', () => {
+    expect(rootLogKaLifecycleEvent).toBe(logKaLifecycleEvent);
+    expect(ROOT_KA_LIFECYCLE_STAGES).toBe(KA_LIFECYCLE_STAGES);
   });
 });
 
