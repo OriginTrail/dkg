@@ -79,8 +79,11 @@ describe('KA lifecycle logging - publisher publish', () => {
     expect(lifecycleLogs.map((entry) => `${lifecycleField(entry.message, 'stage')}:${lifecycleField(entry.message, 'event')}`))
       .toEqual([
         'identity:asset_ual_allocated',
+        'wm:write',
+        'swm_share:prepared',
         'storage_ack:request',
         'storage_ack:success',
+        'storage_ack:quorum',
         'chain:submit',
         'chain:confirm',
         'vm:promote',
@@ -94,6 +97,17 @@ describe('KA lifecycle logging - publisher publish', () => {
     expect(ackSuccess?.message).toContain('peerNodeIdentityId=1');
     expect(ackSuccess?.message).toContain('outcome=success');
     expect(ackSuccess?.message).toContain('quorumCollected=1');
+
+    const wmWrite = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'stage') === 'wm');
+    expect(wmWrite?.message).toContain('recordCount=2');
+    expect(wmWrite?.message).not.toContain('PublisherLogBot');
+
+    const swmPrepared = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'stage') === 'swm_share');
+    expect(swmPrepared?.message).toContain('source=inline');
+
+    const ackQuorum = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'event') === 'quorum');
+    expect(ackQuorum?.message).toContain('outcome=success');
+    expect(ackQuorum?.message).toContain('quorumCollected=1');
 
     const chainConfirm = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'event') === 'confirm');
     expect(chainConfirm?.message).toContain(`kaId=${result.kaId}`);
