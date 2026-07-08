@@ -169,6 +169,50 @@ describe('sync-on-connect churn gates', () => {
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('makes sync-on-connect requester paths no-op when the emergency switch is disabled', async () => {
+    const agent = await createUnstartedAgent('SyncOnConnectDisabled');
+    (agent as any).config.syncOnConnectEnabled = false;
+    (agent as any).started = true;
+    const calls: string[] = [];
+    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+
+    expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
+    expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('not-started');
+
+    await flushTimers();
+    expect(calls).toEqual([]);
+  });
+
+  it('makes durable sync requester paths no-op when the emergency switch is disabled', async () => {
+    const agent = await createUnstartedAgent('DurableSyncDisabled');
+    (agent as any).config.durableSyncEnabled = false;
+
+    const durable = await (agent as any).syncFromPeerDetailed(PEER_A, ['cg-a']);
+    expect(durable).toMatchObject({
+      insertedTriples: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+    });
+
+    const shared = await (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['cg-a']);
+    expect(shared).toMatchObject({
+      insertedTriples: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+    });
+
+    const recovery = await (agent as any).recoverContextGraphSwmFromPeer(PEER_A, 'cg-a');
+    expect(recovery).toEqual({
+      replacedRoots: 0,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+      completed: true,
+    });
+  });
+
   it('marks a subscribed context graph synced after SWM-only catchup progress', async () => {
     const agent = await createUnstartedAgent('SwmOnlyCatchupMarksSynced');
     const contextGraphId = 'swm-only-catchup-cg';

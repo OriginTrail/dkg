@@ -103,7 +103,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 
-  it('a configured ACK preference list orders listed peers first but never excludes connected peers (2026-07-07 incident)', async () => {
+  it('a configured ACK preference list orders listed peers first and bounds fallback spray (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
       confirmedCores: [CORE[2]],
@@ -112,13 +112,12 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
 
     // Listed peers are preferred within each tier (confirmed cores, then
-    // rest), but foreign/unlisted peers stay dialable: signer validity is
-    // chain truth (sharding-table membership per collected ACK), and a
-    // hard gate here capped the mainnet pool at the bundled relay list.
+    // rest), and fallback stays bounded at 2x quorum so a stale confirmed
+    // set cannot fan out to every connected peer.
     expect(a.getACKCandidatePeers()).toEqual([
       CORE[2],
       CORE[0], CORE[1], CORE[3],
-      ...foreign,
+      foreign[0], foreign[1],
     ]);
   });
 
@@ -140,7 +139,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(out.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('V2 folded-private rounds keep unlisted V2-advertising cores dialable, listed peers first within each tier', async () => {
+  it('V2 folded-private rounds prefer protocol-capable peers, listed peers first within the V2 tier', async () => {
     const relays = ['relay-1', 'relay-2'];
     const upgraded = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
     const a = await buildAgent({
@@ -150,12 +149,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
     for (const id of upgraded) a.knownCorePeerIdsV2.add(id);
 
-    // v2Advertised tier first (none listed → connection order), then the
-    // remaining confirmed cores (both listed).
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
-      ...upgraded,
-      ...relays,
-    ]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(upgraded);
   });
 
   it('runtime quorum below default (2): 2 confirmed cores already satisfy it', async () => {
@@ -200,7 +194,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     ]);
   });
 
-  it('V2 folded-private ACKs keep fallback candidates even when cached V2 metadata appears quorum-sized', async () => {
+  it('V2 folded-private ACKs do not add fallback candidates when cached V2 metadata reaches quorum', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: [...CORE, ...EDGE],
@@ -209,16 +203,10 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     a.knownCorePeerIdsV2.add(CORE[0]);
     a.knownCorePeerIdsV2.add(CORE[2]);
 
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
-      CORE[0],
-      CORE[2],
-      CORE[1],
-      CORE[3],
-      ...EDGE,
-    ]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([CORE[0], CORE[2]]);
   });
 
-  it('V2 folded-private ACKs do not let stale identify metadata hide a connected upgraded core', async () => {
+  it('V2 folded-private ACKs filter to the protocol-capable quorum once enough peers advertise V2', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: CORE,
@@ -228,7 +216,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     a.knownCorePeerIdsV2.add(CORE[1]);
     a.knownCorePeerIdsV2.add(CORE[2]);
 
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE.slice(0, 3));
   });
 
   it('peer:update evicts stale V2 ACK capability only from populated protocol lists', async () => {

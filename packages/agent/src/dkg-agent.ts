@@ -106,7 +106,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  selectACKCandidatePeers,
+  selectACKCandidatePeersWithDiagnostics,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
   deriveStatus, type KaStatus,
@@ -1707,16 +1707,32 @@ export class DKGAgent extends DKGAgentBase {
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
-    return selectACKCandidatePeers({
+    const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    const selection = selectACKCandidatePeersWithDiagnostics({
       connectedPeers: peers.map(p => p.toString()),
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
-      requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+      requiredACKs,
       protocol,
     });
+    const selected = selection.diagnostics
+      .filter((diagnostic) => diagnostic.selected)
+      .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
+      .join(',');
+    const filtered = selection.diagnostics
+      .filter((diagnostic) => !diagnostic.selected)
+      .slice(0, 8)
+      .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.reason}`)
+      .join(',');
+    this.log.info(
+      createOperationContext('publish'),
+      `[ACKCollector] Selected ${selection.peers.length}/${selection.diagnostics.length} ACK candidate peer(s) ` +
+      `(required=${requiredACKs}, protocol=${protocol}, selected=${selected || 'none'}, filtered=${filtered || 'none'})`,
+    );
+    return selection.peers;
   }
 
   public createACKTransportFactory(

@@ -6,7 +6,7 @@ import {
   validateSubGraphName,
   contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 
 export type SyncRow = { s: string; p: string; o: string; g: string };
@@ -25,6 +25,10 @@ const SCHEMA_NAME = 'http://schema.org/name';
 const PROV_GENERATED = 'http://www.w3.org/ns/prov#generated';
 const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
+
+function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
+  return { signal, priority: 'background', source };
+}
 
 export interface GraphListMemo {
   get(options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
@@ -89,7 +93,7 @@ export function createResponderGraphListMemo(
       const now = Date.now();
       if (inflight) return [...(await raceAgainstAbort(inflight, options?.signal))];
       if (!options?.refresh && cached && now - cachedAt < ttlMs) return [...cached];
-      const load = store.listGraphs()
+      const load = store.listGraphs(syncResponderStoreOptions(options?.signal, 'sync.responder.listGraphs'))
         .then((graphs) => {
           const sorted = [...new Set(graphs)].sort(compareCodePoint);
           cached = sorted;
@@ -741,7 +745,7 @@ async function readRegisteredSubGraphNames(
             <${SCHEMA_NAME}> ?name .
       }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRegisteredSubGraphNames'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ subject: row['sg'], name: stripLiteral(row['name']) }))
@@ -770,7 +774,7 @@ async function isKnownContextGraph(
         }
       }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.isKnownContextGraph'));
   return res.type === 'boolean' && res.value;
 }
 
@@ -834,7 +838,7 @@ async function readAdmittedAssertionGraphs(
         FILTER(?layer != ${sparqlString(MemoryLayer.WorkingMemory)})
       }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readAdmittedAssertionGraphs'));
   if (res.type !== 'bindings') return new Set();
   return new Set(res.bindings.map((row) => row['g']).filter(Boolean));
 }
@@ -851,7 +855,7 @@ async function readRowsAcrossGraphs(
       VALUES ?g { ${values} }
       GRAPH ?g { ?s ?p ?o }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsAcrossGraphs'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -878,7 +882,7 @@ async function readRowsPageAcrossGraphs(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readRowsPageAcrossGraphs'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -905,7 +909,7 @@ async function readSwmMetaRows(
     : ''}
       }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readSwmMetaRows'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -946,7 +950,7 @@ async function readSwmMetaRowsPage(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readSwmMetaRowsPage'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -991,7 +995,7 @@ async function readFreshSwmRoots(
         FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
       }
     }
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmRoots'));
   if (res.type !== 'bindings') return new Set();
   return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
@@ -1068,7 +1072,7 @@ async function readDurableDeltaRowsPageAcrossGraphs(
     ORDER BY ?g ?s ?p ?o
     OFFSET ${safeOffset}
     LIMIT ${safeLimit}
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readDurableDeltaRowsPageAcrossGraphs'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
@@ -1090,7 +1094,7 @@ async function readDurableDeltaRowsAcrossGraphs(
       ${durableDeltaWhereClauseForGraphs(values, metaGraphs)}
     }
     ${durableDeltaGroupClause(metaGraphs, sinceBatchId, true)}
-  `, { signal });
+  `, syncResponderStoreOptions(signal, 'sync.responder.readDurableDeltaRowsAcrossGraphs'));
   if (res.type !== 'bindings') return [];
   return res.bindings
     .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
