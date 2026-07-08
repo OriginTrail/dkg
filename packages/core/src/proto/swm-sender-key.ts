@@ -186,7 +186,6 @@ export interface SwmSenderKeyMessageAADFields {
   type?: string;
   contextGraphId: string;
   subGraphName?: string;
-  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;
@@ -200,7 +199,6 @@ export interface SwmSenderKeyPackageAADFields {
   type?: string;
   contextGraphId: string;
   subGraphName?: string;
-  assetUal?: string;
   senderAgentAddress: string;
   epochId: string;
   membershipHash: string;

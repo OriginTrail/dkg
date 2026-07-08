@@ -259,7 +259,6 @@ export async function encryptSwmSenderKeyMessage(
     type: SWM_SENDER_KEY_MESSAGE_TYPE,
     contextGraphId: input.contextGraphId,
     subGraphName: input.subGraphName,
-    assetUal: input.assetUal,
     senderAgentAddress: input.senderAgentAddress,
     epochId: input.epochId,
     membershipHash: input.membershipHash,

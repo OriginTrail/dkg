@@ -622,11 +622,24 @@ describe('KA receiver lifecycle logs', () => {
       nonce: new Uint8Array(12).fill(5),
     };
 
-    expect(computeSwmSenderKeyPackageAAD({ ...packageFields, assetUal: ASSET_UAL }))
+    const packageWithLogMetadata: SwmSenderKeyPackageMsg = {
+      ...packageFields,
+      assetUal: ASSET_UAL,
+      signature: new Uint8Array(65),
+    };
+    const messageWithLogMetadata: SwmSenderKeyMessageMsg = {
+      ...messageFields,
+      assetUal: ASSET_UAL,
+      ciphertext: new Uint8Array(48),
+      aadHash: new Uint8Array(32),
+      senderKeySignature: new Uint8Array(64),
+    };
+
+    expect(computeSwmSenderKeyPackageAAD(packageWithLogMetadata))
       .toEqual(computeSwmSenderKeyPackageAAD(packageFields));
-    expect(computeSwmSenderKeyPackageEncryptionAAD({ ...packageFields, assetUal: ASSET_UAL }))
+    expect(computeSwmSenderKeyPackageEncryptionAAD(packageWithLogMetadata))
       .toEqual(computeSwmSenderKeyPackageEncryptionAAD(packageFields));
-    expect(computeSwmSenderKeyMessageAAD({ ...messageFields, assetUal: ASSET_UAL }))
+    expect(computeSwmSenderKeyMessageAAD(messageWithLogMetadata))
       .toEqual(computeSwmSenderKeyMessageAAD(messageFields));
   });
 

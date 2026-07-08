@@ -70,14 +70,6 @@ export {
   type CclPolicyRecord,
   type PolicyApprovalBinding,
 } from './ccl-policy.js';
-export {
-  buildKaLifecycleLogProof,
-  KA_LIFECYCLE_PROOF_REQUIRED_STAGES,
-  KA_LIFECYCLE_PROOF_SOURCE_DOCS,
-  type KaLifecycleLogProof,
-  type KaLifecycleProofEntry,
-  type KaLifecycleProofRecord,
-} from './ka-lifecycle-log-proof.js';
 export { DKGAgent } from './dkg-agent.js';
 export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {
