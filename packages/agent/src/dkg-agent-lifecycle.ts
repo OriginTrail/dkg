@@ -208,6 +208,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
@@ -522,6 +523,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
+
+    // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking, so
+    // the local store is clean before this node serves or syncs anything.
+    // Marker-gated (runs once per data dir), never throws, no-op on stores
+    // that never accepted oversized literals (Blazegraph).
+    await runOversizeSweep({
+      store: this.store,
+      dataDir: this.config.dataDir,
+      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+      logInfo: (message) => this.log.info(ctx, message),
+      logWarn: (message) => this.log.warn(ctx, message),
+    });
 
     await this.node.start();
     this.started = true;

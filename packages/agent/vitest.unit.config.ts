@@ -32,6 +32,7 @@ export default defineConfig({
       "test/sync-verify-collapsed.test.ts",
       "test/durable-sync-since-threading.test.ts",
       "test/oversize-filter.test.ts",
+      "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
       "test/sync-fetch-coalescing.test.ts",
       "test/sync-on-connect-churn.test.ts",

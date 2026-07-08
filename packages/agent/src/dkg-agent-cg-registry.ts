@@ -93,6 +93,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -937,6 +938,20 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     curated?: boolean;
   }): Promise<void> {
     const ctx = createOperationContext('system');
+
+    // OT-RFC-56 §4.6: this writer inserts the CG registration record RAW into
+    // the network-replicated ONTOLOGY graph, bypassing the guarded publish
+    // routes — the exact producer hole behind the 2026-07-08 mainnet
+    // "skyocean" 177KB-description poison. Enforce the protocol literal
+    // limit BEFORE any write; caller-correctable (CG creation is interactive).
+    assertRdfLiteralMutf8Safe(`"${opts.name}"`, {
+      label: 'contextGraph.name', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+    });
+    if (opts.description) {
+      assertRdfLiteralMutf8Safe(`"${opts.description}"`, {
+        label: 'contextGraph.description', subject: opts.id, predicate: DKG_ONTOLOGY.SCHEMA_DESCRIPTION,
+      });
+    }
 
     const exists = await this.contextGraphExists(opts.id);
     if (exists) {
