@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519Sign } from '@origintrail-official/dkg-core';
 import {
   makeNetworkIdentityRequest,
@@ -8,6 +9,7 @@ import {
 } from '../src/p2p/network-identity-proof.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
 const REMOTE_PRIVATE_KEY_SEED = Buffer
   .from('vHxcSg3ecwP9UfJWdmlnWQeJe83jD2yKtOJlWuLpIrTRh3QiB5sL6iRhAidCZ3bHQLaE0RwBfHBNEmV7ylcjqg==', 'base64')
   .slice(0, 32);
@@ -39,6 +41,18 @@ describe('network identity proof', () => {
     await expect(verifyNetworkIdentityResponse({
       response,
       remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toEqual({ ok: true });
+  });
+
+  it('accepts an alternate-encoded remote peer id for the same peer key', async () => {
+    const response = await signedResponse();
+
+    await expect(verifyNetworkIdentityResponse({
+      response,
+      remotePeerId: REMOTE_PEER_ID_CID,
       localIdentity,
       nonce: 'nonce-1',
       requesterPeerId: 'requester-peer',

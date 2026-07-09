@@ -149,6 +149,7 @@ import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, pri
 import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
+import { canonicalPeerIdString } from './p2p/network-identity-proof.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -1833,13 +1834,25 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'INVALID_PEER_ID';
       throw error;
     }
+    let admittedPeerId = targetPeerId;
+    if (this.networkAdmissionCoordinator.enabled && targetPeerId) {
+      try {
+        admittedPeerId = canonicalPeerIdString(targetPeerId);
+      } catch (err) {
+        const error = new Error(
+          `Invalid target /p2p/<peerId> for network admission: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        (error as any).code = 'INVALID_PEER_ID';
+        throw error;
+      }
+    }
     await connectToMultiaddr(
       this.node.libp2p as any,
       multiaddress,
       (message) => this.log.info(ctx, message),
     );
-    if (targetPeerId) {
-      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);
+    if (admittedPeerId) {
+      await this.assertPeerAdmittedForExplicitConnect(admittedPeerId, ctx);
     }
   }
 

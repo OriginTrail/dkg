@@ -140,6 +140,10 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
   };
 }
 
+export function canonicalPeerIdString(peerId: string): string {
+  return peerIdFromString(peerId).toString();
+}
+
 export async function verifyNetworkIdentityResponse(
   input: VerifyNetworkIdentityResponseInput,
 ): Promise<VerifyNetworkIdentityResponseResult> {
@@ -149,7 +153,22 @@ export async function verifyNetworkIdentityResponse(
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
-  if (response.peerId !== input.remotePeerId) return { ok: false, reason: 'peer id mismatch' };
+  let remotePeerId: string;
+  let publicKey: Uint8Array | undefined;
+  try {
+    const peerId = peerIdFromString(input.remotePeerId);
+    remotePeerId = peerId.toString();
+    publicKey = peerId.publicKey?.raw;
+  } catch (err) {
+    return { ok: false, reason: `invalid remote peer id: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  let responsePeerId: string;
+  try {
+    responsePeerId = canonicalPeerIdString(response.peerId);
+  } catch (err) {
+    return { ok: false, reason: `invalid response peer id: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (responsePeerId !== remotePeerId) return { ok: false, reason: 'peer id mismatch' };
   if (response.networkId !== input.localIdentity.networkId) return { ok: false, reason: 'network id mismatch' };
   if (input.localIdentity.genesisId && response.genesisId !== input.localIdentity.genesisId) {
     return { ok: false, reason: 'genesis id mismatch' };
@@ -157,19 +176,12 @@ export async function verifyNetworkIdentityResponse(
   if (input.localIdentity.chainId && response.chainId !== input.localIdentity.chainId) {
     return { ok: false, reason: 'chain id mismatch' };
   }
-  let publicKey: Uint8Array | undefined;
-  try {
-    const peerId = peerIdFromString(input.remotePeerId);
-    publicKey = peerId.publicKey?.raw;
-  } catch (err) {
-    return { ok: false, reason: `invalid remote peer id: ${err instanceof Error ? err.message : String(err)}` };
-  }
   if (!publicKey) return { ok: false, reason: 'remote peer id has no embedded public key' };
 
   const payload = networkIdentityProofPayload({
     nonce: input.nonce,
     requesterPeerId: input.requesterPeerId,
-    responderPeerId: input.remotePeerId,
+    responderPeerId: remotePeerId,
     networkId: response.networkId,
     genesisId: response.genesisId,
     chainId: response.chainId,
