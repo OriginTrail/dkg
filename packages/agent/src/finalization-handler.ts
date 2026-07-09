@@ -4,7 +4,7 @@ import {
   sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
   contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
-  DKGEvent, Logger, createOperationContext, logKaLifecycleEvent,
+  DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type EventBus,
   type FinalizationMessageMsg,
@@ -29,6 +29,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 import { ethers } from 'ethers';
+import {
+  FinalizationLifecycleLogger,
+  finalizationLifecycleDecision,
+  type FinalizationLifecycleLogOptions,
+} from './finalization-lifecycle-logger.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -50,11 +55,6 @@ export type ResolveContextGraphOnChainId = (
 ) => Promise<string | null | undefined>;
 
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
-
-export interface FinalizationLifecycleLogOptions {
-  localPeerId?: string;
-  localNodeIdentityId?: string | number | bigint;
-}
 
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -84,8 +84,8 @@ export class FinalizationHandler {
   private readonly eventBus: EventBus | undefined;
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
-  private readonly lifecycleLogOptions: FinalizationLifecycleLogOptions | undefined;
   private readonly log = new Logger('FinalizationHandler');
+  private readonly lifecycle: FinalizationLifecycleLogger;
   private readonly processedUals = new Set<string>();
   // Forward-prevention for the cgId-resolution race (RS heal): chain-authoritative
   // kaId(batchId)->cgId bindings, cached POSITIVE-ONLY. A 0/miss is NEVER cached —
@@ -106,53 +106,7 @@ export class FinalizationHandler {
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
-    this.lifecycleLogOptions = lifecycleLogOptions;
-  }
-
-  private logLifecycleEvent(
-    ctx: OperationContext,
-    event: string,
-    msg: {
-      ual?: string;
-      contextGraphId?: string;
-      targetContextGraphId?: string;
-      txHash?: string;
-      publisherAddress?: string;
-      subGraphName?: string;
-      blockNumber?: string | number | bigint | { toString(): string };
-      batchId?: string | number | bigint | { toString(): string };
-      rootEntityCount?: number;
-      swmStatementCount?: number;
-      outcome?: string;
-      retryable?: boolean;
-      reason?: string;
-      level?: 'info' | 'warn' | 'error';
-    },
-  ): void {
-    if (!msg.ual) return;
-    logKaLifecycleEvent(this.log, ctx, {
-      level: msg.level,
-      assetUal: msg.ual,
-      stage: 'finalization',
-      event,
-      role: 'receiver',
-      localPeerId: this.lifecycleLogOptions?.localPeerId ?? 'unknown',
-      localNodeIdentityId: this.lifecycleLogOptions?.localNodeIdentityId?.toString() ?? 'unknown',
-      metadata: {
-        contextGraphId: msg.contextGraphId,
-        targetContextGraphId: msg.targetContextGraphId,
-        txHash: msg.txHash,
-        publisherAddress: msg.publisherAddress,
-        subGraphName: msg.subGraphName,
-        blockNumber: msg.blockNumber?.toString(),
-        batchId: msg.batchId?.toString(),
-        rootEntityCount: msg.rootEntityCount,
-        swmStatementCount: msg.swmStatementCount,
-        outcome: msg.outcome,
-        retryable: msg.retryable,
-        reason: msg.reason,
-      },
-    });
+    this.lifecycle = new FinalizationLifecycleLogger(this.log, lifecycleLogOptions);
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
@@ -166,18 +120,18 @@ export class FinalizationHandler {
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
       }
-      this.logLifecycleEvent(ctx, 'finalization_received', {
+      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_received', {
         ...msg,
         contextGraphId: msg.contextGraphId || contextGraphId,
         rootEntityCount: msg.rootEntities.length,
-      });
+      }));
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
         // #1100: same guard as GossipPublishHandler — frames of other gossip
         // message types decode "successfully" with garbage in this field, so
         // only WARN when the mismatched value is a plausible CG id.
         if (!validateContextGraphId(msg.contextGraphId).valid) return;
-        this.logLifecycleEvent(ctx, 'finalization_rejected', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
           ...msg,
           contextGraphId: msg.contextGraphId,
           rootEntityCount: msg.rootEntities.length,
@@ -185,7 +139,7 @@ export class FinalizationHandler {
           retryable: false,
           reason: `contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}"`,
           level: 'warn',
-        });
+        }));
         this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
@@ -198,7 +152,7 @@ export class FinalizationHandler {
       }
 
       if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
-        this.logLifecycleEvent(ctx, 'finalization_rejected', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
           ...msg,
           contextGraphId,
           rootEntityCount: msg.rootEntities.length,
@@ -206,7 +160,7 @@ export class FinalizationHandler {
           retryable: false,
           reason: 'incomplete finalization message',
           level: 'warn',
-        });
+        }));
         this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}), ignoring`);
         return;
       }
@@ -280,7 +234,7 @@ export class FinalizationHandler {
         if (sgVal.valid) {
           subGraphName = msg.subGraphName;
         } else {
-          this.logLifecycleEvent(ctx, 'finalization_rejected', {
+          this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
             ...msg,
             contextGraphId,
             targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
@@ -292,7 +246,7 @@ export class FinalizationHandler {
             retryable: false,
             reason: sgVal.reason,
             level: 'warn',
-          });
+          }));
           this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
           return;
         }
@@ -309,10 +263,10 @@ export class FinalizationHandler {
       );
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
-        this.logLifecycleEvent(ctx, 'finalization_already_confirmed', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_already_confirmed', {
           ...msg,
           targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
-        });
+        }));
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
         return;
       }
@@ -414,7 +368,7 @@ export class FinalizationHandler {
             });
             if (outcome === 'stale-target') {
               this.markProcessed(dedupeKey);
-              this.logLifecycleEvent(ctx, 'finalization_stale_target', {
+              this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_stale_target', {
                 ...msg,
                 targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
                 rootEntityCount: msg.rootEntities.length,
@@ -424,12 +378,12 @@ export class FinalizationHandler {
                 batchId,
                 outcome,
                 reason: 'newer update already materialized',
-              });
+              }));
               this.log.info(ctx, `Finalization: a newer update is already materialised for ${msg.ual}, skipping stale publish promotion`);
               return;
             }
             this.markProcessed(dedupeKey);
-            this.logLifecycleEvent(ctx, 'finalization_applied', {
+            this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_applied', {
               ...msg,
               targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
               rootEntityCount: msg.rootEntities.length,
@@ -439,11 +393,11 @@ export class FinalizationHandler {
               batchId,
               outcome,
               retryable: false,
-            });
+            }));
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
           }
-          this.logLifecycleEvent(ctx, 'finalization_verification_failed', {
+          this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_verification_failed', {
             ...msg,
             targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
             rootEntityCount: msg.rootEntities.length,
@@ -455,11 +409,11 @@ export class FinalizationHandler {
             retryable: true,
             reason: 'on-chain verification failed',
             level: 'warn',
-          });
+          }));
           this.log.info(ctx, `Finalization: on-chain verification failed for ${msg.ual}, will retry via ChainEventPoller`);
           return;
         }
-        this.logLifecycleEvent(ctx, 'finalization_merkle_mismatch', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_merkle_mismatch', {
           ...msg,
           targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
           rootEntityCount: msg.rootEntities.length,
@@ -471,10 +425,10 @@ export class FinalizationHandler {
           retryable: true,
           reason: 'shared memory merkle root mismatch',
           level: 'warn',
-        });
+        }));
         this.log.info(ctx, `Finalization: merkle mismatch for ${msg.ual}, shared memory data differs from published`);
       } else {
-        this.logLifecycleEvent(ctx, 'finalization_no_data', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_no_data', {
           ...msg,
           targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
           rootEntityCount: msg.rootEntities.length,
@@ -486,13 +440,13 @@ export class FinalizationHandler {
           retryable: true,
           reason: 'no shared memory data',
           level: 'warn',
-        });
+        }));
         this.log.info(ctx, `Finalization: no shared memory data for ${msg.ual}, peer missed SWM sharing`);
       }
 
       // Fallback: no matching shared memory data. The data will arrive via
       // the regular publish topic broadcast or ChainEventPoller sync.
-      this.logLifecycleEvent(ctx, 'finalization_payload_sync_required', {
+      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_payload_sync_required', {
         ...msg,
         targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
         rootEntityCount: msg.rootEntities.length,
@@ -504,7 +458,7 @@ export class FinalizationHandler {
         retryable: true,
         reason: 'no matching SWM snapshot',
         level: 'warn',
-      });
+      }));
       this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching SWM snapshot)`);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -512,7 +466,7 @@ export class FinalizationHandler {
       // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
       if (/wire type|index out of range|offset|unexpected tag/i.test(errMsg)) return;
       if (decodedMsg) {
-        this.logLifecycleEvent(ctx, 'finalization_failed', {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_failed', {
           ...decodedMsg,
           contextGraphId: decodedMsg.contextGraphId || contextGraphId,
           targetContextGraphId: resolvedTargetContextGraphId ?? decodedMsg.targetContextGraphId,
@@ -521,7 +475,7 @@ export class FinalizationHandler {
           retryable: true,
           reason: errMsg,
           level: 'warn',
-        });
+        }));
       }
       this.log.warn(ctx, `Finalization: failed to process message: ${errMsg}`);
     }

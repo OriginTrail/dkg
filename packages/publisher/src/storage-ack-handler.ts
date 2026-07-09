@@ -72,6 +72,7 @@ const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
 const MAX_DECLINE_LOG_CG_ID_CHARS = 160;
 const MAX_DECLINE_LOG_MESSAGE_CHARS = 240;
+const STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS = 250;
 
 function compactDeclineText(value: string, maxChars: number): string {
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -463,18 +464,46 @@ export class StorageACKHandler {
     });
   }
 
+  private scheduleLifecycleResponseLog(
+    intent: PublishIntentMsg | undefined,
+    ack: StorageACKMsg,
+    peerId: PeerId,
+  ): void {
+    if (!intent || !this.config.resolveAssetUalForPublishIntent) return;
+    void this.resolveLifecycleAssetUalForPublishIntent(intent, ack, peerId)
+      .then((assetUal) => this.logLifecycleResponse(assetUal, peerId, ack))
+      .catch((err) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        this.log.warn(
+          createOperationContext('share'),
+          `StorageACK lifecycle log scheduling failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
+        );
+      });
+  }
+
   private async resolveLifecycleAssetUalForPublishIntent(
     intent: PublishIntentMsg | undefined,
     ack: StorageACKMsg,
     peerId: PeerId,
   ): Promise<string | undefined> {
     if (!intent || !this.config.resolveAssetUalForPublishIntent) return undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const timeoutResult = new Promise<undefined>((resolve) => {
+      timeout = setTimeout(() => {
+        this.log.warn(
+          createOperationContext('share'),
+          `StorageACK lifecycle assetUal resolver exceeded ${STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS}ms; ACK response was already returned`,
+        );
+        resolve(undefined);
+      }, STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS);
+      if (typeof timeout.unref === 'function') timeout.unref();
+    });
     try {
-      return await this.config.resolveAssetUalForPublishIntent({
+      return await Promise.race([this.config.resolveAssetUalForPublishIntent({
         intent,
         ack,
         peerId: peerId.toString(),
-      });
+      }), timeoutResult]);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(
@@ -482,6 +511,8 @@ export class StorageACKHandler {
         `StorageACK lifecycle assetUal resolver failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
       );
       return undefined;
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -727,12 +758,7 @@ export class StorageACKHandler {
           cgIdAttr,
         );
         const decoded = decodeStorageACK(result);
-        const assetUal = await this.resolveLifecycleAssetUalForPublishIntent(
-          intentPreview,
-          decoded,
-          peerId,
-        );
-        this.logLifecycleResponse(assetUal, peerId, decoded);
+        this.scheduleLifecycleResponseLog(intentPreview, decoded, peerId);
         if (isStorageACKDecline(decoded)) {
           const declineCode = decoded.declineCode || 'UNKNOWN';
           span.setAttribute('dkg.ack_outcome', 'decline');

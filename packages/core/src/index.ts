@@ -12,9 +12,15 @@ export * from './imported-artifact-metadata.js';
 export * from './event-bus.js';
 export {
   Logger,
+  createOperationContext,
+  type OperationContext,
+  type OperationName,
+  type LogSink,
+  type LogRecord,
+} from './logger.js';
+export {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,
-  createOperationContext,
   logKaLifecycleEvent,
   parseKaLifecycleFields,
   type KaLifecycleLogEvent,
@@ -22,11 +28,7 @@ export {
   type KaLifecycleMetadataValue,
   type KaLifecycleRole,
   type KaLifecycleStage,
-  type OperationContext,
-  type OperationName,
-  type LogSink,
-  type LogRecord,
-} from './logger.js';
+} from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,

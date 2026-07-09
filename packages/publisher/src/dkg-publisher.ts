@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, logKaLifecycleEvent, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY, type KaLifecycleLogLevel, type KaLifecycleMetadataValue, type KaLifecycleStage } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -69,6 +69,7 @@ import {
   type CASCondition,
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
+import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 // Typed errors + the CAS condition payload live in ./errors.js now; re-export
@@ -2611,80 +2612,40 @@ export class DKGPublisher implements Publisher {
     const attributionIdentityId: bigint = hasAttributionOverride
       ? options.publisherNodeIdentityIdOverride!
       : this.publisherNodeIdentityId;
-    const localPeerIdForLifecycle = normalizedPublisherPeerId || 'unknown';
-    let lifecycleAssetUal: string | undefined;
-    let identityLifecycleEmitted = false;
-    const rememberLifecycleAssetUal = async (kaId: bigint | undefined): Promise<string | undefined> => {
-      if (lifecycleAssetUal || kaId === undefined) return lifecycleAssetUal;
-      try {
-        lifecycleAssetUal = await this.resolveKaUal(kaId);
-      } catch {
-        lifecycleAssetUal = undefined;
-      }
-      return lifecycleAssetUal;
-    };
-    const emitPublishLifecycle = (input: {
-      stage: KaLifecycleStage;
-      event: string;
-      level?: KaLifecycleLogLevel;
-      peer?: string;
-      peerNodeIdentityId?: string;
-      metadata?: Record<string, KaLifecycleMetadataValue>;
-    }): void => {
-      if (!lifecycleAssetUal) return;
-      logKaLifecycleEvent(this.log, ctx, {
-        assetUal: lifecycleAssetUal,
-        stage: input.stage,
-        event: input.event,
-        role: 'publisher',
-        localPeerId: localPeerIdForLifecycle,
-        localNodeIdentityId: attributionIdentityId.toString(),
-        peer: input.peer,
-        peerNodeIdentityId: input.peerNodeIdentityId,
-        level: input.level,
-        metadata: input.metadata,
-      });
-    };
-    if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
-      await rememberLifecycleAssetUal(options.precomputedAttestation.reservedKaId);
-      emitPublishLifecycle({
-        stage: 'identity',
-        event: 'asset_ual_allocated',
-        metadata: {
-          contextGraphId,
-          kaId: options.precomputedAttestation.reservedKaId.toString(),
-          publisherAddress,
-          entityCount,
-          publicRecordCount: allSkolemizedQuads.length,
-          hiddenCommitmentCount: privateRoots.length,
-        },
-      });
-      identityLifecycleEmitted = true;
-    }
-    emitPublishLifecycle({
-      stage: 'wm',
-      event: 'write',
-      metadata: {
-        contextGraphId,
-        recordCount: allSkolemizedQuads.length,
-        rootEntityCount: manifestEntries.length,
-        accessPolicy: effectiveAccessPolicy,
-        hiddenCommitmentCount: privateRoots.length,
-        subGraphName: options.subGraphName,
-      },
+    const lifecycle = new PublishLifecycleLogger({
+      log: this.log,
+      ctx,
+      localPeerId: normalizedPublisherPeerId || 'unknown',
+      localNodeIdentityId: attributionIdentityId.toString(),
+      resolveAssetUal: (kaId) => this.resolveKaUal(kaId),
     });
-    emitPublishLifecycle({
-      stage: 'swm_share',
-      event: 'prepared',
-      metadata: {
+    if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
+      await lifecycle.rememberAssetUal(options.precomputedAttestation.reservedKaId);
+      lifecycle.identityAllocated({
         contextGraphId,
-        swmGraphId,
-        source: isPublishFromSharedMemory ? 'shared_memory' : 'inline',
-        recordCount: allSkolemizedQuads.length,
-        byteSize: effectiveByteSize.toString(),
-        encryptedInline: useEncryptedInline,
-        catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
-      },
+        kaId: options.precomputedAttestation.reservedKaId.toString(),
+        publisherAddress,
+        entityCount,
+        publicRecordCount: allSkolemizedQuads.length,
+        hiddenCommitmentCount: privateRoots.length,
+      });
+    }
+    lifecycle.workspaceWritten({
+      contextGraphId,
+      recordCount: allSkolemizedQuads.length,
+      rootEntityCount: manifestEntries.length,
+      accessPolicy: effectiveAccessPolicy,
+      hiddenCommitmentCount: privateRoots.length,
+      subGraphName: options.subGraphName,
+    });
+    lifecycle.swmSharePrepared({
+      contextGraphId,
+      swmGraphId,
+      source: isPublishFromSharedMemory ? 'shared_memory' : 'inline',
+      recordCount: allSkolemizedQuads.length,
+      byteSize: effectiveByteSize.toString(),
+      encryptedInline: useEncryptedInline,
+      catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
     });
 
     // Numeric-negative and numeric-zero CG ids are programming errors —
@@ -2731,14 +2692,7 @@ export class DKGPublisher implements Publisher {
         const rootEntities = manifestEntries.map(m => m.rootEntity);
         const reservedAckKaId =
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId;
-        let assetUal: string | undefined;
-        if (reservedAckKaId !== undefined) {
-          try {
-            assetUal = await this.resolveKaUal(reservedAckKaId);
-          } catch {
-            assetUal = undefined;
-          }
-        }
+        const assetUal = await lifecycle.rememberAssetUal(reservedAckKaId);
         // OT-RFC-49 / WS-D: for curated CGs the publisher pays / signs against
         // the catalog footprint (`effectiveByteSize` == `catalogByteSize`) and
         // the curated commitment is `catalogCommitment`. For public CGs nothing
@@ -2761,21 +2715,17 @@ export class DKGPublisher implements Publisher {
           : privateRoots.length > 0
             ? 'folded_private'
             : 'public';
-        emitPublishLifecycle({
-          stage: 'storage_ack',
-          event: 'request',
-          metadata: {
-            contextGraphId: v10CgDomain,
-            swmGraphId,
-            subGraphName: options.subGraphName,
-            ackMode: lifecycleAckMode,
-            kaCount,
-            rootEntityCount: rootEntities.length,
-            publicByteSize: effectiveByteSize.toString(),
-            tokenAmount: precomputedTokenAmount.toString(),
-            merkleLeafCount: kcMerkleLeafCount,
-            outcome: 'request',
-          },
+        lifecycle.storageAckRequested({
+          contextGraphId: v10CgDomain,
+          swmGraphId,
+          subGraphName: options.subGraphName,
+          ackMode: lifecycleAckMode,
+          kaCount,
+          rootEntityCount: rootEntities.length,
+          publicByteSize: effectiveByteSize.toString(),
+          tokenAmount: precomputedTokenAmount.toString(),
+          merkleLeafCount: kcMerkleLeafCount,
+          outcome: 'request',
         });
         if (useCuratedCatalog) {
           if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
@@ -2820,21 +2770,13 @@ export class DKGPublisher implements Publisher {
           .map((a) => `${a.peerId.slice(-8)}:${a.subscriptionSource ?? '?'}`)
           .join(', ');
         for (const ack of v10ACKs) {
-          emitPublishLifecycle({
-            stage: 'storage_ack',
-            event: 'success',
-            peer: ack.peerId,
-            peerNodeIdentityId: ack.nodeIdentityId.toString(),
-            metadata: {
-              outcome: 'success',
-              quorumCollected: v10ACKs.length,
-              subscriptionSource: ack.subscriptionSource,
-            },
+          lifecycle.storageAckSucceeded(ack.peerId, ack.nodeIdentityId.toString(), {
+            outcome: 'success',
+            quorumCollected: v10ACKs.length,
+            subscriptionSource: ack.subscriptionSource,
           });
         }
-        emitPublishLifecycle({
-          stage: 'storage_ack',
-          event: 'quorum',
+        lifecycle.storageAckQuorum({
           metadata: {
             outcome: 'success',
             quorumCollected: v10ACKs.length,
@@ -2871,9 +2813,7 @@ export class DKGPublisher implements Publisher {
                 : reason === 'ACK' || reason?.startsWith('ACK:')
                   ? 'success'
                   : 'failure';
-            emitPublishLifecycle({
-              stage: 'storage_ack',
-              event: outcome,
+            lifecycle.storageAckOutcome(outcome, {
               level: 'warn',
               peer: peerOutcome.peerId,
               metadata: {
@@ -2885,9 +2825,7 @@ export class DKGPublisher implements Publisher {
               },
             });
           }
-          emitPublishLifecycle({
-            stage: 'storage_ack',
-            event: 'quorum',
+          lifecycle.storageAckQuorum({
             level: 'warn',
             metadata: {
               outcome: 'failure',
@@ -2897,15 +2835,10 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
-        emitPublishLifecycle({
-          stage: 'storage_ack',
-          event: 'failure',
-          level: 'warn',
-          metadata: {
-            outcome: 'failure',
-            errorClass: tag,
-            reason: err instanceof Error ? err.message : String(err),
-          },
+        lifecycle.storageAckFailed({
+          outcome: 'failure',
+          errorClass: tag,
+          reason: err instanceof Error ? err.message : String(err),
         });
         this.log.warn(
           ctx,
@@ -3314,21 +3247,16 @@ export class DKGPublisher implements Publisher {
           // precomputedAttestation (the agent is the single allocation point).
           (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
         );
-        await rememberLifecycleAssetUal(reservedKaId);
-        if (!identityLifecycleEmitted && reservedKaId !== undefined) {
-          emitPublishLifecycle({
-            stage: 'identity',
-            event: 'asset_ual_allocated',
-            metadata: {
-              contextGraphId,
-              kaId: reservedKaId.toString(),
-              publisherAddress,
-              entityCount,
-              publicRecordCount: allSkolemizedQuads.length,
-              hiddenCommitmentCount: privateRoots.length,
-            },
+        await lifecycle.rememberAssetUal(reservedKaId);
+        if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
+          lifecycle.identityAllocated({
+            contextGraphId,
+            kaId: reservedKaId.toString(),
+            publisherAddress,
+            entityCount,
+            publicRecordCount: allSkolemizedQuads.length,
+            hiddenCommitmentCount: privateRoots.length,
           });
-          identityLifecycleEmitted = true;
         }
         try {
           // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
@@ -3356,17 +3284,13 @@ export class DKGPublisher implements Publisher {
               );
             }
           }
-          emitPublishLifecycle({
-            stage: 'chain',
-            event: 'submit',
-            metadata: {
-              contextGraphId: v10CgId.toString(),
-              kaId: reservedKaId?.toString(),
-              byteSize: effectiveByteSize.toString(),
-              tokenAmount: tokenAmount.toString(),
-              ackCount: v10ACKs.length,
-              merkleLeafCount: kcMerkleLeafCount,
-            },
+          lifecycle.chainSubmitted({
+            contextGraphId: v10CgId.toString(),
+            kaId: reservedKaId?.toString(),
+            byteSize: effectiveByteSize.toString(),
+            tokenAmount: tokenAmount.toString(),
+            ackCount: v10ACKs.length,
+            merkleLeafCount: kcMerkleLeafCount,
           });
           onChainResult = await this.chain.createKnowledgeAssets!({
             publishOperationId,
@@ -3430,18 +3354,14 @@ export class DKGPublisher implements Publisher {
           throw new Error('Publish succeeded but DKGKnowledgeAssets address is unavailable for UAL assignment');
         }
         ual = `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
-        lifecycleAssetUal = ual;
-        emitPublishLifecycle({
-          stage: 'chain',
-          event: 'confirm',
-          metadata: {
-            contextGraphId: v10CgId.toString(),
-            kaId: kaId.toString(),
-            txHash: onChainResult.txHash,
-            blockNumber: onChainResult.blockNumber,
-            txIndex: onChainResult.txIndex,
-            tokenAmount: tokenAmount.toString(),
-          },
+        lifecycle.setAssetUal(ual);
+        lifecycle.chainConfirmed({
+          contextGraphId: v10CgId.toString(),
+          kaId: kaId.toString(),
+          txHash: onChainResult.txHash,
+          blockNumber: onChainResult.blockNumber,
+          txIndex: onChainResult.txIndex,
+          tokenAmount: tokenAmount.toString(),
         });
 
         for (const km of kaMetadata) {
@@ -3527,16 +3447,12 @@ export class DKGPublisher implements Publisher {
         // the success branch, so a failed ACK/chain publish never exposes one
         // (CLEAR/REPLACE — see persistCatalogEntry).
         await persistCatalogEntry();
-        emitPublishLifecycle({
-          stage: 'vm',
-          event: 'promote',
-          metadata: {
-            kaId: kaId.toString(),
-            vmGraph,
-            vmRecordCount: vmQuads.length,
-            rootEntityCount: manifestEntries.length,
-            status: 'confirmed',
-          },
+        lifecycle.vmPromoted({
+          kaId: kaId.toString(),
+          vmGraph,
+          vmRecordCount: vmQuads.length,
+          rootEntityCount: manifestEntries.length,
+          status: 'confirmed',
         });
 
         status = 'confirmed';
@@ -3567,17 +3483,12 @@ export class DKGPublisher implements Publisher {
         // unchanged so callers preserve `instanceof` checks.
         const tag = err instanceof Error ? err.name : 'unknown';
         const msg = err instanceof Error ? err.message : String(err);
-        emitPublishLifecycle({
-          stage: 'chain',
-          event: 'failure',
-          level: 'error',
-          metadata: {
-            outcome: 'failure',
-            contextGraphId: v10CgId.toString(),
-            ackCount: v10ACKs?.length ?? 0,
-            errorClass: tag,
-            reason: msg,
-          },
+        lifecycle.chainFailed({
+          outcome: 'failure',
+          contextGraphId: v10CgId.toString(),
+          ackCount: v10ACKs?.length ?? 0,
+          errorClass: tag,
+          reason: msg,
         });
         this.log.warn(ctx, `On-chain publish failed (${tag}): ${msg}`);
         throw err instanceof Error ? err : new Error(msg);
@@ -3636,15 +3547,11 @@ export class DKGPublisher implements Publisher {
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
     };
-    emitPublishLifecycle({
-      stage: 'finalization',
-      event: 'complete',
-      metadata: {
-        kaId: result.kaId.toString(),
-        status: result.status,
-        ackCount: result.v10ACKs?.length ?? 0,
-        localChainSkipReason: result.localChainSkipReason,
-      },
+    lifecycle.publishCompleted({
+      kaId: result.kaId.toString(),
+      status: result.status,
+      ackCount: result.v10ACKs?.length ?? 0,
+      localChainSkipReason: result.localChainSkipReason,
     });
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, {

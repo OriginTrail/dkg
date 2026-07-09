@@ -216,6 +216,36 @@ describe('StorageACKHandler', () => {
     expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
   });
 
+  it('does not wait for lifecycle assetUal resolution before returning a valid ACK', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(() => new Promise<string>(() => {}));
+    const handler = await createHandler(swmQuads, {
+      localPeerId: 'receiver-peer',
+      ackHandlerDeadlineMs: 0,
+      resolveAssetUalForPublishIntent,
+    } as any);
+
+    const response = await Promise.race<Uint8Array | 'timed-out'>([
+      handler.handler(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1', 'urn:entity:2'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      }), fakePeerId),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 25)),
+    ]);
+
+    expect(response).not.toBe('timed-out');
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    const ack = decodeStorageACK(response as Uint8Array);
+    expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
   it('emits ackHandlerTotal{outcome} through the REAL handler (ack + decline paths)', async () => {
     // Review coverage gap: the inbound storage-ACK outcome metric is a separate
     // contract from ACKCollector's — drive the real handler and assert it.
