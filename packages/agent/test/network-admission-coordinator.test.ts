@@ -127,6 +127,31 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(seenOptions?.signal).not.toBe(callerSignal);
   });
 
+  it('does not start a background probe when the first admission wait is already aborted', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+    const callerAbort = new AbortController();
+    callerAbort.abort(new Error('caller already cancelled'));
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { signal: callerAbort.signal },
+      ),
+    ).rejects.toThrow('caller already cancelled');
+    await Promise.resolve();
+    expect(sendIdentityProbe).not.toHaveBeenCalled();
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+  });
+
   it('canonicalizes peer ids before probing and sharing in-flight admission attempts', async () => {
     let release!: (value: Uint8Array) => void;
     const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {

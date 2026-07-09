@@ -215,6 +215,7 @@ export class NetworkAdmissionCoordinator {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
+    if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);

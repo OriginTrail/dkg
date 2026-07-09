@@ -67,6 +67,20 @@ export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarge
     : { kind: 'direct', multiaddress: structure.multiaddress };
 }
 
+export function parseExplicitConnectTarget(
+  addr: string,
+  options: { requireTargetPeerId?: boolean } = {},
+): MultiaddrConnectTarget {
+  const target = parseMultiaddrConnectTarget(addr);
+  if (options.requireTargetPeerId && !target.targetPeerId) {
+    throw new MultiaddrPeerTargetParseError(
+      'connect multiaddr must include a target /p2p/<peerId> for network admission',
+      '<missing>',
+    );
+  }
+  return target;
+}
+
 function parseMultiaddrStructure(addr: string): ParsedMultiaddrStructure {
   const parsed = multiaddr(addr);
   const components = parsed.getComponents();

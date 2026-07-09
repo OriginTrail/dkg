@@ -148,9 +148,13 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import {
   NetworkAdmissionRejectedError,
+  NetworkAdmissionInvalidPeerIdError,
   type NetworkAdmissionAttemptOptions,
 } from './p2p/network-admission-coordinator.js';
-import { parseExplicitConnectTarget } from './p2p/explicit-connect-target.js';
+import {
+  MultiaddrPeerTargetParseError,
+  parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget,
+} from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   createCGMemberEnumerator,
@@ -401,6 +405,20 @@ function pcaRegisteredProbe(
 ): (() => Promise<boolean>) | null {
   const read = chain.isPublishingConvictionAgent;
   return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
+
+function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: boolean) {
+  try {
+    return parseMultiaddrExplicitConnectTarget(multiaddress, {
+      requireTargetPeerId: admissionEnabled,
+    });
+  } catch (err) {
+    if (!admissionEnabled) throw err;
+    throw new NetworkAdmissionInvalidPeerIdError(
+      err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
