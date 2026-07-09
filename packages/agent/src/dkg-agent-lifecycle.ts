@@ -425,9 +425,7 @@ type InFlightSyncPageFetch = {
 type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeers']>>;
 
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
-const inFlightDurableSyncsByAgent = new WeakMap<DKGAgent, Map<string, Promise<DurableSyncResult>>>();
-const inFlightSharedMemorySyncsByAgent = new WeakMap<DKGAgent, Map<string, Promise<SharedMemorySyncResult>>>();
-const inFlightContextGraphCatchupsByAgent = new WeakMap<DKGAgent, Map<string, Promise<ContextGraphCatchupResult>>>();
+const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
 
 function syncPageFetchCoalescingKey(params: {
   remotePeerId: string;
@@ -462,16 +460,32 @@ function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPa
   return inFlight;
 }
 
-function inFlightPromiseMapFor<T>(
-  registry: WeakMap<DKGAgent, Map<string, Promise<T>>>,
+function runSyncSingleFlight<T>(
   agent: DKGAgent,
-): Map<string, Promise<T>> {
-  let inFlight = registry.get(agent);
+  key: string,
+  factory: () => Promise<T>,
+): Promise<T> {
+  let inFlight = inFlightSyncSingleFlightsByAgent.get(agent);
   if (!inFlight) {
     inFlight = new Map();
-    registry.set(agent, inFlight);
+    inFlightSyncSingleFlightsByAgent.set(agent, inFlight);
   }
-  return inFlight;
+  const existing = inFlight.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const promise = Promise.resolve()
+    .then(factory)
+    .finally(() => {
+      if (inFlight.get(key) === promise) {
+        inFlight.delete(key);
+      }
+    });
+  inFlight.set(key, promise);
+  return promise;
+}
+
+function syncSingleFlightKey(scope: string, fields: Record<string, unknown>): string {
+  return JSON.stringify({ scope, ...fields });
 }
 
 function normalizedCatchupMaxPeers(maxPeers: number | undefined): number | null {
@@ -479,48 +493,54 @@ function normalizedCatchupMaxPeers(maxPeers: number | undefined): number | null 
   return maxPeers;
 }
 
-function contextGraphCatchupCoalescingKey(params: {
+function contextGraphCatchupSingleFlightKey(params: {
   contextGraphId: string;
   includeSharedMemory: boolean;
   maxPeers?: number;
   peerRotationKey?: string;
 }): string {
-  return JSON.stringify([
-    params.contextGraphId,
-    params.includeSharedMemory,
-    normalizedCatchupMaxPeers(params.maxPeers),
-    params.peerRotationKey ?? null,
-  ]);
+  return syncSingleFlightKey('context-graph-catchup', {
+    contextGraphId: params.contextGraphId,
+    includeSharedMemory: params.includeSharedMemory,
+    maxPeers: normalizedCatchupMaxPeers(params.maxPeers),
+    peerRotationKey: params.peerRotationKey ?? null,
+  });
 }
 
-function durableSyncCoalescingKey(params: {
+function durableSyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
   syncAgentsMeta: boolean;
-}): string {
-  return JSON.stringify([
-    params.remotePeerId,
-    params.contextGraphIds,
-    params.stopOnBackoffWorthyFailure === true,
-    params.syncAgentsMeta,
-  ]);
+  hasPhaseCallback: boolean;
+  hasAccessDeniedCallback: boolean;
+  hasSinceBatchIdResolver: boolean;
+}): string | null {
+  if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
+    return null;
+  }
+  return syncSingleFlightKey('durable-sync', {
+    remotePeerId: params.remotePeerId,
+    contextGraphIds: params.contextGraphIds,
+    stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    syncAgentsMeta: params.syncAgentsMeta,
+  });
 }
 
-function sharedMemorySyncCoalescingKey(params: {
+function sharedMemorySyncSingleFlightKey(params: {
   remotePeerId: string;
   contextGraphIds: readonly string[];
   stopOnBackoffWorthyFailure?: boolean;
   publicContextGraphIds: readonly string[];
   privateRecoverFromCurator: readonly string[];
 }): string {
-  return JSON.stringify([
-    params.remotePeerId,
-    params.contextGraphIds,
-    params.stopOnBackoffWorthyFailure === true,
-    params.publicContextGraphIds,
-    params.privateRecoverFromCurator,
-  ]);
+  return syncSingleFlightKey('shared-memory-sync', {
+    remotePeerId: params.remotePeerId,
+    contextGraphIds: params.contextGraphIds,
+    stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    publicContextGraphIds: params.publicContextGraphIds,
+    privateRecoverFromCurator: params.privateRecoverFromCurator,
+  });
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -3479,26 +3499,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
     );
 
-    if (onPhase || onAccessDenied || sinceBatchIdFor) {
-      return runSync();
-    }
-    const coalescingKey = durableSyncCoalescingKey({
+    const singleFlightKey = durableSyncSingleFlightKey({
       remotePeerId,
       contextGraphIds,
       stopOnBackoffWorthyFailure,
       syncAgentsMeta,
+      hasPhaseCallback: Boolean(onPhase),
+      hasAccessDeniedCallback: Boolean(onAccessDenied),
+      hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
     });
-    const inFlight = inFlightPromiseMapFor(inFlightDurableSyncsByAgent, this);
-    const existing = inFlight.get(coalescingKey);
-    if (existing) return existing;
-
-    const sync = runSync().finally(() => {
-      if (inFlight.get(coalescingKey) === sync) {
-        inFlight.delete(coalescingKey);
-      }
-    });
-    inFlight.set(coalescingKey, sync);
-    return sync;
+    return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
   }
 
   /**
@@ -3722,16 +3732,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
     const { publicContextGraphIds, privateRecoverFromCurator } = plan;
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const coalescingKey = sharedMemorySyncCoalescingKey({
+    const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
       contextGraphIds,
       stopOnBackoffWorthyFailure,
       publicContextGraphIds,
       privateRecoverFromCurator,
     });
-    const inFlight = inFlightPromiseMapFor(inFlightSharedMemorySyncsByAgent, this);
-    const existing = inFlight.get(coalescingKey);
-    if (existing) return existing;
 
     const runSync = async (): Promise<SharedMemorySyncResult> => {
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
@@ -3852,13 +3859,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return summary;
     };
 
-    const sync = runSync().finally(() => {
-      if (inFlight.get(coalescingKey) === sync) {
-        inFlight.delete(coalescingKey);
-      }
-    });
-    inFlight.set(coalescingKey, sync);
-    return sync;
+    return runSyncSingleFlight(this, singleFlightKey, runSync);
   }
 
   /**
@@ -4065,17 +4066,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     this.trackSyncContextGraph(contextGraphId);
 
-    const coalescingKey = contextGraphCatchupCoalescingKey({
+    const singleFlightKey = contextGraphCatchupSingleFlightKey({
       contextGraphId,
       includeSharedMemory,
       maxPeers: options?.maxPeers,
       peerRotationKey: options?.peerRotationKey,
     });
-    const inFlight = inFlightPromiseMapFor(inFlightContextGraphCatchupsByAgent, this);
-    const existing = inFlight.get(coalescingKey);
-    if (existing) return existing;
 
-    const catchup = (async (): Promise<ContextGraphCatchupResult> => {
+    return runSyncSingleFlight(this, singleFlightKey, async (): Promise<ContextGraphCatchupResult> => {
       const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
       const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
@@ -4123,13 +4121,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
         totalPeers: orderedPeers.length,
       });
-    })().finally(() => {
-      if (inFlight.get(coalescingKey) === catchup) {
-        inFlight.delete(coalescingKey);
-      }
     });
-    inFlight.set(coalescingKey, catchup);
-    return catchup;
   }
 
   selectCatchupPeerWindow(this: DKGAgent,
