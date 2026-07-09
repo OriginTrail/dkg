@@ -149,9 +149,6 @@ async function loadAuthoritativeQuadKeys(
   // (which reads every quad in the store on RocksDB per publish). The resolved
   // set equals the old filter's target (base graph + `${graph}/_verifiable_memory/*`).
   const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, graph);
-  if (vmGraphs.length === 0) {
-    return new Set();
-  }
   const graphValues = vmGraphs.map((g) => `<${g}>`).join(' ');
   const values = [...confirmedRoots].map((root) => safeStringLiteral(root)).join(' ');
   const result = await store.query(

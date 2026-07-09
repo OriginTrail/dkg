@@ -401,7 +401,6 @@ export class FinalizationHandler {
     // present in BOTH the bucket and a per-KA graph collapses to one
     // (a constructed graph is a set).
     const swmGraphs = await resolveSharedMemoryReadGraphs(this.store, sharedMemoryGraph);
-    if (swmGraphs.length === 0) return [];
     const graphValues = swmGraphs.map(g => `<${g}>`).join(' ');
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
       VALUES ?g { ${graphValues} }

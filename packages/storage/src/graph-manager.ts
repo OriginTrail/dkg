@@ -1,4 +1,4 @@
-import type { TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -17,6 +17,18 @@ import {
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
+
+export type NonEmptyGraphList = [string, ...string[]];
+export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
+
+export interface LoadSelectedSharedMemoryQuadsOptions {
+  querySource?: QueryOptions['source'];
+  quadFilter?: (quad: Quad) => boolean;
+  rootEntitiesErrorMessage?: (input: {
+    inputCount: number;
+    hadInput: boolean;
+  }) => string;
+}
 
 async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
   return store.listGraphsByPrefix
@@ -41,9 +53,9 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
  * just not index-accelerated). `assertSafeIri(bucketGraph)` throws on an unsafe
  * bucket to preserve the old `sharedMemoryReadBothFilter` fail-closed behavior
  * (the replaced filter asserted the same); per-KA under-graphs are dropped if
- * unsafe (never produced by the DKG write path). Returns [] only when the
- * bucket exists but has no under-graphs and no bucket-level quads — callers may
- * still query the bucket alone since it is always included.
+ * unsafe (never produced by the DKG write path). The returned list is always
+ * non-empty for a safe bucket because the bucket graph itself is part of the
+ * read contract, even when the named-graph index currently has no child graphs.
  *
  * Freshness contract: the index must be at least as fresh as the SPARQL scan it
  * replaces. Same-process writes satisfy this (GraphSetIndexStore is
@@ -56,7 +68,7 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
   bucketGraph: string,
-): Promise<string[]> {
+): Promise<NonEmptyGraphList> {
   assertSafeIri(bucketGraph);
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`);
@@ -65,7 +77,60 @@ export async function resolveSharedMemoryReadGraphs(
     if (graph.startsWith(stagingPrefix)) continue;
     if (isSafeIri(graph)) out.add(graph);
   }
-  return [...out];
+  return [...out] as NonEmptyGraphList;
+}
+
+/**
+ * Load the selected SWM quad slice from the exact graph set resolved by
+ * `resolveSharedMemoryReadGraphs`. This keeps merkle-sensitive SWM selection
+ * policy in one place while allowing call sites to inject their small
+ * differences, such as query source tags or post-query bookkeeping filters.
+ */
+export async function loadSelectedSharedMemoryQuads(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  let innerGraphPattern: string;
+  if (selection === 'all') {
+    innerGraphPattern = '?s ?p ?o';
+  } else {
+    const roots = [...new Set(
+      selection.rootEntities
+        .map((r) => String(r).trim())
+        .filter((r) => isSafeIri(r)),
+    )];
+    if (roots.length === 0) {
+      const hadInput = selection.rootEntities.length > 0;
+      const message = options.rootEntitiesErrorMessage?.({
+        inputCount: selection.rootEntities.length,
+        hadInput,
+      }) ?? (
+        hadInput
+          ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
+          : 'No rootEntities provided'
+      );
+      throw new Error(message);
+    }
+    const values = roots.map((r) => `<${r}>`).join(' ');
+    innerGraphPattern = `VALUES ?root { ${values} }
+          ?s ?p ?o .
+          FILTER(
+            ?s = ?root
+            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+          )`;
+  }
+
+  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph);
+  const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+  const queryOptions = options.querySource ? { source: options.querySource } : undefined;
+  const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
+        VALUES ?g { ${graphValues} }
+        GRAPH ?g { ${innerGraphPattern} }
+      }`, queryOptions);
+  if (result.type !== 'quads') return [];
+  return options.quadFilter ? result.quads.filter(options.quadFilter) : result.quads;
 }
 
 /**
@@ -82,12 +147,12 @@ export async function resolveSharedMemoryReadGraphs(
 export async function resolveVerifiableMemoryReadGraphs(
   store: TripleStore,
   dataGraph: string,
-): Promise<string[]> {
+): Promise<NonEmptyGraphList> {
+  assertSafeIri(dataGraph);
   const under = await listGraphsByPrefix(store, `${dataGraph}/_verifiable_memory/`);
-  const out = new Set<string>();
-  if (isSafeIri(dataGraph)) out.add(dataGraph);
+  const out = new Set<string>([dataGraph]);
   for (const graph of under) if (isSafeIri(graph)) out.add(graph);
-  return [...out];
+  return [...out] as NonEmptyGraphList;
 }
 
 export class ContextGraphManager {

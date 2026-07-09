@@ -800,7 +800,6 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     // FILTER-narrowed, so the old form scanned every quad). Same target set as
     // the old filter (dataGraph + `${dataGraph}/_verifiable_memory/*`).
     const vmReadGraphs = await resolveVerifiableMemoryReadGraphs(this.store, dataGraph);
-    if (vmReadGraphs.length === 0) return;
     const graphValues = vmReadGraphs.map(g => `<${g}>`).join(' ');
     const result = await this.store.query(
       `SELECT ?s ?p ?o WHERE { VALUES ?g { ${graphValues} } GRAPH ?g { ?s ?p ?o . FILTER(${filterClauses}) } }`,
