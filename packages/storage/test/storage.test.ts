@@ -6,10 +6,20 @@ import {
   GraphManager,
   PrivateContentStore,
   createTripleStore,
+  loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
   registerTripleStoreAdapter,
+  resolveSharedMemoryReadGraphs,
+  resolveVerifiableMemoryReadGraphs,
   type Quad,
   type TripleStore,
 } from '../src/index.js';
+import {
+  contextGraphDataGraphUri,
+  contextGraphSharedMemoryMetaUri,
+  contextGraphSharedMemoryUri,
+  sharedMemoryReadBothFilter,
+} from '@origintrail-official/dkg-core';
 import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
 
 // ---------------------------------------------------------------------------
@@ -376,6 +386,38 @@ describe('GraphManager', () => {
   let store: TripleStore;
   let gm: GraphManager;
 
+  function indexedReadContractStore(graphsByPrefix: Record<string, string[]>): {
+    store: TripleStore;
+    prefixCalls: string[];
+    queries: string[];
+  } {
+    const prefixCalls: string[] = [];
+    const queries: string[] = [];
+    const fakeStore: TripleStore = {
+      insert: async () => {},
+      delete: async () => {},
+      deleteByPattern: async () => 0,
+      query: async (sparql) => {
+        queries.push(sparql);
+        return { type: 'quads', quads: [] };
+      },
+      hasGraph: async () => false,
+      createGraph: async () => {},
+      dropGraph: async () => {},
+      listGraphs: async () => {
+        throw new Error('unbounded listGraphs should not be used');
+      },
+      listGraphsByPrefix: async (prefix) => {
+        prefixCalls.push(prefix);
+        return graphsByPrefix[prefix] ?? [];
+      },
+      deleteBySubjectPrefix: async () => 0,
+      countQuads: async () => 0,
+      close: async () => {},
+    };
+    return { store: fakeStore, prefixCalls, queries };
+  }
+
   beforeEach(() => {
     store = new OxigraphStore();
     gm = new GraphManager(store);
@@ -416,6 +458,176 @@ describe('GraphManager', () => {
     ]);
     await gm.dropContextGraph('x');
     expect(await gm.hasContextGraph('x')).toBe(false);
+  });
+
+  it('resolves the exact SWM read graph set from the named-graph index', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('resolver-swm');
+    try {
+      await indexed.insert([
+        { subject: 'urn:bucket', predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: 'urn:partition', predicate: 'urn:p', object: '"partition"', graph: `${swm}/0xabc/7` },
+        { subject: 'urn:staging', predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
+        { subject: 'urn:meta', predicate: 'urn:p', object: '"meta"', graph: contextGraphSharedMemoryMetaUri('resolver-swm') },
+        { subject: 'urn:other', predicate: 'urn:p', object: '"other"', graph: contextGraphSharedMemoryUri('resolver-other') },
+      ]);
+
+      expect((await resolveSharedMemoryReadGraphs(indexed, swm)).sort()).toEqual([
+        swm,
+        `${swm}/0xabc/7`,
+      ].sort());
+      expect(await resolveSharedMemoryReadGraphs(indexed, contextGraphSharedMemoryUri('empty-swm'))).toEqual([
+        contextGraphSharedMemoryUri('empty-swm'),
+      ]);
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('loads selected SWM quads with the same graph semantics as sharedMemoryReadBothFilter', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('resolver-loader');
+    const root = 'urn:root';
+    const child = `${root}/.well-known/genid/child`;
+    const other = 'urn:other-root';
+    const key = (quad: Quad) => `${quad.subject}|${quad.predicate}|${quad.object}`;
+    const keys = (quads: Quad[]) => quads.map(key).sort();
+    try {
+      await indexed.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket-root"', graph: swm },
+        { subject: child, predicate: 'urn:p', object: '"child"', graph: `${swm}/0xabc/7` },
+        { subject: other, predicate: 'urn:p', object: '"other"', graph: `${swm}/0xabc/7` },
+        { subject: 'urn:staged', predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
+      ]);
+
+      const oldAll = await indexed.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swm)} }`,
+      );
+      expect(oldAll.type).toBe('quads');
+      if (oldAll.type !== 'quads') return;
+      expect(keys(await loadSelectedSharedMemoryQuads(indexed, swm, 'all'))).toEqual(keys(oldAll.quads));
+
+      const oldRoot = await indexed.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE {
+          GRAPH ?g {
+            VALUES ?root { <${root}> }
+            ?s ?p ?o .
+            FILTER(
+              ?s = ?root
+              || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
+            )
+          }
+          ${sharedMemoryReadBothFilter(swm)}
+        }`,
+      );
+      expect(oldRoot.type).toBe('quads');
+      if (oldRoot.type !== 'quads') return;
+      expect(keys(await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] }))).toEqual(keys(oldRoot.quads));
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('binds selected SWM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const swm = contextGraphSharedMemoryUri('resolver-swm-contract');
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${swm}/`]: [
+        `${swm}/0xabc/7`,
+        `${swm}/staging/tmp`,
+      ],
+    });
+
+    await loadSelectedSharedMemoryQuads(contractStore, swm, {
+      rootEntities: ['http://example.com/root'],
+    });
+
+    expect(prefixCalls).toEqual([`${swm}/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${swm}>`);
+    expect(queries[0]).toContain(`<${swm}/0xabc/7>`);
+    expect(queries[0]).not.toContain('/staging/tmp');
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
+  });
+
+  it('resolves the exact VM read graph set from the named-graph index', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const dataGraph = contextGraphDataGraphUri('resolver-vm');
+    const vmGraph = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const vmMetaGraph = `${vmGraph}/_meta`;
+    try {
+      await indexed.insert([
+        { subject: 'urn:data', predicate: 'urn:p', object: '"data"', graph: dataGraph },
+        { subject: 'urn:vm', predicate: 'urn:p', object: '"vm"', graph: vmGraph },
+        { subject: 'urn:vm-meta', predicate: 'urn:p', object: '"vm-meta"', graph: vmMetaGraph },
+        { subject: 'urn:private', predicate: 'urn:p', object: '"private"', graph: `${dataGraph}/_private` },
+        { subject: 'urn:other', predicate: 'urn:p', object: '"other"', graph: contextGraphDataGraphUri('resolver-vm-other') },
+      ]);
+
+      expect((await resolveVerifiableMemoryReadGraphs(indexed, dataGraph)).sort()).toEqual([
+        dataGraph,
+        vmGraph,
+        vmMetaGraph,
+      ].sort());
+      expect(await resolveVerifiableMemoryReadGraphs(indexed, contextGraphDataGraphUri('empty-vm'))).toEqual([
+        contextGraphDataGraphUri('empty-vm'),
+      ]);
+      await expect(resolveVerifiableMemoryReadGraphs(indexed, `${dataGraph}">`)).rejects.toThrow();
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('binds selected VM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-contract');
+    const vmGraph = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${dataGraph}/_verifiable_memory/`]: [vmGraph],
+    });
+
+    await loadSelectedVerifiableMemoryQuads(contractStore, dataGraph, ['http://example.com/root']);
+
+    expect(prefixCalls).toEqual([`${dataGraph}/_verifiable_memory/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${dataGraph}>`);
+    expect(queries[0]).toContain(`<${vmGraph}>`);
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
+  });
+
+  it('loads selected VM quads from the base graph and multiple per-KA VM graphs', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-loader');
+    const vmGraphA = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const vmGraphB = `${dataGraph}/_verifiable_memory/0xdef/8`;
+    const vmMetaGraph = `${vmGraphA}/_meta`;
+    const root = 'urn:vm-root';
+    const childA = `${root}/.well-known/genid/a`;
+    const childB = `${root}/.well-known/genid/b`;
+    const otherRoot = 'urn:vm-other-root';
+    const key = (quad: Quad) => `${quad.subject}|${quad.predicate}|${quad.object}`;
+    const keys = (quads: Quad[]) => quads.map(key).sort();
+    try {
+      await indexed.insert([
+        { subject: root, predicate: 'urn:p', object: '"base-root"', graph: dataGraph },
+        { subject: childA, predicate: 'urn:p', object: '"child-a"', graph: vmGraphA },
+        { subject: childB, predicate: 'urn:p', object: '"child-b"', graph: vmGraphB },
+        { subject: root, predicate: 'urn:p', object: '"meta-root"', graph: vmMetaGraph },
+        { subject: otherRoot, predicate: 'urn:p', object: '"other-root"', graph: vmGraphA },
+        { subject: root, predicate: 'urn:p', object: '"private-root"', graph: `${dataGraph}/_private` },
+        { subject: root, predicate: 'urn:p', object: '"other-graph"', graph: contextGraphDataGraphUri('resolver-vm-loader-other') },
+      ]);
+
+      expect(keys(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [root, root]))).toEqual([
+        `${childA}|urn:p|"child-a"`,
+        `${childB}|urn:p|"child-b"`,
+        `${root}|urn:p|"base-root"`,
+        `${root}|urn:p|"meta-root"`,
+      ].sort());
+      expect(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [])).toEqual([]);
+    } finally {
+      await indexed.close();
+    }
   });
 });
 

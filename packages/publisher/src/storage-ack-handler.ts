@@ -1,4 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { loadSelectedSharedMemoryQuads, type SharedMemoryReadSelection } from '@origintrail-official/dkg-storage';
 import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
@@ -18,7 +19,6 @@ import {
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
-  sharedMemoryReadBothFilter,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
 } from '@origintrail-official/dkg-core';
@@ -109,7 +109,7 @@ function summarizeDeclineEntities(entities: readonly string[]): string {
 
 /**
  * Module-private marker for "a triple-store operation failed mid-ACK".
- * `loadSWMQuads` raises this ONLY around its `store.query` calls so the
+ * `loadSWMQuads` raises this ONLY around the storage loader's store/index reads so the
  * handler's catch sites can tell a peer-local store outage (→ transient
  * `CORE_TEMPORARILY_UNAVAILABLE` decline) apart from the
  * `assertSafeIri` malformed-request throws inside the same function,
@@ -539,7 +539,7 @@ export class StorageACKHandler {
 
   /**
    * Load SWM quads for the recompute, translating a store outage into the
-   * transient decline. `loadSWMQuads` tags ONLY its internal `store.query`
+   * transient decline. `loadSWMQuads` tags ONLY the storage loader's store/index
    * throws as `StoreUnavailableError`; its `assertSafeIri` guards throw
    * ordinary errors that this helper re-raises so a malformed-request still
    * resets the stream (never demoted to a retryable decline).
@@ -1646,6 +1646,9 @@ export class StorageACKHandler {
 
   private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
     assertSafeIri(graphUri);
+    for (const entity of rootEntities) {
+      assertSafeIri(entity);
+    }
     // The publisher computes the KC merkle root over its SWM read with the
     // trust-level / workspace-owner bookkeeping quads filtered OUT
     // (`isSwmMerkleExcludedQuad`). The core responder recomputes the same root
@@ -1654,40 +1657,22 @@ export class StorageACKHandler {
     // store is hashed on one side but not the other and every folded-private
     // ACK declines MERKLE_MISMATCH_IN_SWM (2026-07-07 Gnosis mainnet). Shared
     // single-source filter so the two paths can never drift again.
-    if (rootEntities.length === 0) {
-      // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
-      // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.queryStoreOrUnavailable(sparql);
-      return result.type === 'quads' ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q)) : [];
-    }
-
-    const allQuads: Quad[] = [];
-    for (const entity of rootEntities) {
-      assertSafeIri(entity);
-      const genidPrefix = `${entity}/.well-known/genid/`;
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.queryStoreOrUnavailable(sparql);
-      if (result.type === 'quads') {
-        for (const q of result.quads) {
-          if (!isSwmMerkleExcludedQuad(q)) allQuads.push(q);
-        }
-      }
-    }
-    return allQuads;
-  }
-
-  /**
-   * `store.query` with store-outage tagging: a throw here means the
-   * triple store itself is unhealthy (worker mid-restart, 'store is
-   * closed'), which the ACK handlers translate into the transient
-   * `CORE_TEMPORARILY_UNAVAILABLE` decline. Kept as a separate wrapper
-   * so ONLY the store op is tagged — the `assertSafeIri` guards in
-   * {@link loadSWMQuads} above stay ordinary malformed-request throws.
-   */
-  private async queryStoreOrUnavailable(sparql: string): ReturnType<TripleStore['query']> {
+    //
+    // A3 (O(store) relief): go through the shared `loadSelectedSharedMemoryQuads`
+    // helper, which binds the SWM graph set through the fast named-graph index
+    // (`VALUES ?g`) instead of an unbounded `GRAPH ?g` + STRSTARTS scan — this
+    // recompute runs on the ACK-deadline-critical responder that was starving
+    // under load. Using the SAME helper as the publisher's merkle read keeps
+    // graph selection AND the merkle-exclusion filter single-sourced, so the two
+    // recomputes can never drift. The explicit `assertSafeIri(...)` guards above
+    // stay ordinary malformed-request throws; a store/index failure inside the
+    // read is re-tagged `StoreUnavailableError` (→ CORE_TEMPORARILY_UNAVAILABLE).
+    const selection: SharedMemoryReadSelection =
+      rootEntities.length === 0 ? 'all' : { rootEntities };
     try {
-      return await this.store.query(sparql);
+      return await loadSelectedSharedMemoryQuads(this.store, graphUri, selection, {
+        quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
+      });
     } catch (err) {
       throw new StoreUnavailableError(err);
     }

@@ -95,14 +95,13 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  sharedMemoryReadBothFilter,
   partitionCatalogQuads,
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedSharedMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3320,50 +3319,16 @@ export class PublishMethods extends DKGAgentBase {
     subGraphName?: string,
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    let sparql: string;
-    if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
-    } else {
-      // Round 4 review §10 — mirror the `isSafeIri` filter that
-      // `DKGPublisher.publishFromSharedMemory` applies before its own
-      // SPARQL CONSTRUCT. Without this guard a caller could craft a
-      // `selection.rootEntities` value containing `>` / SPARQL syntax
-      // that breaks out of the `<…>` IRI literal and rewrites the
-      // pre-seal CONSTRUCT into a wider scope. Both seams must agree
-      // on the IRI shape that survives interpolation; the `_meta`
-      // seal writer (`buildAssertionSealQuads`) applies the same
-      // reject-set when it persists rootEntities so any value that
-      // round-trips through finalize → publish is safe here.
-      const roots = [...new Set(
-        selection.rootEntities
-          .map((r) => String(r).trim())
-          .filter((r) => isSafeIri(r)),
-      )];
-      if (roots.length === 0) {
-        const hadInput = selection.rootEntities.length > 0;
-        throw new Error(
-          hadInput
-            ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
-                `(all ${selection.rootEntities.length} entries failed IRI validation) ` +
-                `for context graph ${contextGraphId}`
-            : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`,
-        );
-      }
-      const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH ?g {
-          VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(
-            ?s = ?root
-            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-        ${sharedMemoryReadBothFilter(swmGraph)}
-      }`;
-    }
-    const result = await this.store.query(sparql, { source: 'agent.resolveLiftWorkspaceSlice' });
-    return result.type === 'quads' ? result.quads : [];
+    return loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
+      querySource: 'agent.resolveLiftWorkspaceSlice',
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+        hadInput
+          ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
+              `(all ${inputCount} entries failed IRI validation) ` +
+              `for context graph ${contextGraphId}`
+          : `_loadSelectedSWMQuads: no rootEntities supplied for context graph ${contextGraphId}`
+      ),
+    });
   }
 
   /**
