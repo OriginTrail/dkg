@@ -1222,3 +1222,21 @@ export interface DKGAgentConfig {
     outboxStore: ProtocolOutboxStore;
   };
 }
+
+export interface DKGAgentACKTransport {
+  publisherPeerId: string;
+  gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
+  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  getConnectedCorePeers: (protocol?: string) => string[];
+  log?: (message: string) => void;
+}
+
+export interface DKGAgentACKTransportOptions {
+  sendTimeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+export type ResolvedDKGAgentConfig =
+  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+    storageAckTiming: StorageAckTiming;
+  };

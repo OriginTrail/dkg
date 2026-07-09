@@ -92,11 +92,28 @@ describe('resolveStorageAckTiming', () => {
     });
   });
 
+  it('allows handlerDeadlineMs: 0 to disable the handler deadline', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 20_000,
+    });
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0, sendTimeoutMs: 10_000 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 10_000,
+    });
+  });
+
   it('rejects explicitly misaligned handler/send pairs', () => {
     expect(() => resolveStorageAckTiming({
       handlerDeadlineMs: 60_000,
       sendTimeoutMs: 30_000,
     })).toThrow(/storageAck\.sendTimeoutMs must be at least 5000ms greater/);
+  });
+
+  it('rejects negative handler deadline disables', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: -1,
+    })).toThrow(/storageAck\.handlerDeadlineMs must be a non-negative safe integer/);
   });
 
   it('rejects malformed storageAck blocks instead of silently defaulting', () => {

@@ -118,6 +118,8 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type DKGAgentACKTransport,
+  type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type PublishOpts,
   type PublishAsyncContent,

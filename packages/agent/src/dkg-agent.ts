@@ -105,7 +105,6 @@ import {
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
-  createACKSendP2P as createPublisherACKSendP2P,
   resolveStorageAckTiming,
   selectACKCandidatePeers,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -342,8 +341,11 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type DKGAgentACKTransport,
+  type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
+  type ResolvedDKGAgentConfig,
 } from './dkg-agent-types.js';
 import {
   normalizePublishContextGraphId,
@@ -428,6 +430,8 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  DKGAgentACKTransport,
+  DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
 
@@ -539,7 +543,31 @@ function legacyChainListScanOptions(
   return undefined;
 }
 
-function normalizeStorageAckConfig(config: DKGAgentConfig): DKGAgentConfig {
+function assertLegacyStorageAckAlias(
+  value: unknown,
+  label: string,
+  options: { allowZero: boolean },
+): void {
+  const validInteger = Number.isSafeInteger(value);
+  const validRange = options.allowZero
+    ? (value as number) >= 0
+    : (value as number) > 0;
+  if (!validInteger || !validRange) {
+    throw new Error(
+      `${label} must be a ${options.allowZero ? 'non-negative' : 'positive'} ` +
+      'safe integer number of milliseconds',
+    );
+  }
+}
+
+function throwStorageAckTimingConflict(): never {
+  throw new Error(
+    'DKGAgentConfig.storageAckTiming must not conflict with legacy ' +
+    'ackHandlerDeadlineMs/ackSendTimeoutMs aliases',
+  );
+}
+
+function normalizeStorageAckConfig(config: DKGAgentConfig): ResolvedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
   const hasLegacyTiming =
     config.ackHandlerDeadlineMs !== undefined ||
@@ -557,30 +585,63 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): DKGAgentConfig {
     'DKGAgentConfig.storageAckTiming',
   );
 
-  if (hasStorageAckTiming && hasLegacyTiming) {
-    const legacyTiming = resolveStorageAckTiming(
-      {
-        handlerDeadlineMs: config.ackHandlerDeadlineMs,
-        sendTimeoutMs: config.ackSendTimeoutMs,
-      },
-      'DKGAgentConfig legacy ACK timing',
+  if (hasStorageAckTiming && config.ackHandlerDeadlineMs !== undefined) {
+    assertLegacyStorageAckAlias(
+      config.ackHandlerDeadlineMs,
+      'DKGAgentConfig.ackHandlerDeadlineMs',
+      { allowZero: true },
     );
-    if (
-      legacyTiming.handlerDeadlineMs !== timing.handlerDeadlineMs ||
-      legacyTiming.sendTimeoutMs !== timing.sendTimeoutMs
-    ) {
-      throw new Error(
-        'DKGAgentConfig.storageAckTiming must not conflict with legacy ' +
-        'ackHandlerDeadlineMs/ackSendTimeoutMs aliases',
-      );
+    if (config.ackHandlerDeadlineMs !== timing.handlerDeadlineMs) {
+      throwStorageAckTimingConflict();
+    }
+  }
+  if (hasStorageAckTiming && config.ackSendTimeoutMs !== undefined) {
+    assertLegacyStorageAckAlias(
+      config.ackSendTimeoutMs,
+      'DKGAgentConfig.ackSendTimeoutMs',
+      { allowZero: false },
+    );
+    if (config.ackSendTimeoutMs !== timing.sendTimeoutMs) {
+      throwStorageAckTimingConflict();
     }
   }
 
+  const {
+    storageAckTiming: _storageAckTiming,
+    ackHandlerDeadlineMs: _ackHandlerDeadlineMs,
+    ackSendTimeoutMs: _ackSendTimeoutMs,
+    ...rest
+  } = config;
   return {
-    ...config,
+    ...rest,
     storageAckTiming: timing,
-    ackHandlerDeadlineMs: timing.handlerDeadlineMs,
-    ackSendTimeoutMs: timing.sendTimeoutMs,
+  };
+}
+
+interface ACKReliableMessenger {
+  sendReliable(
+    peerId: string,
+    protocol: string,
+    data: Uint8Array,
+    opts: { timeoutMs: number },
+  ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
+}
+
+function createACKSendP2P(input: {
+  messenger: ACKReliableMessenger;
+  timeoutMs: number;
+}): ACKCollectorDeps['sendP2P'] {
+  return async (peerId: string, protocol: string, data: Uint8Array) => {
+    const sendResult = await input.messenger.sendReliable(peerId, protocol, data, {
+      timeoutMs: input.timeoutMs,
+    });
+    if (!sendResult.delivered) {
+      throw new Error(`substrate queued (transport): ${sendResult.error}`);
+    }
+    if (!sendResult.response) {
+      throw new Error('substrate delivered (transport) without response');
+    }
+    return sendResult.response;
   };
 }
 
@@ -600,8 +661,8 @@ export class DKGAgent extends DKGAgentBase {
     | { signature: string; count: number }
     | undefined;
 
-  static async create(config: DKGAgentConfig): Promise<DKGAgent> {
-    config = normalizeStorageAckConfig(config);
+  static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const config = normalizeStorageAckConfig(inputConfig);
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1645,7 +1706,7 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
-  public getACKCandidatePeerIds(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
+  public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
     return selectACKCandidatePeers({
       connectedPeers: peers.map(p => p.toString()),
@@ -1659,14 +1720,27 @@ export class DKGAgent extends DKGAgentBase {
     });
   }
 
-  public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    return this.getACKCandidatePeerIds(protocol);
+  public createACKTransportFactory(
+    options: DKGAgentACKTransportOptions = {},
+  ): () => DKGAgentACKTransport {
+    const timeoutMs = options.sendTimeoutMs ?? this.config.storageAckTiming.sendTimeoutMs;
+    return () => ({
+      publisherPeerId: this.peerId,
+      gossipPublish: async (topic: string, data: Uint8Array) => {
+        await this.gossip.publish(topic, data);
+      },
+      sendP2P: this.createACKSendP2P(timeoutMs),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      log: options.log,
+    });
   }
 
-  private createACKSendP2P(): ACKCollectorDeps['sendP2P'] {
-    return createPublisherACKSendP2P({
+  private createACKSendP2P(
+    timeoutMs = this.config.storageAckTiming.sendTimeoutMs,
+  ): ACKCollectorDeps['sendP2P'] {
+    return createACKSendP2P({
       messenger: this.messenger,
-      timeoutMs: this.config.storageAckTiming!.sendTimeoutMs,
+      timeoutMs,
     });
   }
 
@@ -1699,7 +1773,7 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeerIds(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1782,7 +1856,7 @@ export class DKGAgent extends DKGAgentBase {
         }
       }
       // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeerIds' confirmed-core shortcut tracks the chain's real
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
       // requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;
@@ -1851,7 +1925,7 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeerIds(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1933,7 +2007,7 @@ export class DKGAgent extends DKGAgentBase {
         }
       }
       // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeerIds' confirmed-core shortcut tracks the chain's real
+      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
       // requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;

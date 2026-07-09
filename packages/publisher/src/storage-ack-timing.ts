@@ -26,6 +26,14 @@ function requirePositiveSafeIntegerMs(value: unknown, label: string): number | u
   return value as number;
 }
 
+function requireNonNegativeSafeIntegerMs(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0) {
+    throw new Error(`${label} must be a non-negative safe integer number of milliseconds`);
+  }
+  return value as number;
+}
+
 export function resolveStorageAckTiming(
   storageAck?: StorageAckTimingInput | null,
   label = 'storageAck',
@@ -33,7 +41,7 @@ export function resolveStorageAckTiming(
   if (storageAck != null && (typeof storageAck !== 'object' || Array.isArray(storageAck))) {
     throw new Error(`${label} must be an object with optional handlerDeadlineMs/sendTimeoutMs fields`);
   }
-  const handlerOverride = requirePositiveSafeIntegerMs(
+  const handlerOverride = requireNonNegativeSafeIntegerMs(
     storageAck?.handlerDeadlineMs,
     `${label}.handlerDeadlineMs`,
   );
@@ -46,7 +54,10 @@ export function resolveStorageAckTiming(
     STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
     handlerDeadlineMs + STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   );
-  if (sendTimeoutMs - handlerDeadlineMs < STORAGE_ACK_TIMING_SAFETY_MARGIN_MS) {
+  if (
+    handlerDeadlineMs > 0 &&
+    sendTimeoutMs - handlerDeadlineMs < STORAGE_ACK_TIMING_SAFETY_MARGIN_MS
+  ) {
     throw new Error(
       `${label}.sendTimeoutMs must be at least ${STORAGE_ACK_TIMING_SAFETY_MARGIN_MS}ms ` +
       `greater than ${label}.handlerDeadlineMs ` +

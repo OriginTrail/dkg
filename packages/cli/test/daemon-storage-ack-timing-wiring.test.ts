@@ -6,8 +6,14 @@ import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   chainResetWipe: vi.fn(),
+  createServer: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
+  startPublisherRuntimeIfEnabled: vi.fn(),
+}));
+
+vi.mock('node:http', () => ({
+  createServer: mocks.createServer,
 }));
 
 vi.mock('@origintrail-official/dkg-agent', async importOriginal => {
@@ -36,7 +42,32 @@ vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
   };
 });
 
-const { createDaemonACKTransportFactory, runDaemonInner } = await import('../src/daemon/lifecycle.js');
+vi.mock('../src/publisher-runner.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/publisher-runner.js')>();
+  return {
+    ...actual,
+    startPublisherRuntimeIfEnabled: mocks.startPublisherRuntimeIfEnabled,
+  };
+});
+
+const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+
+function createFakeServer() {
+  const server = {
+    listen: vi.fn((_port: number, _host: string, cb?: () => void) => {
+      cb?.();
+      return server;
+    }),
+    address: vi.fn(() => ({ port: 43123 })),
+    close: vi.fn((cb?: () => void) => {
+      cb?.();
+      return server;
+    }),
+    on: vi.fn(() => server),
+    once: vi.fn(() => server),
+  };
+  return server;
+}
 
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
@@ -52,6 +83,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   let stderrWrite: typeof process.stderr.write = process.stderr.write;
   let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
   let unhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] = [];
+  let sigintListeners: NodeJS.SignalsListener[] = [];
+  let sigtermListeners: NodeJS.SignalsListener[] = [];
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-storage-ack-timing-wiring-'));
@@ -61,7 +94,11 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     stderrWrite = process.stderr.write;
     uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
     unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
+    sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
+    mocks.createServer.mockImplementation(createFakeServer);
+    mocks.startPublisherRuntimeIfEnabled.mockResolvedValue(null);
     mocks.loadNetworkConfig.mockResolvedValue({
       networkName: 'DKG V10 Gnosis Mainnet',
       genesisId: 'gnosis-mainnet',
@@ -88,12 +125,17 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    vi.useRealTimers();
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
     process.removeAllListeners('uncaughtException');
     for (const listener of uncaughtExceptionListeners) process.on('uncaughtException', listener);
     process.removeAllListeners('unhandledRejection');
     for (const listener of unhandledRejectionListeners) process.on('unhandledRejection', listener);
+    process.removeAllListeners('SIGINT');
+    for (const listener of sigintListeners) process.on('SIGINT', listener);
+    process.removeAllListeners('SIGTERM');
+    for (const listener of sigtermListeners) process.on('SIGTERM', listener);
     if (originalDkgHome === undefined) delete process.env.DKG_HOME;
     else process.env.DKG_HOME = originalDkgHome;
     if (tempHome) await rm(tempHome, { recursive: true, force: true });
@@ -141,6 +183,17 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
   });
 
+  it('passes disabled StorageACK handler deadlines into DKGAgent.create', async () => {
+    const createArg = await captureCreateArg({
+      storageAck: { handlerDeadlineMs: 0, sendTimeoutMs: 20_000 },
+    });
+
+    expect(createArg.storageAckTiming).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 20_000,
+    });
+  });
+
   it('validates malformed StorageACK timing before chain-reset wipe can run', async () => {
     await expect(runDaemonInner(true, {
       name: 'storage-ack-invalid-before-wipe-test',
@@ -154,30 +207,113 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
-  it('passes the resolved send timeout into daemon async publisher ACK sends', async () => {
+  it('passes the resolved send timeout through the daemon async publisher startup handoff', async () => {
+    const realSetTimeout = globalThis.setTimeout;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: Parameters<typeof setTimeout>[0], timeout?: number, ...args: any[]) => {
+      const handle = realSetTimeout(handler, timeout, ...args);
+      if ((timeout ?? 0) > 0) handle.unref?.();
+      return handle;
+    }) as typeof setTimeout);
     const response = new Uint8Array([7]);
     const sendReliable = vi.fn(async () => ({
       delivered: true,
       response,
     }));
     const payload = new Uint8Array([1, 2, 3]);
-    const agent = {
+    const createACKTransportFactory = vi.fn(({ sendTimeoutMs, log }: {
+      sendTimeoutMs?: number;
+      log?: (message: string) => void;
+    }) => () => ({
+      publisherPeerId: 'self-peer',
+      gossipPublish: vi.fn(async () => undefined),
+      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
+        const result = await sendReliable(peerId, protocol, data, {
+          timeoutMs: sendTimeoutMs,
+        });
+        if (!result.delivered) throw new Error(`substrate queued (transport): ${result.error}`);
+        if (!result.response) throw new Error('substrate delivered (transport) without response');
+        return result.response;
+      },
+      getConnectedCorePeers: vi.fn(() => ['peer-a']),
+      log,
+    }));
+    const fakeAgent = {
       peerId: 'self-peer',
-      gossip: { publish: vi.fn(async () => undefined) },
-      messenger: { sendReliable },
-      getACKCandidatePeerIds: vi.fn(() => ['peer-a']),
+      multiaddrs: [],
+      wallet: {
+        keypair: {
+          publicKey: new Uint8Array([1]),
+          secretKey: new Uint8Array([2]),
+        },
+      },
+      store: {},
+      node: { libp2p: { getMultiaddrs: vi.fn(() => []) } },
+      eventBus: { on: vi.fn() },
+      assertion: {
+        create: vi.fn(),
+        write: vi.fn(),
+      },
+      setChatAcl: vi.fn(),
+      setSkillAcl: vi.fn(),
+      onChat: vi.fn(),
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      publishProfile: vi.fn(async () => undefined),
+      publishRelayRegistry: vi.fn(async () => undefined),
+      ensureContextGraphLocal: vi.fn(async () => undefined),
+      subscribeToContextGraph: vi.fn(),
+      pingPeers: vi.fn(async () => undefined),
+      listLocalAgents: vi.fn(() => []),
+      registerImportedArtifactByteStore: vi.fn(),
+      getDefaultAgentAddress: vi.fn(() => undefined),
+      query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
+      createContextGraph: vi.fn(),
+      listContextGraphs: vi.fn(async () => []),
+      createACKTransportFactory,
+      drainRpcUsage: vi.fn(() => ({
+        calls: 0,
+        errors: 0,
+        throttledMs: 0,
+        byEndpoint: {},
+      })),
     };
-    const transport = createDaemonACKTransportFactory({
-      agent,
-      ackSendTimeoutMs: 60_000,
-      log: vi.fn(),
-    })();
+    mocks.agentCreate.mockResolvedValue(fakeAgent);
+
+    await runDaemonInner(true, {
+      name: 'storage-ack-async-publisher-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'edge',
+      apiPort: 0,
+      auth: { enabled: false },
+      promoteQueue: { enabled: false },
+      publisher: { enabled: true },
+      source: 'monorepo',
+      storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+    } as any, Date.now());
+
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+
+    expect(mocks.startPublisherRuntimeIfEnabled).toHaveBeenCalledTimes(1);
+    expect(createACKTransportFactory).toHaveBeenCalledWith(expect.objectContaining({
+      sendTimeoutMs: 60_000,
+      log: expect.any(Function),
+    }));
+
+    const startupArg = mocks.startPublisherRuntimeIfEnabled.mock.calls[0]?.[0] as any;
+    const transport = startupArg.ackTransportFactory();
 
     await expect(transport.sendP2P('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
     expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
     expect(transport.getConnectedCorePeers('/dkg/test/storage-ack')).toEqual(['peer-a']);
-    expect(agent.getACKCandidatePeerIds).toHaveBeenCalledWith('/dkg/test/storage-ack');
   });
 });

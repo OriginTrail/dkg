@@ -113,9 +113,20 @@ interface ACKCollectorDepsCapture {
 interface ProviderInternals {
   createV10ACKProvider(cgId: string): unknown;
   createV10UpdateACKProvider(cgId: string): unknown;
+  createACKTransportFactory(options?: {
+    sendTimeoutMs?: number;
+    log?: (message: string) => void;
+  }): () => {
+    sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
+  };
   router: unknown;
   gossip: unknown;
   messenger: unknown;
+  config: {
+    storageAckTiming: { handlerDeadlineMs: number; sendTimeoutMs: number };
+    ackHandlerDeadlineMs?: number;
+    ackSendTimeoutMs?: number;
+  };
   chain: MockChainAdapter & {
     verifyACKIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
     verifyACKIdentityDetailed?: (
@@ -299,6 +310,81 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
+  });
+
+  it('accepts matching single legacy aliases with storageAckTiming without rehydrating aliases', async () => {
+    const boot = await bootProviderAgent({
+      storageAckTiming: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
+      ackSendTimeoutMs: 60_000,
+    });
+    agent = boot.agent;
+
+    expect(boot.internals.config.storageAckTiming).toEqual({
+      handlerDeadlineMs: 55_000,
+      sendTimeoutMs: 60_000,
+    });
+    expect(boot.internals.config.ackHandlerDeadlineMs).toBeUndefined();
+    expect(boot.internals.config.ackSendTimeoutMs).toBeUndefined();
+  });
+
+  it('rejects conflicting storageAckTiming and legacy ACK timing aliases', async () => {
+    await expect(DKGAgent.create({
+      name: 'ACKTimingConflictingAliasesTest',
+      storageAckTiming: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
+      ackSendTimeoutMs: 20_000,
+    })).rejects.toThrow(/DKGAgentConfig\.storageAckTiming must not conflict/);
+  });
+
+  it('preserves legacy ackHandlerDeadlineMs: 0 as a disabled handler deadline', async () => {
+    const boot = await bootProviderAgent({ ackHandlerDeadlineMs: 0 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const response = new Uint8Array([9]);
+    const sendReliable = vi.fn(async () => ({
+      delivered: true,
+      response,
+    }));
+    internals.messenger = { sendReliable };
+    const payload = new Uint8Array([1]);
+
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    await expect(publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
+
+    expect(internals.config.storageAckTiming).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 20_000,
+    });
+    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+      timeoutMs: 20_000,
+    });
+  });
+
+  it('rejects failed ACK transport sends from the agent-owned transport factory', async () => {
+    const boot = await bootProviderAgent({ ackSendTimeoutMs: 60_000 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const payload = new Uint8Array([1]);
+
+    const queuedSend = vi.fn(async () => ({
+      delivered: false,
+      error: 'queued',
+    }));
+    internals.messenger = { sendReliable: queuedSend };
+    await expect(
+      internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
+    ).rejects.toThrow(/substrate queued \(transport\): queued/);
+    expect(queuedSend).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+      timeoutMs: 60_000,
+    });
+
+    const missingResponseSend = vi.fn(async () => ({
+      delivered: true,
+    }));
+    internals.messenger = { sendReliable: missingResponseSend };
+    await expect(
+      internals.createACKTransportFactory()().sendP2P('peer-a', '/dkg/test/storage-ack', payload),
+    ).rejects.toThrow(/substrate delivered \(transport\) without response/);
   });
 
   it('rejects misaligned direct agent ACK timing before boot side effects', async () => {

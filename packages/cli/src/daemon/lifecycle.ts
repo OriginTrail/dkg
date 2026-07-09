@@ -74,7 +74,6 @@ import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } fro
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
 import {
-  createACKSendP2P,
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -147,7 +146,7 @@ import {
 import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
 import { createDaemonLogSink } from './log-sink.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
-import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type ACKTransportFactory, type PublisherRuntime } from '../publisher-runner.js';
+import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -651,49 +650,6 @@ export function orderACKCandidatePeerIds(input: {
     knownCorePeerIds: input.knownCorePeerIds,
     preferredACKPeerIds: input.preferredACKPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
-  });
-}
-
-interface DaemonACKTransportAgent {
-  peerId: string;
-  gossip: { publish(topic: string, data: Uint8Array): Promise<void> };
-  messenger: {
-    sendReliable(
-      peerId: string,
-      protocol: string,
-      data: Uint8Array,
-      opts: { timeoutMs: number },
-    ): Promise<{ delivered: boolean; error?: unknown; response: Uint8Array }>;
-  };
-  getACKCandidatePeerIds(protocol?: string): string[];
-}
-
-function asDaemonACKTransportAgent(agent: DKGAgent): DaemonACKTransportAgent {
-  const transport = agent as unknown as Pick<DaemonACKTransportAgent, 'gossip' | 'messenger'>;
-  return {
-    peerId: agent.peerId,
-    gossip: transport.gossip,
-    messenger: transport.messenger,
-    getACKCandidatePeerIds: (protocol?: string) => agent.getACKCandidatePeerIds(protocol),
-  };
-}
-
-export function createDaemonACKTransportFactory(input: {
-  agent: DaemonACKTransportAgent;
-  ackSendTimeoutMs: number;
-  log?: (message: string) => void;
-}): () => ACKTransportFactory {
-  return () => ({
-    publisherPeerId: input.agent.peerId,
-    gossipPublish: async (topic: string, data: Uint8Array) => {
-      await input.agent.gossip.publish(topic, data);
-    },
-    sendP2P: createACKSendP2P({
-      messenger: input.agent.messenger,
-      timeoutMs: input.ackSendTimeoutMs,
-    }),
-    getConnectedCorePeers: (protocol?: string) => input.agent.getACKCandidatePeerIds(protocol),
-    log: input.log,
   });
 }
 
@@ -1981,9 +1937,8 @@ export async function runDaemonInner(
             store: agent.store,
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
-            ackTransportFactory: createDaemonACKTransportFactory({
-              agent: asDaemonACKTransportAgent(agent),
-              ackSendTimeoutMs: storageAckTiming.sendTimeoutMs,
+            ackTransportFactory: agent.createACKTransportFactory({
+              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),

@@ -77,10 +77,6 @@ export {
   type ACKCollectionResult,
 } from './ack-collector.js';
 export {
-  createACKSendP2P,
-  type ACKReliableMessenger,
-} from './ack-send-transport.js';
-export {
   selectACKCandidatePeers,
   type ACKCandidatePeerSelectionInput,
 } from './ack-peer-selection.js';
