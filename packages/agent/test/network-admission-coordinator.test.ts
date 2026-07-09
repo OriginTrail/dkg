@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
+import {
+  NetworkAdmissionCoordinator,
+  NetworkAdmissionRejectedError,
+  NetworkIdentityProbeTransportError,
+} from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
@@ -91,7 +95,7 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
   });
 
-  it('backs off retryable probe failures before probing the same peer again', async () => {
+  it('keeps active retryable probe backoff on the retryable error path', async () => {
     let now = 1_000;
     const sendIdentityProbe = vi.fn(async () => {
       throw new Error('stream timeout');
@@ -112,10 +116,146 @@ describe('NetworkAdmissionCoordinator', () => {
 
     await expect(
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
-    ).resolves.toBe(false);
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
 
     now += 101;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not map retryable probe backoff to explicit-connect rejection', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+      },
+    });
+    const assertExplicitConnectAdmitted = async () => {
+      if (await fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'))) return;
+      throw new NetworkAdmissionRejectedError(REMOTE_PEER_ID);
+    };
+
+    await expect(assertExplicitConnectAdmitted()).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+    });
+    await expect(assertExplicitConnectAdmitted()).rejects.toMatchObject({
+      code: 'NETWORK_ADMISSION_PROBE_FAILED',
+    });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+  });
+
+  it('grows transient retryable probe backoff up to the configured cap', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new Error('stream timeout');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        transientBaseMs: 100,
+        transientMaxMs: 150,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 99;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+
+    now += 149;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(3);
+  });
+
+  it('uses unreadable-response backoff before retrying malformed probe responses', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        unreadableResponseMs: 250,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 249;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses typed unsupported-protocol backoff before retrying unsupported identity probes', async () => {
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => {
+      throw new NetworkIdentityProbeTransportError('unsupported-protocol', 'identity protocol unsupported');
+    });
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      probeBackoff: {
+        unsupportedProtocolMs: 500,
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 499;
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    now += 1;
     await expect(
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });

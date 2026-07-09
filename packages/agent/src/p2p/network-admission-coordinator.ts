@@ -54,6 +54,7 @@ export interface NetworkAdmissionProbeBackoffOptions {
 }
 
 type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response' | 'unsupported-protocol';
+export type NetworkIdentityProbeTransportFailureKind = 'transient' | 'unsupported-protocol';
 
 interface NetworkAdmissionProbeBackoffEntry {
   failures: number;
@@ -133,6 +134,18 @@ export class NetworkAdmissionProbeError extends Error {
   constructor(peerId: string, reason: string) {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
+  }
+}
+
+export class NetworkIdentityProbeTransportError extends Error {
+  readonly kind: NetworkIdentityProbeTransportFailureKind;
+  readonly originalError?: unknown;
+
+  constructor(kind: NetworkIdentityProbeTransportFailureKind, reason: string, originalError?: unknown) {
+    super(reason);
+    this.name = 'NetworkIdentityProbeTransportError';
+    this.kind = kind;
+    this.originalError = originalError;
   }
 }
 
@@ -244,7 +257,14 @@ export class NetworkAdmissionCoordinator {
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
     if (this.admission.isRejectedPeer(remotePeerId)) return false;
-    if (this.isProbeBackedOff(remotePeerId)) return false;
+    const backoff = this.probeBackoffEntry(remotePeerId);
+    if (backoff) {
+      const retryAfterMs = Math.max(0, backoff.untilMs - this.now());
+      throw new NetworkAdmissionProbeError(
+        remotePeerId,
+        `retryable probe backed off for ${retryAfterMs}ms after ${backoff.reason}`,
+      );
+    }
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
     const existing = this.inFlight.get(remotePeerId);
@@ -290,7 +310,7 @@ export class NetworkAdmissionCoordinator {
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
-      this.rememberRetryableProbeFailure(remotePeer, message, classifyProbeBackoffKind(message));
+      this.rememberRetryableProbeFailure(remotePeer, message, probeBackoffKindForTransportFailure(err));
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -354,14 +374,11 @@ export class NetworkAdmissionCoordinator {
     }
   }
 
-  private isProbeBackedOff(remotePeer: CanonicalPeerId): boolean {
+  private probeBackoffEntry(remotePeer: CanonicalPeerId): NetworkAdmissionProbeBackoffEntry | undefined {
     const entry = this.retryableProbeBackoff.get(remotePeer);
-    if (!entry) return false;
-    if (entry.untilMs <= this.now()) {
-      this.retryableProbeBackoff.delete(remotePeer);
-      return false;
-    }
-    return true;
+    if (!entry) return undefined;
+    if (entry.untilMs <= this.now()) return undefined;
+    return entry;
   }
 
   private rememberRetryableProbeFailure(
@@ -414,14 +431,8 @@ function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
   }
 }
 
-function classifyProbeBackoffKind(message: string): NetworkAdmissionProbeBackoffKind {
-  const lower = message.toLowerCase();
-  if (
-    lower.includes('could not negotiate')
-    || lower.includes('protocol selection failed')
-    || lower.includes('protocol not supported')
-    || lower.includes('unsupported protocol')
-  ) {
+function probeBackoffKindForTransportFailure(err: unknown): NetworkAdmissionProbeBackoffKind {
+  if (err instanceof NetworkIdentityProbeTransportError && err.kind === 'unsupported-protocol') {
     return 'unsupported-protocol';
   }
   return 'transient';
