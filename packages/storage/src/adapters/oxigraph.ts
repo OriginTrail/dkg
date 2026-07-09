@@ -254,8 +254,8 @@ export class OxigraphStore implements TripleStore {
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
     // The embedded Oxigraph binding executes synchronously, so a caller abort
-    // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
-    // HTTP backend when long sync queries need prompt cancellation.
+    // cannot interrupt this native call mid-flight. Use an HTTP backend when
+    // long sync queries need prompt cancellation.
     const result = this.store.query(sparql);
     throwIfAborted(options?.signal);
 

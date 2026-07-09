@@ -666,7 +666,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkConfig: resolveNetworkConfigName(config),
       networkId,
       networkName: network?.networkName ?? null,
-      storeBackend: config.store?.backend ?? "oxigraph-worker",
+      storeBackend: config.store?.backend ?? "oxigraph-server",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
       // local backends both fields stay null so the response shape is
       // stable across deployments.

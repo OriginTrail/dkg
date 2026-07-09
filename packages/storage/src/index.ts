@@ -60,7 +60,6 @@ export {
 } from './graph-write-gen.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
-export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export { BlazegraphStore } from './adapters/blazegraph.js';
 export {
   SparqlHttpStore,
@@ -87,6 +86,5 @@ export { PrivateContentStore } from './private-store.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';
-import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';

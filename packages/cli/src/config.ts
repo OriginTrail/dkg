@@ -574,7 +574,7 @@ export interface DkgConfig {
   llm?: LlmConfig;
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). */
+  /** Triple store backend override (default: daemon-managed oxigraph-server). */
   store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
@@ -1831,6 +1831,16 @@ export interface StoreConfigValidationError {
 export function validateStoreConfig(config: DkgConfig): StoreConfigValidationError[] {
   const errors: StoreConfigValidationError[] = [];
   const backend = config.store?.backend;
+  if (backend === 'oxigraph-worker') {
+    return [{
+      field: 'store.backend',
+      message:
+        `${EXTERNAL_VALIDATION_PREFIX} "oxigraph-worker" is no longer supported. ` +
+        `Set store.backend to "oxigraph-server" for the daemon-managed local store, ` +
+        `"sparql-http" or "blazegraph" for an external store, or "oxigraph" ` +
+        `for an embedded development store.`,
+    }];
+  }
   // Mirror of `isExternalBackend` from @origintrail-official/dkg-storage.
   // Duplicated here to keep config.ts free of upward dependencies on the
   // storage package (config.ts is leaf-imported by many other modules).
@@ -1847,7 +1857,7 @@ export function validateStoreConfig(config: DkgConfig): StoreConfigValidationErr
           `${EXTERNAL_VALIDATION_PREFIX} is "blazegraph" but ` +
           `store.options.url is missing. Set it to the SPARQL endpoint URL ` +
           `(e.g. http://127.0.0.1:9999/bigdata/namespace/mynode/sparql) or ` +
-          `switch backend to oxigraph-worker.`,
+          `switch backend to oxigraph-server.`,
       });
     }
   } else if (backend === 'sparql-http') {

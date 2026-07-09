@@ -589,7 +589,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
     expect(result.failedFiles.some((f) => f.error.includes('ECONNREFUSED'))).toBe(true);
   });
 
-  it('skips external wipe entirely for local backends (storeConfig present, backend oxigraph-worker)', async () => {
+  it('skips external wipe entirely for local backends (storeConfig present, backend oxigraph-persistent)', async () => {
     writeFileSync(join(dataDir, 'store.nq'), '<s> <p> <o> .');
 
     const { fn, calls } = mockFetch(() => new Response(null, { status: 200 }));
@@ -597,7 +597,7 @@ describe('chainResetWipe — external SPARQL wipe', () => {
       dataDir,
       currentMarker: NEW_MARKER,
       storeConfig: {
-        backend: 'oxigraph-worker',
+        backend: 'oxigraph-persistent',
         // Options that LOOK like an external URL: these must be ignored
         // because the backend itself is local. Otherwise an operator who
         // hand-tuned options would see surprise SPARQL requests.
@@ -652,7 +652,7 @@ describe('detectBackendSwitch', () => {
     const logs: string[] = [];
     const result = detectBackendSwitch({
       dataDir,
-      currentBackend: 'oxigraph-worker',
+      currentBackend: 'oxigraph-persistent',
       acceptStoreReset: false,
       log: (m) => logs.push(m),
     });
@@ -662,7 +662,7 @@ describe('detectBackendSwitch', () => {
     expect(result.aborted).toBe(false);
 
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
-    expect(persisted.lastBackend).toBe('oxigraph-worker');
+    expect(persisted.lastBackend).toBe('oxigraph-persistent');
     // First-boot path is silent — no STORE-SWITCH warning header.
     expect(logs.find((l) => l.includes('STORE-SWITCH'))).toBeUndefined();
   });
@@ -696,19 +696,19 @@ describe('detectBackendSwitch', () => {
   it('is a no-op when backend matches previous boot', () => {
     writeFileSync(
       join(dataDir, STATE_FILE),
-      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-worker', savedAt: Date.now() }),
+      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-persistent', savedAt: Date.now() }),
     );
 
     const logs: string[] = [];
     const result = detectBackendSwitch({
       dataDir,
-      currentBackend: 'oxigraph-worker',
+      currentBackend: 'oxigraph-persistent',
       acceptStoreReset: false,
       log: (m) => logs.push(m),
     });
 
     expect(result.changed).toBe(false);
-    expect(result.previous).toBe('oxigraph-worker');
+    expect(result.previous).toBe('oxigraph-persistent');
     expect(result.aborted).toBe(false);
     expect(logs).toEqual([]);
   });
@@ -716,7 +716,7 @@ describe('detectBackendSwitch', () => {
   it('aborts boot on mismatch without acceptStoreReset, surfaces multi-line warning', () => {
     writeFileSync(
       join(dataDir, STATE_FILE),
-      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-worker', savedAt: Date.now() }),
+      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-persistent', savedAt: Date.now() }),
     );
 
     const logs: string[] = [];
@@ -728,25 +728,25 @@ describe('detectBackendSwitch', () => {
     });
 
     expect(result.changed).toBe(true);
-    expect(result.previous).toBe('oxigraph-worker');
+    expect(result.previous).toBe('oxigraph-persistent');
     expect(result.aborted).toBe(true);
 
     const joined = logs.join('\n');
     expect(joined).toMatch(/STORE-SWITCH/);
-    expect(joined).toMatch(/previous: oxigraph-worker/);
+    expect(joined).toMatch(/previous: oxigraph-persistent/);
     expect(joined).toMatch(/current:\s+blazegraph/);
     expect(joined).toMatch(/DKG_ACCEPT_STORE_RESET=1/);
 
     // State file MUST still record the old backend so a corrected
     // config (operator reverts the edit) sees a match on next boot.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
-    expect(persisted.lastBackend).toBe('oxigraph-worker');
+    expect(persisted.lastBackend).toBe('oxigraph-persistent');
   });
 
   it('proceeds and updates state when acceptStoreReset=true', () => {
     writeFileSync(
       join(dataDir, STATE_FILE),
-      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-worker', savedAt: Date.now() }),
+      JSON.stringify({ chainResetMarker: null, lastBackend: 'oxigraph-persistent', savedAt: Date.now() }),
     );
 
     const logs: string[] = [];
@@ -775,12 +775,12 @@ describe('detectBackendSwitch', () => {
     // Establish a baseline by running detectBackendSwitch first.
     detectBackendSwitch({
       dataDir,
-      currentBackend: 'oxigraph-worker',
+      currentBackend: 'oxigraph-persistent',
       acceptStoreReset: false,
     });
     expect(
       JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8')).lastBackend,
-    ).toBe('oxigraph-worker');
+    ).toBe('oxigraph-persistent');
 
     // Now run a marker change — the wipe path persists chainResetMarker
     // and MUST preserve lastBackend.
@@ -792,7 +792,7 @@ describe('detectBackendSwitch', () => {
 
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(NEW_MARKER);
-    expect(persisted.lastBackend).toBe('oxigraph-worker');
+    expect(persisted.lastBackend).toBe('oxigraph-persistent');
   });
 });
 

@@ -255,9 +255,8 @@ describe('createTripleStore factory', () => {
   it('all built-in backends are registered (factory throws something other than "Unknown TripleStore backend")', async () => {
     // The *registry* contract being tested here is: every built-in
     // backend name is recognized. The construction itself may require
-    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`)
-    // or worker artifacts (oxigraph-worker needs the compiled worker
-    // impl). So a backend passes this test iff calling `createTripleStore`
+    // options (blazegraph needs `url`, sparql-http needs `queryEndpoint`).
+    // So a backend passes this test iff calling `createTripleStore`
     // either succeeds OR throws a *non*-"Unknown TripleStore backend"
     // error.
     //
@@ -266,7 +265,7 @@ describe('createTripleStore factory', () => {
     // effectively assert "a promise settled" — noise. This version
     // asserts the positive contract explicitly and points at the
     // specific failing backend if the registry regresses.
-    const backends = ['oxigraph', 'oxigraph-worker', 'blazegraph', 'sparql-http'];
+    const backends = ['oxigraph', 'blazegraph', 'sparql-http'];
     for (const backend of backends) {
       let outcome: 'constructed' | Error;
       try {
@@ -312,45 +311,10 @@ describe('createTripleStore factory', () => {
     ).rejects.toThrow('queryEndpoint');
   });
 
-  it('oxigraph-worker adapter is registered and round-trips an insert', async () => {
-    // The worker adapter resolves `./oxigraph-worker-impl.js` relative to
-    // the module loaded at runtime. When vitest runs against raw source
-    // without a prior `pnpm build`, that URL lands in `src/adapters/` where
-    // only the .ts files live, so the Worker constructor throws
-    // "Cannot find module … oxigraph-worker-impl.js".
-    //
-    // This used to be caught and converted to `ctx.skip()`, which meant a
-    // green CI run even when the worker artifact was missing — i.e. a
-    // broken build never triggered a test failure. We now FAIL LOUDLY in
-    // that case with a remediation hint, so:
-    //   • locally, the developer sees "run pnpm build first" instead of a
-    //     silent skip;
-    //   • in CI, if `pnpm build` was not wired into the lane (or the build
-    //     regresses), this test surfaces it as a red failure.
-    let store: Awaited<ReturnType<typeof createTripleStore>>;
-    try {
-      store = await createTripleStore({ backend: 'oxigraph-worker' });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('Cannot find module') && msg.includes('oxigraph-worker-impl')) {
-        throw new Error(
-          `oxigraph-worker adapter is not runnable — the compiled ` +
-          `oxigraph-worker-impl.js artifact is missing from ` +
-          `packages/storage/dist/adapters/. Run ` +
-          `\`pnpm --filter @origintrail-official/dkg-storage build\` ` +
-          `before running this test. Underlying error: ${msg}`,
-        );
-      }
-      throw err;
-    }
-    await store.insert([{
-      subject: 'http://ex.org/s',
-      predicate: 'http://ex.org/p',
-      object: '"hi"',
-      graph: 'http://ex.org/g',
-    }]);
-    expect(await store.countQuads()).toBe(1);
-    await store.close();
+  it('rejects the retired oxigraph-worker backend with an actionable message', async () => {
+    await expect(createTripleStore({ backend: 'oxigraph-worker' })).rejects.toThrow(
+      /no longer supported/,
+    );
   });
 
   it('throws on unknown backend', async () => {

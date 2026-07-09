@@ -166,7 +166,7 @@ export async function tryUpdateWithTouchedGraphs(
   return true;
 }
 
-export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
+export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'blazegraph' | 'sparql-http' | string;
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
 // owning local files. The local/external split governs three pieces of
@@ -272,6 +272,14 @@ export function registerTripleStoreAdapter(
 export async function createTripleStore(
   config: TripleStoreConfig,
 ): Promise<TripleStore> {
+  if (config.backend === 'oxigraph-worker') {
+    throw new Error(
+      'TripleStore backend "oxigraph-worker" is no longer supported. ' +
+        'Use the daemon-managed "oxigraph-server" config, an external ' +
+        '"sparql-http"/"blazegraph" store, or "oxigraph-persistent" for ' +
+        'local embedded persistence.',
+    );
+  }
   const factory = adapterRegistry.get(config.backend);
   if (!factory) {
     throw new Error(
@@ -337,8 +345,7 @@ function shouldEnableGraphSetIndex(config: TripleStoreConfig): boolean {
 
 function isDefaultLocalGraphSetIndexBackend(backend: TripleStoreBackend): boolean {
   return backend === 'oxigraph'
-    || backend === 'oxigraph-persistent'
-    || backend === 'oxigraph-worker';
+    || backend === 'oxigraph-persistent';
 }
 
 function resolveLargeLiteralStorageOptions(

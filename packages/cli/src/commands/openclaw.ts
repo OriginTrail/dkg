@@ -127,7 +127,7 @@ openclawCmd
   )
   .option(
     '--store <backend>',
-    'Triple-store backend (oxigraph | blazegraph | sparql-http). Validates the URL via an ASK probe and persists the store block after setup completes.',
+    'Triple-store backend (oxigraph-server | oxigraph | blazegraph | sparql-http). Validates the URL via an ASK probe and persists the store block after setup completes.',
   )
   .option(
     '--store-url <url>',

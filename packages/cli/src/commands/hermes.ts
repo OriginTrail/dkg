@@ -189,7 +189,7 @@ hermesCmd
   )
   .option(
     '--store <backend>',
-    'Triple-store backend (oxigraph | blazegraph | sparql-http). Validates the URL and persists the store block after setup.',
+    'Triple-store backend (oxigraph-server | oxigraph | blazegraph | sparql-http). Validates the URL and persists the store block after setup.',
   )
   .option(
     '--store-url <url>',

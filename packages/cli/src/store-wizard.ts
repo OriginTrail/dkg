@@ -67,9 +67,9 @@ export interface PromptStoreBackendOptions {
 
 export interface PromptStoreBackendResult {
   /**
-   * Persisted store block. `null` means "use the local default" (caller
-   * should omit the field or set it to undefined; saveConfig drops
-   * undefined keys).
+   * Persisted store block. `null` means "leave the store block omitted";
+   * daemon boot treats an omitted store block as the managed `oxigraph-server`
+   * default.
    *
    * `managedByDkg: true` is set by the Docker provisioner branch only;
    * manual URLs always get `managedByDkg: false`. The chain-reset-wipe
@@ -80,15 +80,8 @@ export interface PromptStoreBackendResult {
   storeBlock: ExternalStoreBlock | LocalStoreBlock | null;
 }
 
-// An explicit embedded/local store block carried through verbatim on an
-// Enter-through re-init. `null` still means "no block — runtime default", but
-// when a node already pinned a local backend with custom `options` (e.g. the
-// `options.path` the oxigraph-worker adapter reads for its persistence file),
-// returning that block instead of `null` keeps re-init idempotent: cli init
-// writes `store: storeBlock ?? undefined`, so a `null` would clear the block
-// and relocate the store on the next boot.
 export type LocalStoreBlock = {
-  backend: 'oxigraph' | 'oxigraph-worker' | 'oxigraph-persistent';
+  backend: 'oxigraph' | 'oxigraph-persistent';
   options?: Record<string, unknown>;
 };
 
@@ -136,6 +129,108 @@ function externalStoreBlock(
   };
 }
 
+const STORE_BACKENDS = {
+  'oxigraph-server': {
+    kind: 'managed-local',
+    retired: false,
+    menu: true,
+    label: 'oxigraph-server  (managed local server — recommended)',
+  },
+  oxigraph: {
+    kind: 'local',
+    retired: false,
+    menu: true,
+    label: 'oxigraph         (embedded in-memory store — development only)',
+    requiresExistingPath: false,
+  },
+  'oxigraph-persistent': {
+    kind: 'local',
+    retired: false,
+    menu: false,
+    requiresExistingPath: true,
+  },
+  blazegraph: {
+    kind: 'external',
+    retired: false,
+    menu: true,
+    label: 'blazegraph       (external SPARQL endpoint)',
+  },
+  'sparql-http': {
+    kind: 'external',
+    retired: false,
+    menu: false,
+  },
+  'oxigraph-worker': {
+    kind: 'retired',
+    retired: true,
+    menu: false,
+  },
+} as const;
+
+type StoreBackend = keyof typeof STORE_BACKENDS;
+type SupportedStoreBackend = Exclude<StoreBackend, 'oxigraph-worker'>;
+type MenuStoreBackend = 'oxigraph-server' | 'oxigraph' | 'blazegraph';
+type ExternalStoreBackend = 'blazegraph' | 'sparql-http';
+
+const DEFAULT_STORE_BACKEND: SupportedStoreBackend = 'oxigraph-server';
+const UNSUPPORTED_WORKER_BACKEND: StoreBackend = 'oxigraph-worker';
+
+function storeBackendNames(): StoreBackend[] {
+  return Object.keys(STORE_BACKENDS) as StoreBackend[];
+}
+
+function supportedBackendNames(): SupportedStoreBackend[] {
+  return storeBackendNames().filter((backend): backend is SupportedStoreBackend => (
+    !STORE_BACKENDS[backend].retired
+  ));
+}
+
+function supportedBackendList(): string {
+  return supportedBackendNames().join(', ');
+}
+
+function menuBackendChoices(): MenuStoreBackend[] {
+  return storeBackendNames().filter((backend): backend is MenuStoreBackend => (
+    !STORE_BACKENDS[backend].retired && STORE_BACKENDS[backend].menu
+  ));
+}
+
+function isKnownStoreBackend(backend: string | undefined): backend is StoreBackend {
+  return backend !== undefined && Object.prototype.hasOwnProperty.call(STORE_BACKENDS, backend);
+}
+
+function isSupportedExistingBackend(backend: string | undefined): backend is SupportedStoreBackend {
+  return isKnownStoreBackend(backend) && !STORE_BACKENDS[backend].retired;
+}
+
+function unsupportedWorkerBackendError(source: string): Error {
+  return new Error(
+    `${source} "oxigraph-worker" is no longer supported. ` +
+      `Use one of: ${supportedBackendList()}.`,
+  );
+}
+
+function unknownBackendError(source: 'prompt' | '--store', backend: string): Error {
+  if (source === '--store') {
+    return new Error(`--store must be one of: ${supportedBackendList()} (got "${backend}")`);
+  }
+  return new Error(`Unknown store backend "${backend}". Expected one of: ${supportedBackendList()}.`);
+}
+
+function parseBackendAnswer(
+  input: string,
+  defaultBackend: string,
+  choices: readonly MenuStoreBackend[],
+): string {
+  return /^\d+$/.test(input)
+    ? (choices[parseInt(input, 10) - 1] ?? defaultBackend)
+    : input.toLowerCase();
+}
+
+function hasStorePath(store: PromptStoreBackendOptions['existingStore'] | undefined): boolean {
+  return typeof store?.options?.path === 'string' && store.options.path.trim().length > 0;
+}
+
 export async function promptStoreBackend(
   opts: PromptStoreBackendOptions,
 ): Promise<PromptStoreBackendResult> {
@@ -156,35 +251,17 @@ export async function promptStoreBackend(
       : undefined;
 
   // `oxigraph-server` (daemon-managed local RocksDB server) is the default
-  // local backend: it gives MVCC concurrent reads + incremental persistence,
-  // whereas `oxigraph` (the embedded in-process worker) rewrites the whole
-  // N-Quads dump on every flush. The in-process worker stays available as a
-  // minimal-footprint / single-reader option. NOTE: this only changes what a
-  // *fresh / block-less* `dkg init` writes — the runtime fallback for configs
-  // with no `store` block stays `oxigraph-worker`, so the existing fleet keeps
-  // booting unchanged on auto-update (only an explicit re-init flips a node,
-  // and the daemon's STORE-SWITCH guard makes that an opt-in, not silent).
-  // Keep ANY explicit existing backend as the default answer — including the
-  // embedded `oxigraph` / `oxigraph-worker` / `oxigraph-persistent` variants.
-  // Keeping the *exact* variant (rather than normalising the worker variants
-  // onto the listed `oxigraph` choice) matters for distinguishing intent: an
-  // Enter-through resolves the default back to that exact backend (so the
-  // preserve branch below keeps the block + custom options), whereas explicitly
-  // picking option `2` ("oxigraph") resolves to a *different* answer and is
-  // treated as a real switch to the plain embedded worker. Only a truly absent
-  // store config (fresh install / block-less node) falls through to the new
-  // `oxigraph-server` default.
+  // local backend: it gives MVCC concurrent reads + incremental persistence.
+  // The old `oxigraph-worker` fallback is retired; configs that still name it
+  // are not preserved on Enter-through.
+  if (existingBackend === UNSUPPORTED_WORKER_BACKEND) {
+    log('  Existing store.backend "oxigraph-worker" is retired; defaulting to oxigraph-server.');
+  }
   const defaultBackend = opts.flagBackend
-    ?? (existingBackend === 'blazegraph' || existingBackend === 'sparql-http' || existingBackend === 'oxigraph-server'
-      || existingBackend === 'oxigraph' || existingBackend === 'oxigraph-worker' || existingBackend === 'oxigraph-persistent'
+    ?? (isSupportedExistingBackend(existingBackend)
       ? existingBackend
-      : 'oxigraph-server');
-  const backendChoices = ['oxigraph-server', 'oxigraph', 'blazegraph'] as const;
-  const backendLabels: Record<string, string> = {
-    'oxigraph-server': 'oxigraph-server  (managed local server — recommended)',
-    'oxigraph': 'oxigraph         (embedded in-process worker)',
-    'blazegraph': 'blazegraph       (external SPARQL endpoint)',
-  };
+      : DEFAULT_STORE_BACKEND);
+  const backendChoices = menuBackendChoices();
   // `sparql-http` is intentionally not listed (advanced bring-your-own-server
   // option) but is still accepted when typed or inherited from an existing
   // config / `--store` flag. Resolve the default *answer* by name for unlisted
@@ -198,7 +275,7 @@ export async function promptStoreBackend(
   log('  Triple store backend:');
   for (let i = 0; i < backendChoices.length; i++) {
     const choice = backendChoices[i];
-    log(`    ${i + 1}) ${backendLabels[choice] ?? choice}`);
+    log(`    ${i + 1}) ${STORE_BACKENDS[choice].label}`);
   }
   // When the inherited/flagged backend isn't one of the numbered choices
   // (e.g. `sparql-http`), spell out that pressing Enter keeps it and that a
@@ -216,15 +293,21 @@ export async function promptStoreBackend(
   // out-of-range number (typo like "4") falls back to `defaultBackend` —
   // i.e. the recommended option shown to the operator — rather than a
   // hard-coded `oxigraph`, so a fat-fingered digit on a fresh install no
-  // longer silently downgrades the node to the embedded worker.
-  const backendAnswer = /^\d+$/.test(backendInput)
-    ? (backendChoices[parseInt(backendInput, 10) - 1] ?? defaultBackend)
-    : backendInput.toLowerCase();
+  // longer silently downgrades the node to an embedded backend.
+  const backendAnswer = parseBackendAnswer(backendInput, defaultBackend, backendChoices);
+
+  if (backendAnswer === UNSUPPORTED_WORKER_BACKEND) {
+    throw unsupportedWorkerBackendError('store backend');
+  }
+  if (!isSupportedExistingBackend(backendAnswer)) {
+    throw unknownBackendError('prompt', backendAnswer);
+  }
+  const backendPolicy = STORE_BACKENDS[backendAnswer];
 
   // `oxigraph-server` (daemon-managed local server) is the default numbered
   // choice and is also accepted by name. No URL prompt or probe: the endpoint
   // doesn't exist until the daemon spawns it at boot.
-  if (backendAnswer === 'oxigraph-server') {
+  if (backendPolicy.kind === 'managed-local') {
     log('  Using a daemon-managed local Oxigraph server (started on first daemon boot).');
     // Preserve existing managed-server overrides (port/location/cacheDir) on an
     // Enter-through: `dkg init` persists this block, so returning empty options
@@ -237,28 +320,25 @@ export async function promptStoreBackend(
     return { storeBlock: { backend: 'oxigraph-server', options: prevOptions } };
   }
 
-  if (backendAnswer !== 'blazegraph' && backendAnswer !== 'sparql-http') {
-    // Embedded in-process worker. Preserve an existing explicit local store
-    // block verbatim ONLY when the operator kept that same backend — i.e. the
-    // resolved answer equals the existing backend (an Enter-through, which
-    // resolves the default back to the exact existing variant). That keeps a
-    // re-init idempotent and never drops custom `options` (e.g. the worker's
-    // `options.path`) or relocates the store. An *explicit* switch — picking
-    // option `2`/"oxigraph" on a node currently using `oxigraph-worker` /
-    // `oxigraph-persistent`, a switch from an external/server backend, or a
-    // fresh / block-less init — resolves to a different answer and falls
-    // through to `null`, so `dkg init` clears the old block as intended.
-    if (
-      (backendAnswer === 'oxigraph' ||
-        backendAnswer === 'oxigraph-worker' ||
-        backendAnswer === 'oxigraph-persistent') &&
-      backendAnswer === existingBackend
-    ) {
-      return { storeBlock: { backend: existingBackend, options: opts.existingStore?.options } };
+  if (backendPolicy.kind === 'local') {
+    const localBackend = backendAnswer as LocalStoreBlock['backend'];
+    if (STORE_BACKENDS[localBackend].requiresExistingPath && !hasStorePath(opts.existingStore)) {
+      throw new Error(
+        'store backend "oxigraph-persistent" requires store.options.path; ' +
+          'set it manually in config.json or use "oxigraph-server".',
+      );
     }
-    return { storeBlock: null };
+    const prevOptions =
+      localBackend === existingBackend && opts.existingStore?.options
+        ? opts.existingStore.options
+        : {};
+    return { storeBlock: { backend: localBackend, options: prevOptions } };
   }
-  const backend = backendAnswer as 'blazegraph' | 'sparql-http';
+
+  if (backendPolicy.kind !== 'external') {
+    throw unknownBackendError('prompt', backendAnswer);
+  }
+  const backend = backendAnswer as ExternalStoreBackend;
 
   // URL prompt loop: validate each attempt, surface the operator-facing
   // failure message, allow retry or abort.
@@ -317,7 +397,7 @@ export async function promptStoreBackend(
       }
       const retry = (await opts.ask('Retry with a URL? (y/n)', 'y')).toLowerCase();
       if (retry === 'n') {
-        log('  Aborting store setup; defaulting to local Oxigraph.');
+        log('  Aborting store setup; using the oxigraph-server default.');
         return { storeBlock: null };
       }
       continue;
@@ -352,7 +432,7 @@ export async function promptStoreBackend(
       'y',
     )).toLowerCase();
     if (retry === 'n') {
-      log('  Aborting store setup; defaulting to local Oxigraph.');
+      log('  Aborting store setup; using the oxigraph-server default.');
       return { storeBlock: null };
     }
   }
@@ -391,33 +471,49 @@ export async function applyStoreFlagsToConfig(
   opts: ApplyStoreFlagsOptions,
 ): Promise<void> {
   const log = opts.log ?? console.log;
-  const backend = opts.storeFlag;
+  const backend = opts.storeFlag?.trim().toLowerCase();
   if (!backend) return;
 
   const load = opts.loadConfig ?? loadConfig;
   const save = opts.saveConfig ?? saveConfig;
 
-  // Operators who pass `--store oxigraph` may be trying to FORCE local
-  // even though their existing config has a `store` block — honour
-  // that by clearing the block.
-  if (
-    backend === 'oxigraph' ||
-    backend === 'oxigraph-worker' ||
-    backend === 'oxigraph-persistent'
-  ) {
+  if (backend === UNSUPPORTED_WORKER_BACKEND) {
+    throw unsupportedWorkerBackendError('--store');
+  }
+  if (!isSupportedExistingBackend(backend)) {
+    throw unknownBackendError('--store', backend);
+  }
+  const backendPolicy = STORE_BACKENDS[backend];
+
+  // Operators who pass `--store oxigraph` are explicitly opting into the
+  // embedded development store. Persist it because an omitted store block now
+  // means the managed `oxigraph-server` default.
+  if (backendPolicy.kind === 'local') {
+    const localBackend = backend as LocalStoreBlock['backend'];
     const existing = await load();
-    if (existing.store) {
-      log(`  Removing existing store block (--store ${backend} → local default).`);
-      const next = { ...existing };
-      delete next.store;
-      await save(next);
+    if (STORE_BACKENDS[localBackend].requiresExistingPath) {
+      if (existing.store?.backend === localBackend && hasStorePath(existing.store)) {
+        await save({ ...existing, store: { backend: localBackend, options: existing.store.options } });
+        log(`  Store configured: ${localBackend}.`);
+        return;
+      }
+      throw new Error(
+        `--store ${localBackend} requires an existing store.options.path; ` +
+          'set it manually in config.json or use --store oxigraph-server.',
+      );
+    }
+    await save({ ...existing, store: { backend: localBackend, options: {} } });
+    if (localBackend === 'oxigraph') {
+      log('  Store configured: oxigraph (embedded development store).');
+    } else {
+      log(`  Store configured: ${localBackend}.`);
     }
     return;
   }
 
   // Daemon-managed local Oxigraph server: no URL to validate (the daemon
   // brings it up at boot). Write the block and return.
-  if (backend === 'oxigraph-server') {
+  if (backendPolicy.kind === 'managed-local') {
     const existing = await load();
     // Preserve any existing managed-server overrides (port/location/cacheDir)
     // that planManagedOxigraph reads at boot — re-running setup with
@@ -431,21 +527,20 @@ export async function applyStoreFlagsToConfig(
     return;
   }
 
-  if (backend !== 'blazegraph' && backend !== 'sparql-http') {
-    throw new Error(
-      `--store must be one of: oxigraph, blazegraph, sparql-http, oxigraph-server (got "${backend}")`,
-    );
+  if (backendPolicy.kind !== 'external') {
+    throw unknownBackendError('--store', backend);
   }
+  const externalBackend = backend as ExternalStoreBackend;
 
   const url = opts.storeUrlFlag?.trim();
   if (!url) {
-    throw new Error(`--store ${backend} requires --store-url <SPARQL endpoint URL>`);
+    throw new Error(`--store ${externalBackend} requires --store-url <SPARQL endpoint URL>`);
   }
 
   const optionsForProbe =
-    backend === 'blazegraph' ? { url } : { queryEndpoint: url };
+    externalBackend === 'blazegraph' ? { url } : { queryEndpoint: url };
   const health = await checkExternalStoreReachable({
-    storeConfig: { backend, options: optionsForProbe },
+    storeConfig: { backend: externalBackend, options: optionsForProbe },
     fetch: opts.fetch,
   });
   if (!health.ok) {
@@ -455,8 +550,8 @@ export async function applyStoreFlagsToConfig(
   const existing = await load();
   const next: DkgConfig = {
     ...existing,
-    store: externalStoreBlock(backend, url, false),
+    store: externalStoreBlock(externalBackend, url, false),
   };
   await save(next);
-  log(`  Store configured: ${backend} (${url}) — verified reachable.`);
+  log(`  Store configured: ${externalBackend} (${url}) — verified reachable.`);
 }

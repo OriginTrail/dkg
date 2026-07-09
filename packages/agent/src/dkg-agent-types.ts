@@ -923,7 +923,7 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
-  /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
+  /** Triple store backend configuration (e.g. oxigraph-server runtime view, oxigraph-persistent, blazegraph). If omitted, dataDir agents use oxigraph-persistent. */
   storeConfig?: TripleStoreConfig;
   /** Out-of-line storage for large public SWM RDF literal object terms. Defaults on for local Oxigraph-backed dataDir stores. */
   largeLiteralStorage?: LargeLiteralStorageConfig;

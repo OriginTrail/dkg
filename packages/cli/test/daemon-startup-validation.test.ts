@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
+  startManagedOxigraph: vi.fn(),
 }));
 
 vi.mock('@origintrail-official/dkg-agent', async importOriginal => {
@@ -29,6 +30,14 @@ vi.mock('../src/config.js', async importOriginal => {
   };
 });
 
+vi.mock('../src/daemon/oxigraph-managed.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/oxigraph-managed.js')>();
+  return {
+    ...actual,
+    startManagedOxigraph: mocks.startManagedOxigraph,
+  };
+});
+
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
 
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
@@ -45,6 +54,13 @@ describe('daemon startup network validation', () => {
   let stderrWrite: typeof process.stderr.write = process.stderr.write;
   let uncaughtExceptionListeners: NodeJS.UncaughtExceptionListener[] = [];
   let unhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] = [];
+  const originalAcceptStoreReset = process.env.DKG_ACCEPT_STORE_RESET;
+
+  beforeEach(() => {
+    mocks.loadNetworkConfig.mockResolvedValue(undefined);
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    mocks.startManagedOxigraph.mockResolvedValue(null);
+  });
 
   afterEach(async () => {
     vi.restoreAllMocks();
@@ -64,8 +80,73 @@ describe('daemon startup network validation', () => {
     } else {
       process.env.DKG_HOME = originalDkgHome;
     }
+    if (originalAcceptStoreReset === undefined) {
+      delete process.env.DKG_ACCEPT_STORE_RESET;
+    } else {
+      process.env.DKG_ACCEPT_STORE_RESET = originalAcceptStoreReset;
+    }
     if (tempHome) await rm(tempHome, { recursive: true, force: true });
     tempHome = undefined;
+  });
+
+  async function useTempHome(prefix: string) {
+    tempHome = await mkdtemp(join(tmpdir(), prefix));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    return vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  }
+
+  it('exits before managed store startup when a blockless config has legacy store.nq and no reset acknowledgement', async () => {
+    const stdoutSpy = await useTempHome('dkg-legacy-store-gate-');
+    await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
+    vi
+      .spyOn(process, 'exit')
+      .mockImplementation(((code?: string | number | null) => {
+        throw new Error(`process.exit:${code}`);
+      }) as never);
+
+    await expect(runDaemonInner(true, {
+      name: 'legacy-store-gate-test',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now())).rejects.toThrow('process.exit:1');
+
+    const output = stdoutSpy.mock.calls.map(call => String(call[0])).join('');
+    expect(output).toContain('legacy store.nq from the old implicit worker default');
+    expect(output).toContain('DKG_ACCEPT_STORE_RESET=1');
+    expect(mocks.startManagedOxigraph).not.toHaveBeenCalled();
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+  });
+
+  it('continues with the effective oxigraph-server store after legacy store.nq is acknowledged', async () => {
+    const stdoutSpy = await useTempHome('dkg-legacy-store-ack-');
+    process.env.DKG_ACCEPT_STORE_RESET = '1';
+    await writeFile(join(tempHome!, 'store.nq'), '<s> <p> <o> .');
+    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+
+    await expect(runDaemonInner(true, {
+      name: 'legacy-store-ack-test',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now())).rejects.toThrow('after-agent-create');
+
+    const output = stdoutSpy.mock.calls.map(call => String(call[0])).join('');
+    expect(output).toContain('using oxigraph-server');
+    expect(mocks.startManagedOxigraph).toHaveBeenCalledTimes(1);
+    expect(mocks.startManagedOxigraph.mock.calls[0]?.[0]).toMatchObject({
+      dataDir: tempHome,
+      config: {
+        store: { backend: 'oxigraph-server', options: {} },
+      },
+    });
+    expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
+    expect(mocks.agentCreate.mock.calls[0]?.[0]).toMatchObject({
+      storeConfig: { backend: 'oxigraph-server', options: {} },
+    });
   });
 
   it('exits before agent creation when the selected network is pre-deployment', async () => {

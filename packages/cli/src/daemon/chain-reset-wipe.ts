@@ -718,7 +718,7 @@ export interface BackendSwitchDetectOptions {
   /**
    * Backend name from the current config. Pass the effective value
    * including the default — e.g. when `config.store?.backend` is
-   * undefined, callers should pass `'oxigraph-worker'` so the check
+   * undefined, callers should pass `'oxigraph-server'` so the check
    * is symmetric across "no store block" ↔ "explicit store block".
    */
   currentBackend: string;
@@ -757,8 +757,8 @@ export function detectBackendSwitch(
       : null;
 
   // First boot or legacy state file: silently record and move on. We
-  // explicitly do NOT treat null-previous as a "switch from
-  // oxigraph-worker"; that would re-warn every operator who upgrades
+  // explicitly do NOT treat null-previous as a "switch from the old
+  // implicit backend"; that would re-warn every operator who upgrades
   // into this release without ever having touched their store
   // configuration. Only operator-visible config changes between two
   // recorded backends count as a switch.
