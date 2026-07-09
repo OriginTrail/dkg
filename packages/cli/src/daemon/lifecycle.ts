@@ -189,6 +189,7 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 import {
   daemonState,
   resolveStandaloneInstall,
+  resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -292,6 +293,9 @@ import {
   type UpdateStatus,
   acquireUpdateLock,
   releaseUpdateLock,
+  resolveAutoUpdateGitRef,
+  checkForNewCommitWithStatus,
+  performUpdateWithStatus,
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
@@ -2061,14 +2065,73 @@ export async function runDaemonInner(
   // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   const au = resolveAutoUpdateConfig(config, network);
-  // OT-RFC-41 §4.2 / §5 PR 5: auto-update polling is npm-only.
-  // `resolveStandaloneInstall` still seeds `daemonState.standaloneCache`
-  // for `/api/status` consumers; monorepo dev daemons (standalone=false)
-  // skip the polling loop entirely — contributors update via
-  // `git pull && pnpm install && pnpm build`.
-  const standalone = resolveStandaloneInstall(au?.source ?? resolveAutoUpdateSource(config, network));
+  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
+  const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
+  const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
 
-  if (standalone) {
+  if (pollingMode === "git" && au) {
+    const checkIntervalMs = au.checkIntervalMinutes * 60_000;
+    let watchedRef = "";
+    let watchedRepo = "";
+    try {
+      watchedRef = resolveAutoUpdateGitRef(au);
+      watchedRepo = repoToFetchUrl(au.repo);
+    } catch (err: any) {
+      log(
+        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
+          "Git polling disabled until config is fixed and the daemon is restarted.",
+      );
+    }
+
+    if (watchedRef && watchedRepo) {
+      log(
+        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
+          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
+      );
+
+      const runCheck = async () => {
+        const gitStatus = await checkForNewCommitWithStatus(au, log);
+        if (gitStatus.status === "error") {
+          log("Auto-update (git): update check failed.");
+          return;
+        }
+
+        daemonState.lastUpdateCheck.checkedAt = Date.now();
+        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
+        daemonState.lastUpdateCheck.channelTargetMissing = false;
+        daemonState.lastUpdateCheck.latestVersion = "";
+        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
+
+        if (gitStatus.status !== "available" || !gitStatus.commit) return;
+
+        daemonState.isUpdating = true;
+        let updateStatus: UpdateStatus = "failed";
+        try {
+          updateStatus = await performUpdateWithStatus(au, log, {
+            expectedCommit: gitStatus.commit,
+          });
+        } finally {
+          daemonState.isUpdating = false;
+        }
+
+        if (updateStatus === "updated") {
+          log("Auto-update (git): update activated; exiting for supervised restart.");
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+          return;
+        }
+        if (updateStatus === "up-to-date") {
+          log("Auto-update (git): update skipped — node caught up before apply.");
+          return;
+        }
+        log("Auto-update (git): update failed.");
+      };
+
+      setTimeout(runCheck, 15_000);
+      updateInterval = setInterval(runCheck, checkIntervalMs);
+    }
+  } else if (pollingMode === "git") {
+    log("Auto-update (git): disabled — autoUpdate.enabled is false.");
+  } else if (pollingMode === "npm") {
     const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
     // Even in version-check-only mode (au is null because auto-apply is
     // disabled) the policy used for the check must reflect the operator's

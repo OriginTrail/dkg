@@ -194,7 +194,14 @@ function restoreIo() {
   Object.assign(_autoUpdateIo, origIo);
 }
 
-import { checkForNewCommitWithStatus, checkForUpdate, performUpdate, performNpmUpdate } from '../src/daemon.js';
+import {
+  checkForNewCommitWithStatus,
+  checkForUpdate,
+  normalizeGitRefInput,
+  performUpdate,
+  performNpmUpdate,
+  resolveAutoUpdateGitRef,
+} from '../src/daemon.js';
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -202,6 +209,31 @@ const AU: AutoUpdateConfig = {
   branch: 'main',
   checkIntervalMinutes: 30,
 };
+
+describe('git auto-update ref normalization', () => {
+  it('normalizes bare branch values to full branch refs', () => {
+    expect(normalizeGitRefInput('main')).toBe('refs/heads/main');
+    expect(normalizeGitRefInput('release/v10')).toBe('refs/heads/release/v10');
+  });
+
+  it('preserves full refs and lets autoUpdate.ref override branch', () => {
+    expect(normalizeGitRefInput('refs/heads/main')).toBe('refs/heads/main');
+    expect(normalizeGitRefInput('refs/tags/v10.0.5')).toBe('refs/tags/v10.0.5');
+    expect(resolveAutoUpdateGitRef({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/heads/canary',
+      checkIntervalMinutes: 30,
+    })).toBe('refs/heads/canary');
+  });
+
+  it('rejects unsafe refs before they reach git', () => {
+    expect(() => normalizeGitRefInput('main; rm -rf /')).toThrow(/invalid branch\/ref/);
+    expect(() => normalizeGitRefInput('--upload-pack=/tmp/pwn')).toThrow(/invalid branch\/ref/);
+    expect(() => normalizeGitRefInput('refs/heads/')).toThrow(/invalid branch\/ref/);
+  });
+});
 
 function normalizePathString(value: unknown): string {
   return String(value).replace(/\\/g, '/');
@@ -349,6 +381,47 @@ describe('blue-green checkForUpdate', () => {
       if (origToken === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = origToken;
     }
+  });
+
+  it('bootstraps from an npm-built active slot with no current git commit metadata', async () => {
+    const latest = 'bbb222';
+    readFileImpl = async (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized.endsWith('/.current-commit')) throw new Error('ENOENT');
+      if (normalized.endsWith('/.update-pending.json')) throw new Error('ENOENT');
+      return '';
+    };
+    existsSyncImpl = (path: any) => {
+      const normalized = normalizePathString(path);
+      if (normalized === '/tmp/dkg-test/releases/a') return true;
+      if (normalized.endsWith('/releases/b/.git')) return false;
+      if (normalized.includes('cli.js')) return true;
+      if (normalized.endsWith('/packages/node-ui/dist-ui/index.html')) return true;
+      return true;
+    };
+    execImpl = async (cmd: string, opts?: any) => {
+      if (cmd.includes('git rev-parse HEAD') && normalizePathString(opts?.cwd) === '/tmp/dkg-test/releases/a') {
+        throw new Error('fatal: not a git repository');
+      }
+      return { stdout: '', stderr: '' };
+    };
+    makeFetchOk(latest);
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(AU, (message) => logCalls.push(message));
+
+    expect(result).toBe(true);
+    expect(logCalls.some(m => m.includes('active slot git commit is unknown'))).toBe(true);
+    const allCmds = getExecCalls();
+    const gitCmds = getExecFileCalls();
+    const activeDir = '/tmp/dkg-test/releases/a';
+    const targetDir = '/tmp/dkg-test/releases/b';
+    expect(allCmds.some(c => c.cmd.includes('git rev-parse HEAD') && c.cwd === activeDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
+    expect(gitCmds.some(c => c.file === 'git' && c.args[0] === 'fetch' && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm install') && c.cwd === targetDir)).toBe(true);
+    expect(allCmds.some(c => c.cmd.includes('pnpm build') && c.cwd === targetDir)).toBe(true);
+    expect(swapSlotCalls).toContain('b');
   });
 
   it('skips when no new commit', async () => {

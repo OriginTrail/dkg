@@ -64,16 +64,33 @@ describe('buildInitAutoUpdate', () => {
     expect(r.checkIntervalMinutes).toBe(10);
   });
 
-  it('enable preserves a local channel pin across the rerun', () => {
+  it('enable preserves npm fields but drops git-only fields when forcing npm mode', () => {
     const r = buildInitAutoUpdate({
       enableAutoUpdate: true,
-      existingAutoUpdate: { enabled: true, channel: 'staging' },
+      existingAutoUpdate: {
+        enabled: true,
+        source: 'git',
+        channel: 'staging',
+        repo: 'https://github.com/OriginTrail/dkg.git',
+        branch: 'canary',
+        ref: 'refs/heads/canary',
+        sshKeyPath: '/tmp/git-key',
+        sshCommand: 'ssh -i /tmp/git-key',
+        buildTimeoutMs: { install: 600_000 },
+      },
       networkAutoUpdate: net,
       ...proj,
-      answers: { repo: '', branch: '', allowPrerelease: true, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: true, interval: 5 },
     });
     expect(r.enabled).toBe(true);
+    expect(r.source).toBe('npm');
     expect(r.channel).toBe('staging');
+    expect(r.repo).toBeUndefined();
+    expect(r.branch).toBeUndefined();
+    expect(r.ref).toBeUndefined();
+    expect(r.sshKeyPath).toBeUndefined();
+    expect(r.sshCommand).toBeUndefined();
+    expect(r.buildTimeoutMs).toBeUndefined();
   });
 
   it('enable persists only fields that differ from the network/project defaults', () => {
@@ -83,7 +100,7 @@ describe('buildInitAutoUpdate', () => {
       networkAutoUpdate: net,
       ...proj,
       // Every answer equals the effective default → nothing extra is pinned.
-      answers: { repo: 'OriginTrail/dkg', branch: 'main', allowPrerelease: true, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: true, interval: 5 },
     });
     expect(r).toEqual({ enabled: true, source: 'npm' });
   });
@@ -94,7 +111,7 @@ describe('buildInitAutoUpdate', () => {
       existingAutoUpdate: undefined,
       networkAutoUpdate: net, // allowPrerelease default = true
       ...proj,
-      answers: { repo: 'OriginTrail/dkg', branch: 'main', allowPrerelease: false, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: false, interval: 5 },
     });
     expect(r).toEqual({ enabled: true, source: 'npm', allowPrerelease: false });
   });

@@ -404,13 +404,50 @@ describe('config-sanity check (§4.7.2)', () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({
-          autoUpdate: { repo: 'https://github.com/OriginTrail/dkg.git', branch: 'main' },
+          autoUpdate: {
+            source: 'npm',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            ref: 'refs/heads/canary',
+            sshKeyPath: '/tmp/git-key',
+            sshCommand: 'ssh -i /tmp/git-key',
+            buildTimeoutMs: { install: 600000 },
+          },
         }),
       },
     });
     const findings = await runConfigSanityCheck(deps);
     expect(findings.find((f) => f.subject === 'autoUpdate.repo')).toBeDefined();
     expect(findings.find((f) => f.subject === 'autoUpdate.branch')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.ref')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshKeyPath')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshCommand')).toBeDefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.buildTimeoutMs')).toBeDefined();
+  });
+
+  it('does not warn on git updater fields when autoUpdate.source is git', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            ref: 'refs/heads/canary',
+            sshKeyPath: '/tmp/git-key',
+            sshCommand: 'ssh -i /tmp/git-key',
+            buildTimeoutMs: { install: 600000 },
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.repo')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.branch')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.ref')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshKeyPath')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.sshCommand')).toBeUndefined();
+    expect(findings.find((f) => f.subject === 'autoUpdate.buildTimeoutMs')).toBeUndefined();
   });
 
   it('errors on checkIntervalMinutes < 1', async () => {
@@ -551,6 +588,23 @@ describe('install-layout check (§4.7.3)', () => {
     const state = await collectStateSummary(deps);
     const findings = await runInstallLayoutCheck(deps, state);
     expect(findings.find((f) => f.message.includes("Legacy '.git' directory") && f.severity === 'warning')).toBeDefined();
+  });
+
+  it('Core: allows .git inside slots when git updater mode is configured', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          nodeRole: 'core',
+          autoUpdate: { enabled: true, source: 'git' },
+        }),
+        '/test/.dkg/releases/current': 'symlink:a',
+        '/test/.dkg/releases/a/packages/cli/dist/cli.js': '// active slot',
+        '/test/.dkg/releases/a/.git/config': '[remote "origin"]',
+      },
+    });
+    const state = await collectStateSummary(deps);
+    const findings = await runInstallLayoutCheck(deps, state);
+    expect(findings.find((f) => f.message.includes("Legacy '.git' directory"))).toBeUndefined();
   });
 });
 
