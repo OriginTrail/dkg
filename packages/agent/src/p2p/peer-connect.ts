@@ -106,7 +106,7 @@ export async function primeCatchupConnections(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,
   selfPeerId: string,
-  verifyPeerAdmission: (peerId: string) => boolean | Promise<boolean> = () => true,
+  afterDialAdmissionProbe: (peerId: string) => void | Promise<void> = () => undefined,
 ): Promise<void> {
   try {
     const agents = await discovery.findAgents();
@@ -124,7 +124,7 @@ export async function primeCatchupConnections(
         const pid = peerIdFromString(agent.peerId);
         await libp2p.peerStore.merge(pid, { multiaddrs: [circuitAddr] });
         await libp2p.dial(pid);
-        await verifyPeerAdmission(agent.peerId);
+        await afterDialAdmissionProbe(agent.peerId);
       } catch {
         // Non-fatal — peer may be unreachable.
       }

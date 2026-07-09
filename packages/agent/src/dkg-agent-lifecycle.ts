@@ -771,7 +771,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        if (!this.networkAdmission.isAcceptedPeer(peerId)) return;
         await peerResolver.resolve(peerId, { signal }).catch(() => undefined);
       },
     });
@@ -4416,7 +4415,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.node.libp2p as any,
       this.discovery,
       this.peerId,
-      (peerId) => this.verifyPeerNetworkAdmission(peerId, ctx),
+      async (peerId) => {
+        await this.verifyPeerNetworkAdmission(peerId, ctx);
+      },
     );
   }
 

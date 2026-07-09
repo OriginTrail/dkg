@@ -79,6 +79,18 @@ describe('network identity proof', () => {
     })).resolves.toMatchObject({ ok: false, reason: 'chain id mismatch' });
   });
 
+  it('verifies signatures over optional identity fields claimed by the responder', async () => {
+    const response = await signedResponse(localIdentity);
+
+    await expect(verifyNetworkIdentityResponse({
+      response,
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity: { networkId: localIdentity.networkId },
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toEqual({ ok: true });
+  });
+
   it('rejects replayed or self-asserted claims without a valid peer-id-bound signature', async () => {
     const response = await signedResponse();
 

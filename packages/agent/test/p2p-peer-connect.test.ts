@@ -72,7 +72,6 @@ describe('primeCatchupConnections', () => {
       ],
     } as any, 'self-peer', async (peerId) => {
       admissionCalls.push(peerId);
-      return peerId === eligiblePeer;
     });
 
     expect(merge.calls).toHaveLength(2);

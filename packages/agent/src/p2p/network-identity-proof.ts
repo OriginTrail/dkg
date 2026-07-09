@@ -170,9 +170,9 @@ export async function verifyNetworkIdentityResponse(
     nonce: input.nonce,
     requesterPeerId: input.requesterPeerId,
     responderPeerId: input.remotePeerId,
-    networkId: input.localIdentity.networkId,
-    genesisId: input.localIdentity.genesisId,
-    chainId: input.localIdentity.chainId,
+    networkId: response.networkId,
+    genesisId: response.genesisId,
+    chainId: response.chainId,
   });
   const signature = Buffer.from(response.signature, 'base64');
   const valid = await ed25519Verify(signature, payload, publicKey);
