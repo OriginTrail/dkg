@@ -1,3 +1,4 @@
+import { multiaddr, type Component } from '@multiformats/multiaddr';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface CanonicalMultiaddrPeerTarget {
@@ -20,50 +21,91 @@ export interface CircuitMultiaddrConnectTarget {
 
 export type MultiaddrConnectTarget = DirectMultiaddrConnectTarget | CircuitMultiaddrConnectTarget;
 
-const CIRCUIT_TARGET_MARKER = '/p2p-circuit/p2p/';
+type ParsedMultiaddrStructure = {
+  multiaddress: string;
+  components: Component[];
+  peerIds: string[];
+  circuitIndex: number;
+};
+
+export class MultiaddrPeerTargetParseError extends Error {
+  constructor(
+    message: string,
+    readonly rawTarget?: string,
+  ) {
+    super(message);
+    this.name = 'MultiaddrPeerTargetParseError';
+  }
+}
 
 export function peerIdsFromMultiaddr(addr: string): string[] {
-  const peerIds: string[] = [];
-  const matches = addr.matchAll(/\/p2p\/([^/]+)/g);
-  for (const match of matches) {
-    const peerId = match[1]?.trim();
-    if (peerId) peerIds.push(peerId);
-  }
-  return peerIds;
+  return parseMultiaddrStructure(addr).peerIds;
 }
 
 export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
-  const circuitTarget = rawCircuitTargetPeerId(addr);
-  if (circuitTarget !== undefined) return circuitTarget || undefined;
-  return peerIdsFromMultiaddr(addr).at(-1);
+  const structure = parseMultiaddrStructure(addr);
+  return targetPeerIdFromStructure(structure);
 }
 
 export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMultiaddrPeerTarget | undefined {
   const raw = targetPeerIdFromMultiaddr(addr);
-  return raw ? { raw, canonical: canonicalPeerIdString(raw) } : undefined;
+  return raw ? canonicalTargetPeerId(raw) : undefined;
 }
 
 export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarget {
-  const circuitIndex = addr.indexOf(CIRCUIT_TARGET_MARKER);
-  if (circuitIndex !== -1) {
-    const raw = rawCircuitTargetPeerId(addr);
+  const structure = parseMultiaddrStructure(addr);
+  if (structure.circuitIndex !== -1) {
+    const raw = targetPeerIdFromStructure(structure);
     if (!raw) throw new Error('Circuit multiaddr missing target peer id');
     return {
       kind: 'circuit',
-      multiaddress: addr,
-      relayMultiaddress: addr.slice(0, circuitIndex),
-      target: { raw, canonical: canonicalPeerIdString(raw) },
+      multiaddress: structure.multiaddress,
+      relayMultiaddress: multiaddr(structure.components.slice(0, structure.circuitIndex)).toString(),
+      target: canonicalTargetPeerId(raw),
     };
   }
 
-  const target = canonicalTargetPeerIdFromMultiaddr(addr);
-  return target ? { kind: 'direct', multiaddress: addr, target } : { kind: 'direct', multiaddress: addr };
+  const raw = targetPeerIdFromStructure(structure);
+  const target = raw ? canonicalTargetPeerId(raw) : undefined;
+  return target
+    ? { kind: 'direct', multiaddress: structure.multiaddress, target }
+    : { kind: 'direct', multiaddress: structure.multiaddress };
 }
 
-function rawCircuitTargetPeerId(addr: string): string | undefined {
-  const circuitIndex = addr.indexOf(CIRCUIT_TARGET_MARKER);
-  if (circuitIndex === -1) return undefined;
-  return addr.slice(circuitIndex + CIRCUIT_TARGET_MARKER.length).split('/')[0]?.trim() ?? '';
+function parseMultiaddrStructure(addr: string): ParsedMultiaddrStructure {
+  const parsed = multiaddr(addr);
+  const components = parsed.getComponents();
+  return {
+    multiaddress: parsed.toString(),
+    components,
+    peerIds: components
+      .filter((component) => component.name === 'p2p' && component.value)
+      .map((component) => component.value!.trim())
+      .filter(Boolean),
+    circuitIndex: components.findIndex((component) => component.name === 'p2p-circuit'),
+  };
+}
+
+function targetPeerIdFromStructure(structure: ParsedMultiaddrStructure): string | undefined {
+  const candidates = structure.circuitIndex === -1
+    ? structure.peerIds
+    : structure.components
+      .slice(structure.circuitIndex + 1)
+      .filter((component) => component.name === 'p2p' && component.value)
+      .map((component) => component.value!.trim())
+      .filter(Boolean);
+  return candidates.at(-1);
+}
+
+function canonicalTargetPeerId(raw: string): CanonicalMultiaddrPeerTarget {
+  try {
+    return { raw, canonical: canonicalPeerIdString(raw) };
+  } catch (err) {
+    throw new MultiaddrPeerTargetParseError(
+      err instanceof Error ? err.message : String(err),
+      raw,
+    );
+  }
 }
 
 export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {

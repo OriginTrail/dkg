@@ -151,7 +151,7 @@ import {
   NetworkAdmissionRejectedError,
   type NetworkAdmissionAttemptOptions,
 } from './p2p/network-admission-coordinator.js';
-import { parseMultiaddrConnectTarget, targetPeerIdFromMultiaddr } from './p2p/multiaddr-peer-target.js';
+import { MultiaddrPeerTargetParseError, parseMultiaddrConnectTarget } from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   createCGMemberEnumerator,
@@ -1837,13 +1837,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
     } catch (err) {
       if (!this.networkAdmissionCoordinator.enabled) throw err;
       throw new NetworkAdmissionInvalidPeerIdError(
-        targetPeerIdFromMultiaddr(multiaddress) ?? '<missing>',
+        err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
         err instanceof Error ? err.message : String(err),
       );
     }
-    const targetPeerId = this.networkAdmissionCoordinator.targetPeerForExplicitConnect(
-      connectTarget.target?.canonical,
-    );
+    const targetPeerId = this.networkAdmissionCoordinator.explicitConnectAdmissionTarget(connectTarget);
     await connectToMultiaddr(
       this.node.libp2p as any,
       connectTarget,

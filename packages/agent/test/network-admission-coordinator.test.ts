@@ -75,7 +75,14 @@ describe('NetworkAdmissionCoordinator', () => {
     });
 
     expect(
-      fixture.coordinator.targetPeerForExplicitConnect(canonicalPeerIdString(REMOTE_PEER_ID_CID)),
+      fixture.coordinator.explicitConnectAdmissionTarget({
+        kind: 'direct',
+        multiaddress: `/ip4/127.0.0.1/tcp/9090/p2p/${REMOTE_PEER_ID_CID}`,
+        target: {
+          raw: REMOTE_PEER_ID_CID,
+          canonical: canonicalPeerIdString(REMOTE_PEER_ID_CID),
+        },
+      }),
     ).toBe(REMOTE_PEER_ID);
   });
 
@@ -88,7 +95,10 @@ describe('NetworkAdmissionCoordinator', () => {
     });
 
     try {
-      fixture.coordinator.targetPeerForExplicitConnect(undefined);
+      fixture.coordinator.explicitConnectAdmissionTarget({
+        kind: 'direct',
+        multiaddress: '/ip4/127.0.0.1/tcp/9090',
+      });
       throw new Error('expected explicit-connect target validation to fail');
     } catch (err) {
       expect(err).toMatchObject({ code: 'INVALID_PEER_ID' });

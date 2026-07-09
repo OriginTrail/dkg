@@ -11,6 +11,7 @@ import {
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
+import type { MultiaddrConnectTarget } from './multiaddr-peer-target.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionConnection {
@@ -119,7 +120,8 @@ export class NetworkAdmissionCoordinator {
     return this.admission.verifiedSameNetworkPeerIds();
   }
 
-  targetPeerForExplicitConnect(targetPeerId: CanonicalPeerId | undefined): CanonicalPeerId | undefined {
+  explicitConnectAdmissionTarget(connectTarget: MultiaddrConnectTarget): CanonicalPeerId | undefined {
+    const targetPeerId = connectTarget.target?.canonical;
     if (this.enabled && !targetPeerId) {
       throw new NetworkAdmissionInvalidPeerIdError(
         '<missing>',

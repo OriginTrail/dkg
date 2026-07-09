@@ -33,7 +33,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     },
     networkAdmissionCoordinator: {
       enabled: true,
-      targetPeerForExplicitConnect: vi.fn(() => PEER_ID),
+      explicitConnectAdmissionTarget: vi.fn(() => PEER_ID),
       ensureAdmitted: vi.fn(async () => false),
     },
     log: { info: vi.fn() },
@@ -90,7 +90,12 @@ describe('explicit connect network admission', () => {
       }),
       expect.any(Function),
     );
-    expect(agent.networkAdmissionCoordinator.targetPeerForExplicitConnect).toHaveBeenCalledWith(PEER_ID);
+    expect(agent.networkAdmissionCoordinator.explicitConnectAdmissionTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'direct',
+        target: expect.objectContaining({ canonical: PEER_ID }),
+      }),
+    );
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
