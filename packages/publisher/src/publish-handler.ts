@@ -330,7 +330,6 @@ export class PublishHandler {
         store: this.store,
         contextGraphId,
         metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
-        rootEntities: manifest.map((m) => m.rootEntity),
         recordUal: request.ual,
         metadataQuads,
       });

@@ -1425,11 +1425,15 @@ export class FinalizationHandler {
     // NOTE: the agents CG is always-tentative and never confirms on-chain, so in
     // practice this promotion is not reached for it (see report); this is a
     // defensive, lifecycle-preserving bound that keeps the invariant robust.
+    // The bound derives its lock + prune roots from `metaQuads` itself, so the
+    // dropped zero-public-triple roots (the `continue` above) are naturally excluded
+    // from the prune — it can only evict superseded records for roots THIS record
+    // covers, never zero a root the record omits. (Previously this call passed a
+    // separate rootEntities list, which risked exactly that drift.)
     await insertBoundedAgentRegistryMeta({
       store: this.store,
       contextGraphId,
       metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
-      rootEntities,
       recordUal: ual,
       metadataQuads: metaQuads,
     });

@@ -211,7 +211,7 @@ import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
+import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -1727,9 +1727,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
-      // unless the operator opts in. The predicate reads `DKG_SERVE_AGENTS_META`
-      // FRESH per call, so the kill-switch is reversible at runtime (no restart).
-      shouldWithholdDurableMeta: createAgentsDurableMetaWithholdPredicate(),
+      // unless the operator opts in. This is the env boundary — the pure
+      // `shouldWithholdAgentsDurableMeta` resolver is called directly with a FRESH
+      // `process.env.DKG_SERVE_AGENTS_META` read per request, so the kill-switch is
+      // reversible at runtime (no restart).
+      shouldWithholdDurableMeta: (contextGraphId) =>
+        shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
     });

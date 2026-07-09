@@ -6,6 +6,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
+import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
@@ -1117,23 +1118,8 @@ export class DKGPublisher implements Publisher {
     return undefined;
   }
 
-  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
-    const uniqueKeys = [...new Set(keys)].sort();
-    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
-    let resolve!: () => void;
-    const gate = new Promise<void>(r => { resolve = r; });
-    for (const k of uniqueKeys) {
-      this.writeLocks.set(k, gate);
-    }
-    await predecessor;
-    try {
-      return await fn();
-    } finally {
-      resolve();
-      for (const k of uniqueKeys) {
-        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
-      }
-    }
+  private withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
   /**
