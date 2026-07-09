@@ -22,7 +22,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { noteRpcFailover, noteRpcExhaustion, getRpcFailoverStats, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, getRpcFailoverStats, ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
@@ -172,6 +172,7 @@ describe('/api/status selected overlay details', () => {
       noteRpcFailover('status-test publish', 'https://primary.example', { status: 429 }, 'https://backup.example');
       noteRpcFailover('status-test publish', 'https://other.example', { status: 503 }, 'https://backup.example');
       noteRpcExhaustion('status-test publish', ['https://primary.example', 'https://backup.example']);
+      notePreferredEndpoint('status-test publish', 'https://backup.example');
 
       const server = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -214,6 +215,8 @@ describe('/api/status selected overlay details', () => {
         expect(body.chain.rpcExhaustions).toBe(before.exhaustions + 1);
         expect(body.chain.rpcFailoversByClass.THROTTLE_429).toBe((before.byErrorClass.THROTTLE_429 ?? 0) + 1);
         expect(body.chain.rpcFailoversByClass.SERVER_5XX).toBe((before.byErrorClass.SERVER_5XX ?? 0) + 1);
+        // Endpoint-stickiness establishment counter is wired through /api/status.
+        expect(body.chain.rpcPreferredEstablishments).toBe(before.preferredEstablishments + 1);
         // The counter surface stays host-only — never a raw RPC URL.
         expect(JSON.stringify(body.chain)).not.toContain('://');
       } finally {

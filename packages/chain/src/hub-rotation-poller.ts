@@ -103,7 +103,11 @@ export class HubRotationPoller {
     const head = await this.readProvider(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
+      // Background head probe at the ~stickiness-TTL cadence: keep it
+      // preference-transparent so a poll tick never re-probes/clears the
+      // preferred backend the read/write paths rely on, and so `head` stays
+      // canonical-fresh (not a lagging sticky backend's lower tip).
+      { policy: 'watchdogPointRead', skipPreferred: true },
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
@@ -115,7 +119,7 @@ export class HubRotationPoller {
         toBlock: head,
         topics: [binding.topics],
       }),
-      { policy: 'watchdogWideLogScan' },
+      { policy: 'watchdogWideLogScan', skipPreferred: true },
     );
     if (!this.started || generation !== this.generation) return;
 
@@ -131,7 +135,9 @@ export class HubRotationPoller {
     const head = await this.readProvider(
       'Hub rotation poll initial getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      { policy: 'watchdogPointRead' },
+      // Preference-transparent (see pollOnce): background head probe must not
+      // disturb the read/write stickiness state.
+      { policy: 'watchdogPointRead', skipPreferred: true },
     );
     if (!this.started || generation !== this.generation) return;
     this.lastScannedBlock = this.lastScannedBlock == null

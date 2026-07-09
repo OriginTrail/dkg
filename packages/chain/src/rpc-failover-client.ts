@@ -8,9 +8,18 @@
  *
  * SAFETY BOUNDARY: this module holds NO transaction-safety state — no WAL, no
  * per-wallet serializer, no approval latch. The adapter's tx-orchestration owns
- * all of that and calls into this surface. The module never references the
- * adapter; it is constructed with two required capabilities and one optional
- * per-endpoint transport preflight:
+ * all of that and calls into this surface. The ONLY mutable state it owns is a
+ * TRANSPORT-ORDERING preference (endpoint stickiness), fully delegated to the
+ * `EndpointStickiness` state machine (see endpoint-stickiness.ts): a "prefer the
+ * last-good backend, re-probe the primary at most once per TTL" model, keyed on
+ * `rpcUrl` (survives a live pool rebind), that also tracks whether the preference
+ * is nonce-safe for writes (a read-only-established backend must not drive a
+ * write's nonce). Each loop asks it for an order (by intent) and reports success.
+ * That is pure ordering — it only decides which endpoint each loop TRIES FIRST;
+ * it never signs, never gates a broadcast, never re-orders the tx-safety
+ * guards, and every loop still falls through to the full endpoint set. The
+ * module never references the adapter; it is constructed with two required
+ * capabilities and one optional per-endpoint transport preflight:
  *   1. `getEndpoints()` — a LIVE thunk over the RPC endpoints, each a
  *      `{ provider, rpcUrl }` pair. One object per endpoint keeps the
  *      `provider ↔ rpcUrl` pairing explicit inside every failover loop (not an
@@ -34,7 +43,8 @@ import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
-import { noteRpcFailover, noteRpcExhaustion, rpcHost } from './rpc-failover-log.js';
+import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, rpcHost } from './rpc-failover-log.js';
+import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 import {
@@ -43,6 +53,7 @@ import {
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
+  STICKY_PREFERRED_TTL_MS,
 } from './evm-adapter-constants.js';
 
 /**
@@ -84,6 +95,28 @@ export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
   rpcUsageConsumer?: string;
+  /**
+   * Opt this read OUT of endpoint stickiness — it always uses the canonical
+   * (configured) endpoint order AND never mutates the preferred pointer
+   * (fully preference-transparent). Set on TIP-SENSITIVE reads (current head /
+   * latest block) where a lagging preferred backend could return a stale/lower
+   * head and make the tip non-monotonic across calls. A `skipPreferred` read on
+   * a selectively-healthy primary must NOT clear the preference the heavy
+   * read/write paths rely on — hence transparent, not merely canonical-ordered.
+   */
+  skipPreferred?: boolean;
+  /**
+   * Marks a read whose result may be a benign "not on this endpoint (yet)" EMPTY
+   * value (e.g. `eth_getTransactionReceipt` / `getBlock` returning `null`) rather
+   * than a definitive answer. When set, an empty result is NOT a transport
+   * failure: the loop tries the next endpoint WITHOUT de-preferring it or emitting
+   * failover/exhaustion telemetry, and if EVERY endpoint returns empty (and none
+   * errored) the empty value itself is returned. A real transport error still
+   * fails over / exhausts / propagates as usual. This keeps nullable reads
+   * (receipt/tx/block lookups) failing over on a lagging endpoint without a thrown
+   * sentinel polluting stickiness or telemetry.
+   */
+  isEmptyResult?: (value: unknown) => boolean;
 }
 
 /**
@@ -98,6 +131,34 @@ export type SignPopulatedFn = (
 
 /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
 export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
+
+/**
+ * Optional transport hooks + config for `RpcFailoverClient`, grouped in ONE
+ * object so the constructor boundary stays readable as knobs are added (no
+ * positional `undefined` placeholders for unrelated optional concerns).
+ */
+export interface RpcFailoverClientOptions {
+  /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
+  validateEndpoint?: ValidateEndpointFn;
+  /** Endpoint-stickiness configuration (Mechanism B). */
+  stickiness?: StickinessOptions;
+}
+
+export interface StickinessOptions {
+  /** Force stickiness on/off (tests). Ignored if `isEnabled` is given. */
+  enabled?: boolean;
+  /** Kill-switch predicate, evaluated LIVE per check. OWNERSHIP: the config
+   *  boundary owns env resolution — the production adapter injects
+   *  `() => process.env.DKG_DISABLE_RPC_STICKINESS !== '1'` here, so the transport
+   *  core carries no process-global dependency. Takes precedence over `enabled`.
+   *  When NEITHER `isEnabled` nor `enabled` is supplied, stickiness defaults to
+   *  ENABLED and the env kill-switch is NOT consulted by the core — only the
+   *  adapter-injected predicate honors it (a bare `new RpcFailoverClient(...)` is a
+   *  test/non-production path). */
+  isEnabled?: () => boolean;
+  ttlMs?: number;
+  now?: () => number;
+}
 
 /**
  * Failover classifier for CONTRACT VIEW reads (`readContract`'s default): the
@@ -139,6 +200,12 @@ export function resolveCapMs(policy: ReadPolicy, providerCount: number): number 
 }
 
 export class RpcFailoverClient {
+  /** Transport-ordering preference state machine — the ONLY mutable state this
+   *  module owns (see SAFETY BOUNDARY + endpoint-stickiness.ts). */
+  private readonly stickiness: EndpointStickiness;
+  /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
+  private readonly validateEndpoint?: ValidateEndpointFn;
+
   constructor(
     private readonly getEndpoints: () => RpcEndpoint[],
     private readonly signPopulated: SignPopulatedFn,
@@ -147,8 +214,21 @@ export class RpcFailoverClient {
     // construct this client BEFORE its own `chainId` field is assigned and still
     // have the label resolve correctly at metric-record time.
     private readonly chainId: () => string,
-    private readonly validateEndpoint?: ValidateEndpointFn,
-  ) {}
+    // Optional transport hooks/config in ONE object (preflight + stickiness) so
+    // adding a knob never appends another positional `undefined`.
+    options?: RpcFailoverClientOptions,
+  ) {
+    this.validateEndpoint = options?.validateEndpoint;
+    const stickiness = options?.stickiness;
+    const isEnabled = stickiness?.isEnabled
+      ?? (stickiness?.enabled !== undefined ? () => stickiness.enabled as boolean : () => true);
+    this.stickiness = new EndpointStickiness({
+      now: stickiness?.now ?? Date.now,
+      ttlMs: stickiness?.ttlMs ?? STICKY_PREFERRED_TTL_MS,
+      isEnabled,
+      onEstablished: (url) => notePreferredEndpoint('rpc failover', url),
+    });
+  }
 
   /**
    * Classify an RPC error for low-cardinality metric labels: `timeout` for the
@@ -204,6 +284,8 @@ export class RpcFailoverClient {
       fn,
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
+      opts?.skipPreferred ?? false,
+      opts?.isEmptyResult,
     );
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
@@ -239,6 +321,8 @@ export class RpcFailoverClient {
             (p) => fn(this.rebindContract(contract, p)),
             opts?.isRetryable ?? isContractViewRetryable,
             opts?.policy ?? 'pointRead',
+            opts?.skipPreferred ?? false,
+            opts?.isEmptyResult,
           );
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
@@ -281,7 +365,11 @@ export class RpcFailoverClient {
     label: string,
     opts?: { gasLimitBufferBps?: number },
   ): Promise<{ signedTx: string; txHash: string }> {
-    const endpoints = this.getEndpoints();
+    const canonical = this.getEndpoints();
+    // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
+    // ONLY if a prior populate proved it (else canonical primary-first = the
+    // authoritative nonce source) — the nonce-staleness guard.
+    const endpoints = this.stickiness.order(canonical, 'nonceWrite');
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
@@ -324,30 +412,36 @@ export class RpcFailoverClient {
             );
           }
         }
-        return await withTimeout(
+        const signed = await withTimeout(
           this.signPopulated(rpcSigner, populated),
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction signing via RPC #${i + 1}`,
         );
+        // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
+        // so it's preferred for the read-your-write ops that follow (the caller's
+        // broadcast + receipt + confirming re-reads) AND for subsequent populates.
+        this.stickiness.recordSuccess(endpoint, canonical, 'nonceWrite', i === 0);
+        return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
         lastRetryable = err;
+        this.stickiness.recordFailure(endpoint, 'nonceWrite'); // de-prefer a failed backend
         if (i < endpoints.length - 1) {
           noteRpcFailover(`${label} preparation`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }
       }
     }
-    if (lastRetryable) noteRpcExhaustion(`${label} preparation`, endpoints.map((e) => e.rpcUrl));
+    if (lastRetryable) noteRpcExhaustion(`${label} preparation`, canonical.map((e) => e.rpcUrl));
     // Single provider → carry the code on a new error but keep the message
     // byte-identical (no second endpoint, so the raw message reads cleaner and
     // any message-inspecting caller keeps seeing it). Multiple providers → the
     // HOST-ONLY aggregate (never full URLs — a configured rpcUrl may carry an API
     // key and this message reaches HTTP clients via response paths that echo
     // err.message, e.g. the create+publish 207 tail).
-    const message = endpoints.length <= 1
+    const message = canonical.length <= 1
       ? errorMessage(lastRetryable)
       : `${label} transaction preparation failed on all configured RPC endpoints ` +
-        `(${endpoints.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
     // Populate+sign exhausted every endpoint. This is the PREPARE phase
     // (populateTransaction / eth_estimateGas), NOT the broadcast — label it
     // eth_estimateGas so it doesn't collide with the genuine
@@ -357,7 +451,7 @@ export class RpcFailoverClient {
     });
     throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
       cause: lastRetryable,
-      rpcUrls: endpoints.map((e) => e.rpcUrl),
+      rpcUrls: canonical.map((e) => e.rpcUrl),
     });
   }
 
@@ -377,7 +471,8 @@ export class RpcFailoverClient {
         const metrics = getMetrics();
         const startedAt = Date.now();
         try {
-          const endpoints = this.getEndpoints();
+          const canonical = this.getEndpoints();
+          const endpoints = this.stickiness.order(canonical, 'write');
           let lastRetryable: unknown;
           for (let i = 0; i < endpoints.length; i += 1) {
             const endpoint = endpoints[i];
@@ -396,6 +491,7 @@ export class RpcFailoverClient {
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
+              this.stickiness.recordSuccess(endpoint, canonical, 'write', i === 0);
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -403,6 +499,7 @@ export class RpcFailoverClient {
                 span.setAttribute('dkg.tx_hash', txHash);
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
+                this.stickiness.recordSuccess(endpoint, canonical, 'write', i === 0);
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -410,6 +507,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
+              this.stickiness.recordFailure(endpoint, 'write'); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover(`${label} broadcast`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -417,7 +515,7 @@ export class RpcFailoverClient {
           }
           // All configured endpoints exhausted.
           this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(lastRetryable), { retryable: true, exhausted: true });
-          if (lastRetryable) noteRpcExhaustion(`${label} broadcast`, endpoints.map((e) => e.rpcUrl));
+          if (lastRetryable) noteRpcExhaustion(`${label} broadcast`, canonical.map((e) => e.rpcUrl));
           // Typed transport error (mirroring the preparation loop + CLI path) so a
           // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
@@ -425,7 +523,7 @@ export class RpcFailoverClient {
           throw new ChainRpcTransportError(
             'RPC_ENDPOINTS_EXHAUSTED',
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
-            { cause: lastRetryable, rpcUrls: endpoints.map((e) => e.rpcUrl) },
+            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl) },
           );
         } finally {
           metrics.chainRpcDuration.record(Date.now() - startedAt, {
@@ -454,7 +552,8 @@ export class RpcFailoverClient {
         const metrics = getMetrics();
         const startedAt = Date.now();
         try {
-          const endpoints = this.getEndpoints();
+          const canonical = this.getEndpoints();
+          const endpoints = this.stickiness.order(canonical, 'write');
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
           for (let i = 0; i < endpoints.length; i += 1) {
@@ -476,6 +575,11 @@ export class RpcFailoverClient {
               if (receipt) {
                 span.setAttribute('dkg.tx_hash', txHash);
                 this.recordRpcOutcome('eth_getTransactionReceipt', 'ok');
+                // A DEFINITIVE hit (non-null receipt) on this endpoint → prefer
+                // it. A null "not mined yet" response is NOT a stickiness signal
+                // (no single winning endpoint), so we only note on a real
+                // receipt — the self-heal still polls every endpoint per tick.
+                this.stickiness.recordSuccess(endpoint, canonical, 'write', i === 0);
                 return receipt;
               }
             } catch (err) {
@@ -484,6 +588,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
+              this.stickiness.recordFailure(endpoint, 'write'); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover('receipt lookup', endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -492,7 +597,7 @@ export class RpcFailoverClient {
           if (lastRetryable && !sawNonErrorResponse) {
             // No backend could even answer the lookup → endpoints exhausted.
             this.recordRpcOutcome('eth_getTransactionReceipt', this.rpcOutcome(lastRetryable), { retryable: true, exhausted: true });
-            noteRpcExhaustion('receipt lookup', endpoints.map((e) => e.rpcUrl));
+            noteRpcExhaustion('receipt lookup', canonical.map((e) => e.rpcUrl));
             throw new ChainRpcTransportError(
               'RPC_RECEIPT_LOOKUP_FAILED',
               `Receipt lookup for tx ${txHash} failed on all configured RPC endpoints: ${errorMessage(lastRetryable)}`,
@@ -530,10 +635,23 @@ export class RpcFailoverClient {
     fn: (provider: JsonRpcProvider) => Promise<T>,
     isRetryable: (err: unknown) => boolean,
     policy: ReadPolicy,
+    skipPreferred: boolean,
+    isEmptyResult?: (value: unknown) => boolean,
   ): Promise<T> {
-    const endpoints = this.getEndpoints();
-    const capMs = resolveCapMs(policy, endpoints.length);
+    // `canonical` = the configured order (index 0 = primary), used for the cap,
+    // the exhaustion aggregate, and the "which is the primary" check. `endpoints`
+    // = the per-op iteration order (preferred-first when sticky). Same members,
+    // possibly reordered — so the cap/exhaustion contract stays canonical while
+    // only the try-order changes.
+    const canonical = this.getEndpoints();
+    // A tip-sensitive read (skipPreferred) is 'transparentRead' (canonical order +
+    // no state mutation); a normal read is 'stickyRead'.
+    const intent: StickinessIntent = skipPreferred ? 'transparentRead' : 'stickyRead';
+    const endpoints = this.stickiness.order(canonical, intent);
+    const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
+    let sawEmpty = false;
+    let lastEmpty: T | undefined;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
       const isLast = i === endpoints.length - 1;
@@ -546,33 +664,65 @@ export class RpcFailoverClient {
           );
           return fn(endpoint.provider);
         })();
-        return await (capMs == null
+        const out = await (capMs == null
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
+        if (isEmptyResult?.(out)) {
+          // A BENIGN "no result on this endpoint (yet)" — a nullable read whose
+          // endpoint hasn't imported the tx/block. This is NOT a transport failure:
+          // it must NOT de-prefer the endpoint (recordFailure) or emit failover
+          // telemetry. Try the next endpoint; if EVERY endpoint is empty (and none
+          // errored) the empty value itself is the honest answer.
+          sawEmpty = true;
+          lastEmpty = out;
+          continue;
+        }
+        this.stickiness.recordSuccess(endpoint, canonical, intent, i === 0);
+        return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;
         lastRetryable = err;
+        this.stickiness.recordFailure(endpoint, intent); // de-prefer a failed backend
         if (!isLast) {
           noteRpcFailover(label, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }
       }
     }
-    if (lastRetryable) noteRpcExhaustion(label, endpoints.map((e) => e.rpcUrl));
-    // Single provider → carry the typed code but keep the original message
-    // byte-identical (there is no second endpoint, so the raw message reads
-    // cleaner and any message-inspecting caller keeps seeing it). Multiple
-    // providers → the host-only "all endpoints" aggregate (never full URLs —
-    // a configured rpcUrl may carry an API key and this message can reach HTTP
-    // clients via response paths that echo err.message). Mirrors the write
-    // preparation loop's single-vs-multi message handling.
-    const message = endpoints.length <= 1
-      ? errorMessage(lastRetryable)
-      : `${label} read failed on all configured RPC endpoints ` +
-        `(${endpoints.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
-      cause: lastRetryable,
-      rpcUrls: endpoints.map((e) => e.rpcUrl),
-    });
+    // A REAL transport error on ANY endpoint → exhaustion (telemetry + typed
+    // throw). Order-independent: a mix of empty + transport error still throws
+    // (a transport failure occurred, so "every endpoint lacks it" can't be
+    // concluded and the empty value must NOT be returned as definitive).
+    if (lastRetryable) {
+      noteRpcExhaustion(label, canonical.map((e) => e.rpcUrl));
+      // Single provider → carry the typed code but keep the original message
+      // byte-identical (there is no second endpoint, so the raw message reads
+      // cleaner and any message-inspecting caller keeps seeing it). Multiple
+      // providers → the host-only "all endpoints" aggregate (never full URLs —
+      // a configured rpcUrl may carry an API key and this message can reach HTTP
+      // clients via response paths that echo err.message). Mirrors the write
+      // preparation loop's single-vs-multi message handling. Built from CANONICAL
+      // order so the error's `rpcUrls` stays a stable configured-order contract
+      // regardless of the per-op reorder.
+      const message = canonical.length <= 1
+        ? errorMessage(lastRetryable)
+        : `${label} read failed on all configured RPC endpoints ` +
+          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+      throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+        cause: lastRetryable,
+        rpcUrls: canonical.map((e) => e.rpcUrl),
+      });
+    }
+    // Every endpoint returned an empty result and none errored → the empty value
+    // is the honest "not found anywhere (yet)" answer (only reachable when an
+    // `isEmptyResult` predicate was supplied).
+    if (sawEmpty) return lastEmpty as T;
+    // Unreachable when >=1 endpoint is configured (each iteration returns,
+    // continues on empty, or throws / sets lastRetryable). Guard the 0-endpoint case.
+    throw new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      `${label} read failed: no configured RPC endpoints`,
+      { rpcUrls: [] },
+    );
   }
 
   /**

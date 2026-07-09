@@ -735,6 +735,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
             rpcFailovers: rpcFailoverStats.failovers,
             rpcExhaustions: rpcFailoverStats.exhaustions,
             rpcFailoversByClass: rpcFailoverStats.byErrorClass,
+            // Endpoint-stickiness: times the client stuck to a backup after a
+            // failover (a rising count = a configured primary is degraded).
+            rpcPreferredEstablishments: rpcFailoverStats.preferredEstablishments,
           }
         : null,
       updateAvailable:
