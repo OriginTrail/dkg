@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -99,7 +99,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler, withSignerRegistrationCache,
+  ACKCollector, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -237,6 +237,7 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import { reconcileContextGraph, ReconcileCoalescer, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 /**
@@ -1254,6 +1255,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   `cg=${details.contextGraphId} reason=${details.message}`,
                 );
               },
+              onStorageAckDecision: isKaPublishLifecycleDebugLoggingEnabled()
+                ? createStorageAckLifecycleObserver({
+                    logger: this.log,
+                    localPeerId: () => this.peerId,
+                    localNodeIdentityId: () => onChainIdentityId,
+                    detail: 'debug',
+                    resolveAssetUalForPublishIntent: ({ intent }) =>
+                      resolveStorageAckLifecycleAssetUalFromLocalSwm({
+                        store: this.store,
+                        chain: this.chain,
+                        intent,
+                      }),
+                  })
+                : undefined,
               // PR5 ACK-provenance — bind to the agent's host-mode
               // bookkeeping so every signed ACK carries which of the
               // four LU-6 Phase B discovery paths brought this CG's

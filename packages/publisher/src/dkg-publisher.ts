@@ -1517,6 +1517,7 @@ export class DKGPublisher implements Publisher {
       v10ACKProvider?: PublishOptions['v10ACKProvider'];
       trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
       subGraphName?: string;
+      publisherPeerId?: string;
       /**
        * Per-call override for the on-chain attribution target — see
        * `PublishOptions.publisherNodeIdentityIdOverride` for full semantics.
@@ -1660,6 +1661,7 @@ export class DKGPublisher implements Publisher {
       quads: quads.map((q) => ({ ...q, graph: '' })),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      publisherPeerId: options?.publisherPeerId,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
       publishContextGraphId: chainCgId ?? undefined,

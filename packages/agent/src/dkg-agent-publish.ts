@@ -5011,6 +5011,7 @@ export class PublishMethods extends DKGAgentBase {
       onChainContextGraphId: onChainId,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
+      publisherPeerId: this.peerId,
       trustedNonManifestCatalogTriples,
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,

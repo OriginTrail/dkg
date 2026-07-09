@@ -96,12 +96,15 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       q('urn:test:root:metadata-only', TRUST_LEVEL_PREDICATE, `"${TrustLevel.SelfAttested}"`),
     ]);
 
-    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      publisherPeerId: 'peer-swm',
+    })).resolves.toMatchObject({
       status: 'tentative',
     });
 
     expect(publishSpy.calls).toHaveLength(1);
     const publishArgs = publishSpy.calls[0][0];
+    expect(publishArgs.publisherPeerId).toBe('peer-swm');
     expect(publishArgs.quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
     ]);
