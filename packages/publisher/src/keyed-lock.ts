@@ -1,11 +1,9 @@
 /**
- * Gate-based multi-key lock — the concurrency idiom also used by the private
- * `withWriteLocks` methods in `dkg-publisher.ts` and `workspace-handler.ts`. Provided
- * as a reusable helper so new call sites (agents/_meta retention) share one audited
- * implementation instead of hand-rolling their own. NB: the two pre-existing private
- * copies on the publish/`share`/CAS path are not migrated here — that consolidation is
- * a separate, mechanical follow-up kept out of the agents-meta PR to avoid touching
- * concurrency-critical publish code.
+ * Gate-based multi-key lock — the single canonical implementation of this concurrency
+ * idiom in the publisher package. The `withWriteLocks` methods in `dkg-publisher.ts`
+ * (publish/`share`/CAS) and `workspace-handler.ts` (workspace writes) and the
+ * agents/_meta retention path all delegate here, each supplying its own lock `Map`, so
+ * there is ONE implementation to audit rather than per-module copies.
  *
  * Algorithm: sort + dedupe the keys, snapshot the predecessor gate per key, install
  * ONE shared gate for every key SYNCHRONOUSLY (before any `await`, so there is no
