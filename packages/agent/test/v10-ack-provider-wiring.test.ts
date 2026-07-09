@@ -280,6 +280,35 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     });
   });
 
+  it('normalizes legacy handler-only ACK timing before publish sendP2P wiring', async () => {
+    const boot = await bootProviderAgent({ ackHandlerDeadlineMs: 55_000 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const response = new Uint8Array([9]);
+    const sendReliable = vi.fn(async () => ({
+      delivered: true,
+      response,
+    }));
+    internals.messenger = { sendReliable };
+    const payload = new Uint8Array([1]);
+
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    await expect(publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
+
+    expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
+      timeoutMs: 60_000,
+    });
+  });
+
+  it('rejects misaligned direct agent ACK timing before boot side effects', async () => {
+    await expect(DKGAgent.create({
+      name: 'ACKTimingInvalidPairTest',
+      ackHandlerDeadlineMs: 60_000,
+      ackSendTimeoutMs: 30_000,
+    })).rejects.toThrow(/DKGAgentConfig\.storageAckTiming\.sendTimeoutMs must be at least 5000ms/);
+  });
+
   it('passes ackHandlerDeadlineMs into StorageACKHandler construction during core startup', async () => {
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();
@@ -293,7 +322,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       chainAdapter: chain,
       nodeRole: 'core',
       ackSignerKey: ackSigner.privateKey,
-      ackHandlerDeadlineMs: 55_000,
+      storageAckTiming: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
     });
     await agent.start();
 

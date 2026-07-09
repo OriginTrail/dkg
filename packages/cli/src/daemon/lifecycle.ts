@@ -74,6 +74,7 @@ import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } fro
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
 import {
+  createACKSendP2P,
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
   isSkolemizedUri,
@@ -664,13 +665,22 @@ interface DaemonACKTransportAgent {
       opts: { timeoutMs: number },
     ): Promise<{ delivered: boolean; error?: unknown; response: Uint8Array }>;
   };
-  node: { libp2p: { getPeers(): Array<{ toString(): string }> } };
+  getACKCandidatePeerIds(protocol?: string): string[];
+}
+
+function asDaemonACKTransportAgent(agent: DKGAgent): DaemonACKTransportAgent {
+  const transport = agent as unknown as Pick<DaemonACKTransportAgent, 'gossip' | 'messenger'>;
+  return {
+    peerId: agent.peerId,
+    gossip: transport.gossip,
+    messenger: transport.messenger,
+    getACKCandidatePeerIds: (protocol?: string) => agent.getACKCandidatePeerIds(protocol),
+  };
 }
 
 export function createDaemonACKTransportFactory(input: {
   agent: DaemonACKTransportAgent;
   ackSendTimeoutMs: number;
-  preferredACKPeerIds?: readonly string[];
   log?: (message: string) => void;
 }): () => ACKTransportFactory {
   return () => ({
@@ -678,34 +688,11 @@ export function createDaemonACKTransportFactory(input: {
     gossipPublish: async (topic: string, data: Uint8Array) => {
       await input.agent.gossip.publish(topic, data);
     },
-    sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-      const sendResult = await input.agent.messenger.sendReliable(peerId, protocol, data, {
-        timeoutMs: input.ackSendTimeoutMs,
-      });
-      if (!sendResult.delivered) {
-        throw new Error(`substrate queued (transport): ${sendResult.error}`);
-      }
-      return sendResult.response;
-    },
-    getConnectedCorePeers: (protocol?: string) => {
-      const allPeers = input.agent.node.libp2p
-        .getPeers()
-        .map((p) => p.toString());
-      const internals = input.agent as unknown as {
-        knownCorePeerIds?: Set<string>;
-        knownCorePeerIdsV2?: Set<string>;
-        lastKnownRequiredACKs?: number;
-      };
-      return selectACKCandidatePeers({
-        connectedPeers: allPeers,
-        selfPeerId: input.agent.peerId,
-        knownCorePeerIds: internals.knownCorePeerIds,
-        knownCorePeerIdsV2: internals.knownCorePeerIdsV2,
-        requiredACKs: internals.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
-        protocol,
-        preferredACKPeerIds: input.preferredACKPeerIds,
-      });
-    },
+    sendP2P: createACKSendP2P({
+      messenger: input.agent.messenger,
+      timeoutMs: input.ackSendTimeoutMs,
+    }),
+    getConnectedCorePeers: (protocol?: string) => input.agent.getACKCandidatePeerIds(protocol),
     log: input.log,
   });
 }
@@ -1154,6 +1141,7 @@ export async function runDaemonInner(
     log(`[dkg-build-info] WARNING: failed to emit startup telemetry: ${String(err)}`);
   }
 
+  const storageAckTiming = resolveStorageAckTiming(config.storageAck);
   const selectedNetworkConfig = config.networkConfig?.trim();
   const network = await loadNetworkConfig(selectedNetworkConfig);
   if (selectedNetworkConfig && !network) {
@@ -1387,7 +1375,6 @@ export async function runDaemonInner(
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
   const chainBase = resolveChainConfig(config, network);
-  const storageAckTiming = resolveStorageAckTiming(config.storageAck);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1632,8 +1619,7 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
-    ackHandlerDeadlineMs: storageAckTiming.handlerDeadlineMs,
-    ackSendTimeoutMs: storageAckTiming.sendTimeoutMs,
+    storageAckTiming,
     syncCheckpointStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
@@ -1996,9 +1982,8 @@ export async function runDaemonInner(
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
             ackTransportFactory: createDaemonACKTransportFactory({
-              agent: agent as unknown as DaemonACKTransportAgent,
+              agent: asDaemonACKTransportAgent(agent),
               ackSendTimeoutMs: storageAckTiming.sendTimeoutMs,
-              preferredACKPeerIds,
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),

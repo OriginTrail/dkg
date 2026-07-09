@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
+  chainResetWipe: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
 }));
@@ -24,6 +25,14 @@ vi.mock('../src/config.js', async importOriginal => {
   return {
     ...actual,
     loadNetworkConfig: mocks.loadNetworkConfig,
+  };
+});
+
+vi.mock('../src/daemon/chain-reset-wipe.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/chain-reset-wipe.js')>();
+  return {
+    ...actual,
+    chainResetWipe: mocks.chainResetWipe,
   };
 });
 
@@ -61,6 +70,14 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       defaultNodeRole: 'core',
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    mocks.chainResetWipe.mockResolvedValue({
+      wiped: false,
+      skipped: false,
+      prevMarker: null,
+      removedFiles: [],
+      backedUpFiles: [],
+      failedFiles: [],
+    });
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
@@ -107,8 +124,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   it('passes resolved default StorageACK timing into DKGAgent.create when config is unset', async () => {
     const createArg = await captureCreateArg();
 
-    expect(createArg.ackHandlerDeadlineMs).toBe(15_000);
-    expect(createArg.ackSendTimeoutMs).toBe(20_000);
+    expect(createArg.storageAckTiming).toEqual({
+      handlerDeadlineMs: 15_000,
+      sendTimeoutMs: 20_000,
+    });
   });
 
   it('passes configured StorageACK timing into DKGAgent.create', async () => {
@@ -116,8 +135,23 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       storageAck: { handlerDeadlineMs: 55_000, sendTimeoutMs: 60_000 },
     });
 
-    expect(createArg.ackHandlerDeadlineMs).toBe(55_000);
-    expect(createArg.ackSendTimeoutMs).toBe(60_000);
+    expect(createArg.storageAckTiming).toEqual({
+      handlerDeadlineMs: 55_000,
+      sendTimeoutMs: 60_000,
+    });
+  });
+
+  it('validates malformed StorageACK timing before chain-reset wipe can run', async () => {
+    await expect(runDaemonInner(true, {
+      name: 'storage-ack-invalid-before-wipe-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'core',
+      storageAck: '60000',
+    } as any, Date.now())).rejects.toThrow(/storageAck must be an object/);
+
+    expect(mocks.chainResetWipe).not.toHaveBeenCalled();
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
   it('passes the resolved send timeout into daemon async publisher ACK sends', async () => {
@@ -131,7 +165,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       peerId: 'self-peer',
       gossip: { publish: vi.fn(async () => undefined) },
       messenger: { sendReliable },
-      node: { libp2p: { getPeers: () => [{ toString: () => 'peer-a' }] } },
+      getACKCandidatePeerIds: vi.fn(() => ['peer-a']),
     };
     const transport = createDaemonACKTransportFactory({
       agent,
@@ -143,5 +177,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
     });
+    expect(transport.getConnectedCorePeers('/dkg/test/storage-ack')).toEqual(['peer-a']);
+    expect(agent.getACKCandidatePeerIds).toHaveBeenCalledWith('/dkg/test/storage-ack');
   });
 });

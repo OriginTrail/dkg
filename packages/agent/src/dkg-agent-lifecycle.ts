@@ -1083,11 +1083,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               contextGraphSharedMemoryUri,
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
-              // C1: operator-tunable ACK-handler deadline. Undefined → the
-              // handler's derived 15s default. Raise on large-store cores so a
-              // slow-but-working store completes the ACK instead of declining
-              // CORE_TEMPORARILY_UNAVAILABLE (pair with publishers' ackSendTimeoutMs).
-              ackHandlerDeadlineMs: this.config.ackHandlerDeadlineMs,
+              ackHandlerDeadlineMs: this.config.storageAckTiming?.handlerDeadlineMs
+                ?? this.config.ackHandlerDeadlineMs,
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
               // may be absent on a chunked V2 intent (the handler then

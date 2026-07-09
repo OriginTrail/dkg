@@ -105,6 +105,8 @@ import {
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
+  createACKSendP2P as createPublisherACKSendP2P,
+  resolveStorageAckTiming,
   selectACKCandidatePeers,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
@@ -537,6 +539,51 @@ function legacyChainListScanOptions(
   return undefined;
 }
 
+function normalizeStorageAckConfig(config: DKGAgentConfig): DKGAgentConfig {
+  const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
+  const hasLegacyTiming =
+    config.ackHandlerDeadlineMs !== undefined ||
+    config.ackSendTimeoutMs !== undefined;
+
+  const timing = resolveStorageAckTiming(
+    hasStorageAckTiming
+      ? config.storageAckTiming
+      : hasLegacyTiming
+        ? {
+            handlerDeadlineMs: config.ackHandlerDeadlineMs,
+            sendTimeoutMs: config.ackSendTimeoutMs,
+          }
+        : undefined,
+    'DKGAgentConfig.storageAckTiming',
+  );
+
+  if (hasStorageAckTiming && hasLegacyTiming) {
+    const legacyTiming = resolveStorageAckTiming(
+      {
+        handlerDeadlineMs: config.ackHandlerDeadlineMs,
+        sendTimeoutMs: config.ackSendTimeoutMs,
+      },
+      'DKGAgentConfig legacy ACK timing',
+    );
+    if (
+      legacyTiming.handlerDeadlineMs !== timing.handlerDeadlineMs ||
+      legacyTiming.sendTimeoutMs !== timing.sendTimeoutMs
+    ) {
+      throw new Error(
+        'DKGAgentConfig.storageAckTiming must not conflict with legacy ' +
+        'ackHandlerDeadlineMs/ackSendTimeoutMs aliases',
+      );
+    }
+  }
+
+  return {
+    ...config,
+    storageAckTiming: timing,
+    ackHandlerDeadlineMs: timing.handlerDeadlineMs,
+    ackSendTimeoutMs: timing.sendTimeoutMs,
+  };
+}
+
 /**
  * High-level facade that ties together all DKG agent capabilities:
  * identity, networking, publishing, querying, discovery, and messaging.
@@ -554,6 +601,7 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(config: DKGAgentConfig): Promise<DKGAgent> {
+    config = normalizeStorageAckConfig(config);
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1597,7 +1645,7 @@ export class DKGAgent extends DKGAgentBase {
    * read sees the current value; the default only covers the first call
    * on chains without the getter.
    */
-  private getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
+  public getACKCandidatePeerIds(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const peers = this.node.libp2p.getPeers();
     return selectACKCandidatePeers({
       connectedPeers: peers.map(p => p.toString()),
@@ -1612,15 +1660,10 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   private createACKSendP2P(): ACKCollectorDeps['sendP2P'] {
-    return async (peerId: string, protocol: string, data: Uint8Array) => {
-      const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
-        timeoutMs: this.config.ackSendTimeoutMs,
-      });
-      if (!sendResult.delivered) {
-        throw new Error(`substrate queued (transport): ${sendResult.error}`);
-      }
-      return sendResult.response;
-    };
+    return createPublisherACKSendP2P({
+      messenger: this.messenger,
+      timeoutMs: this.config.storageAckTiming!.sendTimeoutMs,
+    });
   }
 
   /**
@@ -1652,7 +1695,7 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeerIds(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1735,7 +1778,7 @@ export class DKGAgent extends DKGAgentBase {
         }
       }
       // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // getACKCandidatePeerIds' confirmed-core shortcut tracks the chain's real
       // requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;
@@ -1804,7 +1847,7 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeerIds(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -1886,7 +1929,7 @@ export class DKGAgent extends DKGAgentBase {
         }
       }
       // Codex review (PR #1107): cache the runtime quorum BEFORE collect() so
-      // getACKCandidatePeers' confirmed-core shortcut tracks the chain's real
+      // getACKCandidatePeerIds' confirmed-core shortcut tracks the chain's real
       // requiredACKs instead of the hard-coded default.
       if (typeof requiredACKs === 'number' && requiredACKs > 0) {
         this.lastKnownRequiredACKs = requiredACKs;
