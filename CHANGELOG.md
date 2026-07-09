@@ -6,11 +6,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [10.0.5] - 2026-07-08
 
-Node stability and sync hardening on top of 10.0.4, plus contract updates. Ends the oversize-literal retry loop that could pin sync CPU, keeps the `agents/_meta` graph off the sync plane (reduces sync fan-out load), gates node-UI metric store-scans on consumer presence, and repairs the 10.0.4 npm tarball, which shipped without its `network/*.json` overlays and `project.json` (npm-installed nodes were falling back to built-in defaults). Also ships updated PublishingConviction 10.0.8 contracts (sources + ABIs); the on-chain deploy is a separate, coordinated activity (see **Deployment**). Content is identical to the `10.0.5-canary.1` testnet build (commit `6a91a16d`).
+Node stability and sync hardening on top of 10.0.4, plus contract updates and post-canary mainnet-readiness fixes. Ends the oversize-literal retry loop that could pin sync CPU, keeps the `agents/_meta` graph off the sync plane (reduces sync fan-out load), gates node-UI metric store-scans on consumer presence, and repairs the 10.0.4 npm tarball, which shipped without its `network/*.json` overlays and `project.json` (npm-installed nodes were falling back to built-in defaults). Also ships updated PublishingConviction 10.0.8 contracts (sources + ABIs); the on-chain deploy is a separate, coordinated activity (see **Deployment**). The stable cut extends the `10.0.5-canary.1` testnet build with ACK-path hardening, RPC failover fixes, graph-indexed hot-path store reads, active-network peer isolation, git auto-update opt-in, and KA publish lifecycle observability.
 
 ### Added
 
 - **PublishingConviction 10.0.8 contract updates** — updated contract sources and regenerated ABIs (#1524). The runtime contract surface (`packages/evm-module/abi/*.json`) is updated; nodes resolve `PublishingConviction` from the Hub per call and hot-swap the new logic with no restart, so 10.0.4 and 10.0.5 nodes both interoperate with either the 10.0.7 or 10.0.8 contract.
+- **KA publish lifecycle logs by Asset UAL** — publish lifecycle logs now carry the Asset UAL so operators can follow individual Knowledge Assets through the publish path (#1531).
+- **Git auto-update opt-in** — node operators can enable the Git-based auto-update path explicitly instead of relying only on package-manager based update flows (#1545).
 
 ### Fixed
 
@@ -18,10 +20,18 @@ Node stability and sync hardening on top of 10.0.4, plus contract updates. Ends 
 - **`agents/_meta` kept off the sync plane** (#1526, follow-up #1533): the per-agent `_meta` graph is no longer carried on the sync/catch-up path (reduces sync fan-out load), with retention behaviour corrected in the post-merge review follow-up.
 - **Node-UI metric store-scans gated on consumer presence** (#1525): the dashboard metric collector no longer issues store `COUNT` scans when nothing is consuming them, removing idle store load.
 - **npm tarball now ships runtime assets** (#1523): `network/*.json` overlays and `project.json` are guaranteed to be packed into the `@origintrail-official/dkg` tarball. The 10.0.4 tarball omitted them (a turbo-cache prepack regression), so npm-installed nodes silently fell back to built-in network defaults.
+- **Context-graph registration reads use RPC failover** — the CG-register deposit read path now routes through RPC failover instead of binding to a single endpoint (#1535).
+- **RPC failover endpoint stickiness** — read-after-write probes avoid immediately returning to recently failed RPC endpoints, reducing repeated `eth_call`/`eth_getLogs` failures during provider degradation (#1544).
+- **Publisher first-attempt public-CG quads** — public context-graph quads are inlined on the first publish attempt instead of relying on retry-side recovery (#1538).
+- **`agents/_meta` retention hardened** — retention and serve-wiring now include concurrency and drift guards so metadata cleanup does not race active agent state (#1534).
+- **Active-network peer isolation** — peers from other DKG networks are filtered out of active-network state and selection paths (#1546).
+- **Storage ACK priority lane hardening** — ACK timeout, fallback, and scheduler-pressure paths now preserve normal-lane capacity and retain fallback candidates under pressure (#1528).
 
 ### Changed
 
 - **Devnet harness hygiene** (#1521): core-peers restore and the RS-rotation window fixes carried over from the 10.0.4 test run (test infrastructure only).
+- **Operator-tunable ACK deadlines** — StorageACK deadline and publisher send timeout are configurable so operators can tune publish behaviour for slower environments (#1540).
+- **Graph-indexed hot-path store reads** — GraphSetIndexStore rebuilds are deferred and SWM/VM reads bind to the named-graph index instead of falling back to broad store scans (#1541, #1542).
 
 ### Deployment
 
