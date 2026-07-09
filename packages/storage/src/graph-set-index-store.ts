@@ -14,6 +14,7 @@ export type GraphSetMutationSource =
   | 'query';
 
 type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
+type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
   | {
@@ -67,7 +68,7 @@ export class GraphSetIndexStore implements TripleStore {
    * be applied incrementally. The stored source preserves the observer contract
    * while deferring expensive full-store scans until the next graph read.
    */
-  private pendingFullRefresh: GraphSetRefreshSource | null = null;
+  private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -268,7 +269,7 @@ export class GraphSetIndexStore implements TripleStore {
     this.mutationGeneration++;
   }
 
-  private scheduleFullRefresh(source: GraphSetRefreshSource): void {
+  private scheduleFullRefresh(source: PendingFullRefreshSource): void {
     this.bumpMutation();
     this.pendingFullRefresh ??= source;
   }
