@@ -95,6 +95,21 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false]);
     const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
     expect(exactBlockCall).toBeDefined();
+
+    // eth_call with NO block tag (defaults to latest) OR a latest-family tag → TIP
+    // (reads current contract state a lagging backend would stale) → skipPreferred.
+    for (const callParams of [[{ to: '0xC', data: '0x' }], [{ to: '0xC', data: '0x' }, 'latest']]) {
+      readProvider.calls.length = 0;
+      await a.requestPublishingConvictionRpc('eth_call', callParams);
+      expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_call')![2])
+        .toMatchObject({ skipPreferred: true });
+    }
+
+    readProvider.calls.length = 0;
+    // eth_call at a CONCRETE historical block → the answer can't change → STICKY.
+    await a.requestPublishingConvictionRpc('eth_call', [{ to: '0xC', data: '0x' }, '0x7b']);
+    const exactCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_call');
+    expect(exactCall![2]?.skipPreferred).toBeUndefined();
   });
 
   it('the event-lane wide-log scan (listenForEvents → queryFilter) reads canonical + preference-transparent', async () => {

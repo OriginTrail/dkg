@@ -797,12 +797,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
     await this.init();
     const label = `pca rpc ${method}`;
-    const tag = params[0];
 
-    // TRUE tip read (current head, or a latest-family `eth_getBlockByNumber` tag) →
-    // preference-TRANSPARENT: a lagging sticky backend would give a stale head.
+    // TRUE tip read → preference-TRANSPARENT: a lagging sticky backend would give a
+    // stale head / stale contract state. The tip block-tag position differs by
+    // method: `eth_getBlockByNumber` → params[0] (a concrete block is NOT tip);
+    // `eth_call` → params[1] (params[0] is the call object, and an OMITTED tag
+    // defaults to `latest`, so a no-tag / latest-family eth_call is tip-sensitive
+    // too — it reads current contract state that a lagging backend would stale).
+    const isLatestFamilyTag = (t: unknown): boolean =>
+      typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
     const isTipRead = method === 'eth_blockNumber'
-      || (method === 'eth_getBlockByNumber' && typeof tag === 'string' && PCA_TIP_BLOCK_TAGS.has(tag));
+      || (method === 'eth_getBlockByNumber' && isLatestFamilyTag(params[0]))
+      || (method === 'eth_call' && (params[1] === undefined || isLatestFamilyTag(params[1])));
     if (isTipRead) {
       return this.readTipProvider(label, (provider) => provider.send(method, params));
     }

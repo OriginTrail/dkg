@@ -651,23 +651,86 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(thrown.rpcUrls).toEqual(STICKY_URLS); // ...yet rpcUrls stays CANONICAL [primary, backup], not [backup, primary]
   });
 
-  it('AC-9: a primary reached as a FALLBACK (not tried first) does NOT clear the preference (cadence fix)', async () => {
-    // primary: 429 on the op1 establish probe, healthy afterward — but only ever reached as a FALLBACK on op2.
-    const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
-    // backup: ok on op1 (establish), FAILS on op2 (forces the op to fall over to the primary), ok again after.
-    const backup = { read: readSeq((n) => (n === 2 ? retryable429() : 'BACKUP')) };
+  it('AC-9: a preferred backup that RESPONDS (getReceipt null, no failure) while the primary serves the fallback KEEPS the preference (cadence fix; distinct from a FAILED backup — AC-22)', async () => {
+    const receipt = { status: 1, hash: '0xhash' };
+    // Establish preferred=backup via a read failover.
+    const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')), getTransactionReceipt: recorder(async () => receipt) };
+    const backup = { read: readSeq(() => 'BACKUP'), getTransactionReceipt: recorder(async () => null) };
     const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
 
-    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');  // op1 canonical: establish preferred=backup
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup
 
-    // op2 preferred-first [backup, primary]: backup 429s → falls over to the primary as a FALLBACK (i=1, not first).
-    // The primary answering ONE op must NOT clear the preference (it doesn't prove primary health).
+    // getReceipt: [backup, primary]. The backup RESPONDS with null (not-yet-mined) —
+    // NOT a failure — so the loop continues to the primary, which has the receipt.
+    // Because the backup did not FAIL, the preference must NOT be cleared (a benign
+    // "no data here" fallback is not evidence the backup is degraded).
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+
+    // Preference SURVIVED → the next read still prefers the backup.
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');
+    expect(primary.read.calls).toHaveLength(1); // only op1's establish 429 — the primary is NOT re-probed for reads
+  });
+
+  it('AC-22: a preferred backup that FAILS (errors) is DE-PREFERRED (not re-tried first every op, which would re-fail-close) (round-7 🔴)', async () => {
+    // primary: 429 on the op1 establish probe, healthy afterward.
+    const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
+    // backup: ok on op1 (establish), then FAILS (429) from op2 on — a hanging/erroring backup.
+    const backup = { read: readSeq((n) => (n === 1 ? 'BACKUP' : retryable429())) };
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // op1: establish preferred=backup
+
+    // op2 [backup, primary]: backup FAILS (429) → recordFailure de-prefers it → primary serves.
     expect(await client.read('r', (p: any) => p.read())).toBe('PRIMARY');
 
-    // op3: preference SURVIVED op2's fallback-primary success → backup tried FIRST again.
-    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');
-    expect(primary.read.calls).toHaveLength(2); // op1 establish (429) + op2 fallback. If op2 had CLEARED, op3 canonical → 3.
-    expect(backup.read.calls).toHaveLength(3);  // op1 ok, op2 429, op3 ok
+    // op3: backup was de-preferred → canonical [primary, backup] → primary tried FIRST
+    // (NOT re-stalled on the failed backup, which is the #1337 fail-close this prevents).
+    expect(await client.read('r', (p: any) => p.read())).toBe('PRIMARY');
+    expect(backup.read.calls).toHaveLength(2); // op1 (ok) + op2 (429). NOT op3 — de-preferred. (Bug: 3.)
+    expect(primary.read.calls).toHaveLength(3);
+  });
+
+  it('AC-23: past the TTL a nonce-critical populate STAYS on the write-proven backend (does NOT re-probe a possibly-stale primary) (round-7 🔴)', async () => {
+    let clock = 0;
+    const p0 = {}; const p1 = {};
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true, ttlMs: 30_000, now: () => clock });
+
+    clock = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // Past the TTL: a READ re-probe would go canonical, but a nonce-critical populate
+    // MUST NOT (stale-nonce risk on a just-recovered-but-lagging primary) — it keeps
+    // the write-proven backend.
+    clock = 40_000;
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    expect(populateOrder).toEqual(['backup']); // backup tried FIRST — no primary re-probe. (Bug: ['primary','backup'].)
+  });
+
+  it('AC-24: a populate on a READ-established preferred backend UPGRADES it to write-proven, so the next populate sticks (round-7 🟡 coverage)', async () => {
+    const p0 = { read: readSeq(() => retryable429()) };
+    const p1 = { read: readSeq(() => 'BACKUP') };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    // primary populate 429s, backup populate ok (so a populate proves the backup).
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup, source=READ
+
+    // populate #1: source=read → nonceWrite won't trust a read-only backend's nonce →
+    // canonical → primary 429 → backup populates → UPGRADES the preference read→write.
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // populate #2: now write-proven → sticks to the backup first (proves the upgrade).
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    expect(populateOrder).toEqual(['backup']);
   });
 
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {

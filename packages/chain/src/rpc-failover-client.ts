@@ -411,6 +411,7 @@ export class RpcFailoverClient {
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
         lastRetryable = err;
+        this.stickiness.recordFailure(endpoint, 'nonceWrite'); // de-prefer a failed backend
         if (i < endpoints.length - 1) {
           noteRpcFailover(`${label} preparation`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }
@@ -492,6 +493,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
+              this.stickiness.recordFailure(endpoint, 'write'); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover(`${label} broadcast`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -572,6 +574,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
+              this.stickiness.recordFailure(endpoint, 'write'); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover('receipt lookup', endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -652,6 +655,7 @@ export class RpcFailoverClient {
       } catch (err) {
         if (!isRetryable(err)) throw err;
         lastRetryable = err;
+        this.stickiness.recordFailure(endpoint, intent); // de-prefer a failed backend
         if (!isLast) {
           noteRpcFailover(label, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }

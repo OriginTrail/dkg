@@ -94,7 +94,15 @@ export class EndpointStickiness {
     // idx < 0: preferred no longer configured (pool rebind dropped it).
     // idx === 0: preferred IS the primary — canonical already tries it first.
     if (idx <= 0) return canonical;
-    if (this.cfg.now() >= pref.primaryProbeDueAt) {
+    // The TTL re-probe is a READ-recovery mechanism: it periodically re-tries the
+    // configured primary so a recovered primary resumes serving READS. It must NOT
+    // redirect a nonce-critical populate — a primary can be transport-healthy while
+    // still behind the block/txpool state that advanced the signer nonce, so
+    // populating there would sign a stale/duplicate nonce. A `nonceWrite` therefore
+    // keeps its populate-proven backend past the TTL; writes return to the primary
+    // only once a READ re-probe CLEARS the preference on primary recovery (or the
+    // backend fails, see recordFailure).
+    if (intent !== 'nonceWrite' && this.cfg.now() >= pref.primaryProbeDueAt) {
       // Re-probe the configured primary this op; schedule the next re-probe one TTL
       // out so we don't re-stall on it again until then.
       this.state = { ...pref, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };
@@ -165,6 +173,27 @@ export class EndpointStickiness {
       // Never DOWNGRADE on a read (a read hitting the write-proven backend doesn't
       // un-prove its nonce view).
       this.state = { ...this.state, source: 'write' };
+    }
+  }
+
+  /**
+   * Record that `endpoint` FAILED the op (errored → triggered failover), so the
+   * failover loop is moving on to the next endpoint. If the failed endpoint is the
+   * current preferred, DE-PREFER it (drop to `none`): a degraded/hanging preferred
+   * backup must not keep being tried first, or every subsequent op re-stalls on it
+   * until the TTL re-probe — reintroducing the very fail-close this cadence exists
+   * to prevent, just with the backup as the staller. A later success re-establishes
+   * the new last-good backend. No-op for `transparentRead` (non-mutating) or when
+   * the failed endpoint isn't the preferred (e.g. a re-probe where the PRIMARY
+   * fails is expected and must not disturb the preference). This is called ONLY on
+   * a real error/failover, NOT on a benign `null` (e.g. getReceipt's not-yet-mined
+   * null continues the loop without a failover), so a healthy-but-empty backup
+   * stays preferred.
+   */
+  recordFailure<T extends StickyEndpoint>(endpoint: T, intent: StickinessIntent): void {
+    if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
+    if (this.state.kind === 'preferred' && this.state.url === endpoint.rpcUrl) {
+      this.state = { kind: 'none' };
     }
   }
 }
