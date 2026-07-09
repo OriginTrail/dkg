@@ -39,7 +39,7 @@ async function publish(name: string, triples: Array<[string, string, string]>): 
       [`/api/knowledge-assets/${name}/wm/write`, { quads }],
       [`/api/knowledge-assets/${name}/wm/finalize`, {}],
       [`/api/knowledge-assets/${name}/swm/share`, {}],
-      ['/api/shared-memory/publish', { assertionName: name }],
+      [`/api/knowledge-assets/${name}/vm/publish`, {}],
     ];
     for (const [path, extra] of steps) {
       if (![200, 201].includes((await post(path, { contextGraphId: CG, name, ...extra })).status)) {

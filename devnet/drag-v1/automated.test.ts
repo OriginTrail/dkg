@@ -55,7 +55,7 @@ async function publish(api: string, name: string, triples: Array<[string, string
       [`/api/knowledge-assets/${name}/wm/write`, { quads: triples.map(([s, p, o]) => ({ subject: s, predicate: p, object: o, graph: '' })) }],
       [`/api/knowledge-assets/${name}/wm/finalize`, {}],
       [`/api/knowledge-assets/${name}/swm/share`, {}],
-      ['/api/shared-memory/publish', { assertionName: name }],
+      [`/api/knowledge-assets/${name}/vm/publish`, {}],
     ];
     for (const [path, extra] of steps) {
       if (![200, 201].includes((await post(api, path, { contextGraphId: CG, ...extra })).status)) {

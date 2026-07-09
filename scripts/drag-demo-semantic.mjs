@@ -30,7 +30,7 @@ async function waitId() { for (let i = 0; i < 40; i++) { try { if ((await get('/
 async function publish(name, triples, tries = 4) {
   for (let t = 0; t < tries; t++) {
     let ok = true;
-    for (const [path, extra] of [['/api/knowledge-assets', { name }], [`/api/knowledge-assets/${name}/wm/write`, { quads: triples.map(([s, p, o]) => ({ subject: s, predicate: p, object: o, graph: '' })) }], [`/api/knowledge-assets/${name}/wm/finalize`, {}], [`/api/knowledge-assets/${name}/swm/share`, {}], ['/api/shared-memory/publish', { assertionName: name }]]) {
+    for (const [path, extra] of [['/api/knowledge-assets', { name }], [`/api/knowledge-assets/${name}/wm/write`, { quads: triples.map(([s, p, o]) => ({ subject: s, predicate: p, object: o, graph: '' })) }], [`/api/knowledge-assets/${name}/wm/finalize`, {}], [`/api/knowledge-assets/${name}/swm/share`, {}], [`/api/knowledge-assets/${name}/vm/publish`, {}]]) {
       if (![200, 201].includes((await post(path, { contextGraphId: CG, ...extra })).status)) { ok = false; break; }
     }
     if (ok) return true;

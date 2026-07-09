@@ -41,7 +41,7 @@ async function publish(name, triples) {
       [`/api/knowledge-assets/${name}/wm/write`, { quads }],
       [`/api/knowledge-assets/${name}/wm/finalize`, {}],
       [`/api/knowledge-assets/${name}/swm/share`, {}],
-      ['/api/shared-memory/publish', { assertionName: name }],
+      [`/api/knowledge-assets/${name}/vm/publish`, {}],
     ];
     for (const [path, extra] of steps) {
       const { status } = await post(path, { contextGraphId: CG, name, ...extra });

@@ -38,7 +38,7 @@ async function localFacts(api) { return (await post(api, '/api/answer', { questi
 
 async function publish(api, name, triples) {
   const quads = triples.map(([p, o]) => ({ subject: `urn:supplier:${name}`, predicate: p, object: o, graph: '' }));
-  for (const [path, extra] of [['/api/knowledge-assets', { name }], [`/api/knowledge-assets/${name}/wm/write`, { quads }], [`/api/knowledge-assets/${name}/wm/finalize`, {}], [`/api/knowledge-assets/${name}/swm/share`, {}], ['/api/shared-memory/publish', { assertionName: name }]]) {
+  for (const [path, extra] of [['/api/knowledge-assets', { name }], [`/api/knowledge-assets/${name}/wm/write`, { quads }], [`/api/knowledge-assets/${name}/wm/finalize`, {}], [`/api/knowledge-assets/${name}/swm/share`, {}], [`/api/knowledge-assets/${name}/vm/publish`, {}]]) {
     const r = await post(api, path, { contextGraphId: CG, ...extra });
     if (![200, 201].includes(r.status)) return { error: `${path} -> ${r.status}: ${JSON.stringify(r.b).slice(0, 120)}` };
   }
