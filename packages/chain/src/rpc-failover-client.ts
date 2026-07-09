@@ -121,17 +121,6 @@ export type SignPopulatedFn = (
 export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
 
 /**
- * Endpoint-stickiness knobs (Mechanism B). All optional with production
- * defaults; overridden only by tests (injected clock / TTL) or the kill-switch.
- *   - `enabled` — force stickiness on/off. When omitted, resolved LIVE at
- *     check-time from `DKG_DISABLE_RPC_STICKINESS` (env kill-switch), so the flag
- *     takes effect on restart without a code change.
- *   - `ttlMs`   — the primary re-probe cadence (defaults to
- *     `STICKY_PREFERRED_TTL_MS`).
- *   - `now`     — monotonic-ish clock (defaults to `Date.now`); injected by the
- *     cadence unit test.
- */
-/**
  * Optional transport hooks + config for `RpcFailoverClient`, grouped in ONE
  * object so the constructor boundary stays readable as knobs are added (no
  * positional `undefined` placeholders for unrelated optional concerns).

@@ -892,4 +892,22 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(await client.read('r', (p: any) => p.read())).toBe('C'); // preferred C tried first
     expect(pRead.calls.length).toBe(pBefore); // primary NOT re-probed (still within the original TTL window)
   });
+
+  it('AC-20: readContract honors skipPreferred (transparent) — the REAL contract-read path the event-lane scan relies on (round-5 🔴)', async () => {
+    // Proves skipPreferred survives into RpcFailoverClient.readContract (not just
+    // the adapter opts plumbing): `queryFilterWithFailover` passes it here, so if
+    // readContract dropped `opts.skipPreferred` event scans would silently go sticky.
+    const p0 = {}; const p1 = {};
+    let n0 = 0;
+    const primaryView = recorder(async () => { n0 += 1; if (n0 === 1) throw retryable429(); return 'PRIMARY'; });
+    const backupView = recorder(async () => 'BACKUP');
+    const contract = { connect: (p: unknown) => (p === p0 ? { view: primaryView } : { view: backupView }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    expect(await client.readContract('v', contract, (c: any) => c.view())).toBe('BACKUP'); // op1: primary 429 → backup → preferred=backup
+
+    // op2 with skipPreferred → CANONICAL (primary tried first). If readContract
+    // ignored the flag it would prefer the backup and return 'BACKUP'.
+    expect(await client.readContract('v', contract, (c: any) => c.view(), { skipPreferred: true })).toBe('PRIMARY');
+  });
 });

@@ -73,11 +73,16 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_blockNumber')![2])
       .toMatchObject({ skipPreferred: true });
 
-    // eth_getBlockByNumber('latest') → TIP → skipPreferred.
-    await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['latest', false]);
-    expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && c[2]?.skipPreferred))
-      .toBeDefined();
+    // EVERY latest-family eth_getBlockByNumber tag → TIP → skipPreferred (a
+    // regression dropping any one of them from PCA_TIP_BLOCK_TAGS is caught here).
+    for (const blockTag of ['latest', 'pending', 'safe', 'finalized']) {
+      readProvider.calls.length = 0;
+      await a.requestPublishingConvictionRpc('eth_getBlockByNumber', [blockTag, false]);
+      expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber')![2])
+        .toMatchObject({ skipPreferred: true });
+    }
 
+    readProvider.calls.length = 0;
     // eth_getTransactionReceipt → NOT a tip read → STICKY (no skipPreferred), so a
     // lagging primary's null doesn't short-circuit the backup that has the receipt.
     await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']);
@@ -85,6 +90,7 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     expect(receiptCall).toBeDefined();
     expect(receiptCall![2]?.skipPreferred).toBeUndefined();
 
+    readProvider.calls.length = 0;
     // eth_getBlockByNumber(concrete block) → NOT tip → STICKY.
     await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false]);
     const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
@@ -157,5 +163,40 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     // Exhaustion whose cause is a transport error (NOT the not-imported sentinel)
     // propagates as RPC_ENDPOINTS_EXHAUSTED, not a bogus 0.
     await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+  });
+});
+
+// A nullable PCA proxy lookup (receipt/tx/block) whose queried endpoint returns
+// `null` must FAIL OVER (a lagging endpoint's null is "not here yet", not a
+// definitive answer) — otherwise the browser sees a stale null while another
+// endpoint already has the object (round-5 🔴).
+describe('PCA proxy nullable lookups fail over on null instead of returning a lagging stale null', () => {
+  function makePca(p0: any, p1: any) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.ensureConfiguredStaticChainIdValidated = async () => {};
+    a.providers = [p0, p1];
+    a.rpcUrls = ['https://primary.example', 'https://backup.example'];
+    return a;
+  }
+
+  it('primary returns null for the receipt → fails over to the backup that HAS it', async () => {
+    const receipt = { status: '0x1', transactionHash: '0xhash' };
+    const primarySend = recorder(async () => null);   // lagging: no receipt yet
+    const backupSend = recorder(async () => receipt); // has it
+    const a = makePca({ send: primarySend }, { send: backupSend });
+    expect(await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash'])).toBe(receipt);
+    expect(primarySend.calls).toHaveLength(1);
+    expect(backupSend.calls).toHaveLength(1);
+  });
+
+  it('no endpoint has it yet → returns the honest null (after trying ALL endpoints)', async () => {
+    const primarySend = recorder(async () => null);
+    const backupSend = recorder(async () => null);
+    const a = makePca({ send: primarySend }, { send: backupSend });
+    expect(await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash'])).toBeNull();
+    expect(primarySend.calls).toHaveLength(1); // both endpoints were tried before returning null
+    expect(backupSend.calls).toHaveLength(1);
   });
 });
