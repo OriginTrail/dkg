@@ -120,26 +120,12 @@ export class FinalizationHandler {
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
       }
-      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_received', {
-        ...msg,
-        contextGraphId: msg.contextGraphId || contextGraphId,
-        rootEntityCount: msg.rootEntities.length,
-      }));
 
       if (msg.contextGraphId && msg.contextGraphId !== contextGraphId) {
         // #1100: same guard as GossipPublishHandler — frames of other gossip
         // message types decode "successfully" with garbage in this field, so
         // only WARN when the mismatched value is a plausible CG id.
         if (!validateContextGraphId(msg.contextGraphId).valid) return;
-        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
-          ...msg,
-          contextGraphId: msg.contextGraphId,
-          rootEntityCount: msg.rootEntities.length,
-          outcome: 'rejected',
-          retryable: false,
-          reason: `contextGraphId "${msg.contextGraphId}" does not match topic "${contextGraphId}"`,
-          level: 'warn',
-        }));
         this.log.warn(ctx, `Finalization: contextGraphId "${msg.contextGraphId.slice(0, 120)}" does not match topic "${contextGraphId}", ignoring`);
         return;
       }
@@ -152,15 +138,6 @@ export class FinalizationHandler {
       }
 
       if (!msg.ual || !msg.txHash || msg.rootEntities.length === 0) {
-        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
-          ...msg,
-          contextGraphId,
-          rootEntityCount: msg.rootEntities.length,
-          outcome: 'rejected',
-          retryable: false,
-          reason: 'incomplete finalization message',
-          level: 'warn',
-        }));
         this.log.warn(ctx, `Finalization: incomplete message (ual=${msg.ual}, txHash=${msg.txHash}, roots=${msg.rootEntities.length}), ignoring`);
         return;
       }
@@ -234,19 +211,6 @@ export class FinalizationHandler {
         if (sgVal.valid) {
           subGraphName = msg.subGraphName;
         } else {
-          this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_rejected', {
-            ...msg,
-            contextGraphId,
-            targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
-            rootEntityCount: msg.rootEntities.length,
-            subGraphName: msg.subGraphName,
-            blockNumber,
-            batchId: protoToBigInt(msg.batchId),
-            outcome: 'rejected',
-            retryable: false,
-            reason: sgVal.reason,
-            level: 'warn',
-          }));
           this.log.warn(ctx, `Finalization: rejected message with invalid subGraphName "${msg.subGraphName}": ${sgVal.reason}`);
           return;
         }

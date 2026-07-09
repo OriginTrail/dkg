@@ -32,6 +32,7 @@ function makeContext(options: {
   metaQuads?: Quad[];
   dataQuads?: Quad[];
   processError?: Error;
+  storeInsertError?: Error;
   logLifecycle?: (event: {
     assetUal: string;
     event: string;
@@ -98,7 +99,10 @@ function makeContext(options: {
           dataRejectedMissingMeta: options.processResult?.dataRejectedMissingMeta ?? 0,
         };
       },
-      storeInsert: async (quads: Quad[]) => { insertedBatches.push(quads); },
+      storeInsert: async (quads: Quad[]) => {
+        if (options.storeInsertError) throw options.storeInsertError;
+        insertedBatches.push(quads);
+      },
       deleteCheckpoint: (key: string) => { deletedCheckpoints.push(key); },
       setCheckpoint: () => undefined,
       logLifecycle: options.logLifecycle,
@@ -290,6 +294,46 @@ describe('runDurableSync sinceBatchId threading', () => {
     await runDurableSync(context);
 
     expect(lifecycleEvents).toEqual([]);
+  });
+
+  it('emits sync failure lifecycle event after verified KA metadata when storage fails', async () => {
+    const lifecycleEvents: Array<{
+      assetUal: string;
+      event: string;
+      action: string;
+      result: string;
+      contextGraphId: string;
+      remotePeerId: string;
+      reason?: string;
+    }> = [];
+    const publishedMeta = {
+      subject: ASSET_UAL,
+      predicate: `${DKG}merkleRoot`,
+      object: `"${'ab'.repeat(32)}"`,
+      graph: 'did:dkg:context-graph:mfacts/_meta',
+    };
+    const { context } = makeContext({
+      processResult: {
+        verifiedData: [{ subject: 'urn:root', predicate: 'http://schema.org/name', object: '"Fact"', graph: 'did:dkg:context-graph:mfacts' }],
+        verifiedMeta: [publishedMeta],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: 1,
+      },
+      storeInsertError: new Error('insert failed'),
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    });
+
+    await runDurableSync(context);
+
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      event: 'sync_failure',
+      action: 'failure',
+      result: 'failed',
+      contextGraphId: 'mfacts',
+      remotePeerId: 'peerR',
+      reason: 'insert failed',
+    }));
   });
 });
 

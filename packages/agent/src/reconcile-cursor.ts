@@ -40,7 +40,7 @@ export interface CursorState {
   watermark: number;
   /**
    * Completed-but-not-yet-absorbed ordinals above the watermark, mapped to the
-   * observed registration block plus optional asset metadata. An ordinal stays
+   * observed registration block. An ordinal stays
    * here when it completed out of order (a lower ordinal is still missing) OR
    * when it is not yet buried by `confirmationDepth`. In-memory only — on
    * restart the sweep re-derives everything from chain + the persisted watermark.
@@ -52,14 +52,10 @@ export interface CursorState {
 export interface CompletedOrdinal {
   ordinal: number;
   blockNumber: number;
-  assetUal?: string;
-  kaId?: string;
 }
 
 export interface HeldCompletion {
   blockNumber: number;
-  assetUal?: string;
-  kaId?: string;
 }
 
 export function createCursorState(watermark = 0): CursorState {
@@ -95,12 +91,7 @@ export function absorbConfirmed(
     }
     state.ahead.delete(ordinal);
     state.watermark += 1;
-    onAbsorbed?.({
-      ordinal,
-      blockNumber: held.blockNumber,
-      ...(held.assetUal ? { assetUal: held.assetUal } : {}),
-      ...(held.kaId ? { kaId: held.kaId } : {}),
-    });
+    onAbsorbed?.({ ordinal, blockNumber: held.blockNumber });
   }
   return state.watermark;
 }
@@ -120,11 +111,7 @@ export function recordCompletion(
   // Already absorbed (a duplicate/late event for an ordinal below the
   // watermark) — nothing to do.
   if (completed.ordinal < state.watermark) return state.watermark;
-  state.ahead.set(completed.ordinal, {
-    blockNumber: completed.blockNumber,
-    ...(completed.assetUal ? { assetUal: completed.assetUal } : {}),
-    ...(completed.kaId ? { kaId: completed.kaId } : {}),
-  });
+  state.ahead.set(completed.ordinal, { blockNumber: completed.blockNumber });
   return absorbConfirmed(state, chainHeadBlock, confirmationDepth, onAbsorbed);
 }
 

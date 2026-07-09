@@ -23,7 +23,11 @@ pnpm test:devnet:ka-lifecycle-log-proof
 
 That suite runs the script and asserts the generated `metadata.txt`,
 `publish.txt`, and `grep.txt` artifacts contain the same `assetUal` and the
-required publisher, receiver, ACK, finalization, sync, and reconcile rows.
+required publisher, ACK success/quorum, receiver, finalization, sync, and
+reconcile rows. Receiver-side `storage_ack_signed` rows are expected only on
+ACK paths where the receiver can derive the per-KA identity locally, such as
+per-KA SWM graphs; direct inline ACKs prove the ACK lifecycle through the
+publisher's asset-scoped success/quorum rows without trusting a wire UAL.
 
 The script publishes one KA through `scripts/devnet-test-publish.sh`, extracts
 the confirmed `assetUal`, and writes an artifact directory under:
@@ -79,7 +83,9 @@ node1: ka_lifecycle assetUal=$ASSET_UAL stage=wm event=write role=publisher reco
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=swm_share event=prepared role=publisher rawTriples=[REDACTED]
 node2: ka_lifecycle assetUal=$ASSET_UAL stage=swm_share event=swm_update_received role=receiver peer=...
 node2: ka_lifecycle assetUal=$ASSET_UAL stage=swm_share event=swm_state_changed role=receiver outcome=applied
-node2: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=storage_ack_signed role=receiver outcome=success
+node2: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=storage_ack_signed role=receiver outcome=success  # when receiver can derive per-KA identity
+node1: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=success role=publisher outcome=success
+node1: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=quorum role=publisher outcome=success
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=decline role=publisher outcome=decline reason=...
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=chain event=confirm role=publisher txHash=...
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=vm event=promote role=publisher outcome=confirmed

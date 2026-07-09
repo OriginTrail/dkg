@@ -6,9 +6,14 @@ import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
+import {
+  createDurableSyncKaLifecycleObserver,
+  type DurableSyncLifecycleEvent,
+  type DurableSyncLifecycleObserver,
+  type DurableSyncLifecycleScope,
+} from './ka-lifecycle-observer.js';
 
-const DKG_NS = 'http://dkg.io/ontology/';
-const MERKLE_ROOT_PREDICATE = `${DKG_NS}merkleRoot`;
+export type { DurableSyncLifecycleAction, DurableSyncLifecycleEvent } from './ka-lifecycle-observer.js';
 
 export interface DurableSyncSummary {
   insertedTriples: number;
@@ -29,24 +34,6 @@ export interface DurableSyncSummary {
   failedPeers: number;
   failedPhases: number;
   backoffWorthyFailures: number;
-}
-
-export type DurableSyncLifecycleAction = 'request' | 'response' | 'receive' | 'apply' | 'skip' | 'failure';
-
-export interface DurableSyncLifecycleEvent {
-  assetUal: string;
-  event: string;
-  action: DurableSyncLifecycleAction;
-  result: string;
-  source: string;
-  contextGraphId: string;
-  remotePeerId: string;
-  fetchedMetaCount: number;
-  fetchedDataCount: number;
-  insertedMetaCount?: number;
-  insertedDataCount?: number;
-  rejectedKcs?: number;
-  reason?: string;
 }
 
 interface DurableSyncContext {
@@ -98,6 +85,7 @@ interface DurableSyncContext {
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   logLifecycle?: (event: DurableSyncLifecycleEvent) => void;
+  lifecycleObserver?: DurableSyncLifecycleObserver;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -120,6 +108,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     deleteCheckpoint,
     setCheckpoint,
     logLifecycle,
+    lifecycleObserver = logLifecycle ? createDurableSyncKaLifecycleObserver(logLifecycle) : undefined,
     logInfo,
     logWarn,
     logDebug,
@@ -174,7 +163,7 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
-    let verifiedPublishedAssetUals: string[] = [];
+    let lifecycleScope: DurableSyncLifecycleScope | undefined;
     let fetchedMetaCount = 0;
     let fetchedDataCount = 0;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -233,46 +222,16 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-      const publishedAssetUals = publishedAssetUalsFromMeta(processed.verifiedMeta);
-      verifiedPublishedAssetUals = publishedAssetUals;
-      for (const assetUal of publishedAssetUals) {
-        logLifecycle?.({
-          assetUal,
-          event: 'sync_request',
-          action: 'request',
-          result: 'sent',
-          source: 'durable-sync',
-          contextGraphId: pid,
-          remotePeerId,
-          fetchedMetaCount: processed.totalFetchedMetaQuads,
-          fetchedDataCount: processed.totalFetchedDataQuads,
-          rejectedKcs: processed.rejectedKcs,
-        });
-        logLifecycle?.({
-          assetUal,
-          event: 'sync_response',
-          action: 'response',
-          result: 'fetched',
-          source: 'durable-sync',
-          contextGraphId: pid,
-          remotePeerId,
-          fetchedMetaCount: processed.totalFetchedMetaQuads,
-          fetchedDataCount: processed.totalFetchedDataQuads,
-          rejectedKcs: processed.rejectedKcs,
-        });
-        logLifecycle?.({
-          assetUal,
-          event: 'sync_receive',
-          action: 'receive',
-          result: 'verified',
-          source: 'durable-sync',
-          contextGraphId: pid,
-          remotePeerId,
-          fetchedMetaCount: processed.totalFetchedMetaQuads,
-          fetchedDataCount: processed.totalFetchedDataQuads,
-          rejectedKcs: processed.rejectedKcs,
-        });
-      }
+      lifecycleScope = lifecycleObserver?.scopeFromVerifiedMeta({
+        contextGraphId: pid,
+        remotePeerId,
+        verifiedMeta: processed.verifiedMeta,
+      });
+      lifecycleScope?.recordVerified({
+        fetchedMetaCount: processed.totalFetchedMetaQuads,
+        fetchedDataCount: processed.totalFetchedDataQuads,
+        rejectedKcs: processed.rejectedKcs,
+      });
       summary.bytesReceived += metaResult.bytesReceived + dataResult.bytesReceived;
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
@@ -294,21 +253,12 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
       if (skipReason) {
-        for (const assetUal of publishedAssetUals) {
-          logLifecycle?.({
-            assetUal,
-            event: 'sync_skip',
-            action: 'skip',
-            result: 'deferred',
-            source: 'durable-sync',
-            contextGraphId: pid,
-            remotePeerId,
-            fetchedMetaCount: processed.totalFetchedMetaQuads,
-            fetchedDataCount: processed.totalFetchedDataQuads,
-            rejectedKcs: processed.rejectedKcs,
-            reason: skipReason,
-          });
-        }
+        lifecycleScope?.recordSkip({
+          fetchedMetaCount: processed.totalFetchedMetaQuads,
+          fetchedDataCount: processed.totalFetchedDataQuads,
+          rejectedKcs: processed.rejectedKcs,
+          reason: skipReason,
+        });
         recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
         recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
         if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
@@ -329,22 +279,13 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      for (const assetUal of publishedAssetUals) {
-        logLifecycle?.({
-          assetUal,
-          event: 'sync_apply',
-          action: 'apply',
-          result: 'inserted',
-          source: 'durable-sync',
-          contextGraphId: pid,
-          remotePeerId,
-          fetchedMetaCount: processed.totalFetchedMetaQuads,
-          fetchedDataCount: processed.totalFetchedDataQuads,
-          insertedMetaCount: processed.verifiedMeta.length,
-          insertedDataCount: processed.verifiedData.length,
-          rejectedKcs: processed.rejectedKcs,
-        });
-      }
+      lifecycleScope?.recordApply({
+        fetchedMetaCount: processed.totalFetchedMetaQuads,
+        fetchedDataCount: processed.totalFetchedDataQuads,
+        insertedMetaCount: processed.verifiedMeta.length,
+        insertedDataCount: processed.verifiedData.length,
+        rejectedKcs: processed.rejectedKcs,
+      });
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
@@ -367,20 +308,14 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     } catch (pidErr) {
       endPhase();
       const failureReason = pidErr instanceof Error ? pidErr.message : String(pidErr);
-      for (const assetUal of verifiedPublishedAssetUals) {
-        logLifecycle?.({
-          assetUal,
-          event: 'sync_failure',
-          action: 'failure',
-          result: 'failed',
-          source: 'durable-sync',
-          contextGraphId: pid,
-          remotePeerId,
-          fetchedMetaCount,
-          fetchedDataCount,
-          reason: failureReason,
-        });
-      }
+      lifecycleObserver?.recordFailure({
+        assetUals: lifecycleScope?.assetUals ?? [],
+        contextGraphId: pid,
+        remotePeerId,
+        fetchedMetaCount,
+        fetchedDataCount,
+        reason: failureReason,
+      });
       logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${failureReason}`);
       if (isSyncPermanentRejection(pidErr)) {
         // Missed-seam alarm (OT-RFC-56): the oversize guard should have
@@ -418,14 +353,4 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   }
 
   return summary;
-}
-
-function publishedAssetUalsFromMeta(metaQuads: readonly Quad[]): string[] {
-  const out = new Set<string>();
-  for (const quad of metaQuads) {
-    if (quad.predicate === MERKLE_ROOT_PREDICATE && quad.subject.startsWith('did:dkg:')) {
-      out.add(quad.subject);
-    }
-  }
-  return [...out];
 }

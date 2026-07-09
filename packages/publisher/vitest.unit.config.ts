@@ -18,6 +18,8 @@ export default defineConfig({
       'test/multi-root-token-rows.test.ts',
       'test/promote-step-tag.test.ts',
       'test/agents-meta-bound.test.ts',
+      'test/ka-lifecycle-logging.test.ts',
+      'test/storage-ack-handler.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

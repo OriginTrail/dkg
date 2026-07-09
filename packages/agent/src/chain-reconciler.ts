@@ -115,6 +115,22 @@ export interface ReconcileResult {
   assets: ReconciledAssetDecision[];
 }
 
+interface CursorAssetMetadata {
+  assetUal: string;
+  kaId?: string;
+}
+
+const cursorAssetMetadata = new WeakMap<CursorState, Map<number, CursorAssetMetadata>>();
+
+function metadataForCursor(state: CursorState): Map<number, CursorAssetMetadata> {
+  let metadata = cursorAssetMetadata.get(state);
+  if (!metadata) {
+    metadata = new Map();
+    cursorAssetMetadata.set(state, metadata);
+  }
+  return metadata;
+}
+
 /**
  * One sweep pass for a single CG: reconcile every ordinal in `[watermark, head)`
  * (skipping ones already completed and held in the cursor), then advance the
@@ -152,12 +168,15 @@ export async function reconcileContextGraph(
     kaId?: string;
     blockNumber?: number;
   }> = [];
+  const cursorMetadata = metadataForCursor(state);
   const trackCursorAdvancedAsset = (completion: CompletedOrdinal): void => {
-    if (!completion.assetUal) return;
+    const metadata = cursorMetadata.get(completion.ordinal);
+    if (!metadata) return;
+    cursorMetadata.delete(completion.ordinal);
     cursorAdvancedAssets.push({
-      assetUal: completion.assetUal,
+      assetUal: metadata.assetUal,
       ordinal: completion.ordinal,
-      ...(completion.kaId ? { kaId: completion.kaId } : {}),
+      ...(metadata.kaId ? { kaId: metadata.kaId } : {}),
       blockNumber: completion.blockNumber,
     });
   };
@@ -218,6 +237,12 @@ export async function reconcileContextGraph(
       }
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
+        if (outcome.assetUal) {
+          cursorMetadata.set(ordinal, {
+            assetUal: outcome.assetUal,
+            ...(outcome.kaId ? { kaId: outcome.kaId } : {}),
+          });
+        }
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
@@ -226,8 +251,6 @@ export async function reconcileContextGraph(
           {
             ordinal,
             blockNumber: outcome.blockNumber,
-            ...(outcome.assetUal ? { assetUal: outcome.assetUal } : {}),
-            ...(outcome.kaId ? { kaId: outcome.kaId } : {}),
           },
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,

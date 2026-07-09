@@ -259,7 +259,7 @@ describe('ka lifecycle finalization', () => {
     expect(messages).toContainEqual(expect.stringContaining('reason="SWM finalization slice unavailable"'));
   });
 
-  it('logs rejected finalization by assetUal', async () => {
+  it('does not emit asset-scoped lifecycle logs for a mismatched finalization topic', async () => {
     const store = new OxigraphStore();
     const handler = new FinalizationHandler(
       store,
@@ -280,13 +280,8 @@ describe('ka lifecycle finalization', () => {
     })), CONTEXT_GRAPH_ID);
 
     const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
-    expect(messages).toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
-    expect(messages).toContainEqual(expect.stringContaining('event=finalization_rejected'));
-    expect(messages).toContainEqual(expect.stringContaining('outcome=rejected'));
-    expect(messages).toContainEqual(expect.stringContaining('retryable=false'));
-    expect(messages).toContainEqual(
-      expect.stringContaining('reason="contextGraphId'),
-    );
+    expect(messages).not.toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).not.toContainEqual(expect.stringContaining('event=finalization_rejected'));
   });
 
   it('logs finalization verification failure by assetUal', async () => {
