@@ -159,15 +159,20 @@ export class GraphSetIndexStore implements TripleStore {
     // graph enumeration stays O(1) rather than forcing a full store scan on the
     // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
     // full rebuild.
-    if (options?.touchedGraphs && options.touchedGraphs.length > 0) {
-      // Strip the update-only `touchedGraphs` hint before the maintenance READS
-      // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
-      // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
-      const touched = [...options.touchedGraphs];
-      const readOptions = queryOptionsFromUpdateOptions(options);
-      this.bumpMutation();
-      await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'update', readOptions));
-      return;
+    if (options?.touchedGraphs) {
+      // Normalize the caller-supplied hint once at the boundary (filter falsy +
+      // de-dupe), matching the `namedGraphsFromQuads` pattern — keeps the incremental
+      // path predictable and avoids repeated `hasGraph` calls on duplicates.
+      const touched = normalizeGraphUris(options.touchedGraphs);
+      if (touched.length > 0) {
+        // Strip the update-only `touchedGraphs` hint before the maintenance READS
+        // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
+        // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
+        const readOptions = queryOptionsFromUpdateOptions(options);
+        this.bumpMutation();
+        await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'update', readOptions));
+        return;
+      }
     }
     this.scheduleFullRefresh('update');
   }
@@ -379,6 +384,11 @@ export class GraphSetIndexStore implements TripleStore {
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
+}
+
+/** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */
+function normalizeGraphUris(graphs: readonly string[]): string[] {
+  return [...new Set(graphs.filter(Boolean))];
 }
 
 /**
