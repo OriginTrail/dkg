@@ -46,6 +46,16 @@ export function resolveManagedOxigraphPort(
     : DEFAULT_OXIGRAPH_PORT;
 }
 
+function resolvePositiveIntegerOption(
+  options: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const value = options?.[key];
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 interface StoreConfigLike {
   backend?: unknown;
   options?: Record<string, unknown>;
@@ -92,6 +102,10 @@ export interface ManagedOxigraphPlan {
    * to preserve parity with the local Oxigraph default.
    */
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  /** Startup readiness deadline passed to the managed server supervisor. */
+  readyTimeoutMs?: number;
+  /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
+  queryTimeoutS?: number;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -115,6 +129,8 @@ export function planManagedOxigraph(
 
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
+  const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
+  const queryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
   const location =
     typeof options.location === 'string' && options.location.trim()
       ? options.location
@@ -162,6 +178,8 @@ export function planManagedOxigraph(
     cacheDir,
     storeConfigTemplate,
     largeLiteralStorage,
+    readyTimeoutMs,
+    queryTimeoutS,
     sharedMemoryPublicSnapshotStorage,
   };
 }
@@ -217,7 +235,8 @@ export async function startManagedOxigraph(
     location: plan.location,
     port: plan.port,
     log,
-    readyTimeoutMs: opts.readyTimeoutMs,
+    readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
+    queryTimeoutS: plan.queryTimeoutS,
     io: opts.serverIo,
   });
 

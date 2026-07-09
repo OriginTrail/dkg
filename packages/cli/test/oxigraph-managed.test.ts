@@ -64,6 +64,34 @@ describe('planManagedOxigraph', () => {
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
   });
 
+  it('honours managed Oxigraph startup and native query timeout options', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { readyTimeoutMs: 180_000, queryTimeoutS: 35 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.readyTimeoutMs).toBe(180_000);
+    expect(plan!.queryTimeoutS).toBe(35);
+  });
+
+  it('ignores invalid managed Oxigraph timeout options', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { readyTimeoutMs: 0, queryTimeoutS: 1.5 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.readyTimeoutMs).toBeUndefined();
+    expect(plan!.queryTimeoutS).toBeUndefined();
+  });
+
   it('resolveManagedOxigraphPort rejects out-of-range values', () => {
     expect(resolveManagedOxigraphPort({ port: 70000 })).toBe(DEFAULT_OXIGRAPH_PORT);
     expect(resolveManagedOxigraphPort({ port: 7878 })).toBe(7878);
