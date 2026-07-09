@@ -37,11 +37,29 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+  probeBackoff?: Partial<NetworkAdmissionProbeBackoffOptions>;
+  now?: () => number;
 }
 
 export interface NetworkAdmissionAttemptOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+export interface NetworkAdmissionProbeBackoffOptions {
+  transientBaseMs: number;
+  transientMaxMs: number;
+  unreadableResponseMs: number;
+  unsupportedProtocolMs: number;
+}
+
+type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response' | 'unsupported-protocol';
+
+interface NetworkAdmissionProbeBackoffEntry {
+  failures: number;
+  kind: NetworkAdmissionProbeBackoffKind;
+  reason: string;
+  untilMs: number;
 }
 
 export interface NetworkIdentityProtocolRegistrar {
@@ -147,7 +165,10 @@ export class NetworkAdmissionCoordinator {
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
-  private readonly inFlight = new Map<string, InFlightAdmissionAttempt>();
+  private readonly probeBackoff: NetworkAdmissionProbeBackoffOptions;
+  private readonly now: () => number;
+  private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
+  private readonly retryableProbeBackoff = new Map<CanonicalPeerId, NetworkAdmissionProbeBackoffEntry>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -162,6 +183,13 @@ export class NetworkAdmissionCoordinator {
     this.cleanupRejectedPeerState = options.cleanupRejectedPeerState;
     this.log = options.log;
     this.probeTimeoutMs = options.probeTimeoutMs ?? 3_000;
+    this.probeBackoff = {
+      transientBaseMs: options.probeBackoff?.transientBaseMs ?? 15_000,
+      transientMaxMs: options.probeBackoff?.transientMaxMs ?? 120_000,
+      unreadableResponseMs: options.probeBackoff?.unreadableResponseMs ?? 60_000,
+      unsupportedProtocolMs: options.probeBackoff?.unsupportedProtocolMs ?? 300_000,
+    };
+    this.now = options.now ?? Date.now;
   }
 
   get enabled(): boolean {
@@ -215,6 +243,8 @@ export class NetworkAdmissionCoordinator {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
+    if (this.admission.isRejectedPeer(remotePeerId)) return false;
+    if (this.isProbeBackedOff(remotePeerId)) return false;
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
     const existing = this.inFlight.get(remotePeerId);
@@ -258,7 +288,9 @@ export class NetworkAdmissionCoordinator {
         { timeoutMs: this.probeTimeoutMs, signal },
       );
     } catch (err) {
+      if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
+      this.rememberRetryableProbeFailure(remotePeer, message, classifyProbeBackoffKind(message));
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -269,6 +301,7 @@ export class NetworkAdmissionCoordinator {
       claimed = JSON.parse(new TextDecoder().decode(response)) as unknown;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      this.rememberRetryableProbeFailure(remotePeer, message, 'unreadable-response');
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -282,6 +315,7 @@ export class NetworkAdmissionCoordinator {
     });
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
+      this.retryableProbeBackoff.delete(remotePeer);
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -289,6 +323,7 @@ export class NetworkAdmissionCoordinator {
   }
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {
+    this.retryableProbeBackoff.delete(remotePeer);
     this.admission.quarantinePeer(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
@@ -318,6 +353,43 @@ export class NetworkAdmissionCoordinator {
       this.log?.info(ctx, `Rejected peer ${shortPeer}: peerstore cleanup skipped/failed: ${message}`);
     }
   }
+
+  private isProbeBackedOff(remotePeer: CanonicalPeerId): boolean {
+    const entry = this.retryableProbeBackoff.get(remotePeer);
+    if (!entry) return false;
+    if (entry.untilMs <= this.now()) {
+      this.retryableProbeBackoff.delete(remotePeer);
+      return false;
+    }
+    return true;
+  }
+
+  private rememberRetryableProbeFailure(
+    remotePeer: CanonicalPeerId,
+    reason: string,
+    kind: NetworkAdmissionProbeBackoffKind,
+  ): void {
+    const previous = this.retryableProbeBackoff.get(remotePeer);
+    const failures = (previous?.failures ?? 0) + 1;
+    const delayMs = this.probeBackoffDelayMs(failures, kind);
+    this.retryableProbeBackoff.set(remotePeer, {
+      failures,
+      kind,
+      reason,
+      untilMs: this.now() + delayMs,
+    });
+  }
+
+  private probeBackoffDelayMs(failures: number, kind: NetworkAdmissionProbeBackoffKind): number {
+    if (kind === 'unsupported-protocol') return this.probeBackoff.unsupportedProtocolMs;
+    if (kind === 'unreadable-response') return this.probeBackoff.unreadableResponseMs;
+
+    const exponent = Math.min(Math.max(failures - 1, 0), 8);
+    return Math.min(
+      this.probeBackoff.transientMaxMs,
+      this.probeBackoff.transientBaseMs * (2 ** exponent),
+    );
+  }
 }
 
 function abortErrorFromSignal(reason: unknown): Error {
@@ -340,4 +412,17 @@ function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
   } catch (err) {
     throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
   }
+}
+
+function classifyProbeBackoffKind(message: string): NetworkAdmissionProbeBackoffKind {
+  const lower = message.toLowerCase();
+  if (
+    lower.includes('could not negotiate')
+    || lower.includes('protocol selection failed')
+    || lower.includes('protocol not supported')
+    || lower.includes('unsupported protocol')
+  ) {
+    return 'unsupported-protocol';
+  }
+  return 'transient';
 }
