@@ -30,6 +30,7 @@ import {
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo, classifyMonorepoInit, sharedHomeInitGate,
   resolveContextGraphs, resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
+  AUTO_UPDATE_GIT_ONLY_FIELDS,
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
@@ -129,34 +130,46 @@ export function isInitNetworkSwitch(
   return !!prior && selectedNetwork !== prior;
 }
 
+function pickPreservedAutoUpdateFields(
+  source: NonNullable<AutoUpdateConfig['source']>,
+  existingAutoUpdate: AutoUpdateConfig | undefined,
+): Partial<AutoUpdateConfig> {
+  if (!existingAutoUpdate) return {};
+  const preserved: Partial<AutoUpdateConfig> = {};
+  if (existingAutoUpdate.channel) preserved.channel = existingAutoUpdate.channel;
+  if (source === 'git') {
+    for (const field of AUTO_UPDATE_GIT_ONLY_FIELDS) {
+      const value = existingAutoUpdate[field as keyof AutoUpdateConfig];
+      if (value !== undefined && value !== null && value !== '') {
+        (preserved as Record<string, unknown>)[field] = value;
+      }
+    }
+  }
+  return preserved;
+}
+
 /**
  * Pure builder for the `autoUpdate` block `dkg init` persists. Extracted from
  * the interactive wizard so it is unit-testable — the decline path (must write
  * `{ enabled: false }`, NOT fall through to the enabled network default) and
- * channel/advanced-field preservation across reruns have each regressed before.
- * The wizard gathers `answers` interactively and passes them in.
+ * source-mode field boundaries across reruns have each regressed before. The
+ * wizard gathers `answers` interactively and passes them in.
  */
 export function buildInitAutoUpdate(opts: {
   enableAutoUpdate: boolean;
   existingAutoUpdate: AutoUpdateConfig | undefined;
   networkAutoUpdate?: {
-    repo?: string;
-    branch?: string;
     allowPrerelease?: boolean;
-    sshKeyPath?: string;
     checkIntervalMinutes?: number;
   };
   projRepo: string;
   projDefaultBranch: string;
   answers?: {
-    repo: string;
-    branch: string;
     allowPrerelease: boolean;
-    sshKeyPath: string;
     interval: number;
   };
 }): AutoUpdateConfig {
-  const { enableAutoUpdate, existingAutoUpdate, networkAutoUpdate, projRepo, projDefaultBranch, answers } = opts;
+  const { enableAutoUpdate, existingAutoUpdate, networkAutoUpdate, answers } = opts;
   if (!enableAutoUpdate) {
     // Explicit decline: persist `enabled: false` so resolveAutoUpdateConfig
     // does NOT fall through to the enabled network default. Keep any existing
@@ -165,30 +178,23 @@ export function buildInitAutoUpdate(opts: {
       ? { ...existingAutoUpdate, enabled: false }
       : { enabled: false };
   }
-  const a = answers ?? { repo: '', branch: '', allowPrerelease: true, sshKeyPath: '', interval: NaN };
+  const a = answers ?? { allowPrerelease: true, interval: NaN };
   // Effective upstream defaults — what the node would use with nothing
   // persisted. We persist a field only when it differs, so future changes to
   // the shipped network/project config propagate without a config rewrite.
-  const effectiveRepo = networkAutoUpdate?.repo ?? projRepo;
-  const effectiveBranch = networkAutoUpdate?.branch ?? projDefaultBranch;
   const effectiveAllowPrerelease = networkAutoUpdate?.allowPrerelease ?? true;
-  const effectiveSshKeyPath = networkAutoUpdate?.sshKeyPath ?? '';
   const effectiveInterval = networkAutoUpdate?.checkIntervalMinutes ?? 30;
+  const source = 'npm' as const;
   return {
     enabled: true,
     // OT-RFC-41 Bundle B1d: explicit npm source for fresh installs.
-    source: 'npm' as const,
-    ...(a.repo && a.repo !== effectiveRepo ? { repo: a.repo } : {}),
-    ...(a.branch && a.branch !== effectiveBranch ? { branch: a.branch } : {}),
+    source,
     ...(a.allowPrerelease !== effectiveAllowPrerelease ? { allowPrerelease: a.allowPrerelease } : {}),
-    ...(a.sshKeyPath && a.sshKeyPath !== effectiveSshKeyPath ? { sshKeyPath: a.sshKeyPath } : {}),
     ...(Number.isFinite(a.interval) && a.interval !== effectiveInterval ? { checkIntervalMinutes: a.interval } : {}),
-    // Preserve advanced fields the wizard does not prompt for so a rerun
-    // doesn't silently revert operator tuning: build timeouts, custom SSH
-    // command, and the per-node `channel` cohort pin.
-    ...(existingAutoUpdate?.buildTimeoutMs ? { buildTimeoutMs: existingAutoUpdate.buildTimeoutMs } : {}),
-    ...(existingAutoUpdate?.sshCommand ? { sshCommand: existingAutoUpdate.sshCommand } : {}),
-    ...(existingAutoUpdate?.channel ? { channel: existingAutoUpdate.channel } : {}),
+    // Source mode is the config boundary. The npm wizard preserves only
+    // npm/common fields that it does not prompt for; git-only fields are kept
+    // together only when source remains git.
+    ...pickPreservedAutoUpdateFields(source, existingAutoUpdate),
   } as AutoUpdateConfig;
 }
 
@@ -415,7 +421,7 @@ program
     const contextGraphs = contextGraphsStr ? contextGraphsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
     const apiPort = parseInt(await ask('API port', String(existing.apiPort)), 10);
 
-    // OT-RFC-41 §4.3 Bundle B1d: post-rc.12, auto-update is npm-only.
+    // OT-RFC-41 §4.3 Bundle B1d: default auto-update is npm.
     // The prompt wording is updated; the persisted config carries an
     // explicit `source: 'npm'` so the daemon's resolution is
     // unambiguous (no implicit `isStandaloneInstall()` probe).
@@ -431,31 +437,22 @@ program
     // it is unit-tested. Prompt defaults show existing value, else the upstream
     // (network → project) default.
     let autoUpdateAnswers:
-      | { repo: string; branch: string; allowPrerelease: boolean; sshKeyPath: string; interval: number }
+      | { allowPrerelease: boolean; interval: number }
       | undefined;
     if (enableAutoUpdate) {
-      const effectiveRepo = network?.autoUpdate?.repo ?? proj.repo;
-      const effectiveBranch = network?.autoUpdate?.branch ?? proj.defaultBranch;
       const effectiveAllowPrerelease = network?.autoUpdate?.allowPrerelease ?? true;
-      const effectiveSshKeyPath = network?.autoUpdate?.sshKeyPath ?? '';
       const effectiveInterval = network?.autoUpdate?.checkIntervalMinutes ?? 30;
 
-      const defaultRepo = existing.autoUpdate?.repo ?? effectiveRepo;
-      const defaultBranch = existing.autoUpdate?.branch ?? effectiveBranch;
       const defaultAllowPrerelease = existing.autoUpdate?.allowPrerelease ?? effectiveAllowPrerelease;
-      const defaultSshKeyPath = existing.autoUpdate?.sshKeyPath ?? effectiveSshKeyPath;
       const defaultInterval = existing.autoUpdate?.checkIntervalMinutes ?? effectiveInterval;
 
-      const repo = await ask('Git repo/path (owner/name, URL, or git@host:org/repo.git)', defaultRepo);
-      const branch = await ask('Branch', defaultBranch);
       const allowPrerelease = (await ask(
         'Allow pre-release versions? (y/n)',
         defaultAllowPrerelease ? 'y' : 'n',
       )).toLowerCase() === 'y';
-      const sshKeyPath = (await ask('SSH private key path (optional; blank uses agent/default SSH config)', defaultSshKeyPath)).trim();
       const interval = parseInt(await ask('Check interval (minutes)', String(defaultInterval)), 10);
 
-      autoUpdateAnswers = { repo, branch, allowPrerelease, sshKeyPath, interval };
+      autoUpdateAnswers = { allowPrerelease, interval };
     }
     const autoUpdate = buildInitAutoUpdate({
       enableAutoUpdate,

@@ -8,7 +8,8 @@
  *   - The inactive slot is empty OR contains a complete prior
  *     release with its own resolvable entry point — partial state
  *     is a warning suggesting `dkg update --retry` or `dkg rollback`.
- *   - No `.git` inside either slot (post-rc.12 invariant).
+ *   - No `.git` inside either slot unless the node explicitly opts into the
+ *     advanced git updater.
  *
  * **Edge (`nodeRole === "edge"`):**
  *   - The daemon's resolved entry point MUST be inside the
@@ -122,17 +123,18 @@ export async function runInstallLayoutCheck(
       }
     }
 
-    // Post-rc.12 invariant: no `.git` inside either slot.
-    for (const slotName of ['a', 'b'] as const) {
-      const dotGit = join(releasesDir, slotName, '.git');
-      if (deps.exists(dotGit)) {
-        findings.push({
-          check: 'install-layout',
-          severity: 'warning',
-          message: `Legacy '.git' directory found inside slot '${slotName}': ${dotGit}`,
-          advisory: "Pre-rc.12 install.sh-era state survived the npm-only migration. The slot is fine to run from, but the '.git' is unused. Safe to delete after confirming with the operator.",
-          subject: dotGit,
-        });
+    if (state.autoUpdate.source !== 'git') {
+      for (const slotName of ['a', 'b'] as const) {
+        const dotGit = join(releasesDir, slotName, '.git');
+        if (deps.exists(dotGit)) {
+          findings.push({
+            check: 'install-layout',
+            severity: 'warning',
+            message: `Legacy '.git' directory found inside slot '${slotName}': ${dotGit}`,
+            advisory: "Pre-rc.12 install.sh-era state survived the npm-only migration. The slot is fine to run from, but the '.git' is unused unless autoUpdate.source is set to 'git'. Safe to delete after confirming with the operator.",
+            subject: dotGit,
+          });
+        }
       }
     }
 

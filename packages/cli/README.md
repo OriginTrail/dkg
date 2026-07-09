@@ -279,10 +279,16 @@ modes auto-renewal can't recover from:
 | `dkg wallet` | Show operational wallet addresses and balances |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
-| `dkg update` | Update the node software (blue-green slots) |
+| `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
 Run `dkg <command> --help` for per-command options.
+
+NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
+can opt into daemon-polled git updates with `autoUpdate.source: "git"`,
+`repo`, and `branch` or `ref` in `~/.dkg/config.json`; git mode builds from
+source in the inactive blue-green slot and rollback is limited to already-built
+slots.
 
 Async publisher wallets need valid keys and native gas. Register the wallet as a PCA agent or fund TRAC for direct spend before expecting jobs to publish successfully. An on-chain node identity is optional publisher-node attribution; identity `0` is valid no-attribution mode. See [Async Publisher Wallets](../../docs/use-dkg/async-publisher-wallets.md).
 
