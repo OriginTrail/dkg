@@ -23,6 +23,16 @@ export class EventsMethods extends EVMChainAdapterBase {
    * policy so the wide-log multi-RPC timeout (`RPC_LOG_SCAN_TIMEOUT_MS`, vs the 4s
    * point-read cap; single-RPC stays uncapped, #894) is owned HERE once, not by
    * per-call-site discipline. Used by every `listenForEvents` branch below.
+   *
+   * TIP-SENSITIVE → `skipPreferred: true` (endpoint stickiness carve-out). The
+   * event-lane cursor is advanced against a head read canonical-fresh via
+   * `getBlockNumber()` (also `skipPreferred`); if this `[fromBlock, head]` scan
+   * were pinned to a lagging sticky backup whose tip is BELOW `head`, a provider
+   * that silently clamps `toBlock` to its own tip would return fewer logs, the
+   * runner would still persist `lastBlock = head`, and the events in
+   * `(backendTip, head]` would be skipped forever. Scanning canonical-order keeps
+   * the scan's tip coverage aligned with the head that advances the cursor
+   * (mirrors the hub-rotation poller's `skipPreferred` wide-log carve-out).
    */
   private queryFilterWithFailover(
     contract: ethers.Contract,
@@ -35,7 +45,7 @@ export class EventsMethods extends EVMChainAdapterBase {
       contract,
       label,
       (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
-      { policy: 'wideLogScan' },
+      { policy: 'wideLogScan', skipPreferred: true },
     );
   }
 

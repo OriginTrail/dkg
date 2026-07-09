@@ -979,6 +979,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         case 'DIAL_FAILED':
           status = 502; // retriable: addrs known but transport failed
           break;
+        case 'NETWORK_ADMISSION_REJECTED':
+          status = 403; // reachable peer, but not part of this active DKG network
+          break;
         default:
           status = 400;
       }

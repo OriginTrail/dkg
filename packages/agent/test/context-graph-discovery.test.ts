@@ -2886,6 +2886,7 @@ describe('runImmediatePostApprovalSync', () => {
   const CURATOR_PEER = '12D3KooWFakeCuratorPeerForRunImmediatePostApprovalSyncTest';
 
   function installStubs(a: DKGAgent, opts: {
+    ensureAdmitted?: (pid: string) => boolean | Promise<boolean>;
     ensurePeerConnected?: (pid: string) => Promise<void>;
     connectedPeers?: string[];
     runCatchupResult?: {
@@ -2898,9 +2899,14 @@ describe('runImmediatePostApprovalSync', () => {
     broadcastThrows?: Error;
   }) {
     const calls = {
+      ensureAdmittedCalls: [] as string[],
       ensurePeerConnectedCalls: [] as string[],
       runCatchupCalls: [] as Array<{ cg: string; includeSwm: boolean; peers: string[] }>,
       broadcastCalls: [] as Array<{ cg: string; includeSwm: boolean }>,
+    };
+    (a as any).networkAdmissionCoordinator.ensureAdmitted = async (pid: string) => {
+      calls.ensureAdmittedCalls.push(pid);
+      return opts.ensureAdmitted ? opts.ensureAdmitted(pid) : true;
     };
     (a as any).ensurePeerConnected = async (pid: string) => {
       calls.ensurePeerConnectedCalls.push(pid);
@@ -2954,6 +2960,7 @@ describe('runImmediatePostApprovalSync', () => {
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-success', CURATOR_PEER);
 
+    expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
     expect(calls.runCatchupCalls).toHaveLength(1);
     expect(calls.runCatchupCalls[0]).toMatchObject({
@@ -2975,6 +2982,7 @@ describe('runImmediatePostApprovalSync', () => {
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-missing-peer', CURATOR_PEER);
 
+    expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
     expect(calls.runCatchupCalls).toHaveLength(0);
     expect(calls.broadcastCalls).toHaveLength(1);
@@ -3018,6 +3026,29 @@ describe('runImmediatePostApprovalSync', () => {
   // the broadcast fallback MUST still run — wrapping curator-direct
   // and broadcast in a single try/catch reintroduces the silent-stall
   // bug this method was added to close.
+  it('falls back to broadcast when curator fails network admission', async () => {
+    const result = await createTestAgent();
+    agent = result.agent;
+    await agent.start();
+
+    const calls = installStubs(agent, {
+      ensureAdmitted: async () => false,
+      connectedPeers: [CURATOR_PEER],
+      runCatchupResult: { peersSucceeded: 1, dataSynced: 7, sharedMemorySynced: 11, denied: false },
+    });
+
+    await (agent as any).runImmediatePostApprovalSync('test-cg-admission-denied', CURATOR_PEER);
+
+    expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
+    expect(calls.ensurePeerConnectedCalls).toHaveLength(0);
+    expect(calls.runCatchupCalls).toHaveLength(0);
+    expect(calls.broadcastCalls).toHaveLength(1);
+    expect(calls.broadcastCalls[0]).toMatchObject({
+      cg: 'test-cg-admission-denied',
+      includeSwm: true,
+    });
+  }, 15000);
+
   it('falls back to broadcast when ensurePeerConnected throws (regression for catch-block bug)', async () => {
     const result = await createTestAgent();
     agent = result.agent;
@@ -3032,6 +3063,7 @@ describe('runImmediatePostApprovalSync', () => {
 
     await (agent as any).runImmediatePostApprovalSync('test-cg-throw', CURATOR_PEER);
 
+    expect(calls.ensureAdmittedCalls).toEqual([CURATOR_PEER]);
     expect(calls.ensurePeerConnectedCalls).toEqual([CURATOR_PEER]);
     expect(calls.runCatchupCalls).toHaveLength(0);
     expect(calls.broadcastCalls).toHaveLength(1);

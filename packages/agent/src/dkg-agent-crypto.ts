@@ -35,6 +35,7 @@ import {
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  logKaLifecycleEvent,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -95,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -214,6 +215,8 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
+import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
+
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -379,6 +382,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -1209,7 +1214,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
     });
-
     const membershipHash = computeSwmSenderKeyMembershipHash({
       contextGraphId: input.contextGraphId,
       subGraphName: input.subGraphName,
@@ -1909,6 +1913,22 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const wh = this.getOrCreateSharedMemoryHandler();
     const outcome = await wh.handle(data, fromPeerId);
     if (outcome.applied) {
+      if (outcome.assetUal) {
+        logKaLifecycleEvent(this.log, createOperationContext('share'), {
+          assetUal: outcome.assetUal,
+          stage: 'swm_share',
+          event: 'swm_update_applied',
+          role: 'receiver',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: fromPeerId,
+          metadata: {
+            contextGraphId: outcome.cgId,
+            shareOperationId: outcome.shareOperationId,
+            insertedCount: outcome.insertedTriples,
+          },
+        });
+      }
       // PR-H bug 2: emit SwmShareAck on substrate-applied shares
       // too (not just gossip-applied). Pre-PR-H the sender only
       // counted substrate-`delivered` peers via the in-process
@@ -1931,6 +1951,25 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return new Uint8Array();
     }
     if (outcome.retryable) {
+      if (outcome.assetUal) {
+        logKaLifecycleEvent(this.log, createOperationContext('share'), {
+          assetUal: outcome.assetUal,
+          stage: 'swm_share',
+          event: 'swm_update_rejected',
+          role: 'receiver',
+          localPeerId: this.peerId,
+          localNodeIdentityId: this.identityId.toString(),
+          peer: fromPeerId,
+          level: 'warn',
+          metadata: {
+            contextGraphId: outcome.cgId,
+            shareOperationId: outcome.shareOperationId,
+            outcome: 'retryable',
+            retryable: true,
+            reason: outcome.reason,
+          },
+        });
+      }
       // rc.9 PR-D (codex follow-up from PR-G #G1): return the
       // 0x02 sentinel instead of throwing. Pre-PR-D this branch
       // threw, hoping libp2p would surface the handler abort as
@@ -1950,6 +1989,25 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         `SWM substrate receiver transient rejection from ${fromPeerId} (PR-D watchdog will retry): ${outcome.reason}`,
       );
       return FANOUT_RESPONSE_RETRYABLE;
+    }
+    if (outcome.assetUal) {
+      logKaLifecycleEvent(this.log, createOperationContext('share'), {
+        assetUal: outcome.assetUal,
+        stage: 'swm_share',
+        event: 'swm_update_rejected',
+        role: 'receiver',
+        localPeerId: this.peerId,
+        localNodeIdentityId: this.identityId.toString(),
+        peer: fromPeerId,
+        level: 'warn',
+        metadata: {
+          contextGraphId: outcome.cgId,
+          shareOperationId: outcome.shareOperationId,
+          outcome: 'rejected',
+          retryable: false,
+          reason: outcome.reason,
+        },
+      });
     }
     // Permanent rejection: signal via the 1-byte sentinel so the
     // sender records `rejected` (not `delivered`) and stops here.
@@ -1979,6 +2037,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
+      const reasonCode = this.swmSenderKeySetupAckReasonCode(err);
       if (pkg) {
         // A sender-key setup may legitimately be fanned out across every
         // cached snapshot of our agent's public encryption keys. Each
@@ -2010,7 +2069,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         type: SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
         accepted: false,
         reason,
-        reasonCode: this.swmSenderKeySetupAckReasonCode(err),
+        reasonCode,
         contextGraphId: pkg?.contextGraphId,
         subGraphName: pkg?.subGraphName,
         senderAgentAddress: pkg?.senderAgentAddress,
@@ -2159,27 +2218,31 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     ctx: OperationContext,
   ): Promise<Uint8Array> {
     await this.loadSwmSenderKeyState();
+    const messageIndex = uint64ForProto(message.messageIndex);
+    let senderAgentAddress = message.senderAgentAddress;
     if (message.contextGraphId !== contextGraphId) {
-      throw new Error(`Sender Key message contextGraphId "${message.contextGraphId}" does not match envelope "${contextGraphId}"`);
+      const reason = `Sender Key message contextGraphId "${message.contextGraphId}" does not match envelope "${contextGraphId}"`;
+      throw new Error(reason);
     }
-    const senderAgentAddress = ethers.getAddress(message.senderAgentAddress);
+    senderAgentAddress = ethers.getAddress(message.senderAgentAddress);
     const state = this.swmSenderKeyReceiveStates.get(
       swmReceiverStateKey(contextGraphId, message.subGraphName, senderAgentAddress, message.epochId),
     );
     if (!state) {
+      const reason = `No local Sender Key state for ${senderAgentAddress} epoch ${message.epochId}`;
       this.log.warn(
         ctx,
         `SWM sender-key broadcast receive denied: reason=no-state senderAgent=${senderAgentAddress} ` +
         `contextGraph=${contextGraphId}${message.subGraphName ? `/${message.subGraphName}` : ''} ` +
-        `epoch=${message.epochId} messageIndex=${uint64ForProto(message.messageIndex)} membershipHash=${message.membershipHash}`,
+        `epoch=${message.epochId} messageIndex=${messageIndex} membershipHash=${message.membershipHash}`,
       );
-      throw new Error(`No local Sender Key state for ${senderAgentAddress} epoch ${message.epochId}`);
+      throw new Error(reason);
     }
     if (state.membershipHash !== message.membershipHash) {
-      throw new Error(`Sender Key membership hash mismatch for ${senderAgentAddress} epoch ${message.epochId}`);
+      const reason = `Sender Key membership hash mismatch for ${senderAgentAddress} epoch ${message.epochId}`;
+      throw new Error(reason);
     }
 
-    const messageIndex = uint64ForProto(message.messageIndex);
     let chainKey = state.skippedChainKeys.get(messageIndex);
     let usedSkippedKey = false;
     if (chainKey) {
@@ -2187,11 +2250,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       state.skippedChainKeys.delete(messageIndex);
     } else {
       if (messageIndex < state.nextMessageIndex) {
-        throw new Error(`Sender Key replay rejected for index ${messageIndex}`);
+        const reason = `Sender Key replay rejected for index ${messageIndex}`;
+        throw new Error(reason);
       }
       const gap = messageIndex - state.nextMessageIndex;
       if (gap > SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT) {
-        throw new Error(`Sender Key message gap ${gap} exceeds skipped-message cache limit`);
+        const reason = `Sender Key message gap ${gap} exceeds skipped-message cache limit`;
+        throw new Error(reason);
       }
       chainKey = state.chainKey;
       for (let index = state.nextMessageIndex; index < messageIndex; index++) {
@@ -2200,11 +2265,16 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       }
     }
 
-    const decrypted = await decryptSwmSenderKeyMessage({
-      chainKey,
-      message,
-      senderSigningPublicKey: state.senderSigningPublicKey,
-    });
+    let decrypted: Awaited<ReturnType<typeof decryptSwmSenderKeyMessage>>;
+    try {
+      decrypted = await decryptSwmSenderKeyMessage({
+        chainKey,
+        message,
+        senderSigningPublicKey: state.senderSigningPublicKey,
+      });
+    } catch (err) {
+      throw err;
+    }
 
     if (!usedSkippedKey) {
       state.chainKey = decrypted.nextChainKey;
@@ -2215,6 +2285,26 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       state.skippedChainKeys.delete(oldest);
     }
     await this.saveSwmSenderKeyState();
+
+    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(decrypted.plaintext, ctx);
+    if (assetUal) {
+      logKaLifecycleEvent(this.log, ctx, {
+        assetUal,
+        stage: 'sender_key',
+        event: 'sender_key_payload_decrypted',
+        role: 'receiver',
+        localPeerId: this.peerId,
+        localNodeIdentityId: this.identityId.toString(),
+        metadata: {
+          contextGraphId,
+          subGraphName: message.subGraphName,
+          senderAgentAddress,
+          epochId: message.epochId,
+          messageIndex,
+          membershipHash: message.membershipHash,
+        },
+      });
+    }
 
     this.log.info(
       ctx,
@@ -2231,6 +2321,41 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       messageIndex,
     });
     return decrypted.plaintext;
+  }
+
+  async resolveKaLifecycleAssetUalFromWorkspacePlaintext(this: DKGAgent, plaintext: Uint8Array, ctx?: OperationContext): Promise<string | undefined> {
+    try {
+      const request = decodeWorkspacePublishRequest(plaintext);
+      return this.resolveKaLifecycleAssetUalFromIdentity(request.agentAddress, request.kaNumber, ctx);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async resolveKaLifecycleAssetUalFromIdentity(this: DKGAgent, agentAddress?: string, kaNumber?: string, ctx?: OperationContext): Promise<string | undefined> {
+    if (!agentAddress || !kaNumber) return undefined;
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const result = await Promise.race([
+        resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber })
+          .finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+      if (result === TIMEOUT_SENTINEL) {
+        this.log.warn(
+          ctx ?? createOperationContext('share'),
+          `KA lifecycle assetUal derivation exceeded ${KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS}ms; continuing without lifecycle assetUal`,
+        );
+        return undefined;
+      }
+      return result;
+    } catch {
+      return undefined;
+    }
   }
 
   isSwmSenderKeyPayloadDebugLoggingEnabled(this: DKGAgent): boolean {

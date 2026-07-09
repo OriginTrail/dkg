@@ -24,6 +24,7 @@ import type {
 import type {
   OperationContext,
   AuthorAttestationTypedData,
+  DkgNetworkIdentity,
   MessageIdempotencyStore,
   ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
@@ -864,6 +865,8 @@ export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
+  /** Active network identity used to isolate libp2p and app workflow boundaries. */
+  networkIdentity?: DkgNetworkIdentity;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,
@@ -948,6 +951,11 @@ export interface DKGAgentConfig {
   syncAgentsMeta?: boolean;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /** Local daemon logging controls forwarded from config.json. */
+  logging?: {
+    /** Emit detailed KA publish lifecycle logs. Default: false. */
+    kaPublishLifecycleDebug?: boolean;
+  };
   /**
    * OT-RFC-43 Option 1 — durable per-author KA-number allocator. When provided,
    * the publisher mints deterministic packed reservedKaIds (and reconciles the

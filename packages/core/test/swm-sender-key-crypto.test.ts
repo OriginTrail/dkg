@@ -123,6 +123,54 @@ describe('SWM Sender Key crypto', () => {
     })).rejects.toThrow();
   });
 
+  it('keeps log-only assetUal outside Sender Key crypto outputs', async () => {
+    const recipient = recipientKey('0x2222222222222222222222222222222222222222', 0x22);
+    const signingKeypair = await generateEd25519Keypair();
+    const chainKey = generateSwmSenderChainKey(() => new Uint8Array(32).fill(0x66));
+    const assetUal = 'did:dkg:evm:31337/0x000000000000000000000000000000000000c10a/7';
+
+    const pkg = await encryptSwmSenderKeyPackage({
+      contextGraphId: 'cg-private',
+      senderAgentAddress: '0x1111111111111111111111111111111111111111',
+      epochId: 'epoch-asset-ual',
+      membershipHash: 'sha256:asset-ual',
+      recipientAgentAddress: '0x2222222222222222222222222222222222222222',
+      recipientKeyId: recipient.recipientKeyId,
+      createdAtMs: 1_770_000_000_000,
+      initialMessageIndex: 0,
+      chainKey,
+      senderSigningPublicKey: signingKeypair.publicKey,
+      recipientPublicKey: recipient.publicKeyBytes!,
+      randomBytes: deterministicRandomBytes(),
+      assetUal,
+    } as Parameters<typeof encryptSwmSenderKeyPackage>[0] & { assetUal: string });
+
+    expect((pkg as { assetUal?: string }).assetUal).toBeUndefined();
+    await expect(decryptSwmSenderKeyPackage({ package: pkg, recipientKey: recipient })).resolves.toMatchObject({
+      contextGraphId: 'cg-private',
+      epochId: 'epoch-asset-ual',
+    });
+
+    const encrypted = await encryptSwmSenderKeyMessage({
+      chainKey,
+      plaintext: textEncoder.encode('<urn:private> <urn:p> "secret" .'),
+      senderSigningSecretKey: signingKeypair.secretKey,
+      contextGraphId: 'cg-private',
+      senderAgentAddress: '0x1111111111111111111111111111111111111111',
+      epochId: 'epoch-asset-ual',
+      membershipHash: 'sha256:asset-ual',
+      messageIndex: 0,
+      assetUal,
+    } as Parameters<typeof encryptSwmSenderKeyMessage>[0] & { assetUal: string });
+
+    expect((encrypted.message as { assetUal?: string }).assetUal).toBeUndefined();
+    await expect(decryptSwmSenderKeyMessage({
+      chainKey,
+      message: encrypted.message,
+      senderSigningPublicKey: signingKeypair.publicKey,
+    })).resolves.toMatchObject({ plaintext: expect.any(Uint8Array) });
+  });
+
   it('computes membership hash from sorted DKG agent addresses and recipient key IDs', () => {
     const base = computeSwmSenderKeyMembershipHash({
       contextGraphId: 'cg-private',

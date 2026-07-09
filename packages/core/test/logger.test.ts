@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { Logger, createOperationContext, type LogSink, type OperationContext } from '../src/logger.js';
+import {
+  Logger,
+  createOperationContext,
+  type LogSink,
+  type OperationContext,
+} from '../src/logger.js';
 
 interface LogEntry {
   level: string;
@@ -153,6 +158,7 @@ describe('Logger', () => {
     expect(levels).toEqual(['debug', 'info', 'warn', 'error']);
   });
 });
+
 
 describe('createOperationContext', () => {
   it('generates a UUID-shaped operationId', () => {

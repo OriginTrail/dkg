@@ -43,6 +43,13 @@ function relayAddrFor(peerId: string): string {
   return `/ip4/127.0.0.1/tcp/4001/p2p/${peerId}`;
 }
 
+function allowAllNetworkAdmission(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
+}
+
 describe('p2p resilience hooks', () => {
   describe('reconnect-on-gossip', () => {
     it('dials the sender of a gossip message via a connected relay circuit', async () => {
@@ -53,6 +60,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const dialSpy = recorder(async (..._args: any[]) => ({} as any));
         agent.node.libp2p.dial = dialSpy as any;
@@ -92,6 +100,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const dialSpy = recorder(async (..._args: any[]) => ({} as any));
         agent.node.libp2p.dial = dialSpy as any;
@@ -120,6 +129,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const dialSpy = recorder(async (..._args: any[]) => ({} as any));
         agent.node.libp2p.dial = dialSpy as any;
@@ -154,6 +164,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const dialSpy = recorder(async (..._args: any[]) => ({} as any));
         agent.node.libp2p.dial = dialSpy as any;
@@ -179,6 +190,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         // Stubbed dial always rejects so no real path is created; we only
         // care about how many times maybeDialGossipSender *attempted* it.
@@ -225,6 +237,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const calls: string[] = [];
         (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -260,6 +273,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const calls: string[] = [];
         (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -301,6 +315,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const calls: string[] = [];
         (agent as any).trySyncFromPeer = async (peerId: string) => {
@@ -345,6 +360,7 @@ describe('p2p resilience hooks', () => {
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const events: string[] = [];
         let enrichResolve: (() => void) | null = null;

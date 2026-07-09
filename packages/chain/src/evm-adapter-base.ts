@@ -1001,7 +1001,13 @@ export class EVMChainAdapterBase {
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
-      async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+      {
+        validateEndpoint: async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+        // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
+        // boundary (LIVE per-check so flipping the env + restart disables it) so the
+        // transport core stays free of any process-global dependency.
+        stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
+      },
     );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
@@ -1215,6 +1221,43 @@ export class EVMChainAdapterBase {
       ...opts,
       rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
+  }
+
+  /**
+   * Raw PROVIDER read for a TIP-SENSITIVE value — the current head / `latest`
+   * block / any read that must stay canonical-fresh and preference-transparent
+   * (a lagging endpoint-stickiness backend would make the tip non-monotonic
+   * across calls). This is the POSITIVE freshness intent at the call site, so
+   * callers pick `readTipProvider` by meaning instead of remembering the
+   * transport-internal `skipPreferred` opt-out on a plain `readProvider`.
+   */
+  protected readTipProvider<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T> {
+    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
+  }
+
+  /**
+   * Raw PROVIDER read whose `null` is a "not on this endpoint (yet)" signal, not a
+   * definitive answer. A `null` FAILS OVER to the other endpoints (a lagging
+   * endpoint must not hide an object a healthy one has) WITHOUT de-preferring that
+   * endpoint or emitting failover/exhaustion telemetry — because an empty result is
+   * not a transport failure. Returns the first NON-null result, or `null` only when
+   * EVERY endpoint returned `null` and none had a real transport error. A
+   * non-retryable provider error (e.g. `INVALID_ARGUMENT`) or a genuine transport
+   * exhaustion PROPAGATES — never masked as `null`. The empty-vs-error distinction
+   * (and thus the order-independent all-null decision) is handled by the transport
+   * loop via `ReadOpts.isEmptyResult`, so no sentinel exception is tunnelled
+   * through the generic failover/telemetry path.
+   */
+  protected readProviderRetryingNull<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T | null> {
+    return this.readProvider<T | null>(label, fn, { ...opts, isEmptyResult: (v) => v == null });
   }
 
   /**
@@ -2372,8 +2415,21 @@ export class EVMChainAdapterBase {
   }
 
   protected async getBlockTimestamp(blockNumber: number): Promise<number> {
-    const block = await this.readProvider('getBlock', (p) => p.getBlock(blockNumber));
-    return block?.timestamp ?? 0;
+    // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
+    // endpoint stickiness (the endpoint that produced the receipt is the one most
+    // likely to already have the block). It is NOT a `skipPreferred` tip read:
+    // forcing canonical/primary-first here would instead risk querying a lagging
+    // primary that returns `null` for a block a healthy backup already has, and
+    // `null` isn't a retryable transport error, so it would surface as a bogus
+    // `blockTimestamp: 0`. Treat a `null` block as a FAILOVER condition so another
+    // endpoint that has the block can serve it; only if EVERY endpoint lacks it (or
+    // transport is down) do we fall back to the best-effort `0` callers tolerate.
+    // A `null` block (this endpoint hasn't imported it yet) fails over to another
+    // endpoint that has it; best-effort `0` only when EVERY endpoint lacks it and
+    // no transport error occurred. Non-retryable / transport-exhaustion errors
+    // propagate (never masked as a bogus `0`). Order-independent — see the helper.
+    const block = await this.readProviderRetryingNull('getBlock', (p) => p.getBlock(blockNumber));
+    return block?.timestamp != null ? Number(block.timestamp) : 0;
   }
 
   // =====================================================================
@@ -3318,7 +3374,11 @@ export class EVMChainAdapterBase {
   }
 
   async getBlockNumber(): Promise<number> {
-    return this.readProvider('getBlockNumber', (p) => p.getBlockNumber());
+    // TIP-SENSITIVE: the current head drives the event-lane cursor, proof-
+    // challenge block, and finalization reads. A lagging sticky backend would
+    // make the head non-monotonic across calls (poller moving backwards / re-
+    // scanning), so read canonical-order + preference-transparent.
+    return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
   }
 
   getProvider(): JsonRpcProvider {

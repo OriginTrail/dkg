@@ -6,6 +6,8 @@ export interface ACKCandidatePeerSelectionInput {
   ackCandidatePeerIds?: readonly string[];
   /** Preference-only ranking list. Listed peers are ordered first within each tier but never gate eligibility. */
   preferredACKPeerIds?: readonly string[];
+  /** Active-network admission filter. When set, peers outside this set are not ACK candidates. */
+  verifiedSameNetworkPeerIds?: ReadonlySet<string>;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
   requiredACKs: number;
@@ -127,9 +129,12 @@ export function selectACKCandidatePeersWithDiagnostics(
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const preferredACKPeers = normalizePeerIdSet(input.preferredACKPeerIds);
   const allowlistEnabled = allowlistedACKPeers.size > 0;
-  const eligible = allowlistEnabled
+  const allowlisted = allowlistEnabled
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
+  const eligible = input.verifiedSameNetworkPeerIds
+    ? allowlisted.filter((id) => input.verifiedSameNetworkPeerIds!.has(id))
+    : allowlisted;
   const tiers = buildCandidateTiers({
     connected: eligible,
     knownCorePeerIds: input.knownCorePeerIds,
@@ -146,7 +151,9 @@ export function selectACKCandidatePeersWithDiagnostics(
     selected,
     tier: tierMap.get(peerId) ?? 'rest',
     preferred: preferredACKPeers,
-    allowlisted: !allowlistEnabled || allowlistedACKPeers.has(peerId),
+    allowlisted:
+      (!allowlistEnabled || allowlistedACKPeers.has(peerId)) &&
+      (!input.verifiedSameNetworkPeerIds || input.verifiedSameNetworkPeerIds.has(peerId)),
     protocol: input.protocol,
     knownCorePeerIds: input.knownCorePeerIds,
     knownCorePeerIdsV2: input.knownCorePeerIdsV2,

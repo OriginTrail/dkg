@@ -111,6 +111,7 @@ describe('rpc-failover-log', () => {
       expect(getRpcFailoverStats()).toEqual({
         failovers: 1,
         exhaustions: 0,
+        preferredEstablishments: 0,
         byErrorClass: { THROTTLE_429: 1 },
         byEndpointHost: { 'a.example': 1 },
       });

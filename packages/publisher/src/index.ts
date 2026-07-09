@@ -102,8 +102,14 @@ export {
   StorageACKHandler,
   ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
   DEFAULT_ACK_HANDLER_DEADLINE_MS,
+  type StorageAckDecision,
+  type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
 } from './storage-ack-handler.js';
+export {
+  createStorageAckLifecycleObserver,
+  type StorageAckLifecycleObserverOptions,
+} from './storage-ack-lifecycle-observer.js';
 export {
   resolveStorageAckTiming,
   STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,

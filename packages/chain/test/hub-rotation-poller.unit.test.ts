@@ -410,10 +410,19 @@ describe('HubRotationPoller', () => {
         iface.getEvent('AssetStorageChanged')!.topicHash,
         iface.getEvent('NewAssetStorage')!.topicHash,
       ]);
+      // `skipPreferred` pins the poller's endpoint-stickiness transparency
+      // (Mechanism B): a background head/log probe at the ~TTL cadence must not
+      // re-probe or clear the preferred backend the read/write paths rely on.
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getBlockNumber')?.opts)
-        .toEqual({ policy: 'watchdogPointRead' });
+        .toEqual({ policy: 'watchdogPointRead', skipPreferred: true });
       expect(readCalls.find((call) => call.label === 'Hub rotation poll getLogs')?.opts)
-        .toEqual({ policy: 'watchdogWideLogScan' });
+        .toEqual({ policy: 'watchdogWideLogScan', skipPreferred: true });
+      // The STARTUP head read (recordInitialHead, fired on poller.start) is a
+      // SEPARATE carve-out site — pin it independently, since a regression that
+      // dropped `skipPreferred` there would not be caught by the periodic-poll
+      // assertion above (different label).
+      expect(readCalls.find((call) => call.label === 'Hub rotation poll initial getBlockNumber')?.opts)
+        .toEqual({ policy: 'watchdogPointRead', skipPreferred: true });
       expect(onContractName.mock.calls.map((call) => call[0])).toEqual([
         'RandomSampling',
         'ContextGraphs',

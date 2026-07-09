@@ -1821,6 +1821,7 @@ export function classifyClientError(
   msg: string,
 ):
   | { status: 404; sanitized: string }
+  | { status: 403; sanitized: string }
   | { status: 400; sanitized: string }
   | { status: 504; sanitized: string }
   | null {
@@ -1872,6 +1873,17 @@ export function classifyClientError(
   // start returning 500 on what's plainly a malformed-input 400.
   if (/ERR_INVALID_(PEER|MULTIHASH|MULTIADDR|CID|BASE)/.test(msg)) {
     return { status: 400, sanitized };
+  }
+  if (
+    /\b(not admitted|network identity proof rejected|NETWORK_ADMISSION_REJECTED)\b/i.test(msg)
+  ) {
+    return { status: 403, sanitized };
+  }
+  if (
+    /\b(network identity probe failed|network admission probe failed|NETWORK_ADMISSION_PROBE_FAILED|protocol selection failed|could not negotiate)\b/i.test(msg) ||
+    /not synchronously deliverable \(queued\)/i.test(msg)
+  ) {
+    return { status: 504, sanitized };
   }
   return null;
 }

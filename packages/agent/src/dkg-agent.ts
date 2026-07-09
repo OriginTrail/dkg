@@ -22,7 +22,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  DEFAULT_GENESIS_ID, getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -731,10 +731,37 @@ export class DKGAgent extends DKGAgentBase {
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
-    const genesisId = config.genesisId;
+    const genesisId = config.genesisId ?? config.networkIdentity?.genesisId ?? DEFAULT_GENESIS_ID;
 
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store, genesisId);
+    const computedNetworkId = await computeNetworkId(genesisId);
+    if (config.networkIdentity?.genesisId && config.networkIdentity.genesisId !== genesisId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.genesisId (${config.networkIdentity.genesisId}) ` +
+        `must match the selected genesisId (${genesisId})`,
+      );
+    }
+    if (config.networkIdentity?.networkId && config.networkIdentity.networkId !== computedNetworkId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.networkId (${config.networkIdentity.networkId}) ` +
+        `must match computeNetworkId(${genesisId}) (${computedNetworkId})`,
+      );
+    }
+    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
+    if (config.networkIdentity?.chainId && adapterChainId && config.networkIdentity.chainId !== adapterChainId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.chainId (${config.networkIdentity.chainId}) ` +
+        `must match the chain adapter id (${adapterChainId})`,
+      );
+    }
+    const networkIdentity = {
+      ...config.networkIdentity,
+      genesisId,
+      networkId: computedNetworkId,
+      chainId: adapterChainId ?? config.networkIdentity?.chainId,
+    };
+    const resolvedConfig: ResolvedDKGAgentConfig = { ...config, genesisId, networkIdentity };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
@@ -749,6 +776,7 @@ export class DKGAgent extends DKGAgentBase {
       relayServerCapacity: config.relayServerCapacity,
       relayReservationCount: config.relayReservationCount,
       nodeVersion: config.nodeVersion,
+      networkIdentity,
       ...pickNetworkTunables(config),
     };
 
@@ -834,7 +862,7 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      config, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
+      resolvedConfig, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;
@@ -1709,6 +1737,9 @@ export class DKGAgent extends DKGAgentBase {
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
+      verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
+        ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
+        : undefined,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       requiredACKs,
@@ -1749,10 +1780,16 @@ export class DKGAgent extends DKGAgentBase {
   private createACKSendP2P(
     timeoutMs = this.config.storageAckTiming.sendTimeoutMs,
   ): ACKCollectorDeps['sendP2P'] {
-    return createACKSendP2P({
+    const send = createACKSendP2P({
       messenger: this.messenger,
       timeoutMs,
     });
+    return async (peerId: string, protocol: string, data: Uint8Array) => {
+      if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
+        throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
+      }
+      return send(peerId, protocol, data);
+    };
   }
 
   /**
@@ -1907,6 +1944,7 @@ export class DKGAgent extends DKGAgentBase {
         swmGraphId: params.swmGraphId,
         subGraphName: params.subGraphName,
         merkleLeafCount: params.merkleLeafCount,
+        assetUal: params.assetUal,
         ackMode: params.ackMode,
       });
       return result.acks;
