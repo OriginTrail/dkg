@@ -491,10 +491,23 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         if (!isTooLowAllowanceError(err)) {
           throw err;
         }
+        // #1340: read the deposit through the RPC-failover facade (`readContract`),
+        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
+        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
+        // approve + retry below never run, defeating failover for a new CG's first
+        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
+        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
+        // when ALL endpoints fail or the deposit is genuinely dormant.
         const ps = this.contracts.parametersStorage as Contract | undefined;
         let deposit = 0n;
         try {
-          deposit = ps ? await ps.contextGraphRegistrationDeposit() : 0n;
+          deposit = ps
+            ? await this.readContract<bigint>(
+                ps,
+                'parametersStorage.contextGraphRegistrationDeposit',
+                'contextGraphRegistrationDeposit',
+              )
+            : 0n;
         } catch {
           deposit = 0n;
         }
