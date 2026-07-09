@@ -42,6 +42,7 @@ export default defineConfig({
       "test/publish-literal-size.test.ts",
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
+      "test/v10-ack-provider-wiring.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",

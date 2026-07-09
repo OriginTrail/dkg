@@ -67,6 +67,7 @@ export default defineConfig({
           'test/blazegraph-docker.test.ts',
           'test/store-identity-tag.test.ts',
           'test/publisher-runner-lu11.test.ts',
+          'test/publisher-runner-ack-transport.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
@@ -108,6 +109,7 @@ export default defineConfig({
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
           // wallets) — no hardhat.
           'test/daemon-sync-agents-meta-wiring.test.ts',
+          'test/daemon-storage-ack-timing-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

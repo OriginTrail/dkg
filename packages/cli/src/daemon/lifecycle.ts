@@ -128,6 +128,7 @@ import {
   resolveNetworkConfigName,
   resolveApprovalPolicy,
   resolveSharedMemoryTtlMs,
+  resolveStorageAckTiming,
   repoDir,
   releasesDir,
   activeSlot,
@@ -1096,6 +1097,7 @@ export async function runDaemonInner(
     log(`[dkg-build-info] WARNING: failed to emit startup telemetry: ${String(err)}`);
   }
 
+  const storageAckTiming = resolveStorageAckTiming(config.storageAck);
   const selectedNetworkConfig = config.networkConfig?.trim();
   const network = await loadNetworkConfig(selectedNetworkConfig);
   if (selectedNetworkConfig && !network) {
@@ -1573,6 +1575,7 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    storageAckTiming,
     syncCheckpointStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
@@ -1934,61 +1937,8 @@ export async function runDaemonInner(
             store: agent.store,
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
-            ackTransportFactory: () => ({
-              publisherPeerId: agent.peerId,
-              gossipPublish: async (topic: string, data: Uint8Array) => {
-                await agent.gossip.publish(topic, data);
-              },
-              // Route storage-ack + verify-proposal outbound sends through
-              // the Messenger rather than directly through ProtocolRouter
-              // (rc.9 PR-2 wiring). Today this is semantically identical
-              // to the prior `agent.router.send` path — `/dkg/10.0.0/*`
-              // protocols travel `Messenger.sendToPeer` (legacy pass-
-              // through) → `ProtocolRouter.send`. The wiring matters at
-              // Milestone C PR-11 when `/storage-ack` + `/verify-proposal`
-              // migrate to `/dkg/10.0.1/*` and start using
-              // `messenger.sendReliable`, picking up the substrate's
-              // durable outbox + sender-side idempotency without
-              // touching this factory again.
-              //
-              // HIGH RISK gate (rc.9 plan): Milestone C migration of
-              // these protocols MUST include an explicit publishing-flow
-              // integration test covering ACK quorum collection + the
-              // ackTransportFactory hot path before the prefix bump
-              // lands.
-              // rc.9 PR-11: /storage-ack + /verify-proposal migrated to
-              // /dkg/10.0.1/* and now route through messenger.sendReliable
-              // (envelope wrap + sender-side idempotency + durable
-              // outbox). queued surfaces as a thrown transport error so
-              // ACKCollector's MAX_RETRIES loop + per-peer skip semantics
-              // kick in unchanged.
-              sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-                const sendResult = await agent.messenger.sendReliable(peerId, protocol, data);
-                if (!sendResult.delivered) {
-                  throw new Error(`substrate queued (transport): ${sendResult.error}`);
-                }
-                return sendResult.response;
-              },
-              getConnectedCorePeers: (protocol?: string) => {
-                const allPeers = agent.node.libp2p
-                  .getPeers()
-                  .map((p) => p.toString());
-                const knownCorePeerIds = (agent as any).knownCorePeerIds as
-                  | Set<string>
-                  | undefined;
-                const knownCorePeerIdsV2 = (agent as any).knownCorePeerIdsV2 as
-                  | Set<string>
-                  | undefined;
-                return selectACKCandidatePeers({
-                  connectedPeers: allPeers,
-                  selfPeerId: agent.peerId,
-                  knownCorePeerIds,
-                  knownCorePeerIdsV2,
-                  requiredACKs: (agent as any).lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
-                  protocol,
-                  preferredACKPeerIds,
-                });
-              },
+            ackTransportFactory: agent.createACKTransportFactory({
+              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
