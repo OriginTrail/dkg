@@ -1,5 +1,8 @@
 import type { DiscoveryClient } from '../discovery.js';
-import { canonicalTargetPeerIdFromMultiaddr } from './network-admission.js';
+import {
+  canonicalTargetPeerIdFromMultiaddr,
+  type CanonicalMultiaddrPeerTarget,
+} from './multiaddr-peer-target.js';
 
 interface Libp2pLike {
   getConnections(): Array<{ remotePeer: { toString(): string } }>;
@@ -33,15 +36,18 @@ export async function connectToMultiaddr(
   libp2p: Libp2pLike,
   multiaddress: string,
   log?: (message: string) => void,
-  expectedTargetPeerId?: string,
+  parsedTarget?: CanonicalMultiaddrPeerTarget,
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
-  const target = canonicalTargetPeerIdFromMultiaddr(multiaddress);
+  const target = parsedTarget ?? canonicalTargetPeerIdFromMultiaddr(multiaddress);
+  if (target && target.multiaddress !== multiaddress) {
+    throw new Error('Parsed multiaddr peer target does not match dial multiaddr');
+  }
 
   if (!multiaddress.includes('/p2p-circuit/p2p/')) {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
-    const directTargetPeerId = expectedTargetPeerId ?? target?.canonical;
+    const directTargetPeerId = target?.canonical;
     await libp2p.dial(multiaddr(multiaddress));
     if (directTargetPeerId) {
       const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
@@ -63,7 +69,7 @@ export async function connectToMultiaddr(
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
-  const canonicalTargetPeerId = expectedTargetPeerId ?? target.canonical;
+  const canonicalTargetPeerId = target.canonical;
   debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${canonicalTargetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
   debugLog?.(`Dialing final circuit target peer: ${canonicalTargetPeerId}`);

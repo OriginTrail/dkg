@@ -11,38 +11,6 @@ export interface NetworkAdmissionSnapshot {
   quarantinedPeerIds: string[];
 }
 
-export interface CanonicalMultiaddrPeerTarget {
-  raw: string;
-  canonical: CanonicalPeerId;
-}
-
-export function peerIdsFromMultiaddr(addr: string): string[] {
-  const peerIds: string[] = [];
-  const matches = addr.matchAll(/\/p2p\/([^/]+)/g);
-  for (const match of matches) {
-    const peerId = match[1]?.trim();
-    if (peerId) peerIds.push(peerId);
-  }
-  return peerIds;
-}
-
-export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
-  return peerIdsFromMultiaddr(addr).at(-1);
-}
-
-export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMultiaddrPeerTarget | undefined {
-  const raw = targetPeerIdFromMultiaddr(addr);
-  return raw ? { raw, canonical: canonicalPeerIdString(raw) } : undefined;
-}
-
-export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {
-  const peerIds = new Set<string>();
-  for (const addr of addrs ?? []) {
-    for (const peerId of peerIdsFromMultiaddr(addr)) peerIds.add(peerId);
-  }
-  return peerIds;
-}
-
 /**
  * Process-local admission registry for active-network peers.
  *
@@ -72,47 +40,30 @@ export class NetworkAdmissionService {
   markVerifiedSameNetwork(peerId: string): void {
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
     if (!canonicalPeerId) return;
-    this.markVerifiedSameNetworkCanonical(canonicalPeerId);
-  }
-
-  markVerifiedSameNetworkCanonical(peerId: CanonicalPeerId): void {
-    this.verifiedPeerIds.add(peerId);
-    this.quarantinedPeerIds.delete(peerId);
+    this.verifiedPeerIds.add(canonicalPeerId);
+    this.quarantinedPeerIds.delete(canonicalPeerId);
   }
 
   quarantinePeer(peerId: string): void {
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
     if (!canonicalPeerId) return;
-    this.quarantinePeerCanonical(canonicalPeerId);
-  }
-
-  quarantinePeerCanonical(peerId: CanonicalPeerId): void {
-    this.quarantinedPeerIds.add(peerId);
-    this.verifiedPeerIds.delete(peerId);
+    this.quarantinedPeerIds.add(canonicalPeerId);
+    this.verifiedPeerIds.delete(canonicalPeerId);
   }
 
   isAcceptedPeer(peerId: string): boolean {
     if (!this.enabled) return true;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    return canonicalPeerId ? this.isAcceptedPeerCanonical(canonicalPeerId) : false;
-  }
-
-  isAcceptedPeerCanonical(peerId: CanonicalPeerId): boolean {
-    if (!this.enabled) return true;
-    if (peerId === this.selfPeerId) return true;
-    if (this.quarantinedPeerIds.has(peerId)) return false;
-    return this.verifiedPeerIds.has(peerId);
+    if (!canonicalPeerId) return false;
+    if (canonicalPeerId === this.selfPeerId) return true;
+    if (this.quarantinedPeerIds.has(canonicalPeerId)) return false;
+    return this.verifiedPeerIds.has(canonicalPeerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    return canonicalPeerId ? this.isRejectedPeerCanonical(canonicalPeerId) : true;
-  }
-
-  isRejectedPeerCanonical(peerId: CanonicalPeerId): boolean {
-    if (!this.enabled) return false;
-    return this.quarantinedPeerIds.has(peerId);
+    return canonicalPeerId ? this.quarantinedPeerIds.has(canonicalPeerId) : true;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {

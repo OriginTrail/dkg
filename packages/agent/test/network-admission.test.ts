@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
-import {
-  NetworkAdmissionService,
-  peerIdsFromMultiaddrs,
-  targetPeerIdFromMultiaddr,
-} from '../src/p2p/network-admission.js';
+import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const VERIFIED_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -45,19 +41,5 @@ describe('NetworkAdmissionService', () => {
     expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(false);
     expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
-  });
-
-  it('extracts peer ids from configured relay and bootstrap multiaddrs', () => {
-    expect([...peerIdsFromMultiaddrs([
-      '/ip4/127.0.0.1/tcp/4001/p2p/relay-peer',
-      '/dns4/bootstrap.example/tcp/4001/p2p/bootstrap-peer',
-    ])].sort()).toEqual(['bootstrap-peer', 'relay-peer']);
-  });
-
-  it('separates relay seed peers from the explicit target peer in relayed multiaddrs', () => {
-    const addr = '/ip4/127.0.0.1/tcp/4001/p2p/relay-peer/p2p-circuit/p2p/target-peer';
-
-    expect([...peerIdsFromMultiaddrs([addr])]).toEqual(['relay-peer', 'target-peer']);
-    expect(targetPeerIdFromMultiaddr(addr)).toBe('target-peer');
   });
 });

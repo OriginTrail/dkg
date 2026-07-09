@@ -4,11 +4,12 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { NetworkAdmissionService } from './network-admission.js';
 import {
-  NetworkAdmissionService,
   canonicalTargetPeerIdFromMultiaddr,
   targetPeerIdFromMultiaddr,
-} from './network-admission.js';
+  type CanonicalMultiaddrPeerTarget,
+} from './multiaddr-peer-target.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
@@ -111,38 +112,36 @@ export class NetworkAdmissionCoordinator {
 
   isAcceptedPeer(peerId: string): boolean {
     if (!this.identity?.networkId) return true;
-    const canonicalPeerId = tryCanonicalAdmissionPeerId(peerId);
-    return canonicalPeerId ? this.admission.isAcceptedPeerCanonical(canonicalPeerId) : false;
+    return this.admission.isAcceptedPeer(peerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.identity?.networkId) return false;
-    const canonicalPeerId = tryCanonicalAdmissionPeerId(peerId);
-    return canonicalPeerId ? this.admission.isRejectedPeerCanonical(canonicalPeerId) : true;
+    return this.admission.isRejectedPeer(peerId);
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     return this.admission.verifiedSameNetworkPeerIds();
   }
 
-  targetPeerIdForExplicitConnect(multiaddress: string): string | undefined {
-    if (!this.enabled) return targetPeerIdFromMultiaddr(multiaddress);
-    let target;
+  targetPeerForExplicitConnect(multiaddress: string): CanonicalMultiaddrPeerTarget | undefined {
+    let target: CanonicalMultiaddrPeerTarget | undefined;
     try {
       target = canonicalTargetPeerIdFromMultiaddr(multiaddress);
     } catch (err) {
+      if (!this.enabled) throw err;
       throw new NetworkAdmissionInvalidPeerIdError(
         targetPeerIdFromMultiaddr(multiaddress) ?? '<missing>',
         err instanceof Error ? err.message : String(err),
       );
     }
-    if (!target) {
+    if (this.enabled && !target) {
       throw new NetworkAdmissionInvalidPeerIdError(
         '<missing>',
         'connect multiaddr must include a target /p2p/<peerId> for network admission',
       );
     }
-    return target.canonical;
+    return target;
   }
 
   filterAcceptedPeerIds(peerIds: Iterable<string>): string[] {
@@ -176,7 +175,7 @@ export class NetworkAdmissionCoordinator {
   ): Promise<boolean> {
     if (!this.identity?.networkId) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
-    if (this.admission.isAcceptedPeerCanonical(remotePeerId)) return true;
+    if (this.admission.isAcceptedPeer(remotePeerId)) return true;
 
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return this.raceAdmissionSignal(existing, options.signal);
@@ -238,7 +237,7 @@ export class NetworkAdmissionCoordinator {
       requesterPeerId: this.selfPeerId,
     });
     if (verdict.ok) {
-      this.admission.markVerifiedSameNetworkCanonical(remotePeer);
+      this.admission.markVerifiedSameNetwork(remotePeer);
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -270,7 +269,7 @@ export class NetworkAdmissionCoordinator {
   }
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {
-    this.admission.quarantinePeerCanonical(remotePeer);
+    this.admission.quarantinePeer(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -313,13 +312,5 @@ function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
     return canonicalPeerIdString(peerId);
   } catch (err) {
     throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
-  }
-}
-
-function tryCanonicalAdmissionPeerId(peerId: string): CanonicalPeerId | null {
-  try {
-    return canonicalAdmissionPeerId(peerId);
-  } catch {
-    return null;
   }
 }

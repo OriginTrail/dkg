@@ -10,6 +10,7 @@ const peerConnectMocks = vi.hoisted(() => ({
 vi.mock('../src/p2p/peer-connect.js', () => peerConnectMocks);
 
 import { AgentRegistryMethods } from '../src/dkg-agent-registry.js';
+import { canonicalTargetPeerIdFromMultiaddr } from '../src/p2p/multiaddr-peer-target.js';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
@@ -33,7 +34,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     },
     networkAdmissionCoordinator: {
       enabled: true,
-      targetPeerIdForExplicitConnect: vi.fn(() => PEER_ID),
+      targetPeerForExplicitConnect: vi.fn(() => canonicalTargetPeerIdFromMultiaddr(DIRECT_MULTIADDR)),
       ensureAdmitted: vi.fn(async () => false),
     },
     log: { info: vi.fn() },
@@ -78,6 +79,16 @@ describe('explicit connect network admission', () => {
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
 
     expect(peerConnectMocks.connectToMultiaddr).toHaveBeenCalledOnce();
+    expect(peerConnectMocks.connectToMultiaddr).toHaveBeenCalledWith(
+      expect.anything(),
+      DIRECT_MULTIADDR,
+      expect.any(Function),
+      expect.objectContaining({
+        multiaddress: DIRECT_MULTIADDR,
+        raw: PEER_ID,
+        canonical: PEER_ID,
+      }),
+    );
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
