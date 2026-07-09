@@ -62,19 +62,21 @@ export interface StickinessConfig {
 }
 
 /**
- * One failover pass's ordering + outcome bookkeeping, bundled by
- * {@link EndpointStickiness.attempts} so a loop can't accidentally pass a
- * mismatched (canonical, intent) to `order` vs `recordSuccess`/`recordFailure`.
+ * ONE bound attempt in a failover pass: the endpoint to try, plus its outcome
+ * recorders with the endpoint, its position (triedFirst = index 0), and the
+ * (canonical, intent) pair ALL captured at creation. A loop iterates the entries
+ * {@link EndpointStickiness.attempts} returns and, on the entry it actually ran,
+ * calls the NULLARY `recordSuccess()` / `recordFailure()`. Nothing is threaded
+ * back in, so a loop cannot record against the wrong endpoint, a stale index, or a
+ * mismatched canonical/intent — the invariant is structural, not just documented.
  */
 export interface StickyAttempt<T extends StickyEndpoint> {
-  /** Preferred-first iteration order for THIS op. Computed ONCE (order() may
-   *  re-arm the TTL re-probe — it must run exactly once per loop entry). */
-  readonly ordered: T[];
-  /** Record that `endpoint` served attempt `i` (0-based; triedFirst = i === 0). */
-  recordSuccess(endpoint: T, i: number): void;
-  /** Record that `endpoint` FAILED the attempt (real error → failover); de-prefers
-   *  it if it is the current preferred. */
-  recordFailure(endpoint: T): void;
+  /** The endpoint to try for this attempt (preferred-first ordering). */
+  readonly endpoint: T;
+  /** Record that THIS endpoint served the op (triedFirst bound at creation). */
+  recordSuccess(): void;
+  /** Record that THIS endpoint FAILED (real error → failover); de-prefers it if preferred. */
+  recordFailure(): void;
 }
 
 export class EndpointStickiness {
@@ -88,26 +90,25 @@ export class EndpointStickiness {
   }
 
   /**
-   * Bundle one failover pass's ordering + outcome bookkeeping for `intent` over
-   * `canonical` into a {@link StickyAttempt}. `ordered` is computed ONCE here
-   * (order() may re-arm the re-probe TTL — it must not run twice per loop entry);
-   * the two closures capture the SAME canonical + intent, so a loop no longer
-   * hand-threads them across three separate `order`/`recordSuccess`/`recordFailure`
-   * calls (and can't drift them apart).
+   * Build the preferred-first list of BOUND {@link StickyAttempt}s for `intent`
+   * over `canonical`. `order()` runs EXACTLY once here (it may re-arm the TTL
+   * re-probe — it must not run twice per loop entry); each entry captures its own
+   * endpoint + position (triedFirst = index 0) + the SAME (canonical, intent), so
+   * a loop records via the nullary `recordSuccess()`/`recordFailure()` on the entry
+   * it ran and cannot drift the endpoint, index, canonical, or intent apart.
    *
    * This is the SOLE public API for DRIVING a failover pass — `order`,
    * `recordSuccess`, and `recordFailure` are `private` below precisely so the
-   * mismatched-(canonical, intent) hand-threaded path this bundle prevents is not
-   * merely discouraged but unavailable. (`hasPreference` stays public as a
-   * read-only introspection helper; it can't cause drift.)
+   * mismatched hand-threaded path these entries prevent is not merely discouraged
+   * but unavailable. (`hasPreference` stays public as a read-only introspection
+   * helper; it can't cause drift.)
    */
-  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T> {
-    const ordered = this.order(canonical, intent);
-    return {
-      ordered,
-      recordSuccess: (endpoint, i) => this.recordSuccess(endpoint, canonical, intent, i === 0),
-      recordFailure: (endpoint) => this.recordFailure(endpoint, intent),
-    };
+  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T>[] {
+    return this.order(canonical, intent).map((endpoint, i) => ({
+      endpoint,
+      recordSuccess: () => this.recordSuccess(endpoint, canonical, intent, i === 0),
+      recordFailure: () => this.recordFailure(endpoint, intent),
+    }));
   }
 
   /**

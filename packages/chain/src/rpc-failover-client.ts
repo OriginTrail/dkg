@@ -369,8 +369,8 @@ export class RpcFailoverClient {
     // 'nonceWrite': the state machine starts a fresh-nonce populate on a backend
     // ONLY if a prior populate proved it (else canonical primary-first = the
     // authoritative nonce source) — the nonce-staleness guard.
-    const plan = this.stickiness.attempts(canonical, 'nonceWrite');
-    const endpoints = plan.ordered;
+    const attempts = this.stickiness.attempts(canonical, 'nonceWrite');
+    const endpoints = attempts.map((a) => a.endpoint);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
@@ -421,12 +421,12 @@ export class RpcFailoverClient {
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.
-        plan.recordSuccess(endpoint, i);
+        attempts[i].recordSuccess();
         return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
         lastRetryable = err;
-        plan.recordFailure(endpoint); // de-prefer a failed backend
+        attempts[i].recordFailure(); // de-prefer a failed backend
         if (i < endpoints.length - 1) {
           noteRpcFailover(`${label} preparation`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }
@@ -473,8 +473,8 @@ export class RpcFailoverClient {
         const startedAt = Date.now();
         try {
           const canonical = this.getEndpoints();
-          const plan = this.stickiness.attempts(canonical, 'write');
-          const endpoints = plan.ordered;
+          const attempts = this.stickiness.attempts(canonical, 'write');
+          const endpoints = attempts.map((a) => a.endpoint);
           let lastRetryable: unknown;
           for (let i = 0; i < endpoints.length; i += 1) {
             const endpoint = endpoints[i];
@@ -493,7 +493,7 @@ export class RpcFailoverClient {
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-              plan.recordSuccess(endpoint, i);
+              attempts[i].recordSuccess();
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -501,7 +501,7 @@ export class RpcFailoverClient {
                 span.setAttribute('dkg.tx_hash', txHash);
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-                plan.recordSuccess(endpoint, i);
+                attempts[i].recordSuccess();
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -509,7 +509,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
-              plan.recordFailure(endpoint); // de-prefer a failed backend
+              attempts[i].recordFailure(); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover(`${label} broadcast`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -555,8 +555,8 @@ export class RpcFailoverClient {
         const startedAt = Date.now();
         try {
           const canonical = this.getEndpoints();
-          const plan = this.stickiness.attempts(canonical, 'write');
-          const endpoints = plan.ordered;
+          const attempts = this.stickiness.attempts(canonical, 'write');
+          const endpoints = attempts.map((a) => a.endpoint);
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
           for (let i = 0; i < endpoints.length; i += 1) {
@@ -582,7 +582,7 @@ export class RpcFailoverClient {
                 // it. A null "not mined yet" response is NOT a stickiness signal
                 // (no single winning endpoint), so we only note on a real
                 // receipt — the self-heal still polls every endpoint per tick.
-                plan.recordSuccess(endpoint, i);
+                attempts[i].recordSuccess();
                 return receipt;
               }
             } catch (err) {
@@ -591,7 +591,7 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
-              plan.recordFailure(endpoint); // de-prefer a failed backend
+              attempts[i].recordFailure(); // de-prefer a failed backend
               if (i < endpoints.length - 1) {
                 noteRpcFailover('receipt lookup', endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
               }
@@ -650,8 +650,8 @@ export class RpcFailoverClient {
     // A tip-sensitive read (skipPreferred) is 'transparentRead' (canonical order +
     // no state mutation); a normal read is 'stickyRead'.
     const intent: StickinessIntent = skipPreferred ? 'transparentRead' : 'stickyRead';
-    const plan = this.stickiness.attempts(canonical, intent);
-    const endpoints = plan.ordered;
+    const attempts = this.stickiness.attempts(canonical, intent);
+    const endpoints = attempts.map((a) => a.endpoint);
     const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
     let sawEmpty = false;
@@ -681,12 +681,12 @@ export class RpcFailoverClient {
           lastEmpty = out;
           continue;
         }
-        plan.recordSuccess(endpoint, i);
+        attempts[i].recordSuccess();
         return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;
         lastRetryable = err;
-        plan.recordFailure(endpoint); // de-prefer a failed backend
+        attempts[i].recordFailure(); // de-prefer a failed backend
         if (!isLast) {
           noteRpcFailover(label, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
         }
