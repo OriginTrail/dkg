@@ -48,11 +48,67 @@ export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
 }
 
-interface InFlightAdmissionAttempt {
-  controller: AbortController;
-  promise: Promise<boolean>;
-  waiters: number;
-  settled: boolean;
+class InFlightAdmissionAttempt {
+  private readonly controller = new AbortController();
+  private promise: Promise<boolean> = Promise.resolve(false);
+  private waiters = 0;
+  private settled = false;
+
+  constructor(private readonly defaultTimeoutMs: number) {}
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  attach(work: Promise<boolean>, onSettled: () => void): void {
+    this.promise = work.finally(() => {
+      this.settled = true;
+      onSettled();
+    });
+  }
+
+  wait(options: NetworkAdmissionAttemptOptions): Promise<boolean> {
+    const signal = options.signal;
+    const timeoutMs = options.timeoutMs;
+    if (signal?.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
+    this.waiters += 1;
+
+    return new Promise<boolean>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let released = false;
+      const cleanup = () => {
+        if (released) return;
+        released = true;
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+        this.waiters = Math.max(0, this.waiters - 1);
+        if (this.waiters === 0 && !this.settled) {
+          this.controller.abort(admissionTimeoutError(timeoutMs ?? this.defaultTimeoutMs));
+        }
+      };
+      const onAbort = () => {
+        cleanup();
+        reject(abortErrorFromSignal(signal?.reason));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) {
+        timeout = setTimeout(() => {
+          cleanup();
+          reject(admissionTimeoutError(timeoutMs));
+        }, Math.max(0, timeoutMs));
+      }
+      this.promise.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (err) => {
+          cleanup();
+          reject(err);
+        },
+      );
+    });
+  }
 }
 
 export class NetworkAdmissionProbeError extends Error {
@@ -163,22 +219,17 @@ export class NetworkAdmissionCoordinator {
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
 
     const existing = this.inFlight.get(remotePeerId);
-    if (existing) return this.raceAdmissionAttempt(existing, options);
+    if (existing) return existing.wait(options);
 
-    const controller = new AbortController();
-    const attempt: InFlightAdmissionAttempt = {
-      controller,
-      waiters: 0,
-      settled: false,
-      promise: Promise.resolve(false),
-    };
-    attempt.promise = this.probePeer(remotePeerId, ctx, controller.signal)
-      .finally(() => {
-        attempt.settled = true;
+    const attempt = new InFlightAdmissionAttempt(this.probeTimeoutMs);
+    attempt.attach(
+      this.probePeer(remotePeerId, ctx, attempt.signal),
+      () => {
         if (this.inFlight.get(remotePeerId) === attempt) this.inFlight.delete(remotePeerId);
-      });
+      },
+    );
     this.inFlight.set(remotePeerId, attempt);
-    return this.raceAdmissionAttempt(attempt, options);
+    return attempt.wait(options);
   }
 
   private async probePeer(
@@ -236,46 +287,6 @@ export class NetworkAdmissionCoordinator {
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
     return false;
-  }
-
-  private raceAdmissionAttempt(attempt: InFlightAdmissionAttempt, options: NetworkAdmissionAttemptOptions): Promise<boolean> {
-    const signal = options.signal;
-    const timeoutMs = options.timeoutMs;
-    if (signal?.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
-    attempt.waiters += 1;
-
-    return new Promise<boolean>((resolve, reject) => {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const cleanup = () => {
-        if (timeout) clearTimeout(timeout);
-        signal?.removeEventListener('abort', onAbort);
-        attempt.waiters = Math.max(0, attempt.waiters - 1);
-        if (attempt.waiters === 0 && !attempt.settled) {
-          attempt.controller.abort(admissionTimeoutError(timeoutMs ?? this.probeTimeoutMs));
-        }
-      };
-      const onAbort = () => {
-        cleanup();
-        reject(abortErrorFromSignal(signal?.reason));
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-      if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) {
-        timeout = setTimeout(() => {
-          cleanup();
-          reject(admissionTimeoutError(timeoutMs));
-        }, Math.max(0, timeoutMs));
-      }
-      attempt.promise.then(
-        (value) => {
-          cleanup();
-          resolve(value);
-        },
-        (err) => {
-          cleanup();
-          reject(err);
-        },
-      );
-    });
   }
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {

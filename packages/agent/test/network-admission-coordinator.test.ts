@@ -206,6 +206,31 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.admission.snapshot().verifiedPeerIds).toEqual([]);
   });
 
+  it('keeps a shared probe alive when one of multiple waiters times out', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    const first = fixture.coordinator.ensureAdmitted(
+      REMOTE_PEER_ID_CID,
+      createOperationContext('connect'),
+      { timeoutMs: 1 },
+    );
+    const second = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'));
+    await expect(first).rejects.toMatchObject({ name: 'AbortError', code: 'CONNECT_TIMEOUT' });
+
+    const probeSignal = sendIdentityProbe.mock.calls[0][2].signal;
+    expect(probeSignal).toBeInstanceOf(AbortSignal);
+    expect(probeSignal?.aborted).toBe(false);
+    release(new TextEncoder().encode('{not json'));
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
   it('rejects malformed peer ids before probing', async () => {
     const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
     const fixture = buildCoordinator({

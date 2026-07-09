@@ -410,7 +410,14 @@ function pcaRegisteredProbe(
 
 function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: boolean): MultiaddrConnectTarget {
   try {
-    return parseMultiaddrConnectTarget(multiaddress, { requireTargetPeerId: admissionEnabled });
+    const target = parseMultiaddrConnectTarget(multiaddress);
+    if (admissionEnabled && !target.targetPeerId) {
+      throw new MultiaddrPeerTargetParseError(
+        'connect multiaddr must include a target /p2p/<peerId> for network admission',
+        '<missing>',
+      );
+    }
+    return target;
   } catch (err) {
     if (!admissionEnabled) throw err;
     throw new NetworkAdmissionInvalidPeerIdError(

@@ -16,10 +16,6 @@ export interface CircuitMultiaddrConnectTarget {
 
 export type MultiaddrConnectTarget = DirectMultiaddrConnectTarget | CircuitMultiaddrConnectTarget;
 
-export interface MultiaddrConnectTargetParseOptions {
-  requireTargetPeerId?: boolean;
-}
-
 type ParsedMultiaddrStructure = {
   multiaddress: string;
   components: Component[];
@@ -41,10 +37,17 @@ export function peerIdsFromMultiaddr(addr: string): string[] {
   return parseMultiaddrStructure(addr).peerIds;
 }
 
-export function parseMultiaddrConnectTarget(
-  addr: string,
-  options: MultiaddrConnectTargetParseOptions = {},
-): MultiaddrConnectTarget {
+/** @deprecated Prefer parseMultiaddrConnectTarget() so callers share one parsed model. */
+export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
+  return targetPeerIdFromStructure(parseMultiaddrStructure(addr));
+}
+
+/** @deprecated Prefer parseMultiaddrConnectTarget() so callers share one parsed model. */
+export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalPeerId | undefined {
+  return parseMultiaddrConnectTarget(addr).targetPeerId;
+}
+
+export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarget {
   const structure = parseMultiaddrStructure(addr);
   if (structure.circuitIndex !== -1) {
     const raw = targetPeerIdFromStructure(structure);
@@ -59,12 +62,6 @@ export function parseMultiaddrConnectTarget(
 
   const raw = targetPeerIdFromStructure(structure);
   const targetPeerId = raw ? canonicalTargetPeerId(raw) : undefined;
-  if (!targetPeerId && options.requireTargetPeerId) {
-    throw new MultiaddrPeerTargetParseError(
-      'connect multiaddr must include a target /p2p/<peerId> for network admission',
-      '<missing>',
-    );
-  }
   return targetPeerId
     ? { kind: 'direct', multiaddress: structure.multiaddress, targetPeerId }
     : { kind: 'direct', multiaddress: structure.multiaddress };
