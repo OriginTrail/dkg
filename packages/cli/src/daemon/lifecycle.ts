@@ -289,14 +289,15 @@ import {
   getCurrentCliVersion,
   type NpmVersionStatus,
   checkForNpmVersionUpdate,
+  checkForNewCommitWithStatus,
   deriveUpdateCheckState,
   acquireUpdateLock,
   releaseUpdateLock,
   resolveAutoUpdateGitRef,
+  performUpdateWithStatus,
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
-import { runGitAutoUpdateCheck } from './git-auto-update-poll.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2109,7 +2110,37 @@ export async function runDaemonInner(
       );
 
       const runCheck = async () => {
-        await runGitAutoUpdateCheck(au, log, { shutdown });
+        const gitStatus = await checkForNewCommitWithStatus(au, log);
+        if (gitStatus.status === "error") {
+          log("Auto-update (git): update check failed.");
+          return;
+        }
+
+        daemonState.lastUpdateCheck.checkedAt = Date.now();
+        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
+        daemonState.lastUpdateCheck.channelTargetMissing = false;
+        daemonState.lastUpdateCheck.latestVersion = "";
+        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
+
+        if (gitStatus.status !== "available" || !gitStatus.commit) return;
+
+        daemonState.isUpdating = true;
+        const updateStatus = await performUpdateWithStatus(au, log, {
+          expectedCommit: gitStatus.commit,
+        }).finally(() => {
+          daemonState.isUpdating = false;
+        });
+
+        if (updateStatus === "updated") {
+          log("Auto-update (git): update activated; exiting for supervised restart.");
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+          return;
+        }
+        if (updateStatus === "up-to-date") {
+          log("Auto-update (git): update skipped — node caught up before apply.");
+          return;
+        }
+        log("Auto-update (git): update failed.");
       };
 
       setTimeout(runCheck, 15_000);

@@ -1195,6 +1195,7 @@ async function _performUpdateInner(
     return "failed";
   }
   const gitEnv = gitCommandEnv(au);
+  const verifyTagSignature = opts.verifyTagSignature ?? au.verifyTagSignature;
 
   const latestCommit = opts.expectedCommit?.trim()
     || await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
@@ -1257,7 +1258,7 @@ async function _performUpdateInner(
         env: gitEnv,
       },
     );
-    if (opts.verifyTagSignature && maybeTag) {
+    if (verifyTagSignature && maybeTag) {
       await execFileAsync("git", ["verify-tag", maybeTag], {
         cwd: targetDir,
         encoding: "utf-8",

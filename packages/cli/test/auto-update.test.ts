@@ -1,10 +1,7 @@
 import { createHash } from 'node:crypto';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { resolveAutoUpdateConfig, type AutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon.js';
-import { runGitAutoUpdateCheck } from '../src/daemon/git-auto-update-poll.js';
-import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
-import { daemonState } from '../src/daemon/state.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
   { platform: 'linux', arch: 'x64', assetName: 'markitdown-linux-x64', runner: 'ubuntu-latest' },
@@ -214,94 +211,6 @@ const AU: AutoUpdateConfig = {
 };
 
 describe('git auto-update ref normalization', () => {
-  beforeEach(() => {
-    daemonState.isUpdating = false;
-  });
-
-  it('preserves tag-signature verification when daemon git polling applies a resolved update', async () => {
-    const resolved = resolveAutoUpdateConfig(
-      {
-        autoUpdate: {
-          enabled: true,
-          source: 'git',
-          verifyTagSignature: true,
-        },
-      },
-      {
-        autoUpdate: {
-          enabled: true,
-          repo: 'owner/repo',
-          branch: 'main',
-          ref: 'refs/tags/v10.0.5',
-          checkIntervalMinutes: 30,
-          verifyTagSignature: false,
-          source: 'git',
-        },
-      },
-    );
-    expect(resolved).toMatchObject({
-      repo: 'owner/repo',
-      branch: 'main',
-      ref: 'refs/tags/v10.0.5',
-      verifyTagSignature: true,
-    });
-
-    const performUpdateWithStatus = vi.fn(async () => 'up-to-date' as const);
-    await runGitAutoUpdateCheck(resolved!, () => {}, {
-      now: () => 123,
-      checkForNewCommitWithStatus: vi.fn(async () => ({ status: 'available', commit: 'abc123' })),
-      performUpdateWithStatus,
-      shutdown: vi.fn(async () => undefined),
-    });
-
-    expect(performUpdateWithStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ verifyTagSignature: true }),
-      expect.any(Function),
-      {
-        expectedCommit: 'abc123',
-        verifyTagSignature: true,
-      },
-    );
-  });
-
-  it('restarts the daemon after an activated git auto-update and clears update state', async () => {
-    const resolved = resolveAutoUpdateConfig(
-      {
-        autoUpdate: {
-          enabled: true,
-          repo: 'owner/repo',
-          branch: 'main',
-          source: 'git',
-          verifyTagSignature: true,
-        },
-      },
-      undefined,
-    );
-    const shutdown = vi.fn(async () => undefined);
-    const performUpdateWithStatus = vi.fn(async () => {
-      expect(daemonState.isUpdating).toBe(true);
-      return 'updated' as const;
-    });
-
-    await runGitAutoUpdateCheck(resolved!, () => {}, {
-      now: () => 456,
-      checkForNewCommitWithStatus: vi.fn(async () => ({ status: 'available', commit: 'def456' })),
-      performUpdateWithStatus,
-      shutdown,
-    });
-
-    expect(performUpdateWithStatus).toHaveBeenCalledWith(
-      expect.objectContaining({ verifyTagSignature: true }),
-      expect.any(Function),
-      {
-        expectedCommit: 'def456',
-        verifyTagSignature: true,
-      },
-    );
-    expect(shutdown).toHaveBeenCalledWith(DAEMON_EXIT_CODE_RESTART);
-    expect(daemonState.isUpdating).toBe(false);
-  });
-
   it('inherits network-level tag-signature verification for git auto-update polling', () => {
     const resolved = resolveAutoUpdateConfig(
       {
@@ -323,6 +232,30 @@ describe('git auto-update ref normalization', () => {
     );
 
     expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('preserves a local false tag-signature override over network defaults', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: false,
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
   });
 
   it('normalizes bare branch values to full branch refs', () => {
@@ -1131,6 +1064,20 @@ describe('blue-green checkForUpdate', () => {
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
+  });
+
+  it('defaults tag-signature verification from resolved git auto-update config', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
   });
 
   it('accepts refs containing build metadata (+) for tag checks', async () => {
