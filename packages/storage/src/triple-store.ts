@@ -66,6 +66,16 @@ export interface QueryOptions {
    * dispatching or after returning from their blocking native call.
    */
   signal?: AbortSignal;
+  /**
+   * Statically-known named graphs a server-side `update()`/`query(<UPDATE>)`
+   * creates or drops. When supplied, a graph-set index maintains itself
+   * INCREMENTALLY (a bounded `hasGraph` per graph) instead of marking the whole
+   * index dirty and forcing a full `SELECT DISTINCT ?g` rebuild on the next read
+   * — the fix for #1549's perpetually-dirty index under the RS-heal / agents-meta
+   * UPDATE stream. Omit it for opaque updates whose touched graphs are not
+   * derivable at the call site (those still fall back to a lazy full rebuild).
+   */
+  touchedGraphs?: readonly string[];
 }
 
 export type TripleStoreQueryOptions = QueryOptions;

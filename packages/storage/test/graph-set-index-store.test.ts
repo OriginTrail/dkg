@@ -474,6 +474,58 @@ describe('GraphSetIndexStore', () => {
     });
   });
 
+  it('#1549: update() with declared touchedGraphs maintains the index INCREMENTALLY — no full rebuild scan', async () => {
+    const healed = 'did:dkg:context-graph:heal';
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.insert([q(healed)]); },
+    });
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000, now: () => 1_000, onMutation: (e) => events.push(e),
+    });
+    await store.insert([q('did:dkg:context-graph:seed')]);
+    await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:seed']);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // A server-side UPDATE that creates a new graph, with the touched graph DECLARED.
+    // Contrast with the "defers update()" test above (no touchedGraphs → a full
+    // rebuild scan on the next read); here the index stays warm with zero scans.
+    await store.update(
+      'INSERT DATA { GRAPH <did:dkg:context-graph:heal> { <urn:s> <urn:p> "v" } }',
+      { touchedGraphs: [healed] },
+    );
+
+    expect(counting.listGraphsCalls).toBe(1); // incremental hasGraph, NOT a full scan
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([healed, 'did:dkg:context-graph:seed']),
+    );
+    expect(counting.listGraphsCalls).toBe(1); // still warm — no rebuild triggered
+    expect(events).toContainEqual({ type: 'graph-added', graph: healed, source: 'update' });
+  });
+
+  it('#1549: a rebuild triggered by an ack-priority read runs the full scan on the BACKGROUND lane, not ack', async () => {
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.insert([q('did:dkg:context-graph:y')]); },
+    });
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000, now: () => 1_000 });
+    await store.insert([q('did:dkg:context-graph:x')]);
+    await store.listGraphs(); // seed (listGraphsCalls = 1)
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // Opaque update (NO touchedGraphs) marks the index dirty → next read rebuilds.
+    await store.update('INSERT DATA { GRAPH <did:dkg:context-graph:y> { <urn:s> <urn:p> "v" } }');
+
+    // An ACK-priority read on the dirty index forces the rebuild. The rebuild's full
+    // SELECT DISTINCT ?g scan must NOT run on the ack lane (it would consume the
+    // scarce reserved ACK slot); it is forced onto background + tagged.
+    await store.listGraphsByPrefix('did:dkg:', { priority: 'ack', source: 'test.ack.read' });
+    expect(counting.listGraphsCalls).toBe(2);
+
+    const rebuildScan = counting.listGraphsOptions.at(-1);
+    expect(rebuildScan).toMatchObject({ priority: 'background', source: 'graph-set-index.rebuild' });
+    expect(rebuildScan?.priority).not.toBe('ack');
+  });
+
   it('removes stale graph names after a deferred SPARQL query removal', async () => {
     const graph = 'did:dkg:context-graph:old-query';
     const counting = new MutationHookStore(new OxigraphStore(), {

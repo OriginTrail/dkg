@@ -2731,7 +2731,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
       const storeUpdate = this.store.update;
       if (typeof storeUpdate !== 'function') return;
-      const update = (sparql: string): Promise<void> => storeUpdate.call(this.store, sparql);
+      // #1549: declare the graph(s) each server-side INSERT touches so the
+      // graph-set index maintains itself incrementally (a bounded `hasGraph`)
+      // instead of marking the whole index dirty and forcing a full store scan on
+      // the next enumeration. RS-heal is one of only two recurring server-side
+      // UPDATE sources that dirtied the index, and its target graphs are known here.
+      const update = (sparql: string, touchedGraphs?: string[]): Promise<void> =>
+        storeUpdate.call(this.store, sparql, {
+          source: 'agent.swm.rsHeal.materialize',
+          ...(touchedGraphs ? { touchedGraphs } : {}),
+        });
 
       const DKG = 'http://dkg.io/ontology/';
       const legacyMeta = contextGraphMetaUri(localCgId);
@@ -2873,6 +2882,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                      }
                    }
                  }`,
+                [scopedData],
               );
             }
 
@@ -2886,6 +2896,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
                    FILTER(?s = <${ual}> || STRSTARTS(STR(?s), "${ual}/"))
                  }
                }`,
+              [scopedMeta],
             );
 
             // Stamp so a later stale writer can't clobber.

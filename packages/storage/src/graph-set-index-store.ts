@@ -11,7 +11,8 @@ export type GraphSetMutationSource =
   | 'deleteByPattern'
   | 'deleteBySubjectPrefix'
   | 'dropGraph'
-  | 'query';
+  | 'query'
+  | 'update';
 
 type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
 type PendingFullRefreshSource = 'deleteByPattern' | 'query' | 'update';
@@ -130,11 +131,19 @@ export class GraphSetIndexStore implements TripleStore {
     }
     const result = await this.inner.query(sparql, options);
     if (isSparqlUpdate(sparql)) {
-      // A SPARQL UPDATE may create/drop named graphs we can't derive
-      // incrementally. Mark dirty for a single lazy rebuild on the next read
-      // instead of re-scanning the whole store now — the eager per-UPDATE scan
-      // thrashed large stores under the RS-heal/sync UPDATE stream.
-      this.scheduleFullRefresh('query');
+      // A SPARQL UPDATE may create/drop named graphs. When the caller declares
+      // the touched graphs, maintain the index incrementally (bounded per-graph
+      // `hasGraph`) instead of forcing a full rebuild on the next read (#1549 —
+      // keeps the index warm under the UPDATE stream). Opaque updates (no
+      // `touchedGraphs`) fall back to the lazy full rebuild.
+      if (options?.touchedGraphs && options.touchedGraphs.length > 0) {
+        this.bumpMutation();
+        await this.maintainIndex(() =>
+          this.refreshTouchedGraphs([...options.touchedGraphs!], 'query', options),
+        );
+      } else {
+        this.scheduleFullRefresh('query');
+      }
     }
     return result;
   }
@@ -148,10 +157,22 @@ export class GraphSetIndexStore implements TripleStore {
       return;
     }
     await this.inner.update(sparql, options);
-    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create
-    // or drop named graphs the index must learn about. Rather than re-scan the
-    // whole store on every UPDATE (the thrash), mark dirty: the next read does a
-    // single rebuild and the freshly-created/dropped graph is reflected then.
+    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
+    // drop named graphs the index must learn about. When the caller declares the
+    // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
+    // URIs), maintain the index INCREMENTALLY — a bounded per-graph `hasGraph`
+    // (which correctly handles an ASK-guarded INSERT that matched zero rows) —
+    // instead of marking the whole index dirty. That keeps the index warm so
+    // graph enumeration stays O(1) rather than forcing a full store scan on the
+    // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
+    // full rebuild.
+    if (this.enabled && options?.touchedGraphs && options.touchedGraphs.length > 0) {
+      this.bumpMutation();
+      await this.maintainIndex(() =>
+        this.refreshTouchedGraphs([...options.touchedGraphs!], 'update', options),
+      );
+      return;
+    }
     this.scheduleFullRefresh('update');
   }
 
@@ -259,7 +280,17 @@ export class GraphSetIndexStore implements TripleStore {
     for (;;) {
       const sourceForScan = this.pendingFullRefresh ?? source;
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs(options)).filter(Boolean));
+      // #1549: the rebuild is a bulk full-store `SELECT DISTINCT ?g` scan. Force it
+      // onto the BACKGROUND lane and tag it, so a rebuild triggered by an
+      // `ack`-priority read (whose `options` would otherwise flow straight through)
+      // never consumes the scarce reserved ACK slot. The triggering read still
+      // awaits this rebuild (forced-fresh — never a stale/empty serve), it just no
+      // longer runs the scan on the ACK lane. Cancellation (`signal`) is preserved.
+      const next = new Set((await this.inner.listGraphs({
+        ...options,
+        priority: 'background',
+        source: 'graph-set-index.rebuild',
+      })).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
