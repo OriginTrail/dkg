@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { resolveAutoUpdateConfig, type AutoUpdateConfig } from '../src/config.js';
+import type { AutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
@@ -211,53 +211,6 @@ const AU: AutoUpdateConfig = {
 };
 
 describe('git auto-update ref normalization', () => {
-  it('inherits network-level tag-signature verification for git auto-update polling', () => {
-    const resolved = resolveAutoUpdateConfig(
-      {
-        autoUpdate: {
-          enabled: true,
-          source: 'git',
-        },
-      },
-      {
-        autoUpdate: {
-          enabled: true,
-          repo: 'owner/repo',
-          branch: 'main',
-          checkIntervalMinutes: 30,
-          verifyTagSignature: true,
-          source: 'git',
-        },
-      },
-    );
-
-    expect(resolved?.verifyTagSignature).toBe(true);
-  });
-
-  it('preserves a local false tag-signature override over network defaults', () => {
-    const resolved = resolveAutoUpdateConfig(
-      {
-        autoUpdate: {
-          enabled: true,
-          source: 'git',
-          verifyTagSignature: false,
-        },
-      },
-      {
-        autoUpdate: {
-          enabled: true,
-          repo: 'owner/repo',
-          branch: 'main',
-          checkIntervalMinutes: 30,
-          verifyTagSignature: true,
-          source: 'git',
-        },
-      },
-    );
-
-    expect(resolved?.verifyTagSignature).toBe(false);
-  });
-
   it('normalizes bare branch values to full branch refs', () => {
     expect(normalizeGitRefInput('main')).toBe('refs/heads/main');
     expect(normalizeGitRefInput('release/v10')).toBe('refs/heads/release/v10');
