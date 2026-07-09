@@ -105,6 +105,18 @@ export interface ReadOpts {
    * read/write paths rely on — hence transparent, not merely canonical-ordered.
    */
   skipPreferred?: boolean;
+  /**
+   * Marks a read whose result may be a benign "not on this endpoint (yet)" EMPTY
+   * value (e.g. `eth_getTransactionReceipt` / `getBlock` returning `null`) rather
+   * than a definitive answer. When set, an empty result is NOT a transport
+   * failure: the loop tries the next endpoint WITHOUT de-preferring it or emitting
+   * failover/exhaustion telemetry, and if EVERY endpoint returns empty (and none
+   * errored) the empty value itself is returned. A real transport error still
+   * fails over / exhausts / propagates as usual. This keeps nullable reads
+   * (receipt/tx/block lookups) failing over on a lagging endpoint without a thrown
+   * sentinel polluting stickiness or telemetry.
+   */
+  isEmptyResult?: (value: unknown) => boolean;
 }
 
 /**
@@ -273,6 +285,7 @@ export class RpcFailoverClient {
       opts?.isRetryable ?? isRetryableRpcError,
       opts?.policy ?? 'pointRead',
       opts?.skipPreferred ?? false,
+      opts?.isEmptyResult,
     );
     return opts?.rpcUsageConsumer ? withRpcUsageConsumer(opts.rpcUsageConsumer, run) : run();
   }
@@ -309,6 +322,7 @@ export class RpcFailoverClient {
             opts?.isRetryable ?? isContractViewRetryable,
             opts?.policy ?? 'pointRead',
             opts?.skipPreferred ?? false,
+            opts?.isEmptyResult,
           );
           this.recordRpcOutcome('eth_call', 'ok');
           return out;
@@ -622,6 +636,7 @@ export class RpcFailoverClient {
     isRetryable: (err: unknown) => boolean,
     policy: ReadPolicy,
     skipPreferred: boolean,
+    isEmptyResult?: (value: unknown) => boolean,
   ): Promise<T> {
     // `canonical` = the configured order (index 0 = primary), used for the cap,
     // the exhaustion aggregate, and the "which is the primary" check. `endpoints`
@@ -635,6 +650,8 @@ export class RpcFailoverClient {
     const endpoints = this.stickiness.order(canonical, intent);
     const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
+    let sawEmpty = false;
+    let lastEmpty: T | undefined;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
       const isLast = i === endpoints.length - 1;
@@ -650,6 +667,16 @@ export class RpcFailoverClient {
         const out = await (capMs == null
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
+        if (isEmptyResult?.(out)) {
+          // A BENIGN "no result on this endpoint (yet)" — a nullable read whose
+          // endpoint hasn't imported the tx/block. This is NOT a transport failure:
+          // it must NOT de-prefer the endpoint (recordFailure) or emit failover
+          // telemetry. Try the next endpoint; if EVERY endpoint is empty (and none
+          // errored) the empty value itself is the honest answer.
+          sawEmpty = true;
+          lastEmpty = out;
+          continue;
+        }
         this.stickiness.recordSuccess(endpoint, canonical, intent, i === 0);
         return out;
       } catch (err) {
@@ -661,24 +688,41 @@ export class RpcFailoverClient {
         }
       }
     }
-    if (lastRetryable) noteRpcExhaustion(label, canonical.map((e) => e.rpcUrl));
-    // Single provider → carry the typed code but keep the original message
-    // byte-identical (there is no second endpoint, so the raw message reads
-    // cleaner and any message-inspecting caller keeps seeing it). Multiple
-    // providers → the host-only "all endpoints" aggregate (never full URLs —
-    // a configured rpcUrl may carry an API key and this message can reach HTTP
-    // clients via response paths that echo err.message). Mirrors the write
-    // preparation loop's single-vs-multi message handling. Built from CANONICAL
-    // order so the error's `rpcUrls` stays a stable configured-order contract
-    // regardless of the per-op reorder.
-    const message = canonical.length <= 1
-      ? errorMessage(lastRetryable)
-      : `${label} read failed on all configured RPC endpoints ` +
-        `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
-      cause: lastRetryable,
-      rpcUrls: canonical.map((e) => e.rpcUrl),
-    });
+    // A REAL transport error on ANY endpoint → exhaustion (telemetry + typed
+    // throw). Order-independent: a mix of empty + transport error still throws
+    // (a transport failure occurred, so "every endpoint lacks it" can't be
+    // concluded and the empty value must NOT be returned as definitive).
+    if (lastRetryable) {
+      noteRpcExhaustion(label, canonical.map((e) => e.rpcUrl));
+      // Single provider → carry the typed code but keep the original message
+      // byte-identical (there is no second endpoint, so the raw message reads
+      // cleaner and any message-inspecting caller keeps seeing it). Multiple
+      // providers → the host-only "all endpoints" aggregate (never full URLs —
+      // a configured rpcUrl may carry an API key and this message can reach HTTP
+      // clients via response paths that echo err.message). Mirrors the write
+      // preparation loop's single-vs-multi message handling. Built from CANONICAL
+      // order so the error's `rpcUrls` stays a stable configured-order contract
+      // regardless of the per-op reorder.
+      const message = canonical.length <= 1
+        ? errorMessage(lastRetryable)
+        : `${label} read failed on all configured RPC endpoints ` +
+          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+      throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+        cause: lastRetryable,
+        rpcUrls: canonical.map((e) => e.rpcUrl),
+      });
+    }
+    // Every endpoint returned an empty result and none errored → the empty value
+    // is the honest "not found anywhere (yet)" answer (only reachable when an
+    // `isEmptyResult` predicate was supplied).
+    if (sawEmpty) return lastEmpty as T;
+    // Unreachable when >=1 endpoint is configured (each iteration returns,
+    // continues on empty, or throws / sets lastRetryable). Guard the 0-endpoint case.
+    throw new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      `${label} read failed: no configured RPC endpoints`,
+      { rpcUrls: [] },
+    );
   }
 
   /**

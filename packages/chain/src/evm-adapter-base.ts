@@ -110,21 +110,6 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
-/**
- * Sentinel for a nullable read (`getBlock(n)`, `eth_getTransactionReceipt`, …)
- * whose queried endpoint returned `null` — meaning "this endpoint doesn't have
- * the object (yet)", NOT a definitive answer. Thrown inside the read lambda so
- * `readProviderRetryingNull` treats it as a retryable condition and tries another
- * endpoint (a lagging endpoint must not force a fallback when a healthy backup
- * already has the object).
- */
-class NullReadSentinelError extends Error {
-  constructor(label: string) {
-    super(`${label}: object not present on this endpoint`);
-    this.name = 'NullReadSentinelError';
-  }
-}
-
 type IdentityIdCacheEntry = {
   identityId: bigint;
   ttlMs: number;
@@ -1256,57 +1241,23 @@ export class EVMChainAdapterBase {
 
   /**
    * Raw PROVIDER read whose `null` is a "not on this endpoint (yet)" signal, not a
-   * definitive answer — so a `null` FAILS OVER to the other endpoints (a lagging
-   * endpoint must not hide an object a healthy one has) and never records a sticky
-   * success. Returns the first NON-null result, or `null` ONLY when the failover
-   * loop exhausted with EVERY retryable failure being the null sentinel (no
-   * endpoint had a transport problem that could be masking the object).
-   *
-   * The all-null decision is ORDER-INDEPENDENT: it is made from whether ANY real
-   * transport failure occurred across all attempts (`sawTransportFailure`), NOT
-   * from `ChainRpcTransportError.cause` (which is only the LAST failure and would
-   * flip the result based on sticky/canonical attempt order). A non-retryable
-   * provider error (e.g. `INVALID_ARGUMENT`) or a genuine transport exhaustion
-   * PROPAGATES — it is never masked as a `null`.
+   * definitive answer. A `null` FAILS OVER to the other endpoints (a lagging
+   * endpoint must not hide an object a healthy one has) WITHOUT de-preferring that
+   * endpoint or emitting failover/exhaustion telemetry — because an empty result is
+   * not a transport failure. Returns the first NON-null result, or `null` only when
+   * EVERY endpoint returned `null` and none had a real transport error. A
+   * non-retryable provider error (e.g. `INVALID_ARGUMENT`) or a genuine transport
+   * exhaustion PROPAGATES — never masked as `null`. The empty-vs-error distinction
+   * (and thus the order-independent all-null decision) is handled by the transport
+   * loop via `ReadOpts.isEmptyResult`, so no sentinel exception is tunnelled
+   * through the generic failover/telemetry path.
    */
-  protected async readProviderRetryingNull<T>(
+  protected readProviderRetryingNull<T>(
     label: string,
     fn: (provider: JsonRpcProvider) => Promise<T>,
     opts?: ReadOpts,
   ): Promise<T | null> {
-    const baseIsRetryable = opts?.isRetryable ?? isRetryableRpcError;
-    let sawTransportFailure = false;
-    try {
-      return await this.readProvider<T>(
-        label,
-        async (provider) => {
-          try {
-            const result = await fn(provider);
-            if (result == null) throw new NullReadSentinelError(label);
-            return result;
-          } catch (err) {
-            // A REAL (non-sentinel) retryable failure means this endpoint's null
-            // absence — if any — can't be trusted as "object not here". Record it
-            // so the all-null fallback is only taken when NO transport failure
-            // occurred, independent of attempt order.
-            if (!(err instanceof NullReadSentinelError) && baseIsRetryable(err)) {
-              sawTransportFailure = true;
-            }
-            throw err;
-          }
-        },
-        { ...opts, isRetryable: (err) => err instanceof NullReadSentinelError || baseIsRetryable(err) },
-      );
-    } catch (err) {
-      if (
-        err instanceof ChainRpcTransportError
-        && err.code === 'RPC_ENDPOINTS_EXHAUSTED'
-        && !sawTransportFailure
-      ) {
-        return null; // every endpoint returned the null sentinel → honest "not found"
-      }
-      throw err;
-    }
+    return this.readProvider<T | null>(label, fn, { ...opts, isEmptyResult: (v) => v == null });
   }
 
   /**

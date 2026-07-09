@@ -783,6 +783,44 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(order[0]).toBe('primary');
   });
 
+  it('AC-27: a benign EMPTY result (isEmptyResult) fails over but does NOT de-prefer the endpoint or inflate telemetry (round-9/10 🔴)', async () => {
+    const primary = { read: readSeq((n) => (n === 1 ? retryable429() : 'PRIMARY')) };
+    // backup: ok on op1 (establish), a benign null on op2, ok on op3.
+    const backup = { read: readSeq((n) => (n === 2 ? null : 'BACKUP')) };
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred=backup
+    const before = getRpcFailoverStats();
+
+    // op2: the preferred backup returns a BENIGN null → fails over to the primary,
+    // but a null is NOT a failure: the backup is NOT de-preferred, and no
+    // failover/exhaustion telemetry is emitted.
+    expect(await client.read('r', (p: any) => p.read(), { isEmptyResult: (v) => v == null })).toBe('PRIMARY');
+    const after = getRpcFailoverStats();
+    expect(after.failovers).toBe(before.failovers);       // a benign empty is NOT a failover
+    expect(after.exhaustions).toBe(before.exhaustions);   // ...nor an exhaustion
+
+    // op3: the preference SURVIVED the benign null → backup tried FIRST again.
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP');
+    expect(primary.read.calls).toHaveLength(2); // op1 (429) + op2 (fallback). NOT op3 — backup was NOT de-preferred.
+    expect(backup.read.calls).toHaveLength(3);  // op1 + op2 (null) + op3
+  });
+
+  it('AC-28: an already-known broadcast (idempotent success) ESTABLISHES the preference like a normal broadcast (round-9/10 🟡)', async () => {
+    const knownTxError = () => new Error('already known');
+    const primary = { broadcastTransaction: recorder(async () => { throw retryable429(); }), read: recorder(async () => 'PRIMARY') };
+    const backup = { broadcastTransaction: recorder(async () => { throw knownTxError(); }), read: recorder(async () => 'BACKUP') };
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    // primary 429 → backup returns "already known" (idempotent success) → the backup
+    // is where the tx is known → it establishes the preference, same as a real send.
+    await client.broadcast('0xsigned', '0xhash', 'w');
+    expect(getRpcFailoverStats().preferredEstablishments).toBe(1);
+
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // prefers the established backend
+    expect(primary.read.calls).toHaveLength(0);
+  });
+
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };

@@ -96,9 +96,10 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
     expect(exactBlockCall).toBeDefined();
 
-    // eth_call with NO block tag (defaults to latest) OR a latest-family tag → TIP
+    // eth_call with NO block tag (defaults to latest) OR ANY latest-family tag → TIP
     // (reads current contract state a lagging backend would stale) → skipPreferred.
-    for (const callParams of [[{ to: '0xC', data: '0x' }], [{ to: '0xC', data: '0x' }, 'latest']]) {
+    const callObj = { to: '0xC', data: '0x' };
+    for (const callParams of [[callObj], [callObj, 'latest'], [callObj, 'pending'], [callObj, 'safe'], [callObj, 'finalized']]) {
       readProvider.calls.length = 0;
       await a.requestPublishingConvictionRpc('eth_call', callParams);
       expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_call')![2])
