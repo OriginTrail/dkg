@@ -239,4 +239,17 @@ describe('orderACKCandidatePeerIds', () => {
       knownCorePeerIds: new Set(),
     })).toEqual(['edge-1', 'edge-2']);
   });
+
+  it('filters daemon async ACK candidates to active-network admitted peers when provided', () => {
+    const base = ['base-core-1', 'base-core-2'];
+    const testnet = ['testnet-core-1', 'testnet-core-2'];
+
+    expect(orderACKCandidatePeerIds({
+      connectedPeerIds: ['self', testnet[0], base[0], testnet[1], base[1]],
+      selfPeerId: 'self',
+      knownCorePeerIds: new Set([...base, ...testnet]),
+      preferredACKPeerIds: [testnet[0], base[0]],
+      verifiedSameNetworkPeerIds: new Set(base),
+    })).toEqual(base);
+  });
 });

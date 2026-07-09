@@ -6,6 +6,13 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+function allowAllNetworkAdmission(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
+}
+
 // #1236 🔵: clean (all-zero, no-backoff, made-no-progress) detailed
 // sync summaries shaped to match the production `DurableSyncResult` /
 // `SharedMemorySyncResult` returns of `syncFromPeerDetailed` /
@@ -94,6 +101,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
@@ -181,6 +189,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
@@ -316,6 +325,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const deniedPeer = { toString: () => 'peer-denied' };
@@ -391,6 +401,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const deniedPeer = { toString: () => 'peer-denied-empty' };
@@ -444,6 +455,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = { toString: () => 'peer-meta-only' };
@@ -516,6 +528,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = { toString: () => 'peer-meta-only-clean' };
@@ -589,6 +602,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         const remotePeer = agent.node.peerId.toString();
         const seenCalls: string[][] = [];
 
@@ -655,6 +669,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const remotePeer = agent.node.peerId;
@@ -686,6 +701,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
         (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
 
@@ -738,6 +754,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
         (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
         (agent as any).knownCorePeerIds.add('peer-core');
@@ -807,6 +824,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const peerNoProtocol = { toString: () => 'peer-no-protocol' };
@@ -926,6 +944,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         const peerEdgeA = { toString: () => 'peer-edge-a' };
@@ -998,6 +1017,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         (agent as any).subscribedContextGraphs.set('runtime-contextGraph', {
           name: 'Runtime ContextGraph',
           subscribed: true,
@@ -1053,6 +1073,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         (agent as any).subscribedContextGraphs.set('runtime-contextGraph', {
           name: 'Runtime ContextGraph',
           subscribed: true,
@@ -1108,6 +1129,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
 
         const remotePeer = agent.node.peerId;
         let releaseSync: (() => void) | undefined;
@@ -1191,6 +1213,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         (agent as any).subscribedContextGraphs.set('private-cg', {
           name: 'private-cg',
           subscribed: false,
@@ -1234,6 +1257,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         (agent as any).subscribedContextGraphs.set('private-cg', {
           name: 'private-cg',
           subscribed: false,
@@ -1280,6 +1304,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       });
       try {
         await agent.start();
+        allowAllNetworkAdmission(agent);
         await chain.ensureProfile();
         (agent as any).subscribedContextGraphs.set('private-cg', {
           name: 'private-cg',

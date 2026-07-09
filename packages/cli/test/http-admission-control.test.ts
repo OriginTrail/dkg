@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
-import { InFlightLimiter, admitRequest, resolveIntSetting, applyServerLimits } from '../src/daemon/http-utils.js';
+import {
+  InFlightLimiter,
+  admitRequest,
+  resolveIntSetting,
+  applyServerLimits,
+  classifyClientError,
+} from '../src/daemon/http-utils.js';
 
 /**
  * Minimal ServerResponse stand-in capturing writeHead/end and supporting the
@@ -78,6 +84,17 @@ describe('InFlightLimiter — concurrency admission control', () => {
     limiter.release();
     expect(limiter.tryAcquire()).toBe(true); // admitted again — still 2
     expect(limiter.rejectedTotal).toBe(2);
+  });
+});
+
+describe('classifyClientError', () => {
+  it('maps active-network admission failures to bounded HTTP statuses', () => {
+    expect(classifyClientError(
+      'peer abcdefgh is not admitted for outbound protocol /dkg/10.0.1/query',
+    )).toMatchObject({ status: 403 });
+    expect(classifyClientError(
+      'Network identity probe failed for abcdefgh: Protocol selection failed - could not negotiate /dkg/10.0.1/network-identity',
+    )).toMatchObject({ status: 504 });
   });
 });
 

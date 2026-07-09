@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
+import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 type AgentInternals = {
   node: {
@@ -19,6 +20,12 @@ type AgentInternals = {
   config: { ackCandidatePeerIds?: string[]; preferredACKPeerIds?: string[] };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
+  networkAdmission: NetworkAdmissionService;
+  networkAdmissionCoordinator: {
+    enabled: boolean;
+    isAcceptedPeer(peerId: string): boolean;
+    verifiedSameNetworkPeerIds(): ReadonlySet<string>;
+  };
   lastKnownRequiredACKs?: number;
   getACKCandidatePeers: (protocol?: string) => string[];
   handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
@@ -51,6 +58,17 @@ async function buildAgent(opts: {
   for (const id of opts.confirmedCores) internals.knownCorePeerIds.add(id);
   internals.lastKnownRequiredACKs = opts.lastKnownRequiredACKs;
   return internals;
+}
+
+function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService): void {
+  agent.networkAdmission = admission;
+  agent.networkAdmissionCoordinator = {
+    get enabled() {
+      return admission.enabled;
+    },
+    isAcceptedPeer: (peerId) => admission.isAcceptedPeer(peerId),
+    verifiedSameNetworkPeerIds: () => admission.verifiedSameNetworkPeerIds(),
+  };
 }
 
 describe('getACKCandidatePeers — confirmed peers first with stale-metadata fallback (#1093 / #1482)', () => {
@@ -139,7 +157,27 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
     expect(out.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('V2 folded-private rounds prefer protocol-capable peers, listed peers first within the V2 tier', async () => {
+  it('filters ACK candidates to active-network admitted peers when admission is enabled', async () => {
+    const foreign = ['foreign-core-1', 'foreign-core-2'];
+    const sameNetwork = ['same-network-core', 'trusted-relay'];
+    const a = await buildAgent({
+      confirmedCores: [...foreign, ...sameNetwork],
+      connected: [...foreign, ...sameNetwork],
+      preferredACKPeerIds: ['trusted-relay', foreign[0]],
+    });
+    const admission = new NetworkAdmissionService({
+      networkId: 'active-network',
+    });
+    installAdmission(a, admission);
+    admission.markVerifiedSameNetwork('same-network-core');
+
+    expect(a.getACKCandidatePeers()).toEqual(['same-network-core']);
+
+    admission.markVerifiedSameNetwork('trusted-relay');
+    expect(a.getACKCandidatePeers()).toEqual(['trusted-relay', 'same-network-core']);
+  });
+
+  it('V2 folded-private rounds keep unlisted V2-advertising cores dialable, listed peers first within each tier', async () => {
     const relays = ['relay-1', 'relay-2'];
     const upgraded = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
     const a = await buildAgent({

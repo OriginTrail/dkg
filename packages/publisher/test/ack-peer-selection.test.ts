@@ -22,6 +22,41 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     expect(out).toEqual(['trusted-core']);
   });
 
+  it('excludes peers that are not verified for the active network even when preferred or core', () => {
+    const foreign = ['foreign-core-1', 'foreign-core-2'];
+    const sameNetwork = ['same-network-core', RELAYS[0]];
+    const out = selectACKCandidatePeers({
+      connectedPeers: [...foreign, ...sameNetwork],
+      preferredACKPeerIds: [...foreign, RELAYS[0]],
+      verifiedSameNetworkPeerIds: new Set(sameNetwork),
+      knownCorePeerIds: new Set([...foreign, ...sameNetwork]),
+      requiredACKs: 3,
+    });
+    expect(out).toEqual([RELAYS[0], 'same-network-core']);
+  });
+
+  it('keeps same-network non-relay cores eligible while filtering foreign relays', () => {
+    const out = selectACKCandidatePeers({
+      connectedPeers: ['foreign-relay', STAKED[0], STAKED[1]],
+      preferredACKPeerIds: ['foreign-relay'],
+      verifiedSameNetworkPeerIds: new Set([STAKED[0], STAKED[1]]),
+      knownCorePeerIds: new Set(['foreign-relay', STAKED[0], STAKED[1]]),
+      requiredACKs: 3,
+    });
+    expect(out).toEqual([STAKED[0], STAKED[1]]);
+  });
+
+  it('composes the legacy ACK allowlist with active-network eligibility', () => {
+    const out = selectACKCandidatePeers({
+      connectedPeers: ['same-network-core', 'foreign-core'],
+      ackCandidatePeerIds: ['same-network-core', 'foreign-core'],
+      verifiedSameNetworkPeerIds: new Set(['same-network-core']),
+      knownCorePeerIds: new Set(['same-network-core', 'foreign-core']),
+      requiredACKs: 3,
+    });
+    expect(out).toEqual(['same-network-core']);
+  });
+
   it('keeps unlisted staked cores in the pool when listed relays cannot reach quorum (incident shape)', () => {
     // Base mainnet 2026-07-07: 4-relay preference list, only 2 connected
     // and healthy; 3 upgraded non-relay cores connected. Old behavior

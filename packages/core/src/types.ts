@@ -14,6 +14,17 @@ export interface EventBus {
   off(event: string, handler: (data: unknown) => void): void;
 }
 
+export interface DkgNetworkIdentity {
+  /** Canonical genesis identifier from the selected network config. */
+  genesisId?: string;
+  /** Canonical hash/identifier for the active DKG network. */
+  networkId: string;
+  /** Effective chain id after network config and operator overrides resolve. */
+  chainId?: string;
+  /** Selected network config name, when known by the caller. */
+  networkConfigName?: string;
+}
+
 export interface DKGNodeConfig {
   /** Multiaddr strings to listen on. Defaults to TCP + WS on random ports. */
   listenAddresses?: string[];
@@ -31,6 +42,8 @@ export interface DKGNodeConfig {
   dataDir?: string;
   /** Multiaddrs of relay nodes to connect to for NAT traversal. */
   relayPeers?: string[];
+  /** Active network identity used to isolate DHT, GossipSub, and relay wire paths. */
+  networkIdentity?: DkgNetworkIdentity;
   /** Enable circuit relay server on this node (for nodes with public IPs). */
   enableRelayServer?: boolean;
   /**

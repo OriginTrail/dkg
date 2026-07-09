@@ -647,12 +647,14 @@ export function orderACKCandidatePeerIds(input: {
   selfPeerId: string;
   knownCorePeerIds?: ReadonlySet<string>;
   preferredACKPeerIds?: readonly string[];
+  verifiedSameNetworkPeerIds?: ReadonlySet<string>;
 }): string[] {
   return selectACKCandidatePeers({
     connectedPeers: input.connectedPeerIds,
     selfPeerId: input.selfPeerId,
     knownCorePeerIds: input.knownCorePeerIds,
     preferredACKPeerIds: input.preferredACKPeerIds,
+    verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
   });
 }
@@ -1528,6 +1530,12 @@ export async function runDaemonInner(
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,
+    networkIdentity: {
+      genesisId: network?.genesisId,
+      networkId,
+      chainId: chainBase?.chainId,
+      networkConfigName: resolveNetworkConfigName(config),
+    },
     framework: "DKG",
     listenPort: config.listenPort,
     dataDir: dkgDir(),

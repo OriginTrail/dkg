@@ -111,6 +111,7 @@ export {
 export {
   ProtocolRouter,
   QuietRetryableHandlerError,
+  type AdmissionCheckOptions,
   type ProtocolRouterOptions,
   type SendOptions,
   DEFAULT_MAX_READ_BYTES,
@@ -142,6 +143,7 @@ export {
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
 export {
+  DEFAULT_GENESIS_ID,
   getGenesisQuads,
   computeNetworkId,
   getGenesisRaw,

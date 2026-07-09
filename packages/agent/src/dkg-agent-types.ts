@@ -24,6 +24,7 @@ import type {
 import type {
   OperationContext,
   AuthorAttestationTypedData,
+  DkgNetworkIdentity,
   MessageIdempotencyStore,
   ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
@@ -864,6 +865,8 @@ export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
+  /** Active network identity used to isolate libp2p and app workflow boundaries. */
+  networkIdentity?: DkgNetworkIdentity;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,

@@ -148,6 +148,8 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { NetworkAdmissionService } from './p2p/network-admission.js';
+import { NetworkAdmissionCoordinator } from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -533,6 +535,8 @@ export class DKGAgentBase {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   messenger!: Messenger;
+  networkAdmission: NetworkAdmissionService = new NetworkAdmissionService();
+  networkAdmissionCoordinator!: NetworkAdmissionCoordinator;
   /** Single in-process peer-address resolver (RFC 07 §3). Used by Messenger
    * today; ProtocolRouter / /api/connect migrate in PR-3 / PR-4. */
   peerResolver!: PeerResolver;
@@ -1433,6 +1437,16 @@ export class DKGAgentBase {
     this.kaNumberAllocator = config.kaNumberAllocator;
     this.discovery = new DiscoveryClient(queryEngine);
     this.profileManager = new ProfileManager(publisher, store);
+    this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
+      admission: this.networkAdmission,
+      selfPeerId: '',
+      sign: (payload) => wallet.sign(payload),
+      sendIdentityProbe: async () => {
+        throw new Error('network admission coordinator is not started');
+      },
+      getConnections: () => [],
+      deletePeerFromPeerStore: async () => {},
+    });
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
