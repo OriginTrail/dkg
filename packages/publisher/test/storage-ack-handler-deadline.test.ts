@@ -34,8 +34,9 @@ import { ethers } from 'ethers';
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const contextGraphId = '42';
+const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
-function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
+function makeQuad(s: string, p: string, o: string, g = swmGraph): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 

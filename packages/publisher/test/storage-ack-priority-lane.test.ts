@@ -20,11 +20,12 @@ import { encodePublishIntent } from '@origintrail-official/dkg-core';
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const contextGraphId = '42';
+const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 const coreWallet = ethers.Wallet.createRandom();
 const fakePeerId = { toString: () => 'publisher-peer' } as any;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
+function makeQuad(s: string, p: string, o: string, g = swmGraph): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
@@ -113,7 +114,8 @@ class PriorityLaneStore implements TripleStore {
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
     return this.scheduler.run(options?.priority, options?.source ?? 'test.listGraphs', async () => {
-      this.events.push('background:listGraphs:start');
+      this.events.push(`${options?.priority ?? 'normal'}:listGraphs:start`);
+      if (options?.priority === 'ack') return [];
       await this.backgroundGate;
       this.events.push('background:listGraphs:end');
       return [];
@@ -228,6 +230,7 @@ describe('StorageACKHandler priority store lane', () => {
     expect(store.ackQueries).toBe(1);
     expect(events).toEqual([
       'background:listGraphs:start',
+      'ack:listGraphs:start',
       'ack:query:start',
     ]);
 
@@ -246,7 +249,7 @@ describe('StorageACKHandler priority store lane', () => {
     const decoded = decodeStorageACK(response);
 
     expect(store.ackQueries).toBe(1);
-    expect(events).toEqual(['ack:query:start']);
+    expect(events).toEqual(['ack:listGraphs:start', 'ack:query:start']);
     expect(isStorageACKDecline(decoded)).toBe(true);
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
     expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
