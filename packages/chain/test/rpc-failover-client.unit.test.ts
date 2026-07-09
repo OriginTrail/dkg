@@ -744,4 +744,43 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(warns.some((w) => w.includes('stickiness') && w.includes('backup.example'))).toBe(true);
     expect(warns.every((w) => !w.includes('https://'))).toBe(true); // host-only — never a full URL
   });
+
+  // --- nonce-staleness guard: a read-established preference must not steer a
+  // nonce-critical populate to a possibly-lagging backend (otReviewAgent 🔴).
+  const SIGNER_ADDR = '0x' + 'ab'.repeat(20);
+  const makeSigner = () => ({ address: SIGNER_ADDR, connect: (p: unknown) => ({ address: SIGNER_ADDR, boundTo: p }) }) as any;
+
+  it('AC-13: a READ-established preference does NOT steer a write populate (populate stays canonical/primary-first)', async () => {
+    const p0 = { read: readSeq(() => retryable429()) };  // primary read 429s → establishes backup as READ preferred
+    const p1 = { read: readSeq(() => 'BACKUP') };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    // Both endpoints can populate; record which the signer was bound to.
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { populateOrder.push(s.boundTo === p0 ? 'primary' : 'backup'); return Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    expect(await client.read('r', (pr: any) => pr.read())).toBe('BACKUP'); // READ establishes preferred=backup (NOT populate-proven)
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    // The nonce-critical populate STARTED on the canonical primary (the authoritative
+    // nonce source), NOT the read-preferred backup — so a lagging read-preferred
+    // backend can never sign a stale nonce.
+    expect(populateOrder).toEqual(['primary']);
+  });
+
+  it('AC-14: once a populate PROVES a backend (primary down for writes), subsequent writes stick to it (#1340, no per-write primary re-probe)', async () => {
+    const p0 = {}; const p1 = {};
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    // primary populate always 429s (down for writes); backup populates ok.
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const which = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(which); return which === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write #1: canonical → primary 429 → backup → populate-proven
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write #2: populate-proven backend tried FIRST
+    expect(populateOrder).toEqual(['backup']); // primary NOT re-probed — write stickiness preserved for #1340
+  });
 });

@@ -77,11 +77,14 @@ export function rpcHost(url: string): string {
 interface MutableStats {
   failovers: number;
   exhaustions: number;
-  // Count of times endpoint-stickiness ESTABLISHED a preferred (last-good)
-  // backend after a failover — i.e. how often the client stuck to a backup
-  // because the primary was degraded. A rising counter is the operator's signal
-  // that a configured primary is unhealthy. Cleared on a primary re-probe
-  // success (not tracked here — the establish edge is the load-bearing signal).
+  // CUMULATIVE, monotonically-increasing count of establishment edges — each
+  // time endpoint-stickiness newly ESTABLISHED a preferred (last-good) backend
+  // after a failover (the primary was degraded). It is NOT decremented when the
+  // primary recovers and the preference is cleared; only the process-wide test
+  // reset (`_resetRpcFailoverStatsForTest`) zeroes it. A rising rate is the
+  // operator's signal that a configured primary is flapping. It is NOT a gauge of
+  // the current active preference (that state lives on the client instance) — for
+  // "is a preference active right now" a separate gauge would be needed.
   preferredEstablishments: number;
   byErrorClass: Map<RpcFailoverErrorClass, number>;
   byEndpointHost: Map<string, number>;

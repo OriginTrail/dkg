@@ -10,8 +10,10 @@
  * per-wallet serializer, no approval latch. The adapter's tx-orchestration owns
  * all of that and calls into this surface. The ONLY mutable state it owns is a
  * TRANSPORT-ORDERING preference (endpoint stickiness — `preferredRpcUrl` +
- * `primaryProbeDueAt`): a "prefer the last-good backend, re-probe the primary at
- * most once per TTL" pointer, keyed on `rpcUrl` (survives a live pool rebind).
+ * `primaryProbeDueAt` + `preferredFromWrite`): a "prefer the last-good backend,
+ * re-probe the primary at most once per TTL" pointer, keyed on `rpcUrl` (survives
+ * a live pool rebind), plus a flag gating whether a nonce-critical populate may
+ * reuse it (a read-only-established backend must not drive a write's nonce).
  * That is pure ordering — it only decides which endpoint each loop TRIES FIRST;
  * it never signs, never gates a broadcast, never re-orders the tx-safety
  * guards, and every loop still falls through to the full endpoint set. The
@@ -181,6 +183,17 @@ export class RpcFailoverClient {
    *  (canonical order) and re-arms this deadline `+ttlMs`. Guarantees at most
    *  one primary re-stall per TTL under a persistently degraded primary. */
   private primaryProbeDueAt = 0;
+  /** Whether the current `preferredRpcUrl` was PROVEN by a populate+sign success
+   *  (nonce-critical write), not merely by a read. A read-established backend may
+   *  lag the signer's pending-nonce state, so `populateAndSign` MUST NOT populate
+   *  a fresh nonce on it (a stale nonce broadcasts as `nonce too low`, which the
+   *  idempotent-rebroadcast classifier treats as success → a phantom-accepted tx
+   *  that never mines). Writes only reuse a preferred endpoint once a populate has
+   *  succeeded there; reads (and the nonce-free broadcast/receipt hops) reuse it
+   *  regardless. Preserves #1340 (the recovery's approve populate proves the
+   *  backend, so the retry sticks to it) without letting an unrelated read steer a
+   *  write's nonce. */
+  private preferredFromWrite = false;
   private readonly stickyNow: () => number;
   private readonly stickyTtlMs: number;
   private readonly stickyEnabledOverride: boolean | undefined;
@@ -222,10 +235,19 @@ export class RpcFailoverClient {
    * op probes the primary first (canonical) AND re-arms the deadline `+ttlMs`,
    * so a persistently degraded primary is re-probed at most once per TTL.
    */
-  private orderEndpoints(canonical: RpcEndpoint[], skipPreferred: boolean): RpcEndpoint[] {
+  private orderEndpoints(
+    canonical: RpcEndpoint[],
+    skipPreferred: boolean,
+    requirePopulateProven: boolean,
+  ): RpcEndpoint[] {
     if (skipPreferred || !this.stickinessOn() || this.preferredRpcUrl === undefined) {
       return canonical;
     }
+    // A nonce-critical populate must not START on a backend proven only by a
+    // READ (it may lag the signer's pending nonce). Fall back to canonical
+    // (primary-first = the authoritative nonce source); a populate SUCCESS then
+    // marks the winning backend populate-proven, so subsequent writes stick.
+    if (requirePopulateProven && !this.preferredFromWrite) return canonical;
     const idx = canonical.findIndex((e) => e.rpcUrl === this.preferredRpcUrl);
     // idx < 0: preferred no longer configured (pool rebind dropped it).
     // idx === 0: preferred IS the primary — canonical already tries it first.
@@ -261,12 +283,19 @@ export class RpcFailoverClient {
    *     primary would never be re-probed (the cadence is governed solely by
    *     `orderEndpoints` re-arming on a re-probe op). A later re-point to a
    *     different backup is a SILENT pointer move (no new establishment count).
+   *
+   * `isPopulate` marks a nonce-critical populate+sign success (only
+   * `populateAndSign` passes true): it flags the backend `preferredFromWrite`
+   * (nonce-proven). A read success sets it false, so a read-established backend
+   * can serve reads but a subsequent write will re-derive nonce from canonical
+   * order rather than trust a possibly-lagging read-preferred backend.
    */
   private notePreferredOutcome(
     endpoint: RpcEndpoint,
     canonical: RpcEndpoint[],
     skipPreferred: boolean,
     triedFirst: boolean,
+    isPopulate: boolean,
   ): void {
     if (skipPreferred || !this.stickinessOn()) return;
     const primaryUrl = canonical[0]?.rpcUrl;
@@ -278,7 +307,10 @@ export class RpcFailoverClient {
       // method (method-selective 429s are common), so keep the preference:
       // clearing here would reset stickiness OUTSIDE the TTL re-probe cadence and
       // re-stall the next heavy read on the still-degraded primary.
-      if (triedFirst) this.preferredRpcUrl = undefined;
+      if (triedFirst) {
+        this.preferredRpcUrl = undefined;
+        this.preferredFromWrite = false;
+      }
       return;
     }
     if (this.preferredRpcUrl === undefined) {
@@ -286,6 +318,7 @@ export class RpcFailoverClient {
       // re-probe deadline, and emit the operator signal (log + counter).
       this.preferredRpcUrl = endpoint.rpcUrl;
       this.primaryProbeDueAt = this.stickyNow() + this.stickyTtlMs;
+      this.preferredFromWrite = isPopulate;
       notePreferredEndpoint('rpc failover', endpoint.rpcUrl);
     } else if (this.preferredRpcUrl !== endpoint.rpcUrl) {
       // Preferred moved to a different backup (the old one also degraded). Keep
@@ -294,6 +327,13 @@ export class RpcFailoverClient {
       // degradation episode already counted at establishment, so it does NOT
       // re-increment `preferredEstablishments` (which counts establishment edges).
       this.preferredRpcUrl = endpoint.rpcUrl;
+      this.preferredFromWrite = isPopulate;
+    } else if (isPopulate) {
+      // Same preferred backend, now PROVEN by a populate success → upgrade it to
+      // nonce-safe so subsequent writes may stick to it (a read had only proven
+      // it read-safe). Never DOWNGRADE on a read success (a read hitting the
+      // write-proven backend doesn't un-prove its nonce view).
+      this.preferredFromWrite = true;
     }
   }
 
@@ -431,7 +471,9 @@ export class RpcFailoverClient {
     opts?: { gasLimitBufferBps?: number },
   ): Promise<{ signedTx: string; txHash: string }> {
     const canonical = this.getEndpoints();
-    const endpoints = this.orderEndpoints(canonical, false);
+    // requirePopulateProven=true: do NOT start a fresh-nonce populate on a
+    // read-only-established backend (nonce-staleness guard); see preferredFromWrite.
+    const endpoints = this.orderEndpoints(canonical, false, true);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
       const endpoint = endpoints[i];
@@ -480,8 +522,10 @@ export class RpcFailoverClient {
           `${label} transaction signing via RPC #${i + 1}`,
         );
         // Signed on this endpoint → prefer it for the read-your-write ops that
-        // follow (the caller's broadcast + receipt + confirming re-reads).
-        this.notePreferredOutcome(endpoint, canonical, false, i === 0);
+        // follow (the caller's broadcast + receipt + confirming re-reads), and
+        // mark it populate-proven (isPopulate=true) so subsequent nonce-critical
+        // writes may stick to it.
+        this.notePreferredOutcome(endpoint, canonical, false, i === 0, true);
         return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
@@ -532,7 +576,7 @@ export class RpcFailoverClient {
         const startedAt = Date.now();
         try {
           const canonical = this.getEndpoints();
-          const endpoints = this.orderEndpoints(canonical, false);
+          const endpoints = this.orderEndpoints(canonical, false, false);
           let lastRetryable: unknown;
           for (let i = 0; i < endpoints.length; i += 1) {
             const endpoint = endpoints[i];
@@ -551,7 +595,7 @@ export class RpcFailoverClient {
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-              this.notePreferredOutcome(endpoint, canonical, false, i === 0);
+              this.notePreferredOutcome(endpoint, canonical, false, i === 0, false);
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -559,7 +603,7 @@ export class RpcFailoverClient {
                 span.setAttribute('dkg.tx_hash', txHash);
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-                this.notePreferredOutcome(endpoint, canonical, false, i === 0);
+                this.notePreferredOutcome(endpoint, canonical, false, i === 0, false);
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -612,7 +656,7 @@ export class RpcFailoverClient {
         const startedAt = Date.now();
         try {
           const canonical = this.getEndpoints();
-          const endpoints = this.orderEndpoints(canonical, false);
+          const endpoints = this.orderEndpoints(canonical, false, false);
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
           for (let i = 0; i < endpoints.length; i += 1) {
@@ -638,7 +682,7 @@ export class RpcFailoverClient {
                 // it. A null "not mined yet" response is NOT a stickiness signal
                 // (no single winning endpoint), so we only note on a real
                 // receipt — the self-heal still polls every endpoint per tick.
-                this.notePreferredOutcome(endpoint, canonical, false, i === 0);
+                this.notePreferredOutcome(endpoint, canonical, false, i === 0, false);
                 return receipt;
               }
             } catch (err) {
@@ -701,7 +745,7 @@ export class RpcFailoverClient {
     // possibly reordered — so the cap/exhaustion contract stays canonical while
     // only the try-order changes.
     const canonical = this.getEndpoints();
-    const endpoints = this.orderEndpoints(canonical, skipPreferred);
+    const endpoints = this.orderEndpoints(canonical, skipPreferred, false);
     const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
     for (let i = 0; i < endpoints.length; i += 1) {
@@ -719,7 +763,7 @@ export class RpcFailoverClient {
         const out = await (capMs == null
           ? attempt
           : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
-        this.notePreferredOutcome(endpoint, canonical, skipPreferred, i === 0);
+        this.notePreferredOutcome(endpoint, canonical, skipPreferred, i === 0, false);
         return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;
