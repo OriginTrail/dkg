@@ -233,6 +233,14 @@ describe('PCA proxy nullable lookups fail over on null instead of returning a la
     expect(backupSend.calls).toHaveLength(1);
   });
 
+  it('a latest-family (finalized/safe/latest) eth_getBlockByNumber fails over on null too (round-8 🔴)', async () => {
+    // A tip block tag is transparent (canonical-fresh) but STILL nullable — a lagging
+    // primary must not hide a finalized block a backup already has.
+    const block = { number: '0x7b', hash: '0xabc' };
+    const a = makePca({ send: recorder(async () => null) }, { send: recorder(async () => block) });
+    expect(await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['finalized', false])).toBe(block);
+  });
+
   it('eth_getTransactionByHash and a concrete eth_getBlockByNumber ALSO fail over on null (round-6 🟡 coverage)', async () => {
     const tx = { hash: '0xhash', blockNumber: '0x7b' };
     const txAdapter = makePca({ send: recorder(async () => null) }, { send: recorder(async () => tx) });

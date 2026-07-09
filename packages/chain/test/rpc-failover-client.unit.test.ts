@@ -733,6 +733,38 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(populateOrder).toEqual(['backup']);
   });
 
+  it('AC-25: a benign-null getReceipt on a write-proven backend (primary serves) DOWNGRADES source write→read → the next populate goes canonical (round-8 🔴 — exercises the downgrade branch, which recordFailure does NOT)', async () => {
+    const receipt = { status: 1, hash: '0xhash' };
+    const p0: any = { getTransactionReceipt: recorder(async () => receipt) }; // primary HAS the receipt
+    const p1: any = { getTransactionReceipt: recorder(async () => null) };    // write-proven backup: benign null (lagging, NOT a failure)
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    let primaryPopN = 0;
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => {
+      const which = s.boundTo === p0 ? 'primary' : 'backup';
+      populateOrder.push(which);
+      if (which === 'primary') { primaryPopN += 1; if (primaryPopN === 1) return Promise.reject(retryable429()); }
+      return Promise.resolve({ to: '0xTO', data: '0x' });
+    } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish WRITE-proven backup (primary 429 → backup)
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // getReceipt: the write-proven backup returns null (benign — NOT a failure, so
+    // recordFailure does NOT fire), the primary serves the receipt as a write
+    // fallback → the backend's nonce view is suspect → DOWNGRADE source write→read.
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+    expect(p1.getTransactionReceipt.calls).toHaveLength(1); // backup tried first (null)
+    expect(p0.getTransactionReceipt.calls).toHaveLength(1); // primary served
+
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w');
+    // Downgraded → nonceWrite re-derives from CANONICAL (primary first). Without the
+    // downgrade branch this would be ['backup'] (still write-proven).
+    expect(populateOrder).toEqual(['primary']);
+  });
+
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
