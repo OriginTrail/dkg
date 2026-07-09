@@ -37,6 +37,11 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
 const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
+// Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
+// with a TimeoutOverflowWarning — aborting the request almost immediately, the
+// opposite of a long timeout. Cap the derived client timeout so an absurd
+// operator-configured queryTimeoutS degrades to "very long", never "instant".
+const MAX_NODE_TIMER_MS = 2_147_483_647;
 
 /** Same port validation as {@link planManagedOxigraph} — shared with status. */
 export function resolveManagedOxigraphPort(
@@ -61,7 +66,7 @@ function resolvePositiveIntegerOption(
 function resolveManagedQueryClientTimeoutMs(queryTimeoutS: number | undefined): number | undefined {
   return queryTimeoutS === undefined
     ? undefined
-    : queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS;
+    : Math.min(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS, MAX_NODE_TIMER_MS);
 }
 
 interface StoreConfigLike {

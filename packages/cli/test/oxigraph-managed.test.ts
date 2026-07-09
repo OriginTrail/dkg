@@ -138,6 +138,22 @@ describe('planManagedOxigraph', () => {
     expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
   });
 
+  it('clamps an absurd queryTimeoutS to Node’s max timer instead of overflowing to an instant abort', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          // ~24.8 days: queryTimeoutS * 1000 + grace exceeds 2^31-1 ms, which
+          // AbortSignal.timeout would silently coerce to 1ms (immediate abort).
+          options: { queryTimeoutS: 4_294_967 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBe(4_294_967);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
+  });
+
   it('ignores invalid managed Oxigraph timeout options', () => {
     const plan = planManagedOxigraph(
       {
