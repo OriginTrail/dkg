@@ -1659,6 +1659,10 @@ export class DKGAgent extends DKGAgentBase {
     });
   }
 
+  public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
+    return this.getACKCandidatePeerIds(protocol);
+  }
+
   private createACKSendP2P(): ACKCollectorDeps['sendP2P'] {
     return createPublisherACKSendP2P({
       messenger: this.messenger,
