@@ -1,3 +1,5 @@
+import { tryCanonicalPeerIdString } from './peer-id.js';
+
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
@@ -50,7 +52,7 @@ export class NetworkAdmissionService {
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
-    this.selfPeerId = options.selfPeerId;
+    this.selfPeerId = options.selfPeerId ? normalizePeerId(options.selfPeerId) ?? undefined : undefined;
   }
 
   get enabled(): boolean {
@@ -105,6 +107,5 @@ export class NetworkAdmissionService {
 }
 
 function normalizePeerId(peerId: string): string | null {
-  const normalized = peerId.trim();
-  return normalized.length > 0 ? normalized : null;
+  return tryCanonicalPeerIdString(peerId);
 }

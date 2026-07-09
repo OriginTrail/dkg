@@ -4,6 +4,7 @@ import {
   PROTOCOL_NETWORK_IDENTITY,
   type DkgNetworkIdentity,
 } from '@origintrail-official/dkg-core';
+import { canonicalPeerIdString } from './peer-id.js';
 
 export const NETWORK_IDENTITY_PROOF_VERSION = 1;
 export const NETWORK_IDENTITY_PROOF_KIND = 'ed25519-peer-id';
@@ -138,10 +139,6 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: response.signature,
   };
-}
-
-export function canonicalPeerIdString(peerId: string): string {
-  return peerIdFromString(peerId).toString();
 }
 
 export async function verifyNetworkIdentityResponse(

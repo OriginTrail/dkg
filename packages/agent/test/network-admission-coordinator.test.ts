@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const identity = {
   networkId: 'network-a',
@@ -122,6 +124,40 @@ describe('NetworkAdmissionCoordinator', () => {
 
     expect(seenOptions).toMatchObject({ timeoutMs: 100 });
     expect(seenOptions?.signal).toBe(callerSignal);
+  });
+
+  it('canonicalizes peer ids before probing and sharing in-flight admission attempts', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    const first = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID_CID, createOperationContext('connect'));
+    const second = fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect'));
+    await Promise.resolve();
+
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    expect(sendIdentityProbe.mock.calls[0][0]).toBe(REMOTE_PEER_ID);
+    release(new TextEncoder().encode('{not json'));
+    await expect(first).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('rejects malformed peer ids before probing', async () => {
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode('{not json'));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted('not-a-peer-id', createOperationContext('connect')),
+    ).rejects.toMatchObject({ code: 'INVALID_PEER_ID' });
+    expect(sendIdentityProbe).not.toHaveBeenCalled();
   });
 
   it('quarantines peers with a parsed but mismatched network identity proof', async () => {

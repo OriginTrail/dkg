@@ -59,6 +59,33 @@ describe('network identity proof', () => {
     })).resolves.toEqual({ ok: true });
   });
 
+  it('accepts an alternate-encoded response peer id for the same peer key', async () => {
+    const response = await signedResponse();
+
+    await expect(verifyNetworkIdentityResponse({
+      response: { ...response, peerId: REMOTE_PEER_ID_CID },
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toEqual({ ok: true });
+  });
+
+  it('rejects invalid response peer ids before signature verification', async () => {
+    const response = await signedResponse();
+
+    await expect(verifyNetworkIdentityResponse({
+      response: { ...response, peerId: 'not-a-peer-id' },
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('invalid response peer id'),
+    });
+  });
+
   it('rejects peers that omit required local chain or genesis identity fields', async () => {
     const response = await signedResponse();
     const missingChain = { ...response, chainId: undefined };

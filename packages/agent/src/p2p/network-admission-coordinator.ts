@@ -11,6 +11,7 @@ import {
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
+import { canonicalPeerIdString } from './peer-id.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -65,6 +66,15 @@ export class NetworkAdmissionRejectedError extends Error {
   }
 }
 
+export class NetworkAdmissionInvalidPeerIdError extends Error {
+  readonly code = 'INVALID_PEER_ID';
+
+  constructor(peerId: string, reason: string) {
+    super(`Invalid peer id ${peerId}: ${reason}`);
+    this.name = 'NetworkAdmissionInvalidPeerIdError';
+  }
+}
+
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
@@ -81,7 +91,7 @@ export class NetworkAdmissionCoordinator {
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
     this.identity = options.identity;
-    this.selfPeerId = options.selfPeerId;
+    this.selfPeerId = options.identity?.networkId ? canonicalAdmissionPeerId(options.selfPeerId) : options.selfPeerId.trim();
     this.sign = options.sign;
     this.sendIdentityProbe = options.sendIdentityProbe;
     this.getConnections = options.getConnections;
@@ -139,16 +149,17 @@ export class NetworkAdmissionCoordinator {
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
     if (!this.identity?.networkId) return true;
-    if (this.admission.isAcceptedPeer(remotePeer)) return true;
+    const remotePeerId = canonicalAdmissionPeerId(remotePeer);
+    if (this.admission.isAcceptedPeer(remotePeerId)) return true;
 
-    const existing = this.inFlight.get(remotePeer);
+    const existing = this.inFlight.get(remotePeerId);
     if (existing) return this.raceAdmissionSignal(existing, options.signal);
 
-    const promise = this.probePeer(remotePeer, ctx, options)
+    const promise = this.probePeer(remotePeerId, ctx, options)
       .finally(() => {
-        this.inFlight.delete(remotePeer);
+        this.inFlight.delete(remotePeerId);
       });
-    this.inFlight.set(remotePeer, promise);
+    this.inFlight.set(remotePeerId, promise);
     return this.raceAdmissionSignal(promise, options.signal);
   }
 
@@ -269,4 +280,12 @@ function abortErrorFromSignal(reason: unknown): Error {
   const error = new Error('Network admission aborted');
   error.name = 'AbortError';
   return error;
+}
+
+function canonicalAdmissionPeerId(peerId: string): string {
+  try {
+    return canonicalPeerIdString(peerId);
+  } catch (err) {
+    throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
+  }
 }
