@@ -208,9 +208,11 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { runOversizeSweep } from './sync/oversize-sweep.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
-import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/requester/agents-meta-sync-config.js';
+import { resolveSyncAgentsMeta, createAgentsDurableMetaWithholdPredicate } from './sync/agents-meta-policy.js';
 import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -522,6 +524,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.coreHostRecordingsClosed = false;
     const ctx = createOperationContext('connect');
     this.log.info(ctx, `Starting DKG node`);
+
+    // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking, so
+    // the local store is clean before this node serves or syncs anything.
+    // Marker-gated (runs once per data dir), never throws, no-op on stores
+    // that never accepted oversized literals (Blazegraph).
+    await runOversizeSweep({
+      store: this.store,
+      dataDir: this.config.dataDir,
+      recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+      logInfo: (message) => this.log.info(ctx, message),
+      logWarn: (message) => this.log.warn(ctx, message),
+    });
 
     await this.node.start();
     this.started = true;
@@ -1717,10 +1731,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
-      // unless the operator opts in. Reads `DKG_SERVE_AGENTS_META` FRESH per call
-      // so the kill-switch is reversible at runtime without a node restart.
-      shouldWithholdDurableMeta: (contextGraphId) =>
-        shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      // unless the operator opts in. The predicate reads `DKG_SERVE_AGENTS_META`
+      // FRESH per call, so the kill-switch is reversible at runtime (no restart).
+      shouldWithholdDurableMeta: createAgentsDurableMetaWithholdPredicate(),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
     });
@@ -3451,8 +3464,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             await graphManager.ensureContextGraph(contextGraphId);
           },
           storeInsert: async (quads) => {
-            await this.store.insert(quads);
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+            // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
+            // literals BEFORE insert so the SWM page cursor advances instead
+            // of the store throwing and the page re-fetching forever.
+            const inserted = await insertWithOversizeGuard(
+              (kept) => this.store.insert(kept),
+              quads,
+              { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+              'swm-sync',
+            );
+            this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           },
           publicSnapshotStore: this.publicSnapshotStore,
           deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
@@ -3546,10 +3567,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
       store: {
         insert: async (quads) => {
-          await this.store.insert(quads);
-          if (quads.length > 0) {
+          // Oversize guard (OT-RFC-56) — recovered rows are peer data too.
+          const inserted = await insertWithOversizeGuard(
+            (kept) => this.store.insert(kept),
+            quads,
+            { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+            'swm-recovery',
+          );
+          if (inserted.length > 0) {
             this.invalidateListContextGraphsCache();
-            this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+            this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           }
         },
         deleteByPattern: (pattern) => this.store.deleteByPattern(pattern),

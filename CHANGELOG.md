@@ -4,6 +4,31 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.5] - 2026-07-08
+
+Node stability and sync hardening on top of 10.0.4, plus contract updates. Ends the oversize-literal retry loop that could pin sync CPU, keeps the `agents/_meta` graph off the sync plane (reduces sync fan-out load), gates node-UI metric store-scans on consumer presence, and repairs the 10.0.4 npm tarball, which shipped without its `network/*.json` overlays and `project.json` (npm-installed nodes were falling back to built-in defaults). Also ships updated PublishingConviction 10.0.8 contracts (sources + ABIs); the on-chain deploy is a separate, coordinated activity (see **Deployment**). Content is identical to the `10.0.5-canary.1` testnet build (commit `6a91a16d`).
+
+### Added
+
+- **PublishingConviction 10.0.8 contract updates** — updated contract sources and regenerated ABIs (#1524). The runtime contract surface (`packages/evm-module/abi/*.json`) is updated; nodes resolve `PublishingConviction` from the Hub per call and hot-swap the new logic with no restart, so 10.0.4 and 10.0.5 nodes both interoperate with either the 10.0.7 or 10.0.8 contract.
+
+### Fixed
+
+- **Oversize-literal retry loop fixed** (#1529, #1530, #1532; OT-RFC-56 Fixes 2 & 3): an ingest-side guard rejects oversized literals and tombstones the offending assertion instead of re-fetching it repeatedly, a boot-time sweep clears graphs affected before the guard existed, and producer-side guards stop a node from emitting oversized literals in the first place.
+- **`agents/_meta` kept off the sync plane** (#1526, follow-up #1533): the per-agent `_meta` graph is no longer carried on the sync/catch-up path (reduces sync fan-out load), with retention behaviour corrected in the post-merge review follow-up.
+- **Node-UI metric store-scans gated on consumer presence** (#1525): the dashboard metric collector no longer issues store `COUNT` scans when nothing is consuming them, removing idle store load.
+- **npm tarball now ships runtime assets** (#1523): `network/*.json` overlays and `project.json` are guaranteed to be packed into the `@origintrail-official/dkg` tarball. The 10.0.4 tarball omitted them (a turbo-cache prepack regression), so npm-installed nodes silently fell back to built-in network defaults.
+
+### Changed
+
+- **Devnet harness hygiene** (#1521): core-peers restore and the RS-rotation window fixes carried over from the 10.0.4 test run (test infrastructure only).
+
+### Deployment
+
+- **Contract sources/ABIs change in this release** (PublishingConviction 10.0.8, #1524) — this is **not** a "no contract changes" release.
+- **Testnet (Base Sepolia): deployed.** PublishingConviction 10.0.8 at `0x99341dEb6cdfACA94F359591ED3fD20da1901DAf` (deployment block 43880924); the updated deployment registry ships with this release.
+- **Mainnet (Base + Gnosis): pending.** Both chains remain on PublishingConviction 10.0.7 at release-cut time; the 10.0.8 deploy and PCA emission-schedule migration are a separate, coordinated on-chain activity. No node action is required for that deploy — nodes hot-swap the new logic from the Hub.
+
 ## [10.0.4] - 2026-07-08
 
 2026-07-07 mainnet-incident hardening + transaction-dispatcher release. Publisher-side: ACK candidacy ranks-not-gates, empty-reply retry, responder ACK deadlines, SWM merkle-filter parity. Network-side: relay-watchdog churn fix and sync-storm calming (bounded catch-up fan-out, superseded-resume loop kill). Chain-side: the universal per-wallet transaction dispatcher lands end-to-end — every node write serialized per wallet, funding-aware generalized signer selection, and Random Sampling rotating across registered operational wallets instead of pinning wallet #0. Plus the codified manual release flow with signed-tag gates. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.3).

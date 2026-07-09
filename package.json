@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.4",
+  "version": "10.0.5",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -55,7 +55,7 @@
     "test:devnet:v10-core-flows": "vitest run --config devnet/v10-core-flows/vitest.config.ts",
     "test:devnet:v10-e2e": "vitest run --config devnet/v10-end-to-end/vitest.config.ts",
     "test:devnet:v10-stress": "vitest run --config devnet/v10-stress/vitest.config.ts",
-    "test:devnet:conviction-lazy-settle": "vitest run --config devnet/conviction-lazy-settle/vitest.config.ts",
+    "test:devnet:conviction-emission-bell": "vitest run --config devnet/conviction-emission-bell/vitest.config.ts",
     "test:devnet:rfc51-publishing-allocation": "vitest run --config devnet/rfc51-publishing-allocation/vitest.config.ts",
     "test:devnet:core-peers-features": "vitest run --config devnet/core-peers-features/vitest.config.ts",
     "test:devnet:ack-candidate-isolation": "vitest run --config devnet/ack-candidate-isolation/vitest.config.ts",

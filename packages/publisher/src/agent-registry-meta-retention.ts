@@ -1,7 +1,7 @@
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
 import {
   isAgentRegistryContextGraph,
-  isSafeIri,
+  sparqlIri,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
   Logger,
@@ -27,6 +27,66 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
 }
 
 /**
+ * Insert a heartbeat's `_meta` tracking rows and THEN bound the agents-registry
+ * `_meta` graph — the correct ordering for the invariant "an agent always has at
+ * least one live record".
+ *
+ * The prune deletes the SAME agent's superseded prior records; running it BEFORE
+ * the insert (the original #1233 shape) meant an insert failure after a
+ * successful prune could leave the agent with NO record at all. Inserting FIRST
+ * and passing `recordUal` = the just-inserted UAL flips the prune's
+ * `FILTER(?record != recordUal)` from a defensive no-op into an active GUARANTEE
+ * that the new record survives.
+ *
+ * Failure semantics are asymmetric BY DESIGN (#1533):
+ *   - INSERT failure → PROPAGATES. It happens before the prune and nothing
+ *     durable changed, so the caller correctly aborts (e.g. rejects the ACK).
+ *   - PRUNE failure AFTER a successful insert → SWALLOWED (loud warn), NOT
+ *     propagated. The record is already durably inserted, so the caller MUST
+ *     still run its downstream lifecycle registration
+ *     (`pendingPublishes`/`expireTentativePublish`). Letting a transient prune
+ *     error bubble up would reject the ACK and orphan the tentative publish (its
+ *     timeout cleanup never registers). Boundedness is only degraded for one
+ *     round; the next heartbeat re-prunes.
+ *
+ * For non-agents CGs the prune is a no-op (see
+ * {@link pruneSupersededAgentRegistryMeta}), so this is just the insert.
+ *
+ * @param opts.recordUal REQUIRED — the UAL of the record in `metadataQuads`. It
+ *   is both the record being inserted and the one protected from the prune, so
+ *   it MUST equal the `<ual>` subject of `metadataQuads` (a drift would let the
+ *   prune delete the just-inserted record).
+ */
+export async function insertBoundedAgentRegistryMeta(opts: {
+  store: TripleStore;
+  contextGraphId: string;
+  metaGraph: string;
+  rootEntities: readonly string[];
+  recordUal: string;
+  metadataQuads: Quad[];
+}): Promise<void> {
+  const { store, contextGraphId, metaGraph, rootEntities, recordUal, metadataQuads } = opts;
+  // Insert FIRST so a prune failure can never leave the agent with no record.
+  // An insert failure PROPAGATES (caller aborts; nothing durable changed).
+  await store.insert(metadataQuads);
+  // The record is now durable, so a prune failure MUST NOT abort the caller's
+  // downstream lifecycle registration — swallow it with a loud warn and let the
+  // next heartbeat re-prune. `recordUal` protects the row we just wrote.
+  try {
+    await pruneSupersededAgentRegistryMeta({
+      store, contextGraphId, metaGraph, rootEntities, keepUal: recordUal,
+    });
+  } catch (err) {
+    log.warn(
+      createOperationContext('system'),
+      `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
+        `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
+        `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+    );
+  }
+}
+
+/**
  * #1233 follow-up — BOUND the agents-registry `_meta` graph at the load-bearing
  * write sites that #1234 deliberately did NOT skip.
  *
@@ -40,23 +100,26 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
  * blanket skip would desync that state machine (`packages/core/src/genesis.ts`
  * §isAgentRegistryContextGraph). They therefore PRUNE instead of skipping.
  *
- * Before the caller inserts a heartbeat's fresh tracking rows, this evicts the
- * PRIOR tracking rows for the SAME agent — matched on the member entity (the
- * stable agent DID that every heartbeat re-states, unlike the per-heartbeat UAL)
- * and resolved to the record ROOT so BOTH the collapsed (`<ual>`) and legacy /
- * multi-root (`<ual>/<n> dkg:partOf <ual>`) shapes are removed wholesale. At most
- * the newest record per agent survives, so the graph stays bounded to O(agents)
- * instead of O(agents × heartbeats). That surviving record IS the live tentative
- * record the lifecycle needs — only already-superseded history is removed, so
- * tentative→confirm/expire is unaffected.
+ * This evicts the PRIOR tracking rows for the SAME agent — matched on the member
+ * entity (the stable agent DID that every heartbeat re-states, unlike the
+ * per-heartbeat UAL) and resolved to the record ROOT so BOTH the collapsed
+ * (`<ual>`) and legacy / multi-root (`<ual>/<n> dkg:partOf <ual>`) shapes are
+ * removed wholesale. At most the newest record per agent survives, so the graph
+ * stays bounded to O(agents) instead of O(agents × heartbeats).
+ *
+ * Prefer {@link insertBoundedAgentRegistryMeta} at call sites — it inserts first
+ * so `keepUal` actively protects the live record. Calling this directly (prune
+ * only) is for tests and advanced callers.
  *
  * No-op for every non-agents CG (full per-KA `_meta` history is preserved).
  *
- * @param opts.metaGraph the `_meta` graph the caller is about to write into.
- * @param opts.rootEntities the root entities of the record about to be inserted
- *   (the agent DID(s) for this heartbeat).
- * @param opts.keepUal the current heartbeat's UAL — never pruned (defensive; it
- *   is normally not yet present because the prune runs before the insert).
+ * @param opts.metaGraph the `_meta` graph to bound.
+ * @param opts.rootEntities the root entities of the record being retained (the
+ *   agent DID(s) for this heartbeat).
+ * @param opts.keepUal the record to PROTECT from the prune (its UAL). With
+ *   {@link insertBoundedAgentRegistryMeta} this is the just-inserted record, so
+ *   the prune can never delete it. If it is not a safe IRI the prune is SKIPPED
+ *   (warned) rather than risk deleting the protected record.
  */
 export async function pruneSupersededAgentRegistryMeta(opts: {
   store: TripleStore;
@@ -67,8 +130,29 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
 }): Promise<void> {
   const { store, contextGraphId, metaGraph, rootEntities, keepUal } = opts;
   if (!isAgentRegistryContextGraph(contextGraphId)) return;
-  const safeRoots = [...new Set(rootEntities)].filter(isSafeIri);
-  if (safeRoots.length === 0) return;
+
+  // Build the `VALUES ?root { … }` list with the canonical `sparqlIri` guard,
+  // which THROWS on an unsafe IRI. An unsafe root is therefore an explicit
+  // boundary, not a silent drop: we collect it and WARN (naming it) rather than
+  // degrade the retention invariant without any signal.
+  const rootIris: string[] = [];
+  const droppedRoots: string[] = [];
+  for (const root of new Set(rootEntities)) {
+    try {
+      rootIris.push(sparqlIri(root));
+    } catch {
+      droppedRoots.push(root);
+    }
+  }
+  if (droppedRoots.length > 0) {
+    log.warn(
+      createOperationContext('system'),
+      `agents/_meta bound: skipped ${droppedRoots.length} unsafe root IRI(s) for context graph ` +
+        `"${contextGraphId}" — those agents' superseded history was NOT pruned this pass: ` +
+        `[${droppedRoots.join(', ')}]`,
+    );
+  }
+  if (rootIris.length === 0) return;
   assertSafeGraphIriForSparql(metaGraph);
 
   // COUNT-FREE by construction: ONE server-side SPARQL `DELETE … WHERE`, never a
@@ -83,12 +167,12 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   // healStrandedScopedKCs); every production + test backend implements it.
   const storeUpdate = store.update;
   if (typeof storeUpdate !== 'function') {
-    // We have already decided pruning IS required here (agents CG + non-empty
-    // roots), but the store cannot run a server-side UPDATE. Do NOT silently
-    // skip — and do NOT throw (a defensive bound must never break the publish
-    // path). WARN loudly so the invariant violation is visible: every
-    // production + test backend implements update(), so this means a
-    // misconfigured store, and agents/_meta will grow unbounded on it.
+    // Pruning IS required here (agents CG + non-empty roots), but the store
+    // cannot run a server-side UPDATE. Do NOT silently skip — and do NOT throw
+    // (a defensive bound must never break the publish path). WARN loudly so the
+    // invariant violation is visible: every production + test backend implements
+    // update(), so this means a misconfigured store and agents/_meta will grow
+    // unbounded on it.
     log.warn(
       createOperationContext('system'),
       `agents/_meta bound SKIPPED for context graph "${contextGraphId}": the triple store ` +
@@ -99,6 +183,26 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
     return;
   }
 
+  // `keepUal` protects a record (insert-first ordering). If it cannot be safely
+  // embedded, pruning would delete the protected record, so SKIP the prune
+  // (warn) rather than risk the loss. Absent `keepUal` ⇒ no protection (the
+  // legacy prune-only contract).
+  let keepFilter = '';
+  if (keepUal !== undefined) {
+    let keepIri: string;
+    try {
+      keepIri = sparqlIri(keepUal);
+    } catch {
+      log.warn(
+        createOperationContext('system'),
+        `agents/_meta bound: keepUal "${keepUal}" is not a safe IRI; skipping the prune for ` +
+          `context graph "${contextGraphId}" to avoid deleting the protected record.`,
+      );
+      return;
+    }
+    keepFilter = `FILTER(?record != ${keepIri})`;
+  }
+
   // Resolve each matched MEMBER subject to its record ROOT before deleting. The
   // member can be the KC `<ual>` itself (collapsed shape) OR a `<ual>/<n>` token
   // subject (legacy / multi-root), which carries `dkg:partOf <ual>`. COALESCE the
@@ -107,13 +211,8 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   // status/merkleRoot/publishedAt rows AND the token subtree — instead of only
   // the token subtree (the legacy-shape leak, PR #1526 #1). Collapsed records
   // have no `partOf` self-edge (metadata.ts) so COALESCE → member = `<ual>`.
-  // Read-both on the member predicate (`dkg:rootEntity` ‖ `dkg:entity`). keepUal
-  // is compared against the resolved RECORD (defensive: it is normally not yet
-  // present — this runs before the insert); an unsafe/absent keepUal drops the
-  // FILTER (harmless — the current record isn't in the graph at prune time).
-  const values = safeRoots.map((r) => `<${r}>`).join(' ');
-  const safeKeepUal = keepUal && isSafeIri(keepUal) ? keepUal : undefined;
-  const keepFilter = safeKeepUal ? `FILTER(?record != <${safeKeepUal}>)` : '';
+  // Read-both on the member predicate (`dkg:rootEntity` ‖ `dkg:entity`).
+  const values = rootIris.join(' ');
   const sparql = `DELETE { GRAPH <${metaGraph}> { ?s ?p ?o } }
 WHERE { GRAPH <${metaGraph}> {
   VALUES ?root { ${values} }

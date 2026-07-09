@@ -14,7 +14,7 @@
   "all": [
     "ack-candidate-isolation",
     "agent-provenance",
-    "conviction-lazy-settle",
+    "conviction-emission-bell",
     "core-peers-features",
     "edge-update-flow",
     "greenfield-10min",

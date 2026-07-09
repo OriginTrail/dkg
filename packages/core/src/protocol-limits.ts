@@ -1,6 +1,8 @@
 export const MAX_UINT72 = (1n << 72n) - 1n;
 export const MAX_UINT72_DECIMAL = MAX_UINT72.toString();
 
+export const STORAGE_ACK_MAX_STAGING_BYTES = 4 * 1024 * 1024;
+
 export type Uint72DecimalParseResult =
   | { ok: true; value: bigint }
   | { ok: false; reason: 'format' | 'range' | 'parse'; message?: string };

@@ -156,6 +156,9 @@ export interface DkgMetrics {
   protocolSendTotal: Counter;
   /** ms; protocol_id — P2P protocol send duration */
   protocolSendDuration: Histogram;
+  /** kind={oversize|vm-quarantine|store-reject} — synced quads refused for
+   *  exceeding the RDF-literal size invariant (OT-RFC-56; poison visibility). */
+  oversizeTombstonesTotal: Counter;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -180,6 +183,9 @@ function buildMetrics(): DkgMetrics {
     syncRequestTotal: meter.createCounter('dkg.sync.request.total', { description: 'Outbound sync requests' }),
     syncResponseTotal: meter.createCounter('dkg.sync.response.total', { description: 'Inbound sync responses' }),
     protocolSendTotal: meter.createCounter('dkg.protocol_router.send.total', { description: 'Outbound P2P protocol sends' }),
+    oversizeTombstonesTotal: meter.createCounter('dkg.sync.oversize_tombstones.total', {
+      description: 'Synced quads refused for exceeding the RDF-literal size invariant (OT-RFC-56)',
+    }),
     protocolSendDuration: meter.createHistogram('dkg.protocol_router.send.duration', {
       unit: 'ms', description: 'P2P protocol send wall-time', advice: { explicitBucketBoundaries: RPC_DURATION_BUCKETS },
     }),

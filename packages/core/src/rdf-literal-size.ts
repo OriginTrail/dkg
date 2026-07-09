@@ -41,7 +41,8 @@ export class OversizedRdfLiteralError extends DKGUserError {
       `RDF literal${location} is ${args.actualBytes} Java MUTF-8 bytes, ` +
       `which exceeds the Blazegraph-compatible safe limit of ${args.maxBytes} bytes. ` +
       `Split large text into ordered chunks below the limit, or store the body externally ` +
-      `and publish only its URI, hash, summary, and metadata.`,
+      `and publish only its URI, hash, summary, and metadata. ` +
+      `See docs/use-dkg/large-content.md for the supported patterns and roadmap.`,
     );
     this.name = 'OversizedRdfLiteralError';
     this.actualBytes = args.actualBytes;

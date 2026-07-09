@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Wiring guard for the sync-storm mitigation (Chunk 1). The pure resolver is
-// unit-tested in `agents-meta-sync-config.test.ts`, but that alone would stay
+// unit-tested in `agents-meta-policy.test.ts`, but that alone would stay
 // green if someone reverted the production call site in
 // `dkg-agent-lifecycle.ts::syncFromPeerDetailed` back to `nodeRole==='core'
 // ? true`. This test exercises the REAL call site with a stubbed

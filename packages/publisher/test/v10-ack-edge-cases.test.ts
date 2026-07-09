@@ -5,7 +5,7 @@ import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
 } from '../src/merkle.js';
-import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK, STORAGE_ACK_DECLINE_CODES, isStorageACKDecline } from '@origintrail-official/dkg-core';
+import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK, STORAGE_ACK_DECLINE_CODES, STORAGE_ACK_MAX_STAGING_BYTES, isStorageACKDecline } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -971,11 +971,11 @@ describe('StorageACKHandler security', () => {
     expect(store.query.calls).toHaveLength(0);
   });
 
-  it('rejects stagingQuads > 4MB', async () => {
+  it('rejects stagingQuads over the shared StorageACK staging limit', async () => {
     const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
-    const oversizedPayload = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
+    const oversizedPayload = new Uint8Array(STORAGE_ACK_MAX_STAGING_BYTES + 1).fill(0x41);
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId: testCGIdStr,

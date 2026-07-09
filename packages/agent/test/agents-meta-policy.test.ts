@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { resolveSyncAgentsMeta, parseBooleanEnv } from '../src/sync/requester/agents-meta-sync-config.js';
+import {
+  resolveSyncAgentsMeta,
+  parseBooleanEnv,
+  shouldWithholdAgentsDurableMeta,
+} from '../src/sync/agents-meta-policy.js';
+
+const AGENTS_CG = 'agents';
+const USER_CG = 'user-cg';
 
 describe('resolveSyncAgentsMeta', () => {
   it('defaults a core (or any node) with no config and no env to false, so the durable-sync skip fires', () => {
@@ -51,5 +58,29 @@ describe('parseBooleanEnv', () => {
     expect(parseBooleanEnv('YES')).toBe(true);
     expect(parseBooleanEnv('0')).toBe(false);
     expect(parseBooleanEnv('Off')).toBe(false);
+  });
+});
+
+describe('shouldWithholdAgentsDurableMeta', () => {
+  it('withholds the agents registry CG _meta by default (flag unset/empty/falsey)', () => {
+    // Serve-side opt-OUT: default is to withhold the no-consumer agents/_meta.
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, undefined)).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '')).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, '0')).toBe(true);
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'false')).toBe(true);
+    // Unrecognized ⇒ treated as unset ⇒ still withheld (opt-out default).
+    expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, 'maybe')).toBe(true);
+  });
+
+  it('serves the agents registry CG _meta when DKG_SERVE_AGENTS_META is truthy (kill-switch)', () => {
+    for (const raw of ['1', 'true', 'TRUE', 'on', 'yes', ' true ']) {
+      expect(shouldWithholdAgentsDurableMeta(AGENTS_CG, raw)).toBe(false);
+    }
+  });
+
+  it('never withholds a non-agents CG regardless of the flag', () => {
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, undefined)).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, '0')).toBe(false);
+    expect(shouldWithholdAgentsDurableMeta(USER_CG, '1')).toBe(false);
   });
 });

@@ -138,3 +138,35 @@ describe('mapConcept code-span policy', () => {
     ]);
   });
 });
+
+describe('mapConcept section-name truncation (OT-RFC-56 §4.6)', () => {
+  // A markdown-parse quirk can surface a huge string as a "heading" — the
+  // producer shape behind the 2026-07-08 mainnet 177KB schema:name poison.
+  // Section names are truncated to a display bound so the import SUCCEEDS
+  // with a sane name instead of minting an oversized RDF literal (or, post
+  // #1323, failing the whole import at the guarded route).
+  const hugeHeading = 'H'.repeat(180_000);
+  const doc = parseDocument(
+    'briefs/world_cup.md',
+    `---\ntype: T\ntitle: O\n---\n\n# ${hugeHeading}\n\nbody\n`,
+  );
+  const m = mapConcept(doc, 'urn:okf:briefs/world_cup', () => false);
+
+  it('truncates oversized section names to the display bound (never an oversized literal)', () => {
+    const sectionNames = m.quads.filter(
+      (q) => q.subject.includes('okfsec_') && q.predicate.includes('schema.org/name'),
+    );
+    expect(sectionNames.length).toBeGreaterThan(0);
+    for (const q of sectionNames) {
+      expect(q.object.length).toBeLessThanOrEqual(2_048 + 4); // bound + quotes + ellipsis
+      expect(q.object.endsWith('…"')).toBe(true);
+    }
+  });
+
+  it('leaves normal headings untouched', () => {
+    const normal = parseDocument('a/b.md', '---\ntype: T\ntitle: O\n---\n\n# Short heading\n\nbody\n');
+    const mm = mapConcept(normal, 'urn:okf:a/b', () => false);
+    const names = mm.quads.filter((q) => q.subject.includes('okfsec_') && q.predicate.includes('schema.org/name'));
+    expect(names.some((q) => q.object === '"Short heading"')).toBe(true);
+  });
+});
