@@ -12,7 +12,6 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  isProtocolUnsupportedError,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
@@ -151,7 +150,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
-import { NetworkAdmissionCoordinator, NetworkAdmissionRejectedError, NetworkIdentityProbeTransportError } from './p2p/network-admission-coordinator.js';
+import { NetworkAdmissionCoordinator, NetworkAdmissionRejectedError } from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -817,18 +816,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       identity: this.config.networkIdentity,
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
-      sendIdentityProbe: async (peerId, data, options) => {
-        try {
-          return await this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, options);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          throw new NetworkIdentityProbeTransportError(
-            isProtocolUnsupportedError(err) ? 'unsupported-protocol' : 'transient',
-            message,
-            err,
-          );
-        }
-      },
+      sendIdentityProbe: (peerId, data, options) =>
+        this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, options),
       getConnections: () => this.node.libp2p.getConnections() as any,
       deletePeerFromPeerStore: async (peerId) => {
         const { peerIdFromString } = await import('@libp2p/peer-id');

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  isProtocolUnsupportedError,
   PROTOCOL_NETWORK_IDENTITY,
   type DkgNetworkIdentity,
   type OperationContext,
@@ -54,7 +55,6 @@ export interface NetworkAdmissionProbeBackoffOptions {
 }
 
 type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response' | 'unsupported-protocol';
-export type NetworkIdentityProbeTransportFailureKind = 'transient' | 'unsupported-protocol';
 
 interface NetworkAdmissionProbeBackoffEntry {
   failures: number;
@@ -134,18 +134,6 @@ export class NetworkAdmissionProbeError extends Error {
   constructor(peerId: string, reason: string) {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
-  }
-}
-
-export class NetworkIdentityProbeTransportError extends Error {
-  readonly kind: NetworkIdentityProbeTransportFailureKind;
-  readonly originalError?: unknown;
-
-  constructor(kind: NetworkIdentityProbeTransportFailureKind, reason: string, originalError?: unknown) {
-    super(reason);
-    this.name = 'NetworkIdentityProbeTransportError';
-    this.kind = kind;
-    this.originalError = originalError;
   }
 }
 
@@ -432,8 +420,6 @@ function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
 }
 
 function probeBackoffKindForTransportFailure(err: unknown): NetworkAdmissionProbeBackoffKind {
-  if (err instanceof NetworkIdentityProbeTransportError && err.kind === 'unsupported-protocol') {
-    return 'unsupported-protocol';
-  }
+  if (isProtocolUnsupportedError(err)) return 'unsupported-protocol';
   return 'transient';
 }
