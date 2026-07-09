@@ -737,8 +737,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: (peerId, protocolId, direction) =>
-        this.networkAdmission.isPeerAccepted(peerId, protocolId, direction),
+      isPeerAccepted: (peerId) => this.networkAdmission.isAcceptedPeer(peerId),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
     // Default to in-memory substrate stores when no durable stores
@@ -772,15 +771,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        if (!this.networkAdmission.isPeerAccepted(peerId, 'peer-resolver', 'outbound')) return;
+        if (!this.networkAdmission.isAcceptedPeer(peerId)) return;
         await peerResolver.resolve(peerId, { signal }).catch(() => undefined);
       },
     });
     this.gossip = new GossipSubManager(this.node, this.eventBus, {
       networkId: this.config.networkIdentity?.networkId,
       chainId: this.config.networkIdentity?.chainId,
-      isPeerAccepted: (peerId, topic) =>
-        this.networkAdmission.isPeerAccepted(peerId, topic, 'gossip'),
+      isPeerAccepted: (peerId) => this.networkAdmission.isAcceptedPeer(peerId),
     });
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
@@ -2605,7 +2603,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<boolean> {
     const identity = this.config.networkIdentity;
     if (!identity?.networkId) return true;
-    if (this.networkAdmission.isPeerAccepted(remotePeer, 'network-admission', 'outbound')) {
+    if (this.networkAdmission.isAcceptedPeer(remotePeer)) {
       return true;
     }
 
@@ -2712,7 +2710,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!syncOnConnectEnabled(this.config)) {
       return false;
     }
-    if (!this.networkAdmission.isPeerAccepted(remotePeer, 'sync-on-connect', 'outbound')) {
+    if (!this.networkAdmission.isAcceptedPeer(remotePeer)) {
       return false;
     }
     const now = Date.now();
@@ -2816,7 +2814,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!syncOnConnectEnabled(this.config)) {
       return 'not-started';
     }
-    if (!this.networkAdmission.isPeerAccepted(remotePeer, 'sync-on-connect', 'outbound')) {
+    if (!this.networkAdmission.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
@@ -3022,7 +3020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   handlePeerUpdateForSyncRetry(this: DKGAgent, peerId: string, protocols: readonly string[]): void {
     if (peerId === this.node.libp2p.peerId.toString()) return;
-    if (!this.networkAdmission.isPeerAccepted(peerId, 'peer:update', 'inbound')) return;
+    if (!this.networkAdmission.isAcceptedPeer(peerId)) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
     // identify — a core peer whose identify completed late was never
@@ -3080,7 +3078,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
       const peerId = pid.toString();
-      if (!this.networkAdmission.isPeerAccepted(peerId, 'sync-reconciler', 'outbound')) continue;
+      if (!this.networkAdmission.isAcceptedPeer(peerId)) continue;
       if (this.syncingPeers.has(peerId)) continue;
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
@@ -3359,7 +3357,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async maybeDialGossipSender(this: DKGAgent, peerIdStr: string): Promise<void> {
     const selfPeerId = this.node.libp2p.peerId.toString();
     if (peerIdStr === selfPeerId) return;
-    if (!this.networkAdmission.isPeerAccepted(peerIdStr, 'gossip-redial', 'outbound')) return;
+    if (!this.networkAdmission.isAcceptedPeer(peerIdStr)) return;
 
     // Already connected → nothing to do.
     const connected = this.node.libp2p.getPeers().some(p => p.toString() === peerIdStr);
@@ -4031,7 +4029,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       [...new Map(
         this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
       ).values()].filter((peer) =>
-        this.networkAdmission.isPeerAccepted(peer.toString(), 'catchup', 'outbound'),
+        this.networkAdmission.isAcceptedPeer(peer.toString()),
       ),
       preferredPeerId,
       isPrivateContextGraph,
@@ -4532,7 +4530,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {
-    if (!this.networkAdmission.isPeerAccepted(peerId, 'ensure-peer-connected', 'outbound')) return;
+    if (!this.networkAdmission.isAcceptedPeer(peerId)) return;
     await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId);
   }
 

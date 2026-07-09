@@ -1764,7 +1764,7 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     return async (peerId: string, protocol: string, data: Uint8Array) => {
-      if (!this.networkAdmission.isPeerAccepted(peerId, protocol, 'outbound')) {
+      if (!this.networkAdmission.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
       return send(peerId, protocol, data);

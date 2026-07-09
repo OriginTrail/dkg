@@ -38,8 +38,9 @@ export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {
   NetworkAdmissionService,
+  peerIdsFromMultiaddr,
   peerIdsFromMultiaddrs,
-  type NetworkAdmissionDirection,
+  targetPeerIdFromMultiaddr,
   type NetworkAdmissionOptions,
   type NetworkAdmissionSnapshot,
 } from './p2p/network-admission.js';

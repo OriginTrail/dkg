@@ -1,5 +1,3 @@
-export type NetworkAdmissionDirection = 'inbound' | 'outbound' | 'gossip';
-
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
@@ -85,11 +83,7 @@ export class NetworkAdmissionService {
     this.verifiedPeerIds.delete(normalized);
   }
 
-  isPeerAccepted(
-    peerId: string,
-    _protocolOrTopic: string,
-    _direction: NetworkAdmissionDirection,
-  ): boolean {
+  isAcceptedPeer(peerId: string): boolean {
     if (!this.enabled) return true;
     const normalized = normalizePeerId(peerId);
     if (!normalized) return false;

@@ -9,7 +9,7 @@ describe('NetworkAdmissionService', () => {
   it('allows all peers when no active network identity is configured', () => {
     const admission = new NetworkAdmissionService();
 
-    expect(admission.isPeerAccepted('peer-a', '/dkg/test', 'outbound')).toBe(true);
+    expect(admission.isAcceptedPeer('peer-a')).toBe(true);
     expect(admission.snapshot().enabled).toBe(false);
   });
 
@@ -20,9 +20,9 @@ describe('NetworkAdmissionService', () => {
       trustedPeerIds: ['trusted-peer'],
     });
 
-    expect(admission.isPeerAccepted('self-peer', '/dkg/test', 'outbound')).toBe(true);
-    expect(admission.isPeerAccepted('trusted-peer', '/dkg/test', 'inbound')).toBe(false);
-    expect(admission.isPeerAccepted('unknown-peer', '/dkg/test', 'gossip')).toBe(false);
+    expect(admission.isAcceptedPeer('self-peer')).toBe(true);
+    expect(admission.isAcceptedPeer('trusted-peer')).toBe(false);
+    expect(admission.isAcceptedPeer('unknown-peer')).toBe(false);
   });
 
   it('promotes verified same-network peers and excludes quarantined peers', () => {
@@ -36,8 +36,8 @@ describe('NetworkAdmissionService', () => {
 
     admission.quarantinePeer('trusted-peer');
     admission.quarantinePeer('verified-peer');
-    expect(admission.isPeerAccepted('trusted-peer', '/dkg/test', 'outbound')).toBe(false);
-    expect(admission.isPeerAccepted('verified-peer', '/dkg/test', 'outbound')).toBe(false);
+    expect(admission.isAcceptedPeer('trusted-peer')).toBe(false);
+    expect(admission.isAcceptedPeer('verified-peer')).toBe(false);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
 
