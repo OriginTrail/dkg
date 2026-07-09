@@ -72,10 +72,6 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // These are not parity violations. Additions here require a code-review
 // because each one is a silent divergence from the production adapter.
 const MOCK_EXEMPT_FROM_EVM = new Set<string>([
-  // #1340: private failover-read helper on ContextGraphMethods (leaks onto the
-  // prototype because TS `private` isn't runtime-enforced); internal EVM
-  // recovery detail, not adapter API. The mock has no on-chain deposit to read.
-  'readCgRegistrationDeposit',
   // Pure EVM bookkeeping surfaces that the mock has no reason to emulate.
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
@@ -306,10 +302,6 @@ const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
   // dropped the surface, so they don't need parity-list entries.
   'createKnowledgeAsset',
   'updateKnowledgeAsset',
-  // #1340: private failover-read helper on ContextGraphMethods (surfaces on the
-  // prototype because TS `private` isn't runtime-enforced). Internal to the EVM
-  // adapter's CG-register recovery; the mock has no on-chain deposit to read.
-  'readCgRegistrationDeposit',
 ]);
 
 describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {

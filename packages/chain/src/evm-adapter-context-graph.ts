@@ -491,10 +491,26 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         if (!isTooLowAllowanceError(err)) {
           throw err;
         }
-        // #1340: read the deposit through the RPC-failover facade (see
-        // readCgRegistrationDeposit) so a broken primary fails over to a healthy
-        // backup instead of throwing → 0n → skipping the TRAC approve + retry.
-        const deposit = await this.readCgRegistrationDeposit();
+        // #1340: read the deposit through the RPC-failover facade (`readContract`),
+        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
+        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
+        // approve + retry below never run, defeating failover for a new CG's first
+        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
+        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
+        // when ALL endpoints fail or the deposit is genuinely dormant.
+        const ps = this.contracts.parametersStorage as Contract | undefined;
+        let deposit = 0n;
+        try {
+          deposit = ps
+            ? await this.readContract<bigint>(
+                ps,
+                'parametersStorage.contextGraphRegistrationDeposit',
+                'contextGraphRegistrationDeposit',
+              )
+            : 0n;
+        } catch {
+          deposit = 0n;
+        }
         if (deposit === 0n) throw err;
         await this.ensureV10ApproveTrac(
           this.signer,
@@ -538,31 +554,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       success: receipt.status === 1,
       contextGraphId,
     };
-  }
-
-  /**
-   * Read the on-chain CG registration deposit through the RPC-failover facade
-   * (#1340). Extracted as a narrow seam so the failover behavior is testable
-   * without reconstructing the whole `createOnChainContextGraph` flow.
-   *
-   * Returns 0n when the deposit is genuinely dormant OR the read fails on every
-   * configured endpoint — both collapse to the same conservative "do not force
-   * a TRAC approve on an unreadable/dormant deposit". `readContract` fails over
-   * on transport errors (429/5xx/timeout/network) and rethrows a decoded revert
-   * unchanged (caught here → 0n), so the guard never masks a real error.
-   */
-  private async readCgRegistrationDeposit(): Promise<bigint> {
-    const ps = this.contracts.parametersStorage as Contract | undefined;
-    if (!ps) return 0n;
-    try {
-      return await this.readContract<bigint>(
-        ps,
-        'parametersStorage.contextGraphRegistrationDeposit',
-        'contextGraphRegistrationDeposit',
-      );
-    } catch {
-      return 0n;
-    }
   }
 
   async verify(params: VerifyParams): Promise<TxResult> {
