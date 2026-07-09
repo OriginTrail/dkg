@@ -146,9 +146,14 @@ export interface RpcFailoverClientOptions {
 export interface StickinessOptions {
   /** Force stickiness on/off (tests). Ignored if `isEnabled` is given. */
   enabled?: boolean;
-  /** LIVE kill-switch predicate — the CONFIG boundary (the adapter) resolves
-   *  `DKG_DISABLE_RPC_STICKINESS` here so the transport core stays free of any
-   *  process-global dependency. Takes precedence over `enabled`. */
+  /** Kill-switch predicate, evaluated LIVE per check. OWNERSHIP: the config
+   *  boundary owns env resolution — the production adapter injects
+   *  `() => process.env.DKG_DISABLE_RPC_STICKINESS !== '1'` here, so the transport
+   *  core carries no process-global dependency. Takes precedence over `enabled`.
+   *  When NEITHER `isEnabled` nor `enabled` is supplied, stickiness defaults to
+   *  ENABLED and the env kill-switch is NOT consulted by the core — only the
+   *  adapter-injected predicate honors it (a bare `new RpcFailoverClient(...)` is a
+   *  test/non-production path). */
   isEnabled?: () => boolean;
   ttlMs?: number;
   now?: () => number;

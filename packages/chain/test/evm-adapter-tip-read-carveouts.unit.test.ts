@@ -63,14 +63,32 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     expect(call![2]).toMatchObject({ skipPreferred: true });
   });
 
-  it('the PCA rpc proxy (send) reads canonical + preference-transparent', async () => {
+  it('the PCA rpc proxy: TIP methods are transparent, but receipt/exact-block reads stay sticky', async () => {
     const a = makeAdapter();
     const readProvider = recorder(async () => '0x10');
     a.readProvider = readProvider;
-    expect(await a.requestPublishingConvictionRpc('eth_blockNumber', [])).toBe('0x10');
-    const call = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_blockNumber');
-    expect(call).toBeDefined();
-    expect(call![2]).toMatchObject({ skipPreferred: true });
+
+    // eth_blockNumber → TIP → skipPreferred (transparent).
+    await a.requestPublishingConvictionRpc('eth_blockNumber', []);
+    expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_blockNumber')![2])
+      .toMatchObject({ skipPreferred: true });
+
+    // eth_getBlockByNumber('latest') → TIP → skipPreferred.
+    await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['latest', false]);
+    expect(readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && c[2]?.skipPreferred))
+      .toBeDefined();
+
+    // eth_getTransactionReceipt → NOT a tip read → STICKY (no skipPreferred), so a
+    // lagging primary's null doesn't short-circuit the backup that has the receipt.
+    await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']);
+    const receiptCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getTransactionReceipt');
+    expect(receiptCall).toBeDefined();
+    expect(receiptCall![2]?.skipPreferred).toBeUndefined();
+
+    // eth_getBlockByNumber(concrete block) → NOT tip → STICKY.
+    await a.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false]);
+    const exactBlockCall = readProvider.calls.find((c: any[]) => c[0] === 'pca rpc eth_getBlockByNumber' && !c[2]?.skipPreferred);
+    expect(exactBlockCall).toBeDefined();
   });
 
   it('the event-lane wide-log scan (listenForEvents → queryFilter) reads canonical + preference-transparent', async () => {

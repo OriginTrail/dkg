@@ -25,6 +25,11 @@ import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
 
+/** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
+ *  preference-transparent). A concrete hex block number or `earliest` is a fixed
+ *  block → sticky (prefer the endpoint that already has it). */
+const PCA_TIP_BLOCK_TAGS = new Set<string>(['latest', 'pending', 'safe', 'finalized']);
+
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
   identityId?: unknown;
@@ -781,10 +786,20 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
     await this.init();
-    // Generic browser-facing read proxy: the allowlisted methods include the
-    // TIP-SENSITIVE `eth_blockNumber` / `eth_getBlockByNumber`, and this path has
-    // no read-your-write need (the node isn't writing here), so stay canonical +
-    // preference-transparent rather than pin the UI to a possibly-lagging backend.
-    return this.readTipProvider(`pca rpc ${method}`, (provider) => provider.send(method, params));
+    // Classify by method/params. Only a TRUE tip read (current head, or an
+    // `eth_getBlockByNumber` for a latest-family block tag) is preference-
+    // transparent — a lagging sticky backend would give a stale head. Receipt /
+    // tx / exact-block / `eth_call` reconciliation reads stay on the STICKY
+    // failover path: the endpoint that already observed the tx/block is the one to
+    // prefer, and forcing canonical/primary-first would make a lagging primary's
+    // `null` terminal (returned as success) instead of trying the preferred backup
+    // that has the result (#PCA-review).
+    const tag = params[0];
+    const isTipRead = method === 'eth_blockNumber'
+      || (method === 'eth_getBlockByNumber' && typeof tag === 'string' && PCA_TIP_BLOCK_TAGS.has(tag));
+    const read = isTipRead
+      ? this.readTipProvider.bind(this)
+      : this.readProvider.bind(this);
+    return read(`pca rpc ${method}`, (provider) => provider.send(method, params));
   }
 }

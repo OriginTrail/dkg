@@ -826,4 +826,70 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // still write-proven → sticks to backup
     expect(populateOrder).toEqual(['backup']); // the read did NOT reset the write-proven source
   });
+
+  it('AC-17: a re-point after a live pool rebind (expired carried-over deadline) arms a FRESH TTL — no per-op primary re-probe (round-4 🔴)', async () => {
+    let clock = 0;
+    let urls = ['https://p.example', 'https://b.example'];
+    let providers: any[] = [{ read: readSeq(() => retryable429()) }, { read: readSeq(() => 'B') }];
+    const client = new RpcFailoverClient(
+      () => providers.map((p, i) => ({ provider: p as any, rpcUrl: urls[i] })),
+      NEVER_SIGN,
+      () => 'evm:31337',
+      { stickiness: { enabled: true, ttlMs: 30_000, now: () => clock } },
+    );
+    clock = 0;
+    expect(await client.read('r', (p: any) => p.read())).toBe('B'); // establish B, due = 30_000
+
+    // Live pool rebind PAST the TTL: B is gone, new pool [C(primary, down), D].
+    clock = 60_000;
+    urls = ['https://c.example', 'https://d.example'];
+    const cRead = readSeq(() => retryable429());
+    const dRead = recorder(async () => 'D');
+    providers = [{ read: cRead }, { read: dRead }];
+    expect(await client.read('r', (p: any) => p.read())).toBe('D'); // preferred B absent → canonical → C fails → D → re-point + FRESH due
+    expect(cRead.calls).toHaveLength(1); // C probed once (the rebind op)
+
+    clock = 60_001;
+    expect(await client.read('r', (p: any) => p.read())).toBe('D'); // within the FRESH window → D preferred first
+    expect(cRead.calls).toHaveLength(1); // primary NOT re-probed (bug: a stale deadline would re-probe every op → 2)
+    expect(dRead.calls).toHaveLength(2);
+  });
+
+  it('AC-19: getReceipt is a first-class ESTABLISHER — a non-null receipt after failover primes the preference (round-4 🟡)', async () => {
+    const receipt = { status: 1, hash: '0xhash' };
+    const primary = { getTransactionReceipt: recorder(async () => { throw retryable429(); }), read: recorder(async () => 'P') };
+    const backup = { getTransactionReceipt: recorder(async () => receipt), read: recorder(async () => 'B') };
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    // getReceipt runs as the FIRST loop: primary 429 → backup returns the receipt →
+    // it (not a prior broadcast) establishes the preferred endpoint.
+    await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
+    expect(getRpcFailoverStats().preferredEstablishments).toBe(1);
+
+    // A following read prefers the backend getReceipt established.
+    expect(await client.read('r', (p: any) => p.read())).toBe('B');
+    expect(primary.read.calls).toHaveLength(0); // primary NOT tried — the receipt establishment carried over
+  });
+
+  it('AC-18: multi-backup re-point (preferred backup degrades mid-window → next backup) keeps the cadence (round-4 🟡)', async () => {
+    let clock = 0;
+    const pRead = readSeq(() => retryable429());     // primary always down
+    let bN = 0;
+    const bRead = recorder(async () => { bN += 1; if (bN >= 2) throw retryable429(); return 'B'; }); // ok once, then degrades
+    const cRead = recorder(async () => 'C');
+    const client = makeClient(
+      [{ read: pRead }, { read: bRead }, { read: cRead }],
+      ['https://p.example', 'https://b.example', 'https://c.example'],
+      NEVER_SIGN,
+      { enabled: true, ttlMs: 30_000, now: () => clock },
+    );
+    clock = 0;
+    expect(await client.read('r', (p: any) => p.read())).toBe('B'); // establish B
+    clock = 10_000;
+    expect(await client.read('r', (p: any) => p.read())).toBe('C'); // preferred B degrades → fail over B→P→C → re-point to C (in-window)
+    clock = 11_000;
+    const pBefore = pRead.calls.length;
+    expect(await client.read('r', (p: any) => p.read())).toBe('C'); // preferred C tried first
+    expect(pRead.calls.length).toBe(pBefore); // primary NOT re-probed (still within the original TTL window)
+  });
 });

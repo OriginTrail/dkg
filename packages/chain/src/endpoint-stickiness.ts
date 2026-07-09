@@ -149,10 +149,17 @@ export class EndpointStickiness {
       };
       this.cfg.onEstablished?.(endpoint.rpcUrl);
     } else if (this.state.url !== endpoint.rpcUrl) {
-      // Re-point to a different backup (the old one also degraded). Keep the
-      // existing deadline (a hop within an ongoing degradation episode, already
-      // counted at establishment — no new `onEstablished`).
-      this.state = { ...this.state, url: endpoint.rpcUrl, source: isPopulate ? 'write' : 'read' };
+      // Re-point to a different backup (the old one also degraded, or was dropped
+      // by a live pool rebind). Keep an in-window deadline (a hop within an ongoing
+      // degradation episode, already counted at establishment — no new
+      // `onEstablished`), BUT if the carried-over deadline has already EXPIRED, arm
+      // a fresh one: otherwise a rebind that swaps in a new backup while the old
+      // deadline is stale would re-probe the primary on EVERY subsequent op (the
+      // collapse-to-index-0 this cadence exists to prevent).
+      const primaryProbeDueAt = this.cfg.now() >= this.state.primaryProbeDueAt
+        ? this.cfg.now() + this.cfg.ttlMs
+        : this.state.primaryProbeDueAt;
+      this.state = { ...this.state, url: endpoint.rpcUrl, source: isPopulate ? 'write' : 'read', primaryProbeDueAt };
     } else if (isPopulate && this.state.source !== 'write') {
       // Same preferred backend, now PROVEN nonce-safe by a populate → upgrade.
       // Never DOWNGRADE on a read (a read hitting the write-proven backend doesn't
