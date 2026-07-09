@@ -159,11 +159,14 @@ export class GraphSetIndexStore implements TripleStore {
     // graph enumeration stays O(1) rather than forcing a full store scan on the
     // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
     // full rebuild.
-    if (this.enabled && options?.touchedGraphs && options.touchedGraphs.length > 0) {
+    if (options?.touchedGraphs && options.touchedGraphs.length > 0) {
+      // Strip the update-only `touchedGraphs` hint before the maintenance READS
+      // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
+      // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
+      const touched = [...options.touchedGraphs];
+      const readOptions = queryOptionsFromUpdateOptions(options);
       this.bumpMutation();
-      await this.maintainIndex(() =>
-        this.refreshTouchedGraphs([...options.touchedGraphs!], 'update', options),
-      );
+      await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'update', readOptions));
       return;
     }
     this.scheduleFullRefresh('update');
@@ -376,6 +379,16 @@ export class GraphSetIndexStore implements TripleStore {
 
 function namedGraphsFromQuads(quads: Quad[]): string[] {
   return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
+}
+
+/**
+ * Drop the update-only `touchedGraphs` hint, yielding the read-path `QueryOptions`
+ * (source/priority/signal) to forward to index-maintenance reads (`hasGraph`) — so
+ * the update-only field never crosses into a read call via structural assignability.
+ */
+function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
+  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
+  return readOptions;
 }
 
 function isSparqlUpdate(sparql: string): boolean {
