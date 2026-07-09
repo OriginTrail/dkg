@@ -32,6 +32,6 @@ Missing `assetUal` in a publish lifecycle log is an observability defect, not by
 
 Normal lifecycle state changes should be logged at `info`. Declines, retries, and degraded-but-continuing paths should be logged at `warn`. Terminal publish failures should be logged at `error`.
 
-KA publish lifecycle logs are always on for now. Operators can rely on their presence without enabling a feature flag; normal log-level filtering remains the escape hatch for deployments that need less output.
+KA publish lifecycle logs are split into two verbosity tiers. Summary lifecycle logs are always on and cover the high-level state changes needed to follow a publish without flooding normal daemon logs: Asset UAL allocation, WM/SWM state changes, ACK request/quorum/failures, chain submit/confirm/failure, VM promotion, finalization, sync apply/failure, and reconcile promotion/cursor movement. Detailed per-peer/per-step lifecycle logs are emitted only when `DKG_DEBUG_KA_LIFECYCLE=1` (or the compatibility aliases `DKG_KA_LIFECYCLE_DEBUG=1` / `DKG_DEBUG_PUBLISH_LIFECYCLE=1`) is set.
 
 Lifecycle logs must not include raw triples, ciphertext, private payload snippets, or unbounded peer-controlled text. Inputs and outputs should be represented with counts, hashes, identifiers, peer/node metadata, and bounded error reasons.

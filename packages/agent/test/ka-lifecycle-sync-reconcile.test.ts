@@ -74,6 +74,7 @@ import {
 describe('ka lifecycle sync reconcile', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('logs chain reconcile promote decisions by assetUal', async () => {

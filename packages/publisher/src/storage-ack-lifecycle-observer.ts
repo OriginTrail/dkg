@@ -8,6 +8,7 @@ import {
   isStorageACKDecline,
   isTransientStorageACKDeclineCode,
   logKaLifecycleEvent,
+  type KaLifecycleLogDetail,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import type { StorageAckDecision, StorageAckDecisionObserver } from './storage-ack-handler.js';
@@ -27,6 +28,7 @@ export interface StorageAckLifecycleObserverOptions {
   }) => string | undefined | Promise<string | undefined>;
   logger?: Logger;
   resolveTimeoutMs?: number;
+  detail?: KaLifecycleLogDetail;
 }
 
 export function createStorageAckLifecycleObserver(
@@ -65,6 +67,7 @@ export function createStorageAckLifecycleObserver(
       localPeerId,
       localNodeIdentityId,
       peer: decision.peerId,
+      detail: options.detail,
       level: declined ? 'warn' : 'info',
       metadata: {
         contextGraphId: ack.contextGraphId,

@@ -1,9 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { Logger, type LogSink } from '../src/logger.js';
 import {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,
+  isKaLifecycleDebugLoggingEnabled,
   logKaLifecycleEvent,
+  resolveKaLifecycleLogDetail,
 } from '../src/ka-lifecycle-logger.js';
 import {
   KA_LIFECYCLE_STAGES as ROOT_KA_LIFECYCLE_STAGES,
@@ -18,6 +20,14 @@ interface LogEntry {
   module: string;
   message: string;
 }
+
+const KA_DEBUG_ENV_KEYS = [
+  'DKG_DEBUG_KA_LIFECYCLE',
+  'DKG_KA_LIFECYCLE_DEBUG',
+  'DKG_DEBUG_PUBLISH_LIFECYCLE',
+] as const;
+const originalDebugEnv = new Map<string, string | undefined>();
+for (const key of KA_DEBUG_ENV_KEYS) originalDebugEnv.set(key, process.env[key]);
 
 function collectSink(): { entries: LogEntry[]; sink: LogSink } {
   const entries: LogEntry[] = [];
@@ -43,8 +53,17 @@ function captureStderr<T>(fn: () => T): { result: T; output: string[] } {
 }
 
 describe('KA lifecycle logging', () => {
+  beforeEach(() => {
+    for (const key of KA_DEBUG_ENV_KEYS) delete process.env[key];
+  });
+
   afterEach(() => {
     Logger.setSink(null);
+    for (const key of KA_DEBUG_ENV_KEYS) {
+      const original = originalDebugEnv.get(key);
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
   });
 
   it('emits an assetUal-correlated lifecycle log with node metadata and severity', () => {
@@ -101,6 +120,7 @@ describe('KA lifecycle logging', () => {
         assetUal: 'did:dkg:otp:2043/0xasset/43',
         stage: 'swm_share',
         event: 'share.received',
+        detail: 'summary',
         role: 'receiver',
         localPeerId: '12D3KooWReceiverPeerFullIdentifier',
         localNodeIdentityId: 'node-identity-receiver-full',
@@ -205,6 +225,7 @@ describe('KA lifecycle logging', () => {
         assetUal: longAssetUal,
         stage: 'finalization',
         event: 'gossip.received',
+        detail: 'summary',
         role: 'receiver',
         localPeerId: longLocalPeerId,
         localNodeIdentityId: longLocalNodeIdentityId,
@@ -251,6 +272,7 @@ describe('KA lifecycle logging', () => {
           assetUal: `did:dkg:otp:2043/0xasset/${stage}`,
           stage,
           event: `${stage}.progress`,
+          detail: 'summary',
           role: 'sync',
           localPeerId: '12D3KooWLocalPeerFullIdentifier',
           localNodeIdentityId: 'node-identity-local-full',
@@ -264,6 +286,59 @@ describe('KA lifecycle logging', () => {
       ),
     );
     expect(entries.every((entry) => entry.message.includes('role=sync'))).toBe(true);
+  });
+
+  it('suppresses detailed lifecycle events unless KA lifecycle debug logging is enabled', () => {
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const log = new Logger('KALifecycle');
+    const { output } = captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-detail', operationName: 'publish' }, {
+        assetUal: 'did:dkg:otp:2043/0xasset/detail',
+        stage: 'storage_ack',
+        event: 'success',
+        role: 'publisher',
+        localPeerId: 'publisher-peer',
+        localNodeIdentityId: 'publisher-node',
+      }),
+    );
+
+    expect(resolveKaLifecycleLogDetail({
+      assetUal: 'did:dkg:otp:2043/0xasset/detail',
+      stage: 'storage_ack',
+      event: 'success',
+      role: 'publisher',
+      localPeerId: 'publisher-peer',
+      localNodeIdentityId: 'publisher-node',
+    })).toBe('debug');
+    expect(isKaLifecycleDebugLoggingEnabled()).toBe(false);
+    expect(entries).toHaveLength(0);
+    expect(output).toHaveLength(0);
+  });
+
+  it('emits detailed lifecycle events when the KA lifecycle debug flag is enabled', () => {
+    process.env.DKG_DEBUG_KA_LIFECYCLE = '1';
+    const { entries, sink } = collectSink();
+    Logger.setSink(sink);
+
+    const log = new Logger('KALifecycle');
+    const { output } = captureStdout(() =>
+      logKaLifecycleEvent(log, { operationId: 'op-ka-debug-detail', operationName: 'publish' }, {
+        assetUal: 'did:dkg:otp:2043/0xasset/detail',
+        stage: 'storage_ack',
+        event: 'success',
+        role: 'publisher',
+        localPeerId: 'publisher-peer',
+        localNodeIdentityId: 'publisher-node',
+      }),
+    );
+
+    expect(isKaLifecycleDebugLoggingEnabled()).toBe(true);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].message).toContain('stage=storage_ack');
+    expect(entries[0].message).toContain('event=success');
+    expect(output).toHaveLength(1);
   });
 
   it('exports the lifecycle helper and tokens from the package root', () => {

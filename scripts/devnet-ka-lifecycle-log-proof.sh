@@ -3,7 +3,7 @@
 # Generate repeatable KA publish lifecycle log proof from a running devnet.
 #
 # Preconditions:
-#   ./scripts/devnet.sh start 6
+#   DKG_DEBUG_KA_LIFECYCLE=1 ./scripts/devnet.sh start 6
 #   pnpm run build
 #
 # Output:
@@ -116,6 +116,7 @@ write_metadata() {
     printf 'publisherNode=node%s\n' "$NODE_NUM"
     printf 'nodeCount=%s\n' "$node_count"
     printf 'nodeRoles=node%s publisher/core; other node*/daemon.log entries receiver/core/sync as emitted\n' "$NODE_NUM"
+    printf 'kaLifecycleDebugRequired=DKG_DEBUG_KA_LIFECYCLE=1 must be set when starting devnet for the full lifecycle proof trail\n'
     printf 'publishCommand=DEVNET_DIR=%s DEVNET_TEST_NODE=%s CONFIRM_TIMEOUT=%s %s\n' \
       "$DEVNET_DIR" "$NODE_NUM" "$CONFIRM_TIMEOUT" "$PUBLISH_SCRIPT"
     printf 'assetUal=%s\n' "$ASSET_UAL"
@@ -183,7 +184,7 @@ write_metadata
 if [ -n "$MISSING" ]; then
   log "Lifecycle grep output so far:"
   cat "$GREP_OUT"
-  fail "missing required lifecycle tokens: $MISSING"
+  fail "missing required lifecycle tokens: $MISSING (restart devnet with DKG_DEBUG_KA_LIFECYCLE=1 for the full proof trail)"
 fi
 
 log "Lifecycle proof complete:"

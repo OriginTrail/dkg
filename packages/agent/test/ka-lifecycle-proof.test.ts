@@ -75,6 +75,7 @@ import {
 describe('ka lifecycle proof', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('builds a grepable multi-node KA publish lifecycle proof from connected publisher and receiver paths by assetUal', async () => {

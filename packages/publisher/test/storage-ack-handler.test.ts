@@ -197,6 +197,7 @@ describe('StorageACKHandler', () => {
         localPeerId: 'receiver-peer',
         localNodeIdentityId: coreIdentityId,
         resolveAssetUalForPublishIntent,
+        detail: 'summary',
       }),
     } as any);
     const entries: string[] = [];

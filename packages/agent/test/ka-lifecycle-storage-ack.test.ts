@@ -77,6 +77,7 @@ import {
 describe('ka lifecycle storage ack', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('logs StorageACK success by assetUal', async () => {

@@ -21,7 +21,10 @@ export {
 export {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,
+  isKaLifecycleDebugLoggingEnabled,
   logKaLifecycleEvent,
+  resolveKaLifecycleLogDetail,
+  type KaLifecycleLogDetail,
   type KaLifecycleLogEvent,
   type KaLifecycleLogLevel,
   type KaLifecycleMetadataValue,

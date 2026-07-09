@@ -44,7 +44,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../../src/finalization-handler.js';
 import { DKGAgent } from '../../src/index.js';
-import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from '../../src/dkg-agent-lifecycle.js';
+import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from '../../src/storage-ack-lifecycle-identity.js';
 import { makeTestKaAllocator } from '../../../publisher/test/_helpers/ka-allocator.js';
 import { mockSealCtx, wrapPublisherForTest } from '../../../publisher/test/_helpers/seal.js';
 
@@ -71,6 +71,7 @@ export async function createReceiverAgent(): Promise<DKGAgent> {
 }
 
 export function captureLogs(): LogRecord[] {
+  process.env.DKG_DEBUG_KA_LIFECYCLE = '1';
   const entries: LogRecord[] = [];
   Logger.setSink((entry) => entries.push(entry));
   return entries;

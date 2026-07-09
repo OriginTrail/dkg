@@ -74,6 +74,7 @@ import {
 describe('ka lifecycle finalization', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('logs already-confirmed finalization by assetUal', async () => {

@@ -1,6 +1,7 @@
 import { Logger, type OperationContext } from './logger.js';
 
-export type KaLifecycleLogLevel = 'info' | 'warn' | 'error';
+export type KaLifecycleLogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type KaLifecycleLogDetail = 'summary' | 'debug';
 
 export const KA_LIFECYCLE_STAGES = [
   'identity',
@@ -25,6 +26,7 @@ export type KaLifecycleMetadataValue = string | number | boolean | null | undefi
 
 export interface KaLifecycleLogEvent {
   level?: KaLifecycleLogLevel;
+  detail?: KaLifecycleLogDetail;
   assetUal: string;
   stage: KaLifecycleStage;
   event: string;
@@ -40,6 +42,36 @@ const KA_LIFECYCLE_REDACTED = '[REDACTED]';
 const KA_LIFECYCLE_METADATA_MAX_CHARS = 160;
 const KA_LIFECYCLE_UNSAFE_METADATA_KEY = /(?:ciphertext|nquads?|quads?|triples?|payload|plaintext|private|secret|raw)/i;
 const KA_LIFECYCLE_VALUE_REQUIRES_QUOTE = /[\s"\\\u0000-\u001f\u007f\u2028\u2029]/;
+const KA_LIFECYCLE_DEBUG_ENV_KEYS = [
+  'DKG_DEBUG_KA_LIFECYCLE',
+  'DKG_KA_LIFECYCLE_DEBUG',
+  'DKG_DEBUG_PUBLISH_LIFECYCLE',
+] as const;
+const KA_LIFECYCLE_TRUE_ENV = /^(1|true|yes|on)$/i;
+const KA_LIFECYCLE_SUMMARY_EVENTS = new Set<string>([
+  'identity:asset_ual_allocated',
+  'wm:write',
+  'swm_share:prepared',
+  'swm_share:swm_update_applied',
+  'swm_share:swm_update_rejected',
+  'swm_share:swm_state_changed',
+  'storage_ack:request',
+  'storage_ack:quorum',
+  'storage_ack:failure',
+  'storage_ack:storage_ack_declined',
+  'chain:submit',
+  'chain:confirm',
+  'chain:failure',
+  'vm:promote',
+  'finalization:complete',
+  'finalization:finalization_applied',
+  'finalization:finalization_failed',
+  'sync:sync_apply',
+  'sync:sync_failure',
+  'reconcile:reconcile_promote',
+  'reconcile:reconcile_cursor_advance',
+  'reconcile:reconcile_core_fill',
+]);
 const KA_LIFECYCLE_SENSITIVE_METADATA_VALUE = [
   /<[^>\s]+>\s+<[^>\s]+>\s+(?:"[^"]*"|<[^>]+>|_:[^\s]+|[^\s]+)\s*\./,
   /\bciphertext\b(?=.*(?:0x)?[0-9a-fA-F]{64,})/i,
@@ -48,8 +80,23 @@ const KA_LIFECYCLE_SENSITIVE_METADATA_VALUE = [
 ];
 
 export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: KaLifecycleLogEvent): void {
+  const detail = resolveKaLifecycleLogDetail(input);
+  if (detail === 'debug' && !isKaLifecycleDebugLoggingEnabled()) return;
   const level = input.level ?? 'info';
   log[level](ctx, formatKaLifecycleEvent(input));
+}
+
+export function isKaLifecycleDebugLoggingEnabled(): boolean {
+  const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+  if (!env) return false;
+  return KA_LIFECYCLE_DEBUG_ENV_KEYS.some((key) => KA_LIFECYCLE_TRUE_ENV.test(env[key] ?? ''));
+}
+
+export function resolveKaLifecycleLogDetail(input: KaLifecycleLogEvent): KaLifecycleLogDetail {
+  if (input.detail) return input.detail;
+  if (input.level === 'warn' || input.level === 'error') return 'summary';
+  if (KA_LIFECYCLE_SUMMARY_EVENTS.has(`${input.stage}:${input.event}`)) return 'summary';
+  return 'debug';
 }
 
 function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {

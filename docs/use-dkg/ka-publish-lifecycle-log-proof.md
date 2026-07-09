@@ -10,7 +10,7 @@ Generate proof from the branch under test instead of pasting a representative
 sample. Start a multi-node devnet, build the runtime packages, then run:
 
 ```bash
-./scripts/devnet.sh start 6
+DKG_DEBUG_KA_LIFECYCLE=1 ./scripts/devnet.sh start 6
 pnpm run build
 scripts/devnet-ka-lifecycle-log-proof.sh
 ```
@@ -24,10 +24,12 @@ pnpm test:devnet:ka-lifecycle-log-proof
 That suite runs the script and asserts the generated `metadata.txt`,
 `publish.txt`, and `grep.txt` artifacts contain the same `assetUal` and the
 required publisher, ACK success/quorum, receiver, finalization, sync, and
-reconcile rows. Receiver-side `storage_ack_signed` rows are expected only on
-ACK paths where the receiver can derive the per-KA identity locally, such as
-per-KA SWM graphs; direct inline ACKs prove the ACK lifecycle through the
-publisher's asset-scoped success/quorum rows without trusting a wire UAL.
+reconcile rows. This is the full debug trail, so the devnet must be started
+with `DKG_DEBUG_KA_LIFECYCLE=1`. Normal daemon runs emit only the compact
+summary lifecycle spine. Receiver-side `storage_ack_signed` rows are expected
+only on ACK paths where the receiver can derive the per-KA identity locally,
+such as per-KA SWM graphs; direct inline ACKs prove the ACK lifecycle through
+the publisher's asset-scoped success/quorum rows without trusting a wire UAL.
 
 The script publishes one KA through `scripts/devnet-test-publish.sh`, extracts
 the confirmed `assetUal`, and writes an artifact directory under:
@@ -71,11 +73,11 @@ the check:
 - exact grep command and full grep output, with only sensitive payload values
   redacted
 
-## Compact Trail Shape
+## Debug Trail Shape
 
 The unit proof in `packages/agent/test/ka-lifecycle-proof.test.ts` plus the
 split lifecycle suites under `packages/agent/test/ka-lifecycle-*.test.ts`
-assert this operator-facing sequence:
+assert this full debug sequence:
 
 ```text
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=identity event=asset_ual_allocated role=publisher localPeerId=...

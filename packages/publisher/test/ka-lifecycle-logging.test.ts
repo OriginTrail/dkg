@@ -83,7 +83,6 @@ describe('KA lifecycle logging - publisher publish', () => {
         'wm:write',
         'swm_share:prepared',
         'storage_ack:request',
-        'storage_ack:success',
         'storage_ack:quorum',
         'chain:submit',
         'chain:confirm',
@@ -93,11 +92,7 @@ describe('KA lifecycle logging - publisher publish', () => {
     expect(lifecycleLogs.every((entry) => entry.message.includes(`localPeerId=${PUBLISHER_PEER_ID}`))).toBe(true);
     expect(lifecycleLogs.every((entry) => entry.message.includes('localNodeIdentityId=7'))).toBe(true);
 
-    const ackSuccess = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'event') === 'success');
-    expect(ackSuccess?.message).toContain('peer=mock-chain-stub');
-    expect(ackSuccess?.message).toContain('peerNodeIdentityId=1');
-    expect(ackSuccess?.message).toContain('outcome=success');
-    expect(ackSuccess?.message).toContain('quorumCollected=1');
+    expect(lifecycleLogs.some((entry) => lifecycleField(entry.message, 'event') === 'success')).toBe(false);
 
     const wmWrite = lifecycleLogs.find((entry) => lifecycleField(entry.message, 'stage') === 'wm');
     expect(wmWrite?.message).toContain('recordCount=2');
@@ -330,7 +325,6 @@ describe('KA lifecycle logging - publisher publish', () => {
         'wm:write',
         'swm_share:prepared',
         'storage_ack:request',
-        'storage_ack:success',
         'storage_ack:quorum',
         'chain:submit',
         'chain:failure',

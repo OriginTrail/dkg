@@ -74,6 +74,7 @@ import {
 describe('ka lifecycle swm', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('logs a substrate-applied SWM receive by assetUal', async () => {

@@ -74,6 +74,7 @@ import {
 describe('ka lifecycle sender key', () => {
   afterEach(() => {
     Logger.setSink(null);
+    delete process.env.DKG_DEBUG_KA_LIFECYCLE;
   });
 
   it('logs Sender Key payload decrypt by assetUal', async () => {
