@@ -1,7 +1,6 @@
 import type { DiscoveryClient } from '../discovery.js';
 import {
-  canonicalTargetPeerIdFromMultiaddr,
-  type CanonicalMultiaddrPeerTarget,
+  type ParsedMultiaddrPeerTarget,
 } from './multiaddr-peer-target.js';
 
 interface Libp2pLike {
@@ -34,16 +33,12 @@ async function waitForPeerConnection(
 
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
-  multiaddress: string,
+  connectTarget: ParsedMultiaddrPeerTarget,
   log?: (message: string) => void,
-  parsedTarget?: CanonicalMultiaddrPeerTarget,
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
-  const target = parsedTarget ?? canonicalTargetPeerIdFromMultiaddr(multiaddress);
-  if (target && target.multiaddress !== multiaddress) {
-    throw new Error('Parsed multiaddr peer target does not match dial multiaddr');
-  }
+  const { multiaddress, target } = connectTarget;
 
   if (!multiaddress.includes('/p2p-circuit/p2p/')) {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   canonicalTargetPeerIdFromMultiaddr,
+  parseMultiaddrPeerTarget,
   peerIdsFromMultiaddrs,
   targetPeerIdFromMultiaddr,
 } from '../src/p2p/multiaddr-peer-target.js';
@@ -28,9 +29,15 @@ describe('multiaddr peer targets', () => {
     const addr = `/ip4/127.0.0.1/tcp/4001/p2p/${cidPeerId}`;
 
     expect(canonicalTargetPeerIdFromMultiaddr(addr)).toEqual({
-      multiaddress: addr,
       raw: cidPeerId,
       canonical: TARGET_PEER_ID,
+    });
+    expect(parseMultiaddrPeerTarget(addr)).toEqual({
+      multiaddress: addr,
+      target: {
+        raw: cidPeerId,
+        canonical: TARGET_PEER_ID,
+      },
     });
   });
 });

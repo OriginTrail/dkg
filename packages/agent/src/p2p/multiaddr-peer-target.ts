@@ -1,9 +1,13 @@
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface CanonicalMultiaddrPeerTarget {
-  multiaddress: string;
   raw: string;
   canonical: CanonicalPeerId;
+}
+
+export interface ParsedMultiaddrPeerTarget {
+  multiaddress: string;
+  target?: CanonicalMultiaddrPeerTarget;
 }
 
 export function peerIdsFromMultiaddr(addr: string): string[] {
@@ -22,7 +26,12 @@ export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
 
 export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMultiaddrPeerTarget | undefined {
   const raw = targetPeerIdFromMultiaddr(addr);
-  return raw ? { multiaddress: addr, raw, canonical: canonicalPeerIdString(raw) } : undefined;
+  return raw ? { raw, canonical: canonicalPeerIdString(raw) } : undefined;
+}
+
+export function parseMultiaddrPeerTarget(addr: string): ParsedMultiaddrPeerTarget {
+  const target = canonicalTargetPeerIdFromMultiaddr(addr);
+  return target ? { multiaddress: addr, target } : { multiaddress: addr };
 }
 
 export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {

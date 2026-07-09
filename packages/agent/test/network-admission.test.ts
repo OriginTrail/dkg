@@ -42,4 +42,13 @@ describe('NetworkAdmissionService', () => {
     expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
+
+  it('throws on invalid peer ids for mutating admission operations', () => {
+    const admission = new NetworkAdmissionService({
+      networkId: 'network-a',
+    });
+
+    expect(() => admission.markVerifiedSameNetwork('not-a-peer-id')).toThrow('Invalid peer id not-a-peer-id');
+    expect(() => admission.quarantinePeer('not-a-peer-id')).toThrow('Invalid peer id not-a-peer-id');
+  });
 });

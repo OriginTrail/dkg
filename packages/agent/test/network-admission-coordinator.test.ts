@@ -76,7 +76,7 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(
       fixture.coordinator.targetPeerForExplicitConnect(
         `/ip4/127.0.0.1/tcp/9090/p2p/${REMOTE_PEER_ID_CID}`,
-      )?.canonical,
+      ).target?.canonical,
     ).toBe(REMOTE_PEER_ID);
   });
 

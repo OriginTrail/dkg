@@ -1826,15 +1826,14 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    const target = this.networkAdmissionCoordinator.targetPeerForExplicitConnect(multiaddress);
+    const connectTarget = this.networkAdmissionCoordinator.targetPeerForExplicitConnect(multiaddress);
     await connectToMultiaddr(
       this.node.libp2p as any,
-      multiaddress,
+      connectTarget,
       (message) => this.log.info(ctx, message),
-      target,
     );
-    if (target) {
-      await this.assertPeerAdmittedForExplicitConnect(target.canonical, ctx);
+    if (connectTarget.target) {
+      await this.assertPeerAdmittedForExplicitConnect(connectTarget.target.canonical, ctx);
     }
   }
 

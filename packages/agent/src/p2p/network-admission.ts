@@ -38,15 +38,13 @@ export class NetworkAdmissionService {
   }
 
   markVerifiedSameNetwork(peerId: string): void {
-    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    if (!canonicalPeerId) return;
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.verifiedPeerIds.add(canonicalPeerId);
     this.quarantinedPeerIds.delete(canonicalPeerId);
   }
 
   quarantinePeer(peerId: string): void {
-    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    if (!canonicalPeerId) return;
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.quarantinedPeerIds.add(canonicalPeerId);
     this.verifiedPeerIds.delete(canonicalPeerId);
   }
@@ -81,4 +79,10 @@ export class NetworkAdmissionService {
       quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
     };
   }
+}
+
+function canonicalAdmissionServicePeerId(peerId: string): CanonicalPeerId {
+  const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+  if (!canonicalPeerId) throw new Error(`Invalid peer id ${peerId}`);
+  return canonicalPeerId;
 }
