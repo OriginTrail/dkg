@@ -49,18 +49,10 @@ export function resolveAutoUpdateVerifyTagSignature(
   return override ?? configured ?? false;
 }
 
-function assertBooleanOrUndefined(value: unknown, name: string): asserts value is boolean | undefined {
-  if (value !== undefined && typeof value !== 'boolean') {
-    throw new Error(`${name} must be a boolean when provided`);
-  }
-}
-
 export function resolveAutoUpdateGitRefPlan(
   au: Pick<ResolvedAutoUpdateConfig, "branch" | "verifyTagSignature"> & { ref?: string },
   opts: { refOverride?: string; verifyTagSignature?: boolean } = {},
 ): AutoUpdateGitRefPlan {
-  assertBooleanOrUndefined(au.verifyTagSignature, 'autoUpdate.verifyTagSignature');
-  assertBooleanOrUndefined(opts.verifyTagSignature, 'autoUpdate.verifyTagSignature override');
   const ref = resolveAutoUpdateGitRef(au, opts.refOverride);
   const verifyTagSignature = resolveAutoUpdateVerifyTagSignature(opts.verifyTagSignature, au.verifyTagSignature);
   const tagName = parseTagName(ref);

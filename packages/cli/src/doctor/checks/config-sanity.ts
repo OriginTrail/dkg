@@ -15,7 +15,10 @@
  * cost-benefit is documented in OT-RFC-41 §4.7.2.
  */
 import { join } from 'node:path';
-import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
+import {
+  AUTO_UPDATE_GIT_ONLY_FIELDS,
+  parseAutoUpdateVerifyTagSignature,
+} from '../../config.js';
 import {
   formatAutoUpdateTagVerificationWarning,
   resolveAutoUpdateGitRefPlan,
@@ -116,11 +119,23 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
 
     if (gitMode) {
       let verificationWarning: string | null = null;
+      const parsedVerifyTagSignature = parseAutoUpdateVerifyTagSignature(au.verifyTagSignature);
+      if (parsedVerifyTagSignature.error) {
+        findings.push({
+          check: 'config-sanity',
+          severity: 'error',
+          message: parsedVerifyTagSignature.error,
+          advisory: 'Set autoUpdate.verifyTagSignature to true or false, or remove it to inherit the network default.',
+          subject: 'autoUpdate.verifyTagSignature',
+        });
+      }
       try {
         const refPlan = resolveAutoUpdateGitRefPlan({
           branch: typeof au.branch === 'string' ? au.branch : 'main',
           ...(typeof au.ref === 'string' ? { ref: au.ref } : {}),
-          ...(typeof au.verifyTagSignature === 'boolean' ? { verifyTagSignature: au.verifyTagSignature } : {}),
+          ...(parsedVerifyTagSignature.value !== undefined
+            ? { verifyTagSignature: parsedVerifyTagSignature.value }
+            : {}),
         });
         verificationWarning = formatAutoUpdateTagVerificationWarning(refPlan);
       } catch {

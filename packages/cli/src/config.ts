@@ -1204,9 +1204,29 @@ function requireApprovalPolicyConfig(policy: unknown): ApprovalPolicyConfig | un
   return policy as ApprovalPolicyConfig;
 }
 
-function coerceRawAutoUpdateVerifyTagSignature(value: unknown): boolean | undefined {
-  if (value === undefined) return undefined;
-  return value === true;
+export interface AutoUpdateVerifyTagSignatureParseResult {
+  value: boolean | undefined;
+  error?: string;
+}
+
+export function parseAutoUpdateVerifyTagSignature(value: unknown): AutoUpdateVerifyTagSignatureParseResult {
+  if (value === undefined || value === null) return { value: undefined };
+  if (typeof value === 'boolean') return { value };
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return { value: true };
+    if (normalized === 'false') return { value: false };
+  }
+  return {
+    value: undefined,
+    error: `autoUpdate.verifyTagSignature must be a boolean or the string "true"/"false" when provided`,
+  };
+}
+
+function requireAutoUpdateVerifyTagSignature(value: unknown): boolean | undefined {
+  const parsed = parseAutoUpdateVerifyTagSignature(value);
+  if (parsed.error) throw new Error(parsed.error);
+  return parsed.value;
 }
 
 function resolveOptionalAutoUpdateVerifyTagSignature(
@@ -1251,8 +1271,8 @@ export function resolveAutoUpdateConfig(
   const cfgHasVerifyTagSignature = !!cfg && Object.prototype.hasOwnProperty.call(cfg, 'verifyTagSignature');
   const netHasVerifyTagSignature = !!net && Object.prototype.hasOwnProperty.call(net, 'verifyTagSignature');
   const verifyTagSignature = resolveOptionalAutoUpdateVerifyTagSignature(
-    cfgHasVerifyTagSignature ? coerceRawAutoUpdateVerifyTagSignature(cfg?.verifyTagSignature) : undefined,
-    netHasVerifyTagSignature ? coerceRawAutoUpdateVerifyTagSignature(net?.verifyTagSignature) : undefined,
+    cfgHasVerifyTagSignature ? requireAutoUpdateVerifyTagSignature(cfg?.verifyTagSignature) : undefined,
+    netHasVerifyTagSignature ? requireAutoUpdateVerifyTagSignature(net?.verifyTagSignature) : undefined,
   );
 
   // Merge build timeouts per-key so operators can override one step (e.g.

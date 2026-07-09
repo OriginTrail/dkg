@@ -717,7 +717,7 @@ describe('resolveAutoUpdateConfig', () => {
     expect(resolved?.verifyTagSignature).toBe(false);
   });
 
-  it('normalizes non-boolean persisted tag-signature values at the config boundary', () => {
+  it('parses legacy string false tag-signature values at the config boundary', () => {
     const resolved = resolveAutoUpdateConfig(
       {
         autoUpdate: {
@@ -739,6 +739,76 @@ describe('resolveAutoUpdateConfig', () => {
     );
 
     expect(resolved?.verifyTagSignature).toBe(false);
+  });
+
+  it('parses legacy string true tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'true',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: false,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('treats null tag-signature values as unset so network defaults still apply', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: null,
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('rejects invalid tag-signature values instead of disabling verification', () => {
+    expect(() => resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'maybe',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    )).toThrow(/verifyTagSignature must be a boolean/);
   });
 });
 

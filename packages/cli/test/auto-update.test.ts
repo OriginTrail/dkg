@@ -275,17 +275,6 @@ describe('git auto-update ref normalization', () => {
     });
   });
 
-  it('rejects non-boolean plan verification values at the typed boundary', () => {
-    expect(() => resolveAutoUpdateGitRefPlan({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
-      ref: 'refs/tags/v10.0.8',
-      checkIntervalMinutes: 30,
-      verifyTagSignature: 'false' as any,
-    })).toThrow(/verifyTagSignature must be a boolean/);
-  });
-
   it('plans branch verification as inert and formats the daemon startup warning', () => {
     const plan = resolveAutoUpdateGitRefPlan({
       enabled: true,

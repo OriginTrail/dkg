@@ -487,7 +487,7 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
   });
 
-  it('does not warn for non-boolean persisted tag-signature values', async () => {
+  it('does not warn for legacy string false tag-signature values', async () => {
     const deps = makeDeps({
       fs: {
         '/test/.dkg/config.json': JSON.stringify({
@@ -502,6 +502,26 @@ describe('config-sanity check (§4.7.2)', () => {
     });
     const findings = await runConfigSanityCheck(deps);
     expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
+  });
+
+  it('errors on invalid persisted tag-signature values', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: 'maybe',
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    const error = findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature');
+    expect(error).toBeDefined();
+    expect(error!.severity).toBe('error');
+    expect(error!.message).toContain('verifyTagSignature must be a boolean');
   });
 
   it('errors on checkIntervalMinutes < 1', async () => {
