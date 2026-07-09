@@ -2222,7 +2222,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // `connection:open` emitter is synchronous and we don't
       // want to slow down other listeners.
       void (async () => {
-        const admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx);
+        let admitted = false;
+        try {
+          admitted = await this.networkAdmissionCoordinator.ensureAdmitted(remotePeer, ctx);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Network admission probe failed for ${remotePeer.slice(-8)} on connect: ${message}`);
+          return;
+        }
         if (!admitted) return;
         try {
           await this.enrichPeerStoreFromInboundCircuit(evt.detail);
@@ -3922,8 +3929,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.trackSyncContextGraph(contextGraphId);
 
     const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
-    if (preferredPeerId && await this.networkAdmissionCoordinator.ensureAdmitted(preferredPeerId, ctx)) {
-      await this.ensurePeerConnected(preferredPeerId);
+    if (preferredPeerId) {
+      let preferredPeerAdmitted = false;
+      try {
+        preferredPeerAdmitted = await this.networkAdmissionCoordinator.ensureAdmitted(preferredPeerId, ctx);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.log.warn(ctx, `Preferred catchup peer ${preferredPeerId.slice(-8)} admission probe failed: ${message}`);
+      }
+      if (preferredPeerAdmitted) {
+        await this.ensurePeerConnected(preferredPeerId);
+      }
     }
 
     await this.primeCatchupConnections();

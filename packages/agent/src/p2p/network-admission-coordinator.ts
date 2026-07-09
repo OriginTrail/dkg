@@ -42,6 +42,15 @@ export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
 }
 
+export class NetworkAdmissionProbeError extends Error {
+  readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
+
+  constructor(peerId: string, reason: string) {
+    super(`Network identity probe failed for ${peerId}: ${reason}`);
+    this.name = 'NetworkAdmissionProbeError';
+  }
+}
+
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
@@ -123,38 +132,48 @@ export class NetworkAdmissionCoordinator {
     const identity = this.identity;
     if (!identity?.networkId) return true;
 
+    const nonce = randomUUID();
+    const request = makeNetworkIdentityRequest({
+      nonce,
+      requesterPeerId: this.selfPeerId,
+      identity,
+    });
+
+    let response: Uint8Array;
     try {
-      const nonce = randomUUID();
-      const request = makeNetworkIdentityRequest({
-        nonce,
-        requesterPeerId: this.selfPeerId,
-        identity,
-      });
-      const response = await this.sendIdentityProbe(
+      response = await this.sendIdentityProbe(
         remotePeer,
         new TextEncoder().encode(JSON.stringify(request)),
         { timeoutMs: this.probeTimeoutMs },
       );
-      const raw = new TextDecoder().decode(response);
-      const claimed = JSON.parse(raw) as unknown;
-      const verdict = await verifyNetworkIdentityResponse({
-        response: claimed,
-        remotePeerId: remotePeer,
-        localIdentity: identity,
-        nonce,
-        requesterPeerId: this.selfPeerId,
-      });
-      if (verdict.ok) {
-        this.admission.markVerifiedSameNetwork(remotePeer);
-        return true;
-      }
-      await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
-      return false;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.rejectPeer(remotePeer, ctx, `network identity probe failed: ${message}`);
-      return false;
+      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
+      throw new NetworkAdmissionProbeError(remotePeer, message);
     }
+
+    let claimed: unknown;
+    try {
+      claimed = JSON.parse(new TextDecoder().decode(response)) as unknown;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
+      throw new NetworkAdmissionProbeError(remotePeer, message);
+    }
+
+    const verdict = await verifyNetworkIdentityResponse({
+      response: claimed,
+      remotePeerId: remotePeer,
+      localIdentity: identity,
+      nonce,
+      requesterPeerId: this.selfPeerId,
+    });
+    if (verdict.ok) {
+      this.admission.markVerifiedSameNetwork(remotePeer);
+      return true;
+    }
+    await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
+    return false;
   }
 
   private async rejectPeer(remotePeer: string, ctx: OperationContext, reason: string): Promise<void> {

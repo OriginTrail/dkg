@@ -1,16 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_GENESIS_ID, computeNetworkId } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 describe('network admission integration', () => {
   it('admits a real explicit connect to a peer on the same network identity', async () => {
+    const networkId = await computeNetworkId(DEFAULT_GENESIS_ID);
     const local = await DKGAgent.create({
       name: 'AdmissionIntegrationSameLocal',
       listenPort: 0,
       store: new OxigraphStore(),
       networkIdentity: {
-        genesisId: 'v9-testnet',
-        networkId: 'network-a',
+        genesisId: DEFAULT_GENESIS_ID,
+        networkId,
         chainId: 'chain:1',
       },
     });
@@ -19,8 +21,8 @@ describe('network admission integration', () => {
       listenPort: 0,
       store: new OxigraphStore(),
       networkIdentity: {
-        genesisId: 'v9-testnet',
-        networkId: 'network-a',
+        genesisId: DEFAULT_GENESIS_ID,
+        networkId,
         chainId: 'chain:1',
       },
     });
@@ -40,13 +42,15 @@ describe('network admission integration', () => {
   }, 15000);
 
   it('rejects a real explicit connect to a peer on a different network identity', async () => {
+    const localNetworkId = await computeNetworkId(DEFAULT_GENESIS_ID);
+    const foreignNetworkId = await computeNetworkId('gnosis-mainnet');
     const local = await DKGAgent.create({
       name: 'AdmissionIntegrationLocal',
       listenPort: 0,
       store: new OxigraphStore(),
       networkIdentity: {
-        genesisId: 'v9-testnet',
-        networkId: 'network-a',
+        genesisId: DEFAULT_GENESIS_ID,
+        networkId: localNetworkId,
         chainId: 'chain:1',
       },
     });
@@ -55,8 +59,8 @@ describe('network admission integration', () => {
       listenPort: 0,
       store: new OxigraphStore(),
       networkIdentity: {
-        genesisId: 'v9-testnet',
-        networkId: 'network-b',
+        genesisId: 'gnosis-mainnet',
+        networkId: foreignNetworkId,
         chainId: 'chain:1',
       },
     });

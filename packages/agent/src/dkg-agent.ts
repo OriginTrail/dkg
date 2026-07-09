@@ -731,14 +731,35 @@ export class DKGAgent extends DKGAgentBase {
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
-    const genesisId = config.genesisId ?? DEFAULT_GENESIS_ID;
+    const genesisId = config.genesisId ?? config.networkIdentity?.genesisId ?? DEFAULT_GENESIS_ID;
 
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store, genesisId);
-    const networkIdentity = config.networkIdentity ?? {
+    const computedNetworkId = await computeNetworkId(genesisId);
+    if (config.networkIdentity?.genesisId && config.networkIdentity.genesisId !== genesisId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.genesisId (${config.networkIdentity.genesisId}) ` +
+        `must match the selected genesisId (${genesisId})`,
+      );
+    }
+    if (config.networkIdentity?.networkId && config.networkIdentity.networkId !== computedNetworkId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.networkId (${config.networkIdentity.networkId}) ` +
+        `must match computeNetworkId(${genesisId}) (${computedNetworkId})`,
+      );
+    }
+    const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
+    if (config.networkIdentity?.chainId && adapterChainId && config.networkIdentity.chainId !== adapterChainId) {
+      throw new Error(
+        `DKGAgentConfig.networkIdentity.chainId (${config.networkIdentity.chainId}) ` +
+        `must match the chain adapter id (${adapterChainId})`,
+      );
+    }
+    const networkIdentity = {
+      ...config.networkIdentity,
       genesisId,
-      networkId: await computeNetworkId(genesisId),
-      chainId: chain.chainId !== 'none' ? chain.chainId : undefined,
+      networkId: computedNetworkId,
+      chainId: adapterChainId ?? config.networkIdentity?.chainId,
     };
     const resolvedConfig: ResolvedDKGAgentConfig = { ...config, genesisId, networkIdentity };
 
