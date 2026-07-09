@@ -1,6 +1,6 @@
 // KC→KA rename guard — on-chain publish receipt quads.
 //
-// After a successful VM publish, `/api/shared-memory/publish` writes a
+// After a successful VM publish, the lifecycle publish path writes a
 // small receipt block into the context graph `_meta` graph keyed by
 // the assertion URI. The KC→KA rename (rc.12) renamed the id predicate
 // `publishedAtKcId` → `publishedAtKaId`. Across the whole worktree NO

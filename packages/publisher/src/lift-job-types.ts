@@ -39,15 +39,34 @@ export interface LiftRequestAuthorSeal {
   readonly reservedKaId?: LiftJobBigInt;
 }
 
-export interface LiftRequest {
-  readonly swmId: string;
+export interface KnowledgeAssetVmPublishRequest {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly agentAddress?: string;
+  readonly subGraphName?: string;
+  readonly shareOperationId: string;
+  readonly roots: readonly string[];
+  /** Author seal captured with the queued SWM share snapshot. */
+  readonly seal: LiftRequestAuthorSeal;
+  readonly sealChainId: LiftJobBigInt;
+  readonly sealKav10Address: LiftJobHex;
+  readonly sealFinalizedAtIso: string;
+  readonly sealMerkleRoot: LiftJobHex;
+  readonly intentKey: string;
+  readonly wmCurrentAssertion?: string;
+  readonly swmCurrentAssertion?: string;
+  readonly vmCurrentAssertion?: string;
+  readonly kaNumber?: string;
+  readonly reservedUal?: string;
+  readonly publishEpochs?: number;
+  readonly clearSharedMemoryAfter?: boolean;
+  readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
+}
+
+export interface LiftPublishSnapshotRequest {
   readonly shareOperationId: string;
   readonly roots: readonly string[];
   readonly contextGraphId: string;
-  readonly namespace: string;
-  readonly scope: string;
-  readonly transitionType: LiftTransitionType;
-  readonly authority: LiftAuthorityProof;
   readonly priorVersion?: string;
   readonly subGraphName?: string;
   readonly accessPolicy?: LiftAccessPolicy;
@@ -62,23 +81,39 @@ export interface LiftRequest {
   readonly seal?: LiftRequestAuthorSeal;
 }
 
+export interface LiftPublishRequestMetadata {
+  readonly scope: string;
+  readonly transitionType: LiftTransitionType;
+  readonly authority: LiftAuthorityProof;
+}
+
+export interface LiftRequestBase extends LiftPublishSnapshotRequest, LiftPublishRequestMetadata {
+  readonly swmId: string;
+  readonly namespace: string;
+}
+
+export interface RawLiftRequest extends LiftRequestBase {
+  readonly jobType?: 'lift';
+}
+
+export type LiftRequest = RawLiftRequest;
+
+export interface RawLiftJobRequest {
+  readonly jobType: 'lift';
+  readonly lift: RawLiftRequest;
+}
+
+export interface KnowledgeAssetVmPublishJobRequest {
+  readonly jobType: 'knowledge-asset-vm-publish';
+  readonly knowledgeAssetVmPublish: KnowledgeAssetVmPublishRequest;
+}
+
+export type LiftJobRequest = RawLiftJobRequest | KnowledgeAssetVmPublishJobRequest;
+
 export const LIFT_REQUEST_IMMUTABLE_FIELDS = [
-  'swmId',
-  'shareOperationId',
-  'roots',
-  'contextGraphId',
-  'namespace',
-  'scope',
-  'transitionType',
-  'authority',
-  'priorVersion',
-  'subGraphName',
-  'accessPolicy',
-  'allowedPeers',
-  'entityProofs',
-  'publishEpochs',
-  'publisherNodeIdentityIdOverride',
-  'seal',
+  'jobType',
+  'lift',
+  'knowledgeAssetVmPublish',
 ] as const;
 
 export interface LiftJobTimestamps {
@@ -217,7 +252,7 @@ export const LIFT_JOB_MUTABLE_PERSISTED_FIELDS = [
 export interface LiftJobBase {
   readonly jobId: string;
   readonly jobSlug: string;
-  readonly request: LiftRequest;
+  readonly request: LiftJobRequest;
   readonly status: LiftJobState;
   readonly timestamps: LiftJobTimestamps;
   readonly retries: LiftJobRetryMetadata;

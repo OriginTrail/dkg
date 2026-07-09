@@ -346,7 +346,7 @@ EOF
       ;;
     *) fail "Scenario $tag: unknown payload mode '$payload_mode'";;
   esac
-  write_resp=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$write_body")
+  write_resp=$(DEVNET_PUBLISH_PRESERVE_BATCH=1 devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$write_body")
   local triples_written
   triples_written=$(printf '%s' "$write_resp" | node -e '
     let d=""; process.stdin.on("data",c=>d+=c);
@@ -388,6 +388,7 @@ EOF
   log "  ciphertextChunkCount:  $ct_count"
   log "  plain merkleRoot:      $plain_root  (== batchId)"
   log "  plain merkleLeafCount: $plain_count"
+  [ "$plain_count" = "$triples_written" ] || fail "Scenario $tag: preserve-batch publish plain merkleLeafCount=$plain_count, expected triplesWritten=$triples_written"
 
   local zero_root="0x0000000000000000000000000000000000000000000000000000000000000000"
   if [ "$access_policy" = "1" ]; then
@@ -453,7 +454,8 @@ stop_node_inline() {
 }
 
 # Re-spawn a single core node using the same invocation devnet.sh
-# uses (DKG_HOME=<node_dir>, foreground, log → daemon.log). Waits for
+# uses (DKG_HOME=<node_dir>, foreground, shell output → console.log;
+# the daemon tees its own stream into daemon.log in-process). Waits for
 # the API to respond. Returns 0 on ready, non-zero on timeout.
 start_node_inline() {
   local n="$1"
@@ -467,7 +469,7 @@ start_node_inline() {
   log "  Spawning node $n..."
   DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 \
     node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    >> "$node_dir/daemon.log" 2>&1 &
+    >> "$node_dir/console.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$pidf"
   local port; port=$(node_port "$n")
@@ -573,7 +575,7 @@ EOF
   log "Writing multi-chunk SWM payload to skew picker weight..."
   local write_body write_resp
   write_body=$(build_swm_write_payload "$cg_uri" "$stamp" 98304)
-  write_resp=$(api_call "$EDGE_CURATOR_NODE" POST /api/shared-memory/write "$write_body")
+  write_resp=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$write_body")
   local triples_written
   triples_written=$(printf '%s' "$write_resp" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{console.log(JSON.parse(d).triplesWritten||0)}catch(e){console.log(0)}})' 2>/dev/null || echo 0)
   [ "$triples_written" -ge 1 ] || fail "Scenario D: SWM write reported zero triples: $write_resp"

@@ -6,19 +6,31 @@ import {
   TypedEventBus,
   generateEd25519Keypair,
   contextGraphAssertionUri,
+  contextGraphDataUri,
   contextGraphMetaUri,
   contextGraphSharedMemoryUri,
   contextGraphLayerUri,
   MemoryLayer,
   assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
-import { DKGPublisher, AssertionNotPersistedError } from '../src/index.js';
+import {
+  DKGPublisher,
+  AssertionNotPersistedError,
+  assertionScopedGraphUri,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+} from '../src/index.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 const CG_ID = 'test-assertion-cg';
 const SWM_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
+const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
+const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
+const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
+const ACCESS_POLICY_PREDICATE = 'https://dkg.network/ontology#accessPolicy';
+const ALLOWED_AGENT_PREDICATE = 'https://dkg.network/ontology#allowedAgent';
 const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 const AGENT_B = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
 const PEER = '12D3KooWPromoteBoundary';
@@ -48,6 +60,42 @@ function largePayloadQuads(prefix: string, bytes: number): Quad[] {
     index += 1;
   }
   return quads;
+}
+
+function onChainIdQuad(id = '1'): Quad {
+  return {
+    subject: contextGraphDataUri(CG_ID),
+    predicate: ON_CHAIN_ID_PREDICATE,
+    object: `"${id}"`,
+    graph: ONTOLOGY_GRAPH,
+  };
+}
+
+function localPrivateContextGraphQuad(): Quad {
+  return {
+    subject: contextGraphDataUri(CG_ID),
+    predicate: ACCESS_POLICY_PREDICATE,
+    object: '"private"',
+    graph: contextGraphMetaUri(CG_ID),
+  };
+}
+
+function agentsPublicContextGraphQuad(): Quad {
+  return {
+    subject: contextGraphDataUri(CG_ID),
+    predicate: ACCESS_POLICY_PREDICATE,
+    object: '"public"',
+    graph: AGENTS_GRAPH,
+  };
+}
+
+function localAllowedAgentQuad(): Quad {
+  return {
+    subject: contextGraphDataUri(CG_ID),
+    predicate: ALLOWED_AGENT_PREDICATE,
+    object: `"${AGENT}"`,
+    graph: contextGraphMetaUri(CG_ID),
+  };
 }
 
 describe('Working Memory Assertion Lifecycle', () => {
@@ -149,6 +197,155 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(subjects.has('urn:test:entity:bob')).toBe(true);
   });
 
+  it('preserves named graph metadata for mixed default/named graph writes', async () => {
+    const name = 'mixed-graph-draft';
+    const namedGraph = 'urn:test:graph:named';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:default',
+        predicate: 'http://schema.org/name',
+        object: '"Default Graph"',
+        graph: '',
+      },
+      {
+        subject: 'urn:test:entity:named',
+        predicate: 'http://schema.org/name',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const quads = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        subject: 'urn:test:entity:default',
+        object: '"Default Graph"',
+        graph: '',
+      }),
+      expect.objectContaining({
+        subject: 'urn:test:entity:named',
+        object: '"Named Graph"',
+        graph: namedGraph,
+      }),
+    ]));
+
+    const scopedNamedGraphs = (await store.listGraphs())
+      .filter((graph) => graph.includes('/_named_graph/'));
+    expect(scopedNamedGraphs.length).toBeGreaterThan(0);
+  });
+
+  it('rejects named-graph shares before duplicate SPOs can be flattened', async () => {
+    const name = 'named-graph-share-unsupported';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:one',
+      },
+      {
+        subject: 'urn:test:entity:duplicate-spo',
+        predicate: 'http://schema.org/name',
+        object: '"Same"',
+        graph: 'urn:test:graph:two',
+      },
+    ]);
+
+    const beforeShare = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(beforeShare).toEqual(expect.arrayContaining([
+      expect.objectContaining({ graph: 'urn:test:graph:one' }),
+      expect.objectContaining({ graph: 'urn:test:graph:two' }),
+    ]));
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: ['urn:test:graph:one', 'urn:test:graph:two'],
+    });
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(2);
+    const swmResult = await store.query(
+      `ASK { GRAPH <${SWM_GRAPH}> { <urn:test:entity:duplicate-spo> <http://schema.org/name> "Same" } }`,
+    );
+    expect(swmResult.type === 'boolean' ? swmResult.value : true).toBe(false);
+  });
+
+  it('treats DKG physical graph input as default-graph assertion content', async () => {
+    const name = 'physical-graph-default';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:physical-default',
+        predicate: 'http://schema.org/name',
+        object: '"Physical Default"',
+        graph: `did:dkg:context-graph:${CG_ID}`,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:physical-default',
+        graph: '',
+      }),
+    ]);
+    const promoted = await publisher.assertionPromote(CG_ID, name, AGENT);
+    expect(promoted.promotedCount).toBe(1);
+  });
+
+  it('preserves non-physical DKG context graph DIDs as named graph identity', async () => {
+    const name = 'dkg-did-named-graph';
+    const namedGraph = 'did:dkg:context-graph:partner-catalog';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:dkg-did-named',
+        predicate: 'http://schema.org/name',
+        object: '"DKG DID Named Graph"',
+        graph: namedGraph,
+      },
+    ]);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:dkg-did-named',
+        graph: namedGraph,
+      }),
+    ]);
+    await expect(publisher.assertionPromote(CG_ID, name, AGENT)).rejects.toMatchObject({
+      code: 'KA_NAMED_GRAPH_SHARE_UNSUPPORTED',
+      namedGraphs: [namedGraph],
+    });
+  });
+
+  it('discard removes KA-scoped named graph draft content', async () => {
+    const name = 'named-graph-discard';
+    const namedGraph = 'urn:test:graph:discard-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      {
+        subject: 'urn:test:entity:named-discard',
+        predicate: 'http://schema.org/name',
+        object: '"Discard Me"',
+        graph: namedGraph,
+      },
+    ]);
+
+    const wmGraph = await publisher.wmGraphUri(CG_ID, AGENT, name);
+    const scopedNamedGraph = assertionScopedGraphUri(wmGraph, namedGraph);
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:named-discard',
+        graph: namedGraph,
+      }),
+    ]);
+    expect(await store.listGraphs()).toContain(scopedNamedGraph);
+
+    await publisher.assertionDiscard(CG_ID, name, AGENT);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toHaveLength(0);
+    expect(await store.listGraphs()).not.toContain(scopedNamedGraph);
+  });
+
   it('query returns triples from the assertion only', async () => {
     await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, TRIPLES);
@@ -182,6 +379,130 @@ describe('Working Memory Assertion Lifecycle', () => {
     if (swmResult.type === 'bindings') {
       expect(swmResult.bindings.length).toBe(3);
     }
+  });
+
+  it('promote strips generated private-CG catalog floor from SWM and WM when trusted', async () => {
+    const name = 'private-catalog-promote';
+    const cgDid = contextGraphDataUri(CG_ID);
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+    await store.insert([onChainIdQuad('1')]);
+    (publisher as any).chain.getContextGraphAccessPolicy = async () => 1;
+    (publisher as any).chain.getContextGraphNameHash = async () => ethers.keccak256(ethers.toUtf8Bytes(CG_ID));
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      publisherPeerId: PEER,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+      onChainContextGraphId: '1',
+    });
+
+    expect(result.promotedCount).toBe(1);
+    const swmCatalog = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { <${cgDid}> ?p ?o } }`,
+    );
+    expect(swmCatalog.type).toBe('bindings');
+    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(0);
+
+    const remaining = await publisher.assertionQuery(CG_ID, name, AGENT);
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('rejects generated private-CG catalog floor stripping without private CG proof', async () => {
+    const name = 'private-catalog-promote-reject';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, name, AGENT, {
+        publisherPeerId: PEER,
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('promote strips finalized private-CG catalog floor for local private CGs before first registration', async () => {
+    const name = 'private-catalog-promote-local-private';
+    const cgDid = contextGraphDataUri(CG_ID);
+    await store.insert([localPrivateContextGraphQuad()]);
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      publisherPeerId: PEER,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+    });
+
+    expect(result.promotedCount).toBe(1);
+    const swmCatalog = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${SWM_GRAPH}> { <${cgDid}> ?p ?o } }`,
+    );
+    expect(swmCatalog.type).toBe('bindings');
+    if (swmCatalog.type === 'bindings') expect(swmCatalog.bindings).toHaveLength(0);
+  });
+
+  it('rejects generated private-CG catalog floor stripping with a borrowed private on-chain id', async () => {
+    const name = 'private-catalog-promote-borrowed-id';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+    await store.insert([onChainIdQuad('2')]);
+    (publisher as any).chain.getContextGraphAccessPolicy = async () => 1;
+    (publisher as any).chain.getContextGraphNameHash = async () => null;
+
+    await expect(
+      publisher.assertionPromote(CG_ID, name, AGENT, {
+        publisherPeerId: PEER,
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+        onChainContextGraphId: '1',
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects local private-CG catalog floor stripping when a stored on-chain id is public', async () => {
+    const name = 'private-catalog-promote-stale-local-policy';
+    await store.insert([localPrivateContextGraphQuad(), onChainIdQuad('1')]);
+    (publisher as any).chain.getContextGraphAccessPolicy = async () => 0;
+    (publisher as any).chain.getContextGraphNameHash = async () => ethers.keccak256(ethers.toUtf8Bytes(CG_ID));
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, name, AGENT, {
+        publisherPeerId: PEER,
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects local catalog floor stripping when agents graph declares the CG public', async () => {
+    const name = 'private-catalog-promote-agents-public';
+    await store.insert([agentsPublicContextGraphQuad(), localAllowedAgentQuad()]);
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:catalog-content', predicate: 'http://schema.org/name', object: '"Content"' },
+      ...generatedPrivateCatalogFloorQuads(CG_ID),
+    ]);
+
+    await expect(
+      publisher.assertionPromote(CG_ID, name, AGENT, {
+        publisherPeerId: PEER,
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CG_ID),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
   });
 
   // Issue #864 — when the assertion data graph is empty but `_meta` says
@@ -559,6 +880,43 @@ describe('Working Memory Assertion Lifecycle', () => {
       const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
       expect(swmSubjects.has('urn:test:entity:alice')).toBe(true);
       expect(swmSubjects.has('urn:test:entity:bob')).toBe(false);
+    }
+  });
+
+  it('promote with entity filter ignores unrelated named-graph draft content', async () => {
+    const name = 'subset-default-with-local-named-graph';
+    const localNamedGraph = 'urn:test:graph:local-only';
+    await publisher.assertionCreate(CG_ID, name, AGENT);
+    await publisher.assertionWrite(CG_ID, name, AGENT, [
+      { subject: 'urn:test:entity:selected', predicate: 'http://schema.org/name', object: '"Selected"' },
+      {
+        subject: 'urn:test:entity:local-only',
+        predicate: 'http://schema.org/name',
+        object: '"Local Only"',
+        graph: localNamedGraph,
+      },
+    ]);
+
+    const result = await publisher.assertionPromote(CG_ID, name, AGENT, {
+      entities: ['urn:test:entity:selected'],
+    });
+    expect(result.promotedCount).toBe(1);
+
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({
+        subject: 'urn:test:entity:local-only',
+        graph: localNamedGraph,
+      }),
+    ]);
+
+    const swmResult = await store.query(
+      `SELECT ?s WHERE { GRAPH <${SWM_GRAPH}> { ?s ?p ?o } }`,
+    );
+    expect(swmResult.type).toBe('bindings');
+    if (swmResult.type === 'bindings') {
+      const swmSubjects = new Set(swmResult.bindings.map((b) => b['s']));
+      expect(swmSubjects.has('urn:test:entity:selected')).toBe(true);
+      expect(swmSubjects.has('urn:test:entity:local-only')).toBe(false);
     }
   });
 

@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
-import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishSharedMemory, listSwmEntities, describePromoteResult, describePromoteError, type AssertionInfo, type PublishResult, type SwmRootEntity } from '../api.js';
+import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
+import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
@@ -616,25 +617,40 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
 
 /* ── SWM Publish Panel (SWM → VM) ── */
 
-function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string; onPublished: () => void }) {
-  const { data: entities, loading, refresh } = useFetch(
-    () => listSwmEntities(contextGraphId),
+// Outcome of a "publish all/selected" run: each selected SWM assertion is
+// published as its OWN Knowledge Asset via the canonical per-KA /vm/publish
+// BatchPublishResult + the per-KA batch loop now live in api.ts
+// (`publishAssertionsToVm`) so the partial/sample/error accounting is shared across
+// every batch-publish CTA (Design B — one assertion may carry any number of entities).
+
+// Exported for component testing — rendered inline by MemoryLayerView when the
+// SWM layer is active (see the `layer === 'swm'` branch above).
+export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string; onPublished: () => void }) {
+  // Source the publishable units from NAMED SWM assertions (the synchronous
+  // `<cg>/_meta` `dkg:memoryLayer "SWM"` markers), NOT raw SWM root entities.
+  // /vm/publish is keyed by assertion name, so this is what lets us route each
+  // unit through the canonical per-KA publish (and fixes the old multi-root
+  // "exactly one root entity" failure of the legacy shared-memory publish).
+  const { data: assertions, loading, refresh } = useFetch(
+    () => listAssertions(contextGraphId, 'swm'),
     [contextGraphId],
     0
   );
   useMemoryGraphEvents(contextGraphId, refresh, { layers: ['swm'] });
+  // Selection is keyed by `graphUri` — a root + sub-graph assertion can share a
+  // name, so the daemon-produced graph URI is the unique row identity (PR #710).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [publishing, setPublishing] = useState(false);
-  const [publishResult, setPublishResult] = useState<PublishResult | null>(null);
+  const [publishResult, setPublishResult] = useState<BatchPublishResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const allUris = entities?.map(e => e.uri) ?? [];
-  const allSelected = allUris.length > 0 && allUris.every(u => selected.has(u));
+  const allKeys = assertions?.map(a => a.graphUri) ?? [];
+  const allSelected = allKeys.length > 0 && allKeys.every(k => selected.has(k));
 
-  const toggleOne = useCallback((uri: string) => {
+  const toggleOne = useCallback((key: string) => {
     setSelected(prev => {
       const next = new Set(prev);
-      if (next.has(uri)) next.delete(uri); else next.add(uri);
+      if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
   }, []);
@@ -643,53 +659,49 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
     if (allSelected) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(allUris));
+      setSelected(new Set(allKeys));
     }
-  }, [allSelected, allUris]);
+  }, [allSelected, allKeys]);
 
-  const handlePublishSelected = useCallback(async () => {
-    if (selected.size === 0) return;
-    // OT-RFC-44 / Design B: the full selection publishes as ONE Knowledge Asset
-    // whose member entities are the selected roots (any count). No single-root guard.
+  // Publish a set of named SWM assertions, each as its own KA via the canonical
+  // /vm/publish (with the §4.4 catch→seal→retry safety net). We do NOT pre-
+  // register the CG on-chain: the daemon's /vm/publish runs the local
+  // preconditions FIRST and only auto-registers (preserving the stored publish
+  // policy) on the `CG_NOT_REGISTERED` retry path — so a doomed publish never
+  // burns registration gas, and registration uses the right policy
+  // (knowledge-assets.ts vm/publish, #1116).
+  const publishAssertions = useCallback(async (items: AssertionInfo[]) => {
+    if (items.length === 0) return;
     setPublishing(true);
     setPublishResult(null);
     setError(null);
     try {
-      const roots = [...selected];
-      const res = await publishSharedMemory(contextGraphId, roots);
-      setPublishResult(res);
+      // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/sample/error
+      // accounting across every batch-publish CTA.
+      setPublishResult(await publishAssertionsToVm(contextGraphId, items));
       setSelected(new Set());
       refresh();
       onPublished();
     } catch (err: any) {
-      setError(err.message ?? 'Publish failed');
+      // Unexpected non-per-KA failure — surface as a hard error.
+      setError(err?.message ?? 'Publish failed');
     } finally {
       setPublishing(false);
     }
-  }, [selected, contextGraphId, refresh, onPublished]);
+  }, [contextGraphId, refresh, onPublished]);
 
-  const handlePublishAll = useCallback(async () => {
-    if (allUris.length < 1) return;
-    // OT-RFC-44 / Design B: publish all roots as ONE Knowledge Asset (any count).
-    setPublishing(true);
-    setPublishResult(null);
-    setError(null);
-    try {
-      const res = await publishSharedMemory(contextGraphId, allUris);
-      setPublishResult(res);
-      setSelected(new Set());
-      refresh();
-      onPublished();
-    } catch (err: any) {
-      setError(err.message ?? 'Publish failed');
-    } finally {
-      setPublishing(false);
-    }
-  }, [allUris, contextGraphId, refresh, onPublished]);
+  const handlePublishSelected = useCallback(() => {
+    const items = (assertions ?? []).filter(a => selected.has(a.graphUri));
+    return publishAssertions(items);
+  }, [assertions, selected, publishAssertions]);
 
-  const totalTriples = entities?.reduce((sum, e) => sum + e.tripleCount, 0) ?? 0;
-  const selectedTriples = entities?.filter(e => selected.has(e.uri)).reduce((sum, e) => sum + e.tripleCount, 0) ?? 0;
-  const isEmpty = !loading && (!entities || entities.length === 0);
+  const handlePublishAll = useCallback(() => {
+    return publishAssertions(assertions ?? []);
+  }, [assertions, publishAssertions]);
+
+  const totalTriples = assertions?.reduce((sum, a) => sum + (a.tripleCount ?? 0), 0) ?? 0;
+  const selectedTriples = assertions?.filter(a => selected.has(a.graphUri)).reduce((sum, a) => sum + (a.tripleCount ?? 0), 0) ?? 0;
+  const isEmpty = !loading && (!assertions || assertions.length === 0);
 
   if (loading) return <div className="v10-assertion-list-loading">Loading SWM contents...</div>;
   if (isEmpty) {
@@ -709,7 +721,7 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
     <div className="v10-publish-panel">
       <div className="v10-publish-panel-header">
         <span className="v10-publish-panel-title">
-          Entities in Shared Working Memory ({entities!.length} entities · {totalTriples} triples)
+          Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)
         </span>
         <div className="v10-publish-panel-header-actions">
           <button className="v10-publish-panel-refresh" onClick={refresh} title="Refresh">↻</button>
@@ -740,60 +752,85 @@ function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: string;
       </div>
 
       <div className="v10-assertion-items">
-        {entities!.map((e) => (
-          <div key={e.uri} className={`v10-assertion-item ${selected.has(e.uri) ? 'selected' : ''}`}>
+        {assertions!.map((a) => (
+          <div key={a.graphUri} className={`v10-assertion-item ${selected.has(a.graphUri) ? 'selected' : ''}`}>
             <label className="v10-publish-entity-check">
               <input
                 type="checkbox"
-                checked={selected.has(e.uri)}
-                onChange={() => toggleOne(e.uri)}
+                checked={selected.has(a.graphUri)}
+                onChange={() => toggleOne(a.graphUri)}
               />
             </label>
             <div className="v10-assertion-item-info">
-              <span className="v10-assertion-item-name" title={e.uri}>{e.label}</span>
-              <span className="v10-assertion-item-count">{e.tripleCount} triples</span>
+              <span className="v10-assertion-item-name" title={a.graphUri}>{a.name}</span>
+              {a.subGraph && (
+                // Mirror the AssertionList sub-graph chip (same class/glyph/
+                // truncation) so rows sharing a name across root/sub-graph
+                // partitions stay disambiguated.
+                <span className="v10-item-count v10-item-subgraph" title={`In sub-graph: ${a.subGraph}`}>
+                  › {truncateMiddle(a.subGraph, 18)}
+                </span>
+              )}
+              {a.tripleCount != null && (
+                <span className="v10-assertion-item-count">{a.tripleCount} triples</span>
+              )}
             </div>
           </div>
         ))}
       </div>
 
       {publishResult && (() => {
-        const confirmed = publishResult.status === 'confirmed' && !!publishResult.txHash;
+        const { published, total, sealed, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
+        // "Clean" only when every asset published AND none came back as a 207
+        // partial (minted on-chain but the CG binding failed).
+        const allOk = published === total && published > 0 && partial === 0;
+        const sampleConfirmed = sample?.status === 'confirmed' && !!sample.txHash;
         return (
-          <div className={`v10-publish-result-card ${confirmed ? 'success' : 'error'}`}>
+          <div className={`v10-publish-result-card ${allOk ? 'success' : 'error'}`}>
             <div className="v10-publish-result-title">
-              {confirmed
-                ? 'Published to Verifiable Memory'
+              {published > 0
+                ? `Published ${published} of ${total} knowledge asset${total === 1 ? '' : 's'} to Verifiable Memory`
                 : 'NOT published to Verifiable Memory'}
             </div>
-            {!confirmed && (
+            {sealed > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                The data was prepared and stored locally as <code>{publishResult.status}</code>,
-                but the on-chain transaction did not land. Verifiable Memory requires a confirmed
-                <code> KCCreated </code> event. Check the node logs for the cause (typically a
-                missing publisher wallet, an unfunded signer, or a chain adapter that isn&apos;t V10-ready).
+                {sealed} asset{sealed === 1 ? ' was' : 's were'} sealed in Shared Memory before publishing.
+              </div>
+            )}
+            {partial > 0 && (
+              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+                ⚠ {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
+              </div>
+            )}
+            {failures.length > 0 && (
+              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+                {failures.length} asset{failures.length === 1 ? '' : 's'} could not be published — {failures[0].name}: {failures[0].error}
+                {failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}
               </div>
             )}
             <div className="v10-publish-result-details">
-              <div><span className="v10-publish-result-label">Knowledge Asset:</span> {publishResult.kaId}</div>
-              <div><span className="v10-publish-result-label">Status:</span> {publishResult.status}</div>
-              {publishResult.kas && publishResult.kas.length > 1 && (
-                <div><span className="v10-publish-result-label">Additional KAs in batch:</span> {publishResult.kas.length - 1}</div>
+              {sample?.kaId != null && (
+                <div><span className="v10-publish-result-label">Knowledge Asset:</span> {sample.kaId}</div>
               )}
-              {publishResult.txHash ? (
+              {sampleConfirmed ? (
                 <div className="v10-publish-result-tx">
                   <span className="v10-publish-result-label">Tx hash:</span>{' '}
-                  <span className="mono" title={publishResult.txHash}>{publishResult.txHash}</span>
-                  {publishResult.blockNumber != null && (
-                    <span className="v10-publish-result-block"> (block {publishResult.blockNumber})</span>
+                  <span className="mono" title={sample!.txHash}>{sample!.txHash}</span>
+                  {sample!.blockNumber != null && (
+                    <span className="v10-publish-result-block"> (block {sample!.blockNumber})</span>
                   )}
                 </div>
               ) : (
-                <div className="v10-publish-result-tx">
-                  <span className="v10-publish-result-label">Tx hash:</span>{' '}
-                  <span className="mono">(none — no on-chain transaction)</span>
+                <div className="v10-publish-result-details">
+                  Verifiable Memory requires a confirmed <code>KCCreated</code> event. If a publish
+                  did not land on-chain, check the node logs (typically a missing publisher wallet,
+                  an unfunded signer, or a chain adapter that isn&apos;t V10-ready).
                 </div>
               )}
+              {/* B8 — the CONFIRMED post-publish discount, aggregated across the BATCH (not
+                  off the headline `sample`, which is picked for cleanliness not discount —
+                  #1365 r3). Renders nothing unless some item drew on a PCA (#9). */}
+              <DiscountAppliedBadge convictionCostCovered={convictionCostCovered} />
             </div>
           </div>
         );

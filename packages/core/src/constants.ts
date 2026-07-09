@@ -126,11 +126,12 @@ export const PROTOCOL_VERIFY_PROPOSAL = '/dkg/10.0.1/verify-proposal';
 export const PROTOCOL_VERIFY_APPROVAL = '/dkg/10.0.0/verify-approval';
 export const PROTOCOL_STORAGE_ACK = '/dkg/10.0.1/storage-ack';
 /**
- * OT-RFC-38 LU-11 / OT-RFC-39 — storage-ack protocol version that
- * carries `ciphertextChunksRoot` + `ciphertextChunkCount` +
- * `ackProtocolVersion` on `PublishIntent`. Pre-LU-11 nodes don't
- * register this handler so an LU-11 publisher falls back to V1 against
- * legacy peers (with no curated chunked-publish support there).
+ * OT-RFC-38 LU-11 / OT-RFC-39 and folded-private ACKs — storage-ack protocol
+ * version for PublishIntent fields that require capability gating beyond
+ * `/dkg/10.0.1/storage-ack`, including chunked ciphertext fields and field 20
+ * `privateMerkleRoots`. Pre-V2 nodes do not register this handler, so
+ * mixed-version clusters fail at protocol selection instead of silently
+ * ignoring new fields.
  */
 export const PROTOCOL_STORAGE_ACK_V2 = '/dkg/10.0.2/storage-ack';
 
@@ -161,8 +162,49 @@ export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
  * signed JSON wire format and per-pull authorization gate.
  */
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
+export const PROTOCOL_NETWORK_IDENTITY = '/dkg/10.0.1/network-identity';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
+
+const NETWORK_TOPIC_PREFIX = 'dkg/network';
+const NON_DKG_TOPIC_PREFIX = 'topic';
+
+export function networkNamespaceSegment(networkId: string, chainId?: string): string {
+  const parts = [networkId, chainId]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  for (const part of parts) {
+    if (!/^[A-Za-z0-9._:-]+$/.test(part)) {
+      throw new Error(`Invalid DKG network namespace: ${part}`);
+    }
+  }
+  return parts.join('.');
+}
+
+export function dhtProtocolForNetwork(networkId?: string, chainId?: string): string {
+  if (!networkId) return DHT_PROTOCOL;
+  return `/dkg/${networkNamespaceSegment(networkId, chainId)}/kad/1.0.0`;
+}
+
+export function wireTopicForNetwork(networkId: string | undefined, logicalTopic: string, chainId?: string): string {
+  if (!networkId) return logicalTopic;
+  const segment = networkNamespaceSegment(networkId, chainId);
+  const suffix = logicalTopic.startsWith('dkg/')
+    ? logicalTopic.slice('dkg/'.length)
+    : `${NON_DKG_TOPIC_PREFIX}/${logicalTopic}`;
+  return `${NETWORK_TOPIC_PREFIX}/${segment}/${suffix}`;
+}
+
+export function logicalTopicFromWireTopic(networkId: string | undefined, wireTopic: string, chainId?: string): string | null {
+  if (!networkId) return wireTopic;
+  const prefix = `${NETWORK_TOPIC_PREFIX}/${networkNamespaceSegment(networkId, chainId)}/`;
+  if (!wireTopic.startsWith(prefix)) return null;
+  const suffix = wireTopic.slice(prefix.length);
+  if (suffix.startsWith(`${NON_DKG_TOPIC_PREFIX}/`)) {
+    return suffix.slice(NON_DKG_TOPIC_PREFIX.length + 1);
+  }
+  return `dkg/${suffix}`;
+}
 
 /** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
 export const DKG_GOSSIP_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
@@ -291,6 +333,47 @@ export function contextGraphLayerUri(
     ? `did:dkg:context-graph:${contextGraphId}/${subGraphName}`
     : `did:dkg:context-graph:${contextGraphId}`;
   return `${base}/${memoryLayerSlug(layer)}/${agentAddress}/${kaNumber}`;
+}
+
+export interface ContextGraphLayerIdentity {
+  contextGraphId: string;
+  subGraphName?: string;
+  layer: MemoryLayer;
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
+const MEMORY_LAYER_BY_SLUG: ReadonlyMap<string, MemoryLayer> = new Map([
+  [memoryLayerSlug(MemoryLayer.WorkingMemory), MemoryLayer.WorkingMemory],
+  [memoryLayerSlug(MemoryLayer.SharedWorkingMemory), MemoryLayer.SharedWorkingMemory],
+  [memoryLayerSlug(MemoryLayer.VerifiableMemory), MemoryLayer.VerifiableMemory],
+]);
+
+export function parseContextGraphLayerUri(graphUri: string): ContextGraphLayerIdentity | undefined {
+  const prefix = 'did:dkg:context-graph:';
+  if (!graphUri.startsWith(prefix)) return undefined;
+  const segments = graphUri.slice(prefix.length).split('/');
+  if (segments.length !== 4 && segments.length !== 5) return undefined;
+
+  const layerIndex = segments.length - 3;
+  const layer = MEMORY_LAYER_BY_SLUG.get(segments[layerIndex]);
+  if (!layer) return undefined;
+  const contextGraphId = segments[0];
+  const subGraphName = layerIndex === 2 ? segments[1] : undefined;
+  const agentAddress = segments[layerIndex + 1];
+  const kaNumberRaw = segments[layerIndex + 2];
+  if (
+    !contextGraphId ||
+    !/^0x[0-9a-fA-F]{40}$/.test(agentAddress) ||
+    !/^\d+$/.test(kaNumberRaw)
+  ) return undefined;
+  return {
+    contextGraphId,
+    subGraphName,
+    layer,
+    agentAddress,
+    kaNumber: BigInt(kaNumberRaw),
+  };
 }
 
 export function contextGraphRulesUri(contextGraphId: string): string {

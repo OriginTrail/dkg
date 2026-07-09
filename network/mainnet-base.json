@@ -16,6 +16,15 @@
     "type": "evm",
     "chainId": "base:8453",
     "rpcUrl": "https://mainnet.base.org",
+    "rpcUrls": [
+      "https://base-rpc.publicnode.com",
+      "https://base.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://mainnet.base.org",
+      "https://base-rpc.publicnode.com",
+      "https://base.drpc.org"
+    ],
     "hubAddress": "0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13"
   },
   "autoUpdate": {

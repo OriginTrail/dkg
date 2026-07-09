@@ -6,9 +6,9 @@
  * pre-staked genesis core nodes for the ACK quorum (lowered to 1), so the
  * curated `nodeExists` signer check passes.
  *
- * Baseline invariant: a private CG publishing N data entities yields a KC of
- * exactly N KAs. After the catalog injection lands, the SAME publish yields
- * N+1 KAs (the extra one being the public DCAT catalog KA, subject == CG UAL).
+ * Baseline invariant: a private CG publishing N data entities yields a manifest
+ * with exactly N data roots. The public DCAT catalog floor is still committed in
+ * the KC Merkle root and served from `_catalog`, but it is not a user KA root.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -75,20 +75,20 @@ describe('baseline — curated CG product-path publish (pre-catalog)', () => {
     ]);
     // Explicit finalize = the daemon product path (POST /vm/publish does
     // assertion.finalize then publishFromFinalizedAssertion). The catalog
-    // injection lives in assertionFinalize; promote then carries the sealed
-    // content (incl. the catalog KA) to SWM for reload.
+    // injection lives in assertionFinalize and is re-injected as generated
+    // catalog material at publish time, without becoming a manifest root.
     await publisher.assertion.finalize(CG, name);
     await publisher.assertion.promote(CG, name);
 
     const pub: any = await publisher.publishFromFinalizedAssertion(CG, name);
 
     expect(pub.status).toBe('confirmed');
-    // combined model: the private publish now carries the data KA AND
-    // the public DCAT catalog KA (subject = the CG's own UAL), committed in the
-    // CG's own merkle root.
-    expect(pub.kaManifest.length).toBe(2);
+    // combined model: the private publish carries only data roots in the KA
+    // manifest. The generated catalog floor is committed in the CG's Merkle root
+    // and public _catalog graph, but not sealed as a Rule-4-colliding root.
+    expect(pub.kaManifest.length).toBe(1);
     const roots = pub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
-    expect(roots.some((r: string) => r.includes(CG))).toBe(true); // the catalog KA, keyed on the CG UAL
+    expect(roots).toEqual(['urn:acme:shipment/SH-42']);
 
     // The catalog entry persists PLAINTEXT in the public _catalog graph — a
     // queryable, standards-compliant DCAT dataset record (NOT encrypted, unlike
@@ -105,5 +105,33 @@ describe('baseline — curated CG product-path publish (pre-catalog)', () => {
     expect(types).toContain('https://dkg.network/ontology#PrivateContextGraph'); // dual-typed
     const accessRights = triples.find((t: any) => t.p === 'http://purl.org/dc/terms/accessRights');
     expect(accessRights?.o).toBe('http://publications.europa.eu/resource/authority/access-right/RESTRICTED');
+
+    const secondName = 'shipment-2';
+    await publisher.assertion.create(CG, secondName);
+    await publisher.assertion.write(CG, secondName, [
+      { subject: 'urn:acme:shipment/SH-43', predicate: 'urn:acme:product', object: '"P-10"' },
+    ]);
+    await publisher.assertion.finalize(CG, secondName);
+    await publisher.assertion.promote(CG, secondName);
+
+    const secondPub: any = await publisher.publishFromFinalizedAssertion(CG, secondName);
+    expect(secondPub.status).toBe('confirmed');
+    expect(secondPub.kaManifest.length).toBe(1);
+    const secondRoots = secondPub.kaManifest.map((m: any) => String(m.rootEntity ?? m.entity ?? m.subject ?? ''));
+    expect(secondRoots).toEqual(['urn:acme:shipment/SH-43']);
+    expect(secondRoots).not.toContain(cgUal);
+
+    const postSecondCatalog: any = await (publisher as any).store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${catalogGraph}> { <${cgUal}> ?p ?o } }`,
+    );
+    expect(postSecondCatalog.type).toBe('bindings');
+    const postSecondTriples = postSecondCatalog.bindings.map((b: any) => ({ p: b.p, o: b.o }));
+    expect(postSecondTriples.filter((t: any) => t.p === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type').map((t: any) => t.o))
+      .toEqual(expect.arrayContaining([
+        'http://www.w3.org/ns/dcat#Dataset',
+        'https://dkg.network/ontology#PrivateContextGraph',
+      ]));
+    expect(postSecondTriples.find((t: any) => t.p === 'http://purl.org/dc/terms/accessRights')?.o)
+      .toBe('http://publications.europa.eu/resource/authority/access-right/RESTRICTED');
   });
 });

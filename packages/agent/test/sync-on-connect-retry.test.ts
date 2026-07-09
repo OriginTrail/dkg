@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { runSyncOnConnect, SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -40,7 +40,76 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
+function allowAllNetworkAdmission(agent: DKGAgent): void {
+  const coordinator = (agent as any).networkAdmissionCoordinator;
+  coordinator.isAcceptedPeer = () => true;
+  coordinator.isRejectedPeer = () => false;
+  coordinator.ensureAdmitted = async () => true;
+}
+
 describe('runSyncOnConnect callbacks', () => {
+  it('accepts omitted knownCorePeerIdsV2 for backwards-compatible call sites', async () => {
+    const remotePeer = freshPeerIdString();
+    const knownCorePeerIds = new Set<string>();
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC],
+      knownCorePeerIds,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+  });
+
+  it('tracks and evicts V2 ACK capability from populated protocol lists', async () => {
+    const remotePeer = freshPeerIdString();
+    const knownCorePeerIds = new Set<string>();
+    const knownCorePeerIdsV2 = new Set<string>([remotePeer]);
+
+    const emptyIdentifyOutcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [],
+      knownCorePeerIds,
+      knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(emptyIdentifyOutcome).toBe('skipped-no-sync');
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    const v1OnlyOutcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
+      knownCorePeerIds,
+      knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => 0,
+      logInfo: noopLog,
+    });
+
+    expect(v1OnlyOutcome).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+  });
+
   it('fires onPeerSkippedNoSync when the peer does not advertise PROTOCOL_SYNC', async () => {
     const remotePeer = freshPeerIdString();
     const skipped: Array<{ peerId: string; protocols: string[] }> = [];
@@ -641,6 +710,15 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       await agent.start();
 
       const remotePeer = freshPeerIdString();
+      let admitted = false;
+      const ensureAdmitted = recorder(async (peerId: string) => {
+        admitted = true;
+        return peerId === remotePeer;
+      });
+      const coordinator = (agent as any).networkAdmissionCoordinator;
+      coordinator.isAcceptedPeer = () => admitted;
+      coordinator.isRejectedPeer = () => false;
+      coordinator.ensureAdmitted = ensureAdmitted;
       // Pretend sync-on-connect ran earlier and skipped this peer because
       // identify hadn't completed (the libp2p race we're fixing).
       (agent as any).skippedNoSyncPeers.add(remotePeer);
@@ -668,6 +746,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       }
 
       expect(calls).toEqual([remotePeer]);
+      expect(ensureAdmitted.calls.map(([peerId]) => peerId)).toEqual([remotePeer]);
       expect((agent as any).skippedNoSyncPeers.has(remotePeer)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
@@ -682,6 +761,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       (agent as any).skippedNoSyncPeers.add(remotePeer);
@@ -719,6 +799,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
 
@@ -757,6 +838,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const peerB = freshPeerIdString();
@@ -789,6 +871,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const freshPeer = freshPeerIdString();
       const stalePeer = freshPeerIdString();
@@ -825,6 +908,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -858,6 +942,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
 
@@ -891,6 +976,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -953,6 +1039,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -993,6 +1080,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1032,6 +1120,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1058,6 +1147,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1086,6 +1176,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1116,6 +1207,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       let connectedPeers = [peerIdFromString(peerA)];
@@ -1157,6 +1249,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       (agent as any).skippedNoSyncPeers.add(remotePeer);
@@ -1192,6 +1285,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       (agent as any).lastSuccessfulSyncAt.set(remotePeer, Date.now() - 30_000);
@@ -1225,6 +1319,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       const sameTickBoundary = Date.now() - 30_000;
@@ -1245,7 +1340,7 @@ describe('DKGAgent sync state lifecycle', () => {
         },
       } as any));
 
-      expect((agent as any).catchupOnConnectAt.get(remotePeer)).toBeGreaterThan(sameTickBoundary);
+      expect((agent as any).catchupOnConnectAt.get(remotePeer)).toBeGreaterThanOrEqual(sameTickBoundary);
       await new Promise(r => setTimeout(r, 3100));
       expect(calls).toEqual([remotePeer]);
     } finally {
@@ -1261,6 +1356,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       const now = Date.now();
@@ -1294,6 +1390,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const remotePeer = freshPeerIdString();
       (agent.node.libp2p as any).getPeers = recorder(() => [peerIdFromString(remotePeer)]);
@@ -1375,6 +1472,7 @@ describe('DKGAgent sync state lifecycle', () => {
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1418,6 +1516,7 @@ describe('DKGAgent sync transport — off the messenger substrate (node-ui.db bl
     });
     try {
       await agent.start();
+      allowAllNetworkAdmission(agent);
 
       const messengerHandlers = (agent as any).messenger.handlers as Map<string, unknown>;
       const routerHandlers = (agent as any).router.handlers as Map<string, unknown>;

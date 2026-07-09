@@ -23,15 +23,16 @@ added, etc.):
 ## Action
 
 ```text
-$ NODE_DIR=.devnet/node5 ./scripts/dkg publish <cgId> \
-    --file devnet/agent-provenance/turns/turn-<x>.nq \
+$ NODE_DIR=.devnet/node5 ./scripts/dkg ka create <name> --context-graph-id <cgId> \
+    --input-file devnet/agent-provenance/turns/turn-<x>.nq --share
+$ NODE_DIR=.devnet/node5 ./scripts/dkg ka publish <name> --context-graph-id <cgId> \
     --publisher-node-identity-id <core_id>
 
 <paste full stdout/stderr — should include the daemon log line:
 "On-chain confirmed: UAL=... batchId=N tx=0x...">
 ```
 
-KC ID minted: `<batchId>`
+KA ID minted: `<batchId>`
 TX hash: `<0x...>`
 Block number: `<N>`
 

@@ -25,7 +25,7 @@
  */
 
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
-import { ASSERTION_ACTIVITY_TYPE, type AssertionActivityKind } from '@origintrail-official/dkg-node-ui';
+import { ASSERTION_ACTIVITY_TYPE, PCA_COST_COVERED_TYPE, type AssertionActivityKind } from '@origintrail-official/dkg-node-ui';
 
 /**
  * Cheap local membership gate for the cross-node (gossip) activity emitter
@@ -120,6 +120,59 @@ export function recordAssertionActivity(
     title: 'Assertion activity',
     message: `Assertion ${input.kind} in ${contextGraphId}`,
     source: 'activity',
+    contextGraphId,
+    meta: JSON.stringify(meta),
+  });
+}
+
+export interface ConvictionCostCoveredInput {
+  contextGraphId: string;
+  /** The publishing wallet (publish msg.sender) — the bell is scoped to it. */
+  publisherAddress: string;
+  accountId: bigint | string;
+  epoch: number;
+  baseCost: bigint | string;
+  discountedCost: bigint | string;
+  drawnFromEpoch: bigint | string;
+  drawnFromTopUp: bigint | string;
+}
+
+/**
+ * B8 confirmed-discount bell — record one `pca_cost_covered` row when a publish
+ * drew on a Publishing Conviction Account (the adapter decoded the on-chain
+ * CostCovered event). Wallet-scoped: the read path (`scopeNotifications`) only
+ * surfaces it to the publishing wallet (the discount is that wallet's business,
+ * not the whole CG's — invariant 3), upgrading the P0 predictive alert to a
+ * server-confirmed one. Resilient: a malformed CG / non-address publisher is a
+ * no-op (null) and the caller's try/catch swallows DB errors — the bell must
+ * never break a publish. Returns the inserted row id, or null.
+ */
+export function recordConvictionCostCovered(
+  dashDb: Pick<DashboardDB, 'insertNotification'>,
+  input: ConvictionCostCoveredInput,
+): number | null {
+  const contextGraphId = input.contextGraphId?.trim();
+  if (!contextGraphId) return null;
+  const publisher = input.publisherAddress?.trim();
+  if (!publisher || !EVM_ADDRESS_RE.test(publisher)) return null;
+  const accountId = String(input.accountId);
+  const meta = {
+    publisherAddress: publisher.toLowerCase(),
+    accountId,
+    epoch: input.epoch,
+    baseCost: String(input.baseCost),
+    discountedCost: String(input.discountedCost),
+    drawnFromEpoch: String(input.drawnFromEpoch),
+    drawnFromTopUp: String(input.drawnFromTopUp),
+  };
+  return dashDb.insertNotification({
+    ts: Date.now(),
+    type: PCA_COST_COVERED_TYPE,
+    // Display is rendered from the typed meta; title/message satisfy the schema
+    // and remain useful for generic log inspection.
+    title: 'Publishing discount applied',
+    message: `Publish to ${contextGraphId} drew on PCA #${accountId}`,
+    source: 'pca',
     contextGraphId,
     meta: JSON.stringify(meta),
   });

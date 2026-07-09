@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { connectToMultiaddr } from '../src/p2p/peer-connect.js';
+import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -49,5 +49,33 @@ describe('connectToMultiaddr', () => {
       dial,
       peerStore: { merge },
     }, multiaddress)).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+  });
+});
+
+describe('primeCatchupConnections', () => {
+  it('dials discovered peers before running the caller admission proof', async () => {
+    const dial = recorder(async () => undefined);
+    const merge = recorder(async () => undefined);
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const eligiblePeer = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const foreignPeer = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
+    const admissionCalls: string[] = [];
+
+    await primeCatchupConnections({
+      getConnections: () => [],
+      dial,
+      peerStore: { merge },
+    }, {
+      findAgents: async () => [
+        { peerId: foreignPeer, relayAddress },
+        { peerId: eligiblePeer, relayAddress },
+      ],
+    } as any, 'self-peer', async (peerId) => {
+      admissionCalls.push(peerId);
+    });
+
+    expect(merge.calls).toHaveLength(2);
+    expect(dial.calls).toHaveLength(2);
+    expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
   });
 });

@@ -152,10 +152,20 @@ else
 fi
 
 log "Publishing 1 quad into $CG_NAME (cgId=$CG_NUMERIC_ID) via CLI..."
+# #1410 replaced the one-shot `dkg publish <cg> --file` with the two-step KA
+# lifecycle: `ka create --share` (WM → finalize → SWM) then `ka publish` (→ VM).
+RS_KA_NAME="rs-smoke-$(date +%s)"
 set +e
-DKG_HOME="$NODE_DIR" node "$CLI_JS" publish "$CG_NAME" --file "$TMP_RDF" \
+DKG_HOME="$NODE_DIR" node "$CLI_JS" ka create "$RS_KA_NAME" \
+  --context-graph-id "$CG_NAME" --input-file "$TMP_RDF" --share \
   > /tmp/rs-publish.log 2>&1
 PUBLISH_RC=$?
+if [ $PUBLISH_RC -eq 0 ]; then
+  DKG_HOME="$NODE_DIR" node "$CLI_JS" ka publish "$RS_KA_NAME" \
+    --context-graph-id "$CG_NAME" \
+    >> /tmp/rs-publish.log 2>&1
+  PUBLISH_RC=$?
+fi
 set -e
 if [ $PUBLISH_RC -ne 0 ]; then
   tail -n 30 /tmp/rs-publish.log >&2

@@ -37,7 +37,7 @@ Use the manual subscribe **only** when you can demonstrate at least one of:
 
 ## Preconditions
 
-* Target daemon must be a **core** node (`nodeRole === 'core'`) with `swmHostMode` enabled in `~/.dkg/config.json`. Edge nodes have host mode disabled by build; the endpoint returns a no-op on those.
+* Target daemon must be a **core** node (`nodeRole === 'core'`) with `swmHostMode` enabled in `~/.dkg/config.json`. Edge nodes have host mode disabled by build; the endpoint returns a no-op on those. For registered-CG hosting and node-operator authorization, the Core should also have a non-zero node profile `identityId`; see [Core Node Profile Registration](run-node.md#core-node-profile-registration).
 * Operator must have the daemon's `~/.dkg/auth.token` (same `Bearer` scheme every other `/api/*` route uses).
 * Target CG must be **curated** (`accessPolicy === 1`). Public CGs use the plaintext SWM substrate and don't need an opaque host.
 

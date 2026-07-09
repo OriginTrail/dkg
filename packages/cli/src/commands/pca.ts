@@ -30,7 +30,8 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import type { RegisterAgentAdvisoryStatus } from '../pca-confirmation-wire.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -103,6 +104,28 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
+// The operator-facing `verified:` line for a register-agent advisory. The
+// exhaustive switch (`never` default) forces a future RegisterAgentAdvisoryStatus
+// to add a case here rather than silently mislabeling it.
+function describeRegisterAdvisory(advisory: RegisterAgentAdvisoryStatus): string {
+  switch (advisory) {
+    case 'confirmed':
+      return 'confirmed on-chain';
+    case 'not_observed':
+      return 'pending (tx mined; on-chain read has not observed the agent yet — follower-RPC lag)';
+    case 'inconclusive':
+      return 'pending (tx mined; on-chain confirmation was inconclusive — the advisory read failed)';
+    case 'unsupported':
+      return 'not verifiable on this adapter (registration is authoritative via the mined tx)';
+    case 'legacy-unverified':
+      return 'unverifiable — a legacy daemon (pre-#1346) did not confirm on-chain and cannot attest tx success; upgrade the daemon to verify';
+    default: {
+      const _exhaustive: never = advisory;
+      return _exhaustive;
+    }
+  }
+}
+
 export function registerPcaCommand(program: Command): void {
 // ─── dkg publisher ────────────────────────────────────────────────────
 
@@ -152,7 +175,10 @@ pcaCmd
       const result = await client.registerPcaAgent(accountId, agent);
       console.log(`Registered agent on PCA ${result.accountId}:`);
       console.log(`  agent:      ${result.agent}`);
-      console.log(`  registered: ${result.registered} (verified via on-chain read)`);
+      // The client already normalized version-skew into { registered, advisory };
+      // render it directly.
+      console.log(`  registered: ${result.registered}`);
+      console.log(`  verified:   ${describeRegisterAdvisory(result.advisory)}`);
       console.log(`  txHash:     ${result.txHash}`);
       console.log(`  block:      ${result.blockNumber}`);
     } catch (err) {

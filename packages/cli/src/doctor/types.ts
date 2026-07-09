@@ -109,7 +109,7 @@ export interface StateSummary {
     enabled: boolean;
     checkIntervalMinutes: number;
     allowPrerelease: boolean;
-    /** `config.autoUpdate.source` — should be `npm` or `monorepo` post-rc.12. */
+    /** `config.autoUpdate.source` — npm by default, git for advanced Core opt-in, monorepo for dev checkouts. */
     source: string | null;
     /** ~/.dkg/auto-update/last-check.json#timestamp — `null` if never checked. */
     lastCheck: string | null;

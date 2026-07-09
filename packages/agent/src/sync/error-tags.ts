@@ -1,3 +1,5 @@
+import { isOversizedRdfLiteralError } from '@origintrail-official/dkg-core';
+
 type SyncErrorTag = 'syncPeerResponded' | 'syncTransportFailure';
 
 function markSyncError(error: unknown, tag: SyncErrorTag): void {
@@ -34,6 +36,20 @@ export function didSyncPeerRespond(error: unknown): boolean {
 
 export function isSyncTransportFailure(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { syncTransportFailure?: boolean }).syncTransportFailure);
+}
+
+/**
+ * PERMANENT ingest rejection (OT-RFC-56): retrying can never succeed — the
+ * content itself violates a protocol invariant (today: the RDF-literal size
+ * limit; `OversizedRdfLiteralError` from the store adapters). The sync
+ * seams' oversize guard (sync/oversize-filter.ts) should make this
+ * unreachable on the ingest paths; when a runner's catch still sees one, a
+ * seam was missed — log loudly, never count it toward peer backoff, and
+ * expect the same page to fail identically on every retry until the seam is
+ * fixed.
+ */
+export function isSyncPermanentRejection(error: unknown): boolean {
+  return isOversizedRdfLiteralError(error);
 }
 
 export function isSyncBackoffWorthyError(error: unknown): boolean {

@@ -8,12 +8,12 @@
 #
 # Exit code is non-zero when any sub-test fails — orchestrators key off this.
 #
-# Wire shapes assumed (rc.12+):
-#   - publish:    POST /api/shared-memory/write  +  POST /api/shared-memory/publish
+# Wire shapes assumed:
+#   - publish:    POST /api/knowledge-assets + POST /api/knowledge-assets/<name>/vm/publish
 #   - update/private quads: POST /api/update     (legacy is intentionally retained)
-#   - SWM:        POST /api/shared-memory/{write,publish}
+#   - SWM:        POST /api/knowledge-assets/<name>/swm/share
 #   - knowledge-assets: POST /api/knowledge-assets (create), POST /api/knowledge-assets/<name>/wm/write, GET /api/knowledge-assets/<name>/wm/quads (query), POST /api/knowledge-assets/<name>/swm/share (promote)
-#   - CAS:        POST /api/shared-memory/conditional-write  (conditions REQUIRED non-empty)
+#   - CAS:        retired with loose SWM writes
 #   - chat:       POST /api/chat { to, text }
 #   - identity:   GET  /api/identity      (replaces deprecated /api/profile)
 #   - status:     GET  /api/status        (carries peerId, name, nodeRole — covers profile cases)
@@ -112,27 +112,22 @@ CG="${CG:-devnet-test}"
 # split on the first two `|` and treat the rest as the raw response.
 publish_swm() {
   local port=$1 cgid=$2 quads_json=$3 sgname=${4:-} root_entity=${5:-}
+  local name="rc-${RUN_TAG}-${port}-${RANDOM:-0}"
   local write_body=$(cat <<JSON
-{"contextGraphId":"$cgid","quads":[$quads_json]$([ -n "$sgname" ] && echo ",\"subGraphName\":\"$sgname\"")}
+{"contextGraphId":"$cgid","name":"$name","quads":[$quads_json],"finalize":true,"alsoShareSwm":true$([ -n "$sgname" ] && echo ",\"subGraphName\":\"$sgname\"")}
 JSON
 )
-  local w=$(post "$port" /api/shared-memory/write -H "Content-Type: application/json" -d "$write_body")
-  local op=$(echo "$w" | pyfield "d.get('shareOperationId','?')")
-  if [ -z "$op" ] || [ "$op" = "?" ]; then
+  local w=$(post "$port" /api/knowledge-assets -H "Content-Type: application/json" -d "$write_body")
+  local shared=$(echo "$w" | pyfield "1 if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 0")
+  if [ "$shared" != "1" ]; then
     echo "WRITE_FAILED||$w"
     return 1
   fi
-  local selection_json
-  if [ -n "$root_entity" ]; then
-    selection_json="{\"rootEntities\":[\"$root_entity\"]}"
-  else
-    selection_json='"all"'
-  fi
   local pub_body=$(cat <<JSON
-{"contextGraphId":"$cgid","selection":$selection_json$([ -n "$sgname" ] && echo ",\"subGraphName\":\"$sgname\"")}
+{"contextGraphId":"$cgid"$([ -n "$sgname" ] && echo ",\"subGraphName\":\"$sgname\""),"options":{"clearAfter":false}}
 JSON
 )
-  local p=$(post "$port" /api/shared-memory/publish -H "Content-Type: application/json" -d "$pub_body")
+  local p=$(post "$port" "/api/knowledge-assets/$name/vm/publish" -H "Content-Type: application/json" -d "$pub_body")
   local st=$(echo "$p" | pyfield "d.get('status','?')")
   local kc=$(echo "$p" | pyfield "d.get('kaId','?')")
   echo "${st}|${kc}|${p}"
@@ -329,23 +324,27 @@ done
 section "6. SHARED WORKING MEMORY (SWM) — direct write"
 
 DRAFT_URI="urn:v10:draft-report-$RUN_TAG"
+SWM_NAME="draft-report-$RUN_TAG"
 SWM_BODY=$(cat <<JSON
 {
   "contextGraphId": "$CG",
+  "name": "$SWM_NAME",
   "quads": [
     $(q "$DRAFT_URI" "http://www.w3.org/1999/02/22-rdf-syntax-ns#type" "http://schema.org/Report"),
     $(ql "$DRAFT_URI" "http://schema.org/name" "Q1 Analysis Draft $RUN_TAG"),
     $(ql "$DRAFT_URI" "http://schema.org/description" "Work in progress analysis")
-  ]
+  ],
+  "finalize": true,
+  "alsoShareSwm": true
 }
 JSON
 )
-SWM_RESULT=$(post 9201 /api/shared-memory/write -H "Content-Type: application/json" -d "$SWM_BODY")
-SWM_OP=$(echo "$SWM_RESULT" | pyfield "d.get('shareOperationId','?')")
-if [ -n "$SWM_OP" ] && [ "$SWM_OP" != "?" ]; then
-  ok "SWM write succeeded, opId=$SWM_OP"
+SWM_RESULT=$(post 9201 /api/knowledge-assets -H "Content-Type: application/json" -d "$SWM_BODY")
+SWM_SHARED=$(echo "$SWM_RESULT" | pyfield "1 if d.get('swmShared') or d.get('status') in ('swm-shared','vm-confirmed') else 0")
+if [ "$SWM_SHARED" = "1" ]; then
+  ok "Named KA shared to SWM: $SWM_NAME"
 else
-  fail "SWM write failed: $SWM_RESULT"
+  fail "Named KA share failed: $SWM_RESULT"
 fi
 
 sleep 2
@@ -456,12 +455,9 @@ fi
 section "9. PUBLISH FROM SWM → VM"
 
 sleep 2
-# Target ONLY the promoted finding URI — `selection: "all"` would also
-# try to publish any leftover SWM content from prior runs and trip the
-# rc.12 rootEntity-uniqueness rule.
-ENSHRINE=$(post 9201 /api/shared-memory/publish -H "Content-Type: application/json" -d "{
+ENSHRINE=$(post 9201 "/api/knowledge-assets/$ASSERT_NAME/vm/publish" -H "Content-Type: application/json" -d "{
   \"contextGraphId\": \"$CG\",
-  \"selection\": { \"rootEntities\": [\"$FINDING_URI\"] }
+  \"options\": { \"clearAfter\": false }
 }")
 ENS_STATUS=$(echo "$ENSHRINE" | pyfield "d.get('status','?')")
 ENS_KCID=$(echo "$ENSHRINE" | pyfield "d.get('kaId','?')")
@@ -575,33 +571,13 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 section "12. CONDITIONAL SHARE (CAS)"
 
-# rc.12: conditions are REQUIRED and must be non-empty. Each condition is
-# {subject, predicate, expectedValue: string|null}. Pick a fresh URI so the
-# "must not exist" check (expectedValue=null) is always satisfied first call.
-COUNTER_URI="urn:v10:counter-$RUN_TAG"
-
-CAS_BODY=$(cat <<JSON
-{
-  "contextGraphId": "$CG",
-  "quads": [
-    $(ql "$COUNTER_URI" "http://schema.org/value" "initial-value")
-  ],
-  "conditions": [
-    {
-      "subject": "$COUNTER_URI",
-      "predicate": "http://schema.org/value",
-      "expectedValue": null
-    }
-  ]
-}
-JSON
-)
-CAS_RESULT=$(post 9201 /api/shared-memory/conditional-write -H "Content-Type: application/json" -d "$CAS_BODY")
-CAS_OP=$(echo "$CAS_RESULT" | pyfield "d.get('shareOperationId','?')")
-if [ -n "$CAS_OP" ] && [ "$CAS_OP" != "?" ]; then
-  ok "Conditional share succeeded, opId=$CAS_OP"
+# Loose SWM CAS was retired with the anonymous SWM write surface. Keep a small
+ # contract check so the route does not silently come back.
+CAS_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" "http://127.0.0.1:9201/api/shared-memory/conditional-write" -d '{"contextGraphId":"devnet-test","quads":[],"conditions":[]}')
+if [ "$CAS_CODE" = "404" ] || [ "$CAS_CODE" = "410" ]; then
+  ok "Retired conditional-write route is not served (HTTP $CAS_CODE)"
 else
-  fail "Conditional share failed: $CAS_RESULT"
+  fail "Retired conditional-write route unexpectedly returned HTTP $CAS_CODE"
 fi
 
 # ────────────────────────────────────────────────────────────────────────────

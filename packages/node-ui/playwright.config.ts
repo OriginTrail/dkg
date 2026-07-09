@@ -46,6 +46,15 @@ const WEB_SERVER_TIMEOUT_MS = CI
 
 export default defineConfig({
   testDir: './e2e/specs',
+  // `devnet-local/` holds the heavy devnet specs trimmed OUT of the CI lane in
+  // #1403 (on-chain KA mint + update attestation, destructive `clearAfter`
+  // wipes, 30s inter-node soak). The UI-driven WM→SWM cycle spec is NOT here:
+  // #1483 fixed its shared-CG flake (dedicated-CG isolation), so it runs in CI
+  // again from specs/devnet/. The rest are kept runnable on demand —
+  //   pnpm --filter @origintrail-official/dkg-node-ui test:e2e:devnet-local
+  // sets PW_DEVNET_LOCAL=1 to lift the ignore and scopes the run to that dir.
+  // Default runs (and CI's bare `test:e2e`) never pick them up.
+  testIgnore: process.env.PW_DEVNET_LOCAL === '1' ? [] : ['**/devnet-local/**'],
   // Every spec drives the SAME shared real node. Read-only specs parallelise
   // safely; specs that mutate node state guard themselves with
   // `test.describe.configure({ mode: 'serial' })` + uniquely-named data.

@@ -52,7 +52,7 @@ const DEFAULT_OUTPUT_DIR = 'bench/results/profiles';
 const PUBLISH_ASYNC_GET_PAGES: Array<[string, string]> = [
   ['get/read retrieval', 'bench/results/publish-async-get/get-read-retrieval.html'],
   ['synchronous publish with finalization', 'bench/results/publish-async-get/sync-publish-finalization.html'],
-  ['asynchronous publish enqueue and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
+  ['asynchronous VM publish request and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
   ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
   ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
 ];
@@ -163,9 +163,10 @@ async function analyzeGetFlow(config: BenchmarkConfig, payloadSize: PayloadSizeL
     const payload = traceSync(trace, 'setup', 'createPayload', [], 'Generate the asset to publish and read back.', () => (
       createPayload(config, `analysis-get-${payloadSize}`, 1, 'sync', false)
     ));
-    await traceSharedMemoryWrite(trace, client, config, payload);
-    await traceAsync(trace, 'setup', 'publishFromSharedMemory', ['promoteSharedRoot'], 'Finalize staged shared-memory content into verifiable memory for the read path.', () => (
-      client.publishFromSharedMemory(config.contextGraphId, { rootEntities: [payload.rootEntity] }, false)
+    // publishAssertion stages the quads internally (matches the ESBench path),
+    // so no separate traceSharedMemoryWrite here — it would double-write SWM.
+    await traceAsync(trace, 'setup', 'publishAssertion', ['promoteSharedRoot'], 'Finalize the named knowledge asset into verifiable memory for the read path.', () => (
+      client.publishAssertion(config.contextGraphId, `analysis-get-${payloadSize}`, payload.quads, { clearAfter: false })
     ), { rootEntity: payload.rootEntity });
     const sparql = traceSync(trace, 'measured', 'getSparql', [], 'Build the read query for the published root entity.', () => getSparql(payload.rootEntity));
     const response = await traceAsync(trace, 'measured', 'query', ['layer'], 'Read the published marker from the configured memory view.', () => (
@@ -184,9 +185,11 @@ async function analyzeSyncPublishFlow(config: BenchmarkConfig, payloadSize: Payl
     const payload = traceSync(trace, 'setup', 'createPayload', [], 'Generate the payload for synchronous publish.', () => (
       createPayload(config, `analysis-sync-${payloadSize}`, 1, 'sync', false)
     ));
-    await traceSharedMemoryWrite(trace, client, config, payload);
-    await traceAsync(trace, 'measured', 'publishFromSharedMemory', ['promoteSharedRoot'], 'Synchronously finalize staged shared-memory content into verifiable memory.', () => (
-      client.publishFromSharedMemory(config.contextGraphId, { rootEntities: [payload.rootEntity] }, false)
+    // publishAssertion stages the quads internally (matches the ESBench path), so no
+    // separate traceSharedMemoryWrite here — it would double-write SWM and make the
+    // measured publish unrepresentative of the canonical create/write/share/publish flow.
+    await traceAsync(trace, 'measured', 'publishAssertion', ['promoteSharedRoot'], 'Synchronously publish the named knowledge asset into verifiable memory.', () => (
+      client.publishAssertion(config.contextGraphId, `analysis-sync-${payloadSize}`, payload.quads, { clearAfter: false })
     ), { rootEntity: payload.rootEntity });
     traceSync(trace, 'cleanup', 'clear', ['Map.clear'], 'Clear all in-memory layers after the representative run.', () => client.clear());
   });
@@ -194,25 +197,15 @@ async function analyzeSyncPublishFlow(config: BenchmarkConfig, payloadSize: Payl
 
 async function analyzeAsyncPublishFlow(config: BenchmarkConfig, payloadSize: PayloadSizeLabel): Promise<FlowAnalysis> {
   const client = new LayeredDkgBenchmarkClient();
-  return analyzeFlow('asynchronous publish enqueue and finalization', payloadSize, async (trace) => {
+  return analyzeFlow('asynchronous VM publish request and finalization', payloadSize, async (trace) => {
     const payload = traceSync(trace, 'setup', 'createPayload', [], 'Generate the payload for async publish.', () => (
       createPayload(config, `analysis-async-${payloadSize}`, 1, 'async', false)
     ));
-    const prepared = await traceSharedMemoryWrite(trace, client, config, payload);
-    const shareOperationId = prepared.shareOperationId ?? '';
-    const queued = await traceAsync(trace, 'measured', 'publisherEnqueue', ['publisherJobs.set'], 'Enqueue the publish request through the publisher runtime path.', () => (
-      client.publisherEnqueue({
-        contextGraphId: config.contextGraphId,
-        shareOperationId,
-        roots: [payload.rootEntity],
-        namespace: config.namespace,
-        scope: config.scope,
-        authorityProofRef: config.authorityProofRef,
-        swmId: 'swm-main',
-        transitionType: 'CREATE',
-        authorityType: 'owner',
-      })
-    ), { rootEntity: payload.rootEntity, shareOperationId });
+    const name = `analysis-async-${payloadSize}`;
+    await traceCreateSharedKnowledgeAsset(trace, client, config, name, payload);
+    const queued = await traceAsync(trace, 'measured', 'knowledgeAssetPublishAsync', ['publisherJobs.set'], 'Queue VM publish for the named knowledge asset.', () => (
+      client.knowledgeAssetPublishAsync(config.contextGraphId, name)
+    ), { rootEntity: payload.rootEntity, name });
     await traceAsync(trace, 'measured', 'publisherJob', ['promoteSharedRoot'], 'Poll the publisher job and finalize queued content.', () => (
       client.publisherJob(queued.jobId ?? '')
     ), { jobId: queued.jobId });
@@ -265,15 +258,20 @@ async function analyzeFlow(
   return { flow, payloadSize, totalMs, measuredMs, traces: normalizedTraces };
 }
 
-async function traceSharedMemoryWrite(
+async function traceCreateSharedKnowledgeAsset(
   traces: MethodTrace[],
   client: LayeredDkgBenchmarkClient,
   config: BenchmarkConfig,
+  name: string,
   payload: BenchmarkPayload,
 ) {
-  return traceAsync(traces, 'setup', 'sharedMemoryWrite', ['writeWorkingMemory', 'liftWorkingMemoryToSharedMemory'], 'Stage generated quads in local memory and lift them into shared working memory.', () => (
-    client.sharedMemoryWrite(config.contextGraphId, payload.quads)
-  ), payloadContext(payload));
+  return traceAsync(traces, 'setup', 'createKnowledgeAsset', ['writeWorkingMemory', 'liftWorkingMemoryToSharedMemory'], 'Create, seal, and share the named knowledge asset into shared working memory.', () => (
+    client.createKnowledgeAsset(config.contextGraphId, name, {
+      quads: payload.quads,
+      finalize: true,
+      alsoShareSwm: true,
+    })
+  ), { ...payloadContext(payload), name });
 }
 
 async function traceAsync<T>(

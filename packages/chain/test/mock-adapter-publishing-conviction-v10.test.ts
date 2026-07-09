@@ -7,6 +7,8 @@
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { toShardingTableNode } from '../src/evm-adapter-conviction.js';
+import type { PcaRpcMethod } from '../src/chain-adapter.js';
 
 const SIGNER = '0x1111111111111111111111111111111111111111';
 const COMMITTED = ethers.parseEther('10000');
@@ -36,6 +38,23 @@ describe('MockChainAdapter — V10 conviction account create/read', () => {
     expect(info!.agentCount).toBe(0);
 
     expect(await mock.getPublishingConvictionAccountInfo(999n)).toBeNull();
+  });
+
+  it('getPublishingConvictionAccountInfo extended adds GAP-4/5 fields; default omits them', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+
+    const base = (await mock.getPublishingConvictionAccountInfo(accountId))!;
+    expect(base.primaryNode).toBeUndefined();
+    expect(base.remainingAllowance).toBeUndefined();
+    expect(base.currentEpoch).toBeUndefined();
+    expect(base.lastPrimaryNodeChangeEpoch).toBeUndefined();
+
+    const ext = (await mock.getPublishingConvictionAccountInfo(accountId, { extended: true }))!;
+    expect(ext.primaryNode).toBe(0n); // mock doesn't model RFC-51 per-node allocation
+    expect(ext.lastPrimaryNodeChangeEpoch).toBe(0);
+    expect(typeof ext.currentEpoch).toBe('number');
+    expect(ext.remainingAllowance).toBe(ext.baseEpochAllowance + ext.topUpBuffer);
   });
 
   it('lifecycle metadata is internally consistent: expiresAtEpoch = createdAtEpoch + lockDurationEpochs', async () => {
@@ -104,6 +123,45 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     expect((await mock.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(0);
   });
 
+  it('clearPublishingConvictionAgents bulk-removes every agent and frees the reverse map', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const agent1 = ethers.Wallet.createRandom().address;
+    const agent2 = ethers.Wallet.createRandom().address;
+    await mock.registerPublishingConvictionAgent(accountId, agent1);
+    await mock.registerPublishingConvictionAgent(accountId, agent2);
+    expect((await mock.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(2);
+
+    const cleared = await mock.clearPublishingConvictionAgents(accountId);
+    expect(cleared.success).toBe(true);
+    expect(await mock.isPublishingConvictionAgent(accountId, agent1)).toBe(false);
+    expect(await mock.isPublishingConvictionAgent(accountId, agent2)).toBe(false);
+    expect(await mock.getConvictionAgentAccountId(agent1)).toBe(0n);
+    expect((await mock.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(0);
+  });
+
+  it('registerPublishingConvictionAgents bulk-adds all agents (all-or-nothing on a duplicate)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const a1 = ethers.Wallet.createRandom().address;
+    const a2 = ethers.Wallet.createRandom().address;
+
+    const res = await mock.registerPublishingConvictionAgents(accountId, [a1, a2]);
+    expect(res.success).toBe(true);
+    expect(await mock.isPublishingConvictionAgent(accountId, a1)).toBe(true);
+    expect(await mock.isPublishingConvictionAgent(accountId, a2)).toBe(true);
+    expect((await mock.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(2);
+
+    // All-or-nothing: a batch containing an already-registered agent reverts and
+    // adds none of its entries.
+    const a3 = ethers.Wallet.createRandom().address;
+    await expect(
+      mock.registerPublishingConvictionAgents(accountId, [a3, a1]),
+    ).rejects.toThrow(/AgentAlreadyRegistered/);
+    expect(await mock.isPublishingConvictionAgent(accountId, a3)).toBe(false);
+    expect((await mock.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(2);
+  });
+
   it('rejects re-registering an already-registered agent (N28 parity)', async () => {
     const mock = new MockChainAdapter('mock:31337', SIGNER);
     const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
@@ -112,6 +170,106 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     await mock.registerPublishingConvictionAgent(accountId, agent);
     await expect(mock.registerPublishingConvictionAgent(accountId, agent))
       .rejects.toThrow(/AgentAlreadyRegistered/);
+  });
+
+  it('getPublishingConvictionAgents enumerates checksummed addresses and returns [] for missing/empty (B3 parity)', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    expect(await mock.getPublishingConvictionAgents(999n)).toEqual([]); // missing account
+
+    const { accountId } = await mock.createPublishingConvictionAccount(COMMITTED);
+    expect(await mock.getPublishingConvictionAgents(accountId)).toEqual([]); // exists, no agents
+
+    // Mock stores keys lowercased; register a LOWERCASE address and assert the
+    // enumerator checksum-normalizes to match the on-chain address[] view.
+    const checksummed = ethers.getAddress('0x' + 'ab'.repeat(20));
+    await mock.registerPublishingConvictionAgent(accountId, checksummed.toLowerCase());
+    const agents = await mock.getPublishingConvictionAgents(accountId);
+    expect(agents).toEqual([checksummed]);
+    expect(agents[0]).not.toBe(checksummed.toLowerCase()); // EIP-55, not lowercased
+  });
+
+  it('listPublishingConvictionAccountsForWallets returns owned / agent / both, deduped and sorted', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const { accountId: a1 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await mock.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await mock.registerPublishingConvictionAgent(a1, wallet);
+
+    const owned = await mock.listPublishingConvictionAccountsForWallets([SIGNER]);
+    expect(owned.map((entry) => entry.relation)).toEqual(['owned', 'owned']);
+
+    expect(await mock.listPublishingConvictionAccountsForWallets([wallet]))
+      .toEqual([{ accountId: a1, relation: 'agent' }]);
+
+    const combined = await mock.listPublishingConvictionAccountsForWallets([SIGNER, wallet]);
+    const relations = new Map(combined.map((entry) => [entry.accountId, entry.relation]));
+    expect(relations.get(a1)).toBe('both');
+    expect(relations.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2);
+    expect(combined.map((entry) => entry.accountId)).toEqual([a1, a2]);
+    expect(await mock.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
+  it('listDesignatableNodes returns the fixture sharding table in hash-ring order', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const nodes = await mock.listDesignatableNodes();
+    expect(nodes).toHaveLength(3);
+    expect(nodes.map((node) => node.identityId)).toEqual([42n, 57n, 61n]);
+    for (const node of nodes) {
+      expect(node.nodeId).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(typeof node.identityId).toBe('bigint');
+      expect(node.stake).toBeGreaterThan(0n);
+      expect(node.ask).toBeGreaterThan(0n);
+    }
+  });
+
+  it('getPublishingConvictionContracts returns checksummed nft/token plus chainId and rpcUrls', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const c = await mock.getPublishingConvictionContracts();
+    expect(c.nft).toBe(ethers.getAddress(c.nft));
+    expect(c.token).toBe(ethers.getAddress(c.token));
+    expect(c.nft).not.toBe(c.token);
+    expect(c.chainId).toBe('mock:31337');
+    expect(c.rpcUrls).toEqual([]);
+    expect(c.walletRpcUrls).toEqual([]);
+  });
+
+  it('getPublishingConvictionContracts does not leak SECRETKEY from adapter getRpcUrls', async () => {
+    class SecretRpcMock extends MockChainAdapter {
+      override getRpcUrls(): string[] {
+        return ['https://rpc.example/v2/SECRETKEY'];
+      }
+    }
+    const mock = new SecretRpcMock('mock:31337', SIGNER);
+    const c = await mock.getPublishingConvictionContracts();
+    expect(JSON.stringify(c)).not.toContain('SECRETKEY');
+    expect(JSON.stringify(c)).not.toContain('https://rpc.example');
+    expect(c.rpcUrls).toEqual([]);
+  });
+
+  it('requestPublishingConvictionRpc covers the full PCA RPC method union', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+    const methods: PcaRpcMethod[] = [
+      'eth_chainId',
+      'eth_call',
+      'eth_getTransactionReceipt',
+      'eth_getTransactionByHash',
+      'eth_blockNumber',
+      'eth_getBlockByNumber',
+    ];
+
+    for (const method of methods) {
+      await expect(mock.requestPublishingConvictionRpc(method, [])).resolves.not.toBeUndefined();
+    }
+  });
+
+  it('toShardingTableNode normalizes named object and positional tuple shapes', () => {
+    expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n }))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    expect(toShardingTableNode(['0xab', 7n, 1n, 2n]))
+      .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });
+    expect(toShardingTableNode(['0xcd', '9', 3, 4n]))
+      .toEqual({ nodeId: '0xcd', identityId: 9n, ask: 3n, stake: 4n });
   });
 });
 

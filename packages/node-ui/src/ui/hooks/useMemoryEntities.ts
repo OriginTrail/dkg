@@ -196,7 +196,7 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 //      three layers.
 //
 // The V10 named-graph layout we rely on (see `resolveViewGraphs`
-// in `@origintrail-official/dkg-query` and `publishFromSharedMemory`):
+// in `@origintrail-official/dkg-query` and named KA lifecycle publish):
 //
 //   WM  (drafts)    : did:dkg:context-graph:<cg>/<sg>/assertion/<addr>/<name>
 //   SWM (proposed)  : did:dkg:context-graph:<cg>/<sg>/_shared_memory
@@ -207,7 +207,8 @@ function deriveEntityLabel(entity: MemoryEntity): string {
 //
 // Key insight: in V10 the plain `<cg>/<sg>` graph IS the committed
 // (chain-attested) view of a sub-graph — that's where
-// `/api/shared-memory/publish` deposits KAs after on-chain registration.
+// publishing to VM (`POST /api/knowledge-assets/:name/vm/publish`) deposits
+// KAs after on-chain registration.
 // We treat it as VM, not WM. Pre-publish writes only exist in
 // `assertion/<addr>/<name>` graphs.
 //

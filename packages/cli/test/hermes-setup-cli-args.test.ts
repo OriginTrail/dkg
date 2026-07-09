@@ -59,6 +59,23 @@ describe('hermesSetupAction', () => {
     });
   });
 
+  it('#1306: injects a loadOpWallets hook into runSetup (eager wallet creation)', async () => {
+    const runSetupArgs: any[] = [];
+    const runSetup = async (...args: unknown[]) => { runSetupArgs.push(args); };
+
+    await hermesSetupAction(
+      { verify: false, start: false, dryRun: true },
+      makeCommand(),
+      { runSetup: runSetup as any },
+    );
+
+    expect(runSetupArgs).toHaveLength(1);
+    // The 2nd arg is the injected runtime deps; loadOpWallets must be wired so
+    // the adapter can eagerly create wallets before the daemon starts.
+    const [, runDeps] = runSetupArgs[0] as [unknown, { loadOpWallets?: unknown }];
+    expect(typeof runDeps?.loadOpWallets).toBe('function');
+  });
+
   it('defaults verify/start/fund to true and dryRun/preserveProvider to false', () => {
     expect(normalizeHermesSetupOptions({})).toEqual({
       profile: undefined,

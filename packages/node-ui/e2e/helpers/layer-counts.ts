@@ -174,8 +174,7 @@ export async function countRootInSharedMemory(
   const genidPrefix = `${rootUri}/.well-known/genid/`;
   // rc.17 per-KA SWM: promoted content lands in …/_shared_memory/{addr}/{number}
   // (number-keyed), not only the legacy …/_shared_memory bucket. Read BOTH (bucket
-  // OR per-KA prefix), excluding the staging sub-tree — mirrors the UI's
-  // listSwmEntities read-both.
+  // OR per-KA prefix), excluding the staging sub-tree.
   const sparql = `SELECT (COUNT(*) AS ?c) WHERE {
     GRAPH ?g { ?s ?p ?o }
     FILTER((STR(?g) = "${swmGraph}" || STRSTARTS(STR(?g), "${swmGraph}/"))

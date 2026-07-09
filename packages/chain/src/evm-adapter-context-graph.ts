@@ -9,17 +9,174 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
-import { EVMChainAdapterBase, CG_REGISTRY_MAX_SCAN_PAGES, CG_REGISTRY_REORG_BUFFER_BLOCKS } from './evm-adapter-base.js';
+import {
+  EVMChainAdapterBase,
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  CG_REGISTRY_REORG_BUFFER_BLOCKS,
+} from './evm-adapter-base.js';
 import { isTooLowAllowanceError } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+
+type ContextGraphRegistryScanPlan =
+  | {
+      mode: 'explicitFromBlock' | 'listAll';
+      resumeFromWatermark: false;
+      persistProgress: false;
+      allowPartialFailure: false;
+      seedAtEnd: false;
+      pageBudget?: undefined;
+    }
+  | {
+      mode: 'incremental';
+      resumeFromWatermark: true;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: false;
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+      resumeFromWatermark: false;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: true;
+      pageBudget?: undefined;
+    }
+  | {
+      mode: 'seedFromCursor';
+      resumeFromWatermark: true;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: true;
+      pageBudget?: number;
+    };
+
+function normalizePageBudget(value: number | undefined): number | undefined {
+  return Number.isFinite(value) && (value ?? 0) >= 1
+    ? Math.floor(value ?? 0)
+    : undefined;
+}
+
+function buildPublicContextGraphRegistryScanPlan(
+  fromBlock: number | undefined,
+  options: ContextGraphChainScanOptions | undefined,
+): ContextGraphRegistryScanPlan {
+  const runtimeOptions = options as
+    | (ContextGraphChainScanOptions & { mode?: string })
+    | undefined;
+  const mode = runtimeOptions?.mode;
+
+  if (fromBlock !== undefined) {
+    return {
+      mode: 'explicitFromBlock',
+      resumeFromWatermark: false,
+      persistProgress: false,
+      allowPartialFailure: false,
+      seedAtEnd: false,
+    };
+  }
+
+  if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
+    return {
+      mode: 'incremental',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: false,
+      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
+    };
+  }
+
+  if (
+    runtimeOptions &&
+    'seedIncrementalWatermark' in runtimeOptions &&
+    runtimeOptions.seedIncrementalWatermark === true
+  ) {
+    if (runtimeOptions.resumeFromCursor === true) {
+      return {
+        mode: 'seedFromCursor',
+        resumeFromWatermark: true,
+        persistProgress: true,
+        allowPartialFailure: true,
+        seedAtEnd: true,
+        pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
+      };
+    }
+    return {
+      mode: 'seedFull',
+      resumeFromWatermark: false,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+    };
+  }
+
+  if (mode !== undefined && mode !== 'listAll') {
+    throw new Error(
+      'listContextGraphsFromChain accepts only listAll or legacy boolean scan options; ' +
+      'use scanContextGraphRegistryPages for cursor-backed daemon scans.',
+    );
+  }
+
+  return {
+    mode: 'listAll',
+    resumeFromWatermark: false,
+    persistProgress: false,
+    allowPartialFailure: false,
+    seedAtEnd: false,
+  };
+}
+
+function buildCursorContextGraphRegistryScanPlan(
+  options: ContextGraphRegistryScanOptions,
+): ContextGraphRegistryScanPlan {
+  if (options.mode === 'incremental') {
+    return {
+      mode: 'incremental',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: false,
+      pageBudget: normalizePageBudget(options.pageBudget),
+    };
+  }
+
+  if (options?.mode === 'seedFull') {
+    return {
+      mode: 'seedFull',
+      resumeFromWatermark: false,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+    };
+  }
+
+  if (options?.mode === 'seedFromCursor') {
+    return {
+      mode: 'seedFromCursor',
+      resumeFromWatermark: true,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: true,
+      pageBudget: normalizePageBudget(options.pageBudget),
+    };
+  }
+
+  const exhaustive: never = options;
+  throw new Error(`Unsupported ContextGraphNameRegistry scan mode: ${JSON.stringify(exhaustive)}`);
+}
 
 export class ContextGraphMethods extends EVMChainAdapterBase {
   /**
    * Reserve the next authorized signer and return its address. The publisher
    * uses this to bind off-chain signatures to the tx signer before
-   * `publishDirect` is submitted.
+   * `publishDirect` is submitted. This pre-pin runs BEFORE the publish cost is
+   * known (and the ChainAdapter interface advertises no cost arg), so it selects
+   * on the funding floor only — cost-aware selection lives inside
+   * `createKnowledgeAssets` (the no-`publisherAddress` path), and pin-time
+   * pricing is tracked as a follow-up (#1328).
    */
   async getAuthorizedPublisherAddress(contextGraphId: bigint): Promise<string> {
     await this.init();
@@ -106,7 +263,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    return this.contextGraphRegistryScanWatermarks.has(registryAddress);
+    return (await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)) != null;
   }
 
   async listContextGraphsFromChain(
@@ -116,17 +273,55 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
-    const eventFilter = registry.filters.NameClaimed();
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const incremental = options?.incremental === true && fromBlock === undefined;
-    const seedIncrementalWatermark =
-      options?.seedIncrementalWatermark === true && !incremental && fromBlock === undefined;
-    const watermark = incremental
-      ? this.contextGraphRegistryScanWatermarks.get(registryAddress)
+    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
+    return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
+  }
+
+  async *scanContextGraphRegistryPages(
+    options: ContextGraphRegistryScanOptions,
+  ): AsyncIterable<ContextGraphRegistryScanPage> {
+    await this.init();
+    const registry = this.contracts.contextGraphNameRegistry;
+    if (!registry) return;
+    const registryAddress = (await registry.getAddress()).toLowerCase();
+    const scanPlan = buildCursorContextGraphRegistryScanPlan(options);
+    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+  }
+
+  private async _collectContextGraphRegistryScan(
+    registry: Contract,
+    registryAddress: string,
+    fromBlock: number | undefined,
+    scanPlan: ContextGraphRegistryScanPlan,
+  ): Promise<ContextGraphOnChain[]> {
+    const results: ContextGraphOnChain[] = [];
+    for await (const page of this._iterateContextGraphRegistryScanPages(
+      registry,
+      registryAddress,
+      fromBlock,
+      scanPlan,
+    )) {
+      results.push(...page.contextGraphs);
+      await page.ack();
+    }
+    return results;
+  }
+
+  private async *_iterateContextGraphRegistryScanPages(
+    registry: Contract,
+    registryAddress: string,
+    fromBlock: number | undefined,
+    scanPlan: ContextGraphRegistryScanPlan,
+  ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
+    const eventFilter = registry.filters.NameClaimed();
+    const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+      ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
       : undefined;
+    const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
     const scan =
       fromBlock === undefined
-        ? incremental && watermark !== undefined
+        ? canResumeFromWatermark
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
           : await this.resolveContractDeployBlock(
               registryAddress,
@@ -136,21 +331,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
     const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
     const start = fromBlock ?? (
-      incremental && watermark !== undefined
-        ? Math.max(0, watermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+      canResumeFromWatermark
+        ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
         : deployBlock
     );
     if (start > head) {
-      if (seedIncrementalWatermark) {
-        this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
+      if (scanPlan.seedAtEnd) {
+        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
       }
-      return [];
+      return;
     }
 
     const pageSize = this.cgRegistryScanPageSize;
     const pages = Math.ceil((head - start + 1) / pageSize);
     const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (incremental && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
           `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
@@ -167,10 +362,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let preferred: JsonRpcProvider | undefined;
     let scannedAnyPage = false;
 
-    // Incremental daemon scans can resume from the scanned prefix after a later
-    // page failure. Public list-all calls should remain all-or-error.
+    // Daemon scans can resume from the scanned prefix after a later page
+    // failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
       const hi = Math.min(lo + pageSize - 1, head);
+      let pageResults: ContextGraphOnChain[];
       try {
         const page = await this.queryEventLogsPage(
           registry,
@@ -183,7 +379,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           preferred,
         );
         preferred = page.provider;
-        const pageResults: ContextGraphOnChain[] = [];
+        pageResults = [];
         for (const log of page.logs) {
           const parsed = registry.interface.parseLog({ topics: [...log.topics], data: log.data });
           if (!parsed || parsed.name !== 'NameClaimed') continue;
@@ -195,13 +391,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             metadataRevealed: false,
           });
         }
-        results.push(...pageResults);
-        scannedAnyPage = true;
-        if (incremental) {
-          this.contextGraphRegistryScanWatermarks.set(registryAddress, hi + 1);
-        }
       } catch (err) {
-        if (incremental && scannedAnyPage) {
+        if (scanPlan.allowPartialFailure && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
             `listContextGraphsFromChain: partial ContextGraphNameRegistry scan ` +
@@ -217,13 +408,19 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         }
         throw err;
       }
+      results.push(...pageResults);
+      scannedAnyPage = true;
+      yield {
+        contextGraphs: pageResults,
+        ack: scanPlan.persistProgress
+          ? async () => {
+              await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
+            }
+          : async () => {},
+      };
+      const scannedPages = Math.floor((hi - start) / pageSize) + 1;
+      if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return;
     }
-
-    if (seedIncrementalWatermark) {
-      this.contextGraphRegistryScanWatermarks.set(registryAddress, head + 1);
-    }
-
-    return results;
   }
 
   // =====================================================================
@@ -234,7 +431,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    return Boolean(await cgs.isContextGraphActive(contextGraphId));
+    return Boolean(await this.readContract(
+      cgs, 'cgStorage.isContextGraphActive', 'isContextGraphActive', contextGraphId,
+    ));
   }
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
@@ -292,10 +491,23 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         if (!isTooLowAllowanceError(err)) {
           throw err;
         }
+        // #1340: read the deposit through the RPC-failover facade (`readContract`),
+        // NOT a bare call on the signer's primary-bound `parametersStorage` handle.
+        // A broken primary otherwise throws here → is swallowed to 0n → the TRAC
+        // approve + retry below never run, defeating failover for a new CG's first
+        // publish. `readContract` fails over on transport errors (429/5xx/timeout)
+        // and rethrows a decoded revert unchanged; the catch → 0n now fires only
+        // when ALL endpoints fail or the deposit is genuinely dormant.
         const ps = this.contracts.parametersStorage as Contract | undefined;
         let deposit = 0n;
         try {
-          deposit = ps ? await ps.contextGraphRegistrationDeposit() : 0n;
+          deposit = ps
+            ? await this.readContract<bigint>(
+                ps,
+                'parametersStorage.contextGraphRegistrationDeposit',
+                'contextGraphRegistrationDeposit',
+              )
+            : 0n;
         } catch {
           deposit = 0n;
         }
@@ -466,7 +678,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
     // Unreachable below (kept for type-completeness until the mirror is removed);
     // the unsupported-mirror guard above throws before any on-chain side effect.
-    const v10ChainId = (await this.provider.getNetwork()).chainId;
+    const v10ChainId = await this.getEvmChainId();
     const v10KavAddress = await this.contracts.knowledgeAssetsLifecycle!.getAddress();
     const authorTypedData = buildAuthorAttestationTypedData({
       chainId: v10ChainId,
@@ -510,21 +722,27 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getKAContextGraphId(kaId: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const cgId: bigint = await cgs.kaToContextGraph(kaId);
+    const cgId: bigint = await this.readContract(
+      cgs, 'cgStorage.kaToContextGraph', 'kaToContextGraph', kaId,
+    );
     return BigInt(cgId);
   }
 
   async getContextGraphKCCount(contextGraphId: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const count: bigint = await cgs.getContextGraphKaCount(contextGraphId);
+    const count: bigint = await this.readContract(
+      cgs, 'cgStorage.getContextGraphKaCount', 'getContextGraphKaCount', contextGraphId,
+    );
     return BigInt(count);
   }
 
   async getContextGraphKCAt(contextGraphId: bigint, index: bigint): Promise<bigint> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const kaId: bigint = await cgs.getContextGraphKaAt(contextGraphId, index);
+    const kaId: bigint = await this.readContract(
+      cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
+    );
     return BigInt(kaId);
   }
 
@@ -540,11 +758,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     try {
-      const raw: bigint = BigInt(await cgs.getAccessPolicy(contextGraphId));
+      const raw: bigint = BigInt(await this.readContract(
+        cgs, 'cgStorage.getAccessPolicy', 'getAccessPolicy', contextGraphId,
+      ));
       return Number(raw);
     } catch (primaryErr) {
       try {
-        const cg = await cgs.getContextGraph(contextGraphId);
+        const cg = await this.readContract(
+          cgs, 'cgStorage.getContextGraph', 'getContextGraph', contextGraphId,
+        );
         const raw =
           cg?.accessPolicy
           ?? (Array.isArray(cg) ? cg[5] : undefined);
@@ -577,7 +799,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   }> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const result = await cgs.getPublishPolicy(contextGraphId);
+    const result = await this.readContract(
+      cgs, 'cgStorage.getPublishPolicy', 'getPublishPolicy', contextGraphId,
+    );
     // Ethers v6 returns named tuple as both array and object access;
     // destructure positionally to stay robust against ABI naming
     // changes.
@@ -605,7 +829,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphParticipantAgents(contextGraphId: bigint): Promise<string[]> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string[] = await cgs.getParticipantAgents(contextGraphId);
+    const raw: string[] = await this.readContract(
+      cgs, 'cgStorage.getParticipantAgents', 'getParticipantAgents', contextGraphId,
+    );
     return raw.map((addr: string) => ethers.getAddress(addr));
   }
 
@@ -629,7 +855,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   async getContextGraphNameHash(contextGraphId: bigint): Promise<string | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
-    const raw: string = await cgs.getNameHash(contextGraphId);
+    const raw: string = await this.readContract(
+      cgs, 'cgStorage.getNameHash', 'getNameHash', contextGraphId,
+    );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
   }

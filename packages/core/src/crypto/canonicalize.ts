@@ -1,6 +1,7 @@
 import canonize from 'rdf-canonize';
 import { sha256 } from './hashing.js';
 import { keccak256 } from './keccak.js';
+import { canonicalizeObjectTermForHash } from './term-canon.js';
 
 const textEncoder = new TextEncoder();
 
@@ -56,7 +57,13 @@ export function tripleContentV10(
   predicate: string,
   object: string,
 ): Uint8Array {
-  return textEncoder.encode(formatNTriple(subject, predicate, object));
+  // Backend-independent leaf canonicalization (spec §9.0.2): the object literal
+  // is normalized to its protocol-canonical value-space form BEFORE serialization
+  // so the leaf — and the `content` bytes submitted on-chain — are identical on
+  // every node regardless of triple-store backend or version. See term-canon.ts.
+  return textEncoder.encode(
+    formatNTriple(subject, predicate, canonicalizeObjectTermForHash(object)),
+  );
 }
 
 /**

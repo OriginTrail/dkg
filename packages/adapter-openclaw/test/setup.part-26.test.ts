@@ -197,7 +197,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     try {
       // Pre-seed an IDENTITY.md so the agentName argument is deterministic.
       writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\n- **Name**: test-agent\n');
-      await runSetup({ workspace: env.workspace, start: false, verify: false });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false });
 
       expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
       const [url, mode, addresses, nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
@@ -221,7 +221,7 @@ describe('runSetup Step 5 — faucet funding', () => {
   it('skips the faucet call when options.fund === false (--no-fund) and still lands the merge', async () => {
     const env = setupFaucetEnv();
     try {
-      await runSetup({ workspace: env.workspace, start: false, verify: false, fund: false });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false });
 
       expect(requestFaucetFunding).not.toHaveBeenCalled();
 
@@ -236,7 +236,7 @@ describe('runSetup Step 5 — faucet funding', () => {
   it('skips the faucet call under dryRun:true (no faucet request made, no merge written)', async () => {
     const env = setupFaucetEnv();
     try {
-      await runSetup({ workspace: env.workspace, start: false, verify: false, dryRun: true });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false, dryRun: true });
 
       expect(requestFaucetFunding).not.toHaveBeenCalled();
 
@@ -259,7 +259,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     const env = setupFaucetEnv();
     try {
       await expect(
-        runSetup({ workspace: env.workspace, start: false, verify: false }),
+        runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false }),
       ).resolves.toBeUndefined();
 
       // Manual-curl block is logged (`console.log` with the literal "curl -X POST").
@@ -285,7 +285,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     const env = setupFaucetEnv();
     try {
       await expect(
-        runSetup({ workspace: env.workspace, start: false, verify: false }),
+        runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false }),
       ).resolves.toBeUndefined();
 
       const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
@@ -301,7 +301,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     const env = setupFaucetEnv();
     try {
       await expect(
-        runSetup({ workspace: env.workspace, start: false, verify: false }),
+        runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false }),
       ).resolves.toBeUndefined();
 
       const logged = logSpy.mock.calls.map(c => String(c[0])).join('\n');
@@ -324,7 +324,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     const env = setupFaucetEnv();
     try {
       await expect(
-        runSetup({ workspace: env.workspace, start: false, verify: false }),
+        runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false }),
       ).resolves.toBeUndefined();
 
       const cfg = JSON.parse(readFileSync(join(env.openclawHome, 'openclaw.json'), 'utf-8'));
@@ -340,7 +340,7 @@ describe('runSetup Step 5 — faucet funding', () => {
     rmSync(join(env.dkgHome, 'wallets.json'));
     try {
       await expect(
-        runSetup({ workspace: env.workspace, start: false, verify: false }),
+        runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false }),
       ).resolves.toBeUndefined();
 
       // With `start: false`, the retry loop is intentionally skipped (no
@@ -381,7 +381,7 @@ describe('runSetup Step 5 — faucet funding', () => {
       // "persisted-run1", not "changed-run2".
       writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: changed-run2\n');
 
-      await runSetup({ workspace: env.workspace, start: false, verify: false });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false });
 
       expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
       const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
@@ -398,7 +398,7 @@ describe('runSetup Step 5 — faucet funding', () => {
       // discovered IDENTITY.md name, and the faucet should receive it.
       writeFileSync(join(env.workspace, 'IDENTITY.md'), '# Identity\nName: first-run-name\n');
 
-      await runSetup({ workspace: env.workspace, start: false, verify: false });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false });
 
       const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
       expect(nodeName).toBe('first-run-name');
@@ -423,6 +423,7 @@ describe('runSetup Step 5 — faucet funding', () => {
 
       await runSetup({
         workspace: env.workspace,
+        network: 'testnet',
         start: false,
         verify: false,
         name: 'explicit-override',
@@ -452,10 +453,82 @@ describe('runSetup Step 5 — faucet funding', () => {
         JSON.stringify({ name: 'persisted-no-identity' }),
       );
 
-      await runSetup({ workspace: env.workspace, start: false, verify: false });
+      await runSetup({ workspace: env.workspace, network: 'testnet', start: false, verify: false });
 
       const [, , , nodeName] = vi.mocked(requestFaucetFunding).mock.calls[0];
       expect(nodeName).toBe('persisted-no-identity');
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('#1306: eagerly creates wallets via the injected hook (even --no-fund), skipped on --dry-run', async () => {
+    const env = setupFaucetEnv();
+    try {
+      // --no-fund must STILL create wallets (mainnet has no faucet but the node
+      // needs wallets for manual funding + publishing). Called with the home dir.
+      const loadOpWallets = vi.fn(async () => ({
+        adminWallet: { address: '0xAAAA', privateKey: '0x0' },
+        wallets: [],
+      }));
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false },
+        { loadOpWallets },
+      );
+      expect(loadOpWallets).toHaveBeenCalledTimes(1);
+      expect(loadOpWallets.mock.calls[0][0]).toBe(env.dkgHome);
+
+      // --dry-run must NOT create wallets.
+      loadOpWallets.mockClear();
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false, dryRun: true },
+        { loadOpWallets },
+      );
+      expect(loadOpWallets).not.toHaveBeenCalled();
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('#1306: a failing loadOpWallets is best-effort — setup still completes', async () => {
+    const env = setupFaucetEnv();
+    try {
+      const loadOpWallets = vi.fn(async () => { throw new Error('boom'); });
+      // Wallet pre-creation is best-effort; a throw must NOT abort setup.
+      await expect(
+        runSetup(
+          { workspace: env.workspace, network: 'testnet', start: false, verify: false, fund: false },
+          { loadOpWallets },
+        ),
+      ).resolves.toBeUndefined();
+      expect(loadOpWallets).toHaveBeenCalledTimes(1);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it('#1306: eager-created wallets feed the faucet (pre-creation runs before funding)', async () => {
+    const env = setupFaucetEnv();
+    // Remove the pre-seeded wallets so ONLY the hook can provide them — proves
+    // the hook writes wallets.json BEFORE the funding step reads it.
+    rmSync(join(env.dkgHome, 'wallets.json'));
+    try {
+      const loadOpWallets = vi.fn(async (dir: string) => {
+        const cfg = {
+          adminWallet: { address: '0xADMIN', privateKey: '0x0' },
+          wallets: [{ address: '0xOP1', privateKey: '0x0' }],
+        };
+        writeFileSync(join(dir, 'wallets.json'), JSON.stringify(cfg));
+        return cfg;
+      });
+      await runSetup(
+        { workspace: env.workspace, network: 'testnet', start: false, verify: false },
+        { loadOpWallets },
+      );
+      // The faucet now finds the eager-created wallets and funds them.
+      expect(requestFaucetFunding).toHaveBeenCalledTimes(1);
+      const [, , addresses] = vi.mocked(requestFaucetFunding).mock.calls[0];
+      expect(addresses).toEqual(['0xADMIN', '0xOP1']);
     } finally {
       env.restore();
     }

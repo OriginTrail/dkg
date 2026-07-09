@@ -143,9 +143,7 @@ client.list_sub_graphs("cg:test")
 client.invite_to_context_graph("cg:test", "peer")
 client.add_participant("cg:test", "agent")
 client.list_join_requests("cg:test")
-client.publish("cg:test", selection=["urn:root"], clear_after=False, sub_graph_name="sub")
 client.query("ASK {}", "did:dkg:context-graph:cg:test", view="shared-working-memory")
-client.share("did:dkg:context-graph:cg:test", [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}])
 client.list_sub_graphs("did:dkg:context-graph:0xabc/tuesday-cg")
 client.register_context_graph("did:dkg:context-graph:ui-refresh")
 
@@ -169,9 +167,7 @@ assert calls == [
     ("POST", "/api/context-graph/invite", {"contextGraphId": "cg:test", "peerId": "peer"}),
     ("POST", "/api/context-graph/cg%3Atest/add-participant", {"agentAddress": "agent"}),
     ("GET", "/api/context-graph/cg%3Atest/join-requests", {}),
-    ("POST", "/api/shared-memory/publish", {"contextGraphId": "cg:test", "selection": ["urn:root"], "clearAfter": False, "subGraphName": "sub"}),
     ("POST", "/api/query", {"sparql": "ASK {}", "contextGraphId": "cg:test", "view": "shared-working-memory"}),
-    ("POST", "/api/shared-memory/write", {"contextGraphId": "cg:test", "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": '"o"'}]}),
     ("GET", "/api/sub-graph/list?contextGraphId=0xabc%2Ftuesday-cg", {}),
     ("POST", "/api/context-graph/register", {"id": "ui-refresh"}),
 ], calls

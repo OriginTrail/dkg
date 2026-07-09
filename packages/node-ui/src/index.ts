@@ -12,6 +12,10 @@ export {
   buildActivityDigestKey,
   parseActivityDigestKey,
 } from './db.js';
+export {
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+} from './chain-cursor-stores.js';
 export type {
   DashboardDBOptions,
   MetricSnapshotRow,
@@ -38,7 +42,7 @@ export { OperationTracker } from './operation-tracker.js';
 export { MetricsCollector } from './metrics-collector.js';
 export type { MetricsSource } from './metrics-collector.js';
 export { handleNodeUIRequest } from './api.js';
-export { scopeNotifications } from './notifications-scope.js';
+export { scopeNotifications, PCA_COST_COVERED_TYPE } from './notifications-scope.js';
 export type {
   NotifWire,
   ScopedNotificationsResult,
@@ -47,6 +51,8 @@ export type {
 export type { LlmSettingsCallbacks, TelemetrySettingsCallbacks } from './api.js';
 export { LogPushWorker } from './gelf-push-worker.js';
 export type { LogPushWorkerOptions } from './gelf-push-worker.js';
+export { OtlpLogWorker } from './otlp-log-worker.js';
+export type { OtlpLogWorkerOptions } from './otlp-log-worker.js';
 export { ChatMemoryManager } from './chat-memory.js';
 export type {
   MemoryToolContext,
@@ -60,5 +66,9 @@ export type {
 export { LlmClient, LlmRequestError } from './llm/client.js';
 export { resolveCapabilities } from './llm/capability-resolver.js';
 export type { LlmConfig, LlmChatRequest, LlmChatMessage, LlmStreamEvent, LlmCompletionResult, LlmCapabilities } from './llm/types.js';
-export { initTelemetry, recordGauge, setOperationSpan, isTelemetryConfigured } from './telemetry.js';
-export type { TelemetryConfig } from './telemetry.js';
+export {
+  initTelemetry, shutdownTelemetry, isTelemetryConfigured,
+  // Back-compat shims for the pre-#1317 telemetry API (no-ops / legacy config).
+  recordGauge, setOperationSpan,
+} from './telemetry.js';
+export type { TelemetryInitConfig, TelemetryResource, OtlpSignalConfig, TelemetryConfig } from './telemetry.js';

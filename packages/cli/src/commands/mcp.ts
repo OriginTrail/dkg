@@ -10,9 +10,6 @@ import { ethers } from 'ethers';
 import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
 import {
   dkgAuthTokenPath,
-  FAUCET_WALLETS_PER_REQUEST,
-  getFundableWalletAddresses,
-  requestFaucetFunding,
   resolveDkgConfigHome,
   toErrorMessage,
   hasErrorCode,
@@ -30,7 +27,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -149,6 +146,10 @@ mcpCmd
   .option('--name <name>', 'Override agent name (used only on first init)')
   .option('--no-start', 'Skip daemon start (configure only)')
   .option('--no-fund', 'Skip wallet funding via testnet faucet')
+  .option(
+    '--network <name>',
+    'Network to set up on (mainnet-gnosis | mainnet-base | testnet). Default for a fresh node: mainnet-gnosis.',
+  )
   .option('--no-verify', 'Skip post-setup verification probe')
   .option('--dry-run', 'Preview steps without writing or starting anything')
   .option('--force', 'Refresh every detected client regardless of current registration state')
@@ -187,16 +188,26 @@ mcpCmd
       console.error(`  Reason: ${err?.message ?? err}`);
       process.exit(1);
     }
-
     const { mcpSetupAction } = await import('../mcp-setup.js');
     try {
       await mcpSetupAction(opts, {
         loadNetworkConfig: openclawSetupExports.loadNetworkConfig,
         ensureDkgNodeConfig: coreExports.ensureDkgNodeConfig,
         startDaemon: openclawSetupExports.startDaemon,
-        readWalletsWithRetry: openclawSetupExports.readWalletsWithRetry,
-        logManualFundingInstructions: openclawSetupExports.logManualFundingInstructions,
-        requestFaucetFunding: coreExports.requestFaucetFunding,
+        // Lazy + best-effort (parity with openclaw/hermes): dkg-agent is
+        // imported only inside the non-dry-run wallet step, so `--print-only`
+        // / `--dry-run` never require it, and an import failure degrades to a
+        // warning (mcpSetupAction wraps the call in try/catch) instead of
+        // aborting setup.
+        loadOpWallets: async (dir: string) => {
+          const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
+          return loadOpWallets(dir);
+        },
+        // Shared faucet orchestrator — the SAME one openclaw/hermes use.
+        // Replaces the old bespoke `/api/status` reachability probe +
+        // `requestFaucetFunding` path that silently skipped funding on a slow
+        // testnet node.
+        fundWalletsBestEffort: coreExports.fundWalletsBestEffort,
         findDkgMonorepoRoot: coreExports.findDkgMonorepoRoot,
         resolveDkgConfigHome: coreExports.resolveDkgConfigHome,
       });

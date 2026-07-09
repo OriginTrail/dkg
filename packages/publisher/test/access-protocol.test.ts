@@ -20,6 +20,7 @@ import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { buildSeal } from './_helpers/seal.js';
+import { hardhatACKProvider } from './_helpers/acks.js';
 
 let CONTEXT_GRAPH = 'test-access';
 let GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -121,7 +122,11 @@ describe('Access Protocol', () => {
       contextGraphId: CONTEXT_GRAPH,
       ctx: { provider: _provider, kav10Address: _kav10Address },
     });
-    const result = await publisher.publish({ ...publishArgs, precomputedAttestation: seal });
+    const result = await publisher.publish({
+      ...publishArgs,
+      precomputedAttestation: seal,
+      v10ACKProvider: hardhatACKProvider(_kav10Address),
+    });
 
     return { result, bus, keypair };
   }
@@ -132,13 +137,10 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeA.peerId });
 
-    // RC11 / PR1: private-data publishes intentionally skip peer ACK
-    // collection (`dkg-publisher.ts:1937`) and the self-signed ACK
-    // fallback is deleted, so they correctly downgrade to `tentative`.
-    // The owner / non-owner access-control behaviour this test
-    // validates is local to nodeA's store + AccessHandler and is
-    // independent of on-chain confirmation.
-    expect(result.status).toBe('tentative');
+    // Folded public+private publishes now collect V10 ACKs and anchor on-chain.
+    // The owner / non-owner access-control behaviour this test validates is
+    // still local to nodeA's store + AccessHandler.
+    expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
 
     const accessHandler = new AccessHandler(storeA, bus);
@@ -164,11 +166,7 @@ describe('Access Protocol', () => {
     const storeA = new OxigraphStore();
     const { result, bus } = await publishWithPrivate(storeA, { publisherPeerId: nodeB.peerId });
 
-    // RC11 / PR1: see sibling test above — tentative is the honest
-    // outcome for a private-data publish now that the self-signed ACK
-    // fallback is gone. The meta-graph + access-grant assertions below
-    // do not depend on on-chain confirmation.
-    expect(result.status).toBe('tentative');
+    expect(result.status).toBe('confirmed');
     expect(result.kaManifest[0].privateTripleCount).toBe(2);
     expect(result.kaManifest[0].privateMerkleRoot).toBeDefined();
     expect(result.kaManifest[0].privateMerkleRoot).toHaveLength(32);

@@ -18,8 +18,8 @@ prefer running them before falling back to the manual recipes below.
 
 Phase 4 author override (RFC §4(b)) is now wired end-to-end via the
 agent-keystore: end-user agents register on a daemon (`POST
-/api/agent/register`) and publish through that daemon's
-`/api/shared-memory/publish` route. The route resolves the bearer
+/api/agent/register`) and publish through that daemon's named
+knowledge-asset lifecycle routes. The publish route resolves the bearer
 token to an `AgentKeyRecord`, looks up the custodial private key, and
 threads it into the publisher as `authorPrivateKey` so the on-chain
 `AuthorAttestation` is signed by the *agent*, not the daemon. See
@@ -40,7 +40,7 @@ sequence per mode, including:
 
 - **Setup** — what fixtures (PCAs, `authorizedKeys`, identities) the
   mode requires before any `publish` call.
-- **Action** — the actual `dkg publish` (or HTTP) call.
+- **Action** — the actual `dkg ka` publish (or HTTP) call.
 - **Assertions** — the on-chain reads + log checks that ratify the
   mode succeeded with the right authorship / attribution / payment
   shape.
@@ -172,23 +172,26 @@ AGENT_TOKEN=$(curl -s -X POST \
 # Action — end-user agent writes quads + publishes through core 2,
 # authenticating with its OWN bearer token. The daemon resolves the
 # token → agent → custodial privateKey → AuthorAttestation signer.
-curl -s http://127.0.0.1:9202/api/shared-memory/write \
+curl -s http://127.0.0.1:9202/api/knowledge-assets \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
         "contextGraphId": "<cgId>",
+        "name": "mode-b-agent-ka",
         "quads": [{
           "subject": "urn:test:mode-b:1",
           "predicate": "https://schema.org/name",
           "object": "\"mode-b\"",
           "graph": "did:dkg:context-graph:<cgId>"
-        }]
+        }],
+        "finalize": true,
+        "alsoShareSwm": true
       }'
 
-curl -s http://127.0.0.1:9202/api/shared-memory/publish \
+curl -s http://127.0.0.1:9202/api/knowledge-assets/mode-b-agent-ka/vm/publish \
   -H "Authorization: Bearer $AGENT_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "contextGraphId": "<cgId>", "selection": "all", "clearAfter": true }'
+  -d '{ "contextGraphId": "<cgId>", "options": { "clearAfter": true } }'
 ```
 
 Optional: register on core 2's PCA so the publish is discounted (this
@@ -266,7 +269,7 @@ option — explicit `0n` proceeds on-chain.
 - `KnowledgeAssetCreated` event has `author = edge.agent`,
   emitted with `publisherNodeIdentityId = 0` (verifiable via the
   `merkleRoots` accessor: the on-chain attribution field is `0`).
-- `dkg publish` returns `Status: confirmed` (not `tentative`).
+- `dkg ka publish` returns `Status: confirmed` (not `tentative`).
 
 ### Negative case: unauthorized PCA fall-through
 
@@ -281,7 +284,7 @@ option — explicit `0n` proceeds on-chain.
 
 # Action — publish from a fresh wallet not on the allowlist.
 # Use `dkg publisher wallet add <pk>` on node5 first to enroll a
-# fresh signing wallet, then drive `dkg publish`. Do NOT pass that
+# fresh signing wallet, then drive `dkg ka publish`. Do NOT pass that
 # fresh wallet through `node1 pca authorize` — that would defeat
 # the purpose. Verify with `node1 pca info 1 --probe-key <addr>`
 # that `authorized: false` BEFORE the publish.

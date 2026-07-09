@@ -188,9 +188,8 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
+  oversizedRdfLiteralResponseBody,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -321,6 +320,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
+import { authorizeAgentScopedAuthorClaim } from './shared-assertion-helpers.js';
 import type { RequestContext } from './context.js';
 import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 
@@ -328,8 +328,8 @@ function parsePrecomputedUpdateAttestation(
   raw: unknown,
   res: ServerResponse,
 ): PublishOptions['precomputedUpdateAttestation'] | undefined {
-  if (raw == null) return undefined;
-  if (typeof raw !== 'object') {
+  if (raw === undefined) return undefined;
+  if (raw === null || typeof raw !== 'object') {
     jsonResponse(res, 400, {
       error: '"precomputedUpdateAttestation" must be an object',
     });
@@ -541,6 +541,41 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? "Encryption key revocation failed" });
     }
+  }
+
+  // GET /api/agent/:address/encryption-keys — list a local agent's workspace
+  // encryption keys (active + retired) for display before a rotate/revoke.
+  // PUBLIC fields only — private key material (privateEncryptionKey) is NEVER
+  // serialized, even though listLocalAgents() carries it in memory. Same
+  // caller-vs-target gate as rotate/revoke.
+  if (
+    req.method === "GET"
+    && path.startsWith("/api/agent/")
+    && path.endsWith("/encryption-keys")
+  ) {
+    const address = decodeURIComponent(path.slice("/api/agent/".length, -"/encryption-keys".length));
+    if (!address) return jsonResponse(res, 404, { error: "Agent address required in path" });
+    const authz = authorizeKeyManagementOnAddress(address);
+    if (!authz.ok) return jsonResponse(res, authz.status, authz.body);
+    const localAgents = agent.listLocalAgents();
+    const current = localAgents.find((a) => a.agentAddress.toLowerCase() === address.toLowerCase());
+    if (!current) {
+      return jsonResponse(res, 404, { error: `No local agent for address ${address}` });
+    }
+    const keys = (current.workspaceEncryptionKeys ?? []).map((k) => ({
+      encryptionKeyId: k.encryptionKeyId,
+      encryptionKeyAlgorithm: k.encryptionKeyAlgorithm,
+      publicEncryptionKey: k.publicEncryptionKey,
+      encryptionKeyProof: k.encryptionKeyProof,
+      createdAt: k.createdAt,
+      revokedAt: k.revokedAt ?? null,
+      status: k.revokedAt ? "revoked" : "active",
+    }));
+    return jsonResponse(res, 200, {
+      agentAddress: current.agentAddress,
+      agentDid: `did:dkg:agent:${current.agentAddress}`,
+      keys,
+    });
   }
 
   // POST /api/agent/publish-profile — re-broadcast the daemon's default
@@ -944,6 +979,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         case 'DIAL_FAILED':
           status = 502; // retriable: addrs known but transport failed
           break;
+        case 'NETWORK_ADMISSION_REJECTED':
+          status = 403; // reachable peer, but not part of this active DKG network
+          break;
         default:
           status = 400;
       }
@@ -965,7 +1003,16 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       parsed.precomputedUpdateAttestation,
       res,
     );
-    if (parsed.precomputedUpdateAttestation != null && !precomputedUpdateAttestation) {
+    if (parsed.precomputedUpdateAttestation !== undefined && !precomputedUpdateAttestation) {
+      return;
+    }
+    const tokenAgentAddress = requestToken ? agent.resolveAgentByToken(requestToken) : undefined;
+    if (!authorizeAgentScopedAuthorClaim(
+      res,
+      tokenAgentAddress,
+      precomputedUpdateAttestation?.authorAddress,
+      "precomputedUpdateAttestation.authorAddress",
+    )) {
       return;
     }
     if (!kaId || !contextGraphId || !quads?.length) {
@@ -1051,6 +1098,9 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
       // those to 422 (Unprocessable Entity) so the API surfaces a proper 4xx
       // instead of letting it bubble to the generic 500 handler.
       const message = err instanceof Error ? err.message : String(err);
+      if ((err as any)?.code === "OVERSIZED_RDF_LITERAL") {
+        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
       if (message.includes('precomputedUpdateAttestation')) {
         return jsonResponse(res, 422, { error: message });
       }

@@ -4,7 +4,7 @@
  */
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Interface, ethers } from 'ethers';
 import {
   computeApprovalAction,
@@ -12,6 +12,8 @@ import {
   effectivePublishAllowance,
   enrichEvmError,
   EVMChainAdapter,
+  InsufficientPublisherFundsError,
+  isNoFundedPublisherWalletError,
   isTooLowAllowanceError,
   resolveRpcUrls,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
@@ -23,6 +25,502 @@ import {
   DEFAULT_REFILL_BELOW_FRACTION,
   type ApprovalPolicy,
 } from '../src/chain-adapter.js';
+import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
+import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import { connectable } from './connectable.js';
+
+// Isolate the process-wide RPC failover stats + dedup window before EVERY test
+// so a failover/exhaustion warning emitted by one test can't suppress (via the
+// shared dedup window) a `console.warn` assertion in another — and so the new
+// failover-log lines are observed against a clean slate (otReviewAgent #1329).
+beforeEach(() => {
+  _resetRpcFailoverStatsForTest();
+});
+
+describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
+  const ADDR = '0x00000000000000000000000000000000000000a1';
+  const ADDR2 = '0x00000000000000000000000000000000000000a2';
+  const identityInterface = new Interface([
+    'event IdentityCreated(uint72 indexed identityId, bytes32 indexed operationalKey, bytes32 indexed adminKey)',
+  ]);
+  const profileInterface = new Interface([
+    'event ProfileCreated(uint72 indexed identityId)',
+  ]);
+
+  function identityCreatedLog(identityId: bigint) {
+    const encoded = identityInterface.encodeEventLog(
+      identityInterface.getEvent('IdentityCreated')!,
+      [identityId, ethers.ZeroHash, ethers.ZeroHash],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
+
+  function profileCreatedLog(identityId: bigint) {
+    const encoded = profileInterface.encodeEventLog(
+      profileInterface.getEvent('ProfileCreated')!,
+      [identityId],
+    );
+    return { topics: encoded.topics, data: encoded.data };
+  }
+
+  function makeIdentityLookupAdapter(values: bigint[]) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => ({}));
+    let i = 0;
+    const readContract = recorder(async () => {
+      const value = values[Math.min(i, values.length - 1)];
+      i++;
+      return value;
+    });
+    a.readContract = readContract;
+    return { a, readContract };
+  }
+
+  it('invalid addresses return 0 without an RPC read', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([1n]);
+    await expect(a.getIdentityIdForAddress('not-an-address')).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+
+  it('coalesces concurrent negative lookups but does not cache the negative result', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityIdForAddress(ADDR)),
+    );
+    expect(results.every((value) => value === 0n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('refreshes positive lookups after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('local registration and removal update the bounded positive cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n]);
+
+    a.seedIdentityIdForAddress(ADDR, 7n);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(0);
+
+    a.clearIdentityIdForAddress(ADDR);
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('coalesces concurrent self getIdentityId reads through the address cache', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => a.getIdentityId()),
+    );
+
+    expect(results.every((value) => value === 42n)).toBe(true);
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][3]).toBe((a as any).signer.address);
+  });
+
+  it('caches positive self getIdentityId results and refreshes them after the positive TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      await expect(a.getIdentityId()).resolves.toBe(7n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(5 * 60_000 + 1);
+
+      await expect(a.getIdentityId()).resolves.toBe(9n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('caches a zero self getIdentityId result only for the short signer TTL', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares the short signer zero cache between getIdentityId and getIdentityIdForAddress', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 42n]);
+
+    try {
+      await expect(a.getIdentityId()).resolves.toBe(0n);
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(0n);
+      expect(readContract.calls).toHaveLength(1);
+
+      vi.setSystemTime(15_001);
+
+      await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+      await expect(a.getIdentityId()).resolves.toBe(42n);
+      expect(readContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares cache entries between getIdentityId and getIdentityIdForAddress for the signer', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([42n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    await expect(a.getIdentityIdForAddress((a as any).signer.address)).resolves.toBe(42n);
+
+    expect(readContract.calls).toHaveLength(1);
+  });
+
+  it('identity id reads populate the canonical IdentityStorage lazy binding', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const identityStorage = { identityStorage: true };
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => identityStorage);
+    a.readContract = recorder(async (_contract: unknown, _label: string, method: string) => (
+      method === 'getIdentityId' ? 42n : true
+    ));
+
+    await expect(a.getIdentityId()).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(identityStorage);
+
+    await expect(a.isOperationalWalletRegistered(42n, ADDR)).resolves.toBe(true);
+    expect(a.resolveContract.calls).toHaveLength(1);
+    expect(a.readContract.calls).toHaveLength(2);
+    expect(a.readContract.calls[0][0]).toBe(identityStorage);
+    expect(a.readContract.calls[1][0]).toBe(identityStorage);
+  });
+
+  it('identity cache misses refresh IdentityStorage so a missed Hub rotation cannot pin stale zero reads', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
+    const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
+    let resolveCount = 0;
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => {
+      resolveCount += 1;
+      return resolveCount === 1 ? oldIdentityStorage : newIdentityStorage;
+    });
+    a.readContract = recorder(async (contract: unknown) => (
+      contract === oldIdentityStorage ? 0n : 42n
+    ));
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+    expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.contracts.identityStorage).toBe(newIdentityStorage);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    expect(a.resolveContract.calls).toHaveLength(2);
+    expect(a.readContract.calls).toHaveLength(2);
+  });
+
+  it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    const init = recorder(async () => { (a as any).initialized = true; });
+    (a as any).init = init;
+    (a as any).applyHubRotationEventName('IdentityStorage');
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    expect((a as any).initialized).toBe(false);
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(init.calls).toHaveLength(1);
+    expect((a as any).initialized).toBe(true);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('bulk bound-contract invalidation clears signer identity cache and IdentityStorage binding', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([7n, 9n]);
+
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    await expect(a.getIdentityId()).resolves.toBe(7n);
+    expect(readContract.calls).toHaveLength(1);
+
+    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).invalidateAllBoundContracts();
+
+    expect((a as any).contracts.identityStorage).toBeUndefined();
+    await expect(a.getIdentityId()).resolves.toBe(9n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile seeds the signer identity cache after IdentityCreated', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 0n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(77n)],
+      hash: '0x' + '12'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(77n);
+    await expect(a.getIdentityId()).resolves.toBe(77n);
+    expect(readContract.calls).toHaveLength(2);
+  });
+
+  it('ensureProfile freshly rechecks a cached signer zero before creating a profile', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 55n]);
+    a.sendContractTransaction = recorder(async () => {
+      throw new Error('ensureProfile should not create a duplicate profile');
+    });
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.ensureProfile({ stakeAmount: 0n })).resolves.toBe(55n);
+    await expect(a.getIdentityId()).resolves.toBe(55n);
+    expect(readContract.calls).toHaveLength(2);
+    expect(a.sendContractTransaction.calls).toHaveLength(0);
+  });
+
+  it('registerIdentity seeds the signer identity cache after IdentityCreated', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const readContract = recorder(async () => 99n);
+    a.init = async () => undefined;
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.readContract = readContract;
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [identityCreatedLog(88n)],
+      hash: '0x' + '34'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(88n);
+    await expect(a.getIdentityId()).resolves.toBe(88n);
+    expect(readContract.calls).toHaveLength(0);
+  });
+
+  it('registerIdentity seeds the signer identity cache after ProfileCreated fallback', async () => {
+    const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
+    a.contracts.identity = { interface: identityInterface };
+    a.contracts.profile = { interface: profileInterface };
+    a.sendContractTransaction = recorder(async () => ({
+      logs: [profileCreatedLog(89n)],
+      hash: '0x' + '56'.repeat(32),
+      blockNumber: 1,
+      index: 0,
+      status: 1,
+    }));
+
+    await expect(a.getIdentityId()).resolves.toBe(0n);
+    await expect(a.registerIdentity({ publicKey: new Uint8Array([1]), signature: new Uint8Array() })).resolves.toBe(89n);
+    await expect(a.getIdentityId()).resolves.toBe(89n);
+    expect(readContract.calls).toHaveLength(1);
+  });
+});
+
+describe('EVMChainAdapter random sampling identity lookup', () => {
+  it('createChallenge reads back by the emitted identity without pre-reading signer identity', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const challengeIdentityId = 99n;
+    const cachedIdentityId = 42n;
+    const contextGraphId = 3n;
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(
+      rsInterface.getEvent('ChallengeGenerated')!,
+      [challengeIdentityId, contextGraphId, 11n, 2n, 3n, 4n],
+    );
+    const receipt = {
+      hash: '0x' + '11'.repeat(32),
+      blockNumber: 123,
+      index: 4,
+      logs: [{ topics: encoded.topics, data: encoded.data }],
+    };
+    const challengeRaw = {
+      knowledgeAssetId: 11n,
+      knowledgeAssetStorageContract: ethers.ZeroAddress,
+      chunkId: 2n,
+      epoch: 3n,
+      activeProofPeriodStartBlock: 4n,
+      proofingPeriodDurationInBlocks: 5n,
+      solved: false,
+      isCurated: false,
+      challengeLeafCount: 1n,
+      challengeRoot: ethers.ZeroHash,
+    };
+    const rss = { __rss: true };
+    const rs = { interface: rsInterface };
+    const readContract = recorder(async () => challengeRaw);
+    const sendContractTransaction = recorder(async () => receipt as any);
+
+    a.init = async () => undefined;
+    a.getIdentityId = recorder(async () => cachedIdentityId);
+    a.getRandomSampling = async () => ({ rs, rss });
+    a.readContract = readContract;
+    a.sendContractTransaction = sendContractTransaction;
+    // Keep selection deterministic (this test is about the identity read-back,
+    // not wallet rotation) so it doesn't hit a live balance RPC.
+    a.nextRandomSamplingSigner = async () => a.signer;
+
+    const result = await a.createChallenge();
+
+    expect(a.getIdentityId.calls).toHaveLength(0);
+    expect(sendContractTransaction.calls[0][1]).toBe('createChallenge');
+    expect(readContract.calls).toHaveLength(1);
+    expect(readContract.calls[0][0]).toBe(rss);
+    expect(readContract.calls[0][1]).toBe('rss.getNodeChallenge');
+    expect(readContract.calls[0][3]).toBe(challengeIdentityId);
+    expect(result.contextGraphId).toBe(contextGraphId);
+    expect(result.challenge.knowledgeAssetId).toBe(11n);
+  });
+
+  it('createChallenge signs with the wallet selected by nextRandomSamplingSigner (not hardcoded pool[0])', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(a.signer.address);
+    const rsInterface = new Interface([
+      'event ChallengeGenerated(uint72 indexed identityId,uint256 indexed contextGraphId,uint256 knowledgeAssetId,uint256 chunkId,uint256 epoch,uint256 activeProofPeriodStartBlock)',
+    ]);
+    const encoded = rsInterface.encodeEventLog(rsInterface.getEvent('ChallengeGenerated')!, [7n, 3n, 11n, 2n, 3n, 4n]);
+    const receipt = { hash: '0x' + '11'.repeat(32), blockNumber: 1, index: 0, logs: [{ topics: encoded.topics, data: encoded.data }] };
+    const challengeRaw = {
+      knowledgeAssetId: 11n, knowledgeAssetStorageContract: ethers.ZeroAddress, chunkId: 2n, epoch: 3n,
+      activeProofPeriodStartBlock: 4n, proofingPeriodDurationInBlocks: 5n, solved: false, isCurated: false,
+      challengeLeafCount: 1n, challengeRoot: ethers.ZeroHash,
+    };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: { interface: rsInterface }, rss: {} });
+    a.readContract = recorder(async () => challengeRaw);
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    // Force selection to the SECOND operational wallet: if createChallenge were
+    // still pinned to this.signer (pool[0]) the send would use it, not w1.
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.createChallenge();
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('createChallenge');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+    expect(sendSpy.calls[0][5]).toEqual({ gasLimitBufferBps: 5_000 }); // gas headroom preserved
+  });
+
+  it('submitProof signs with the wallet selected by nextRandomSamplingSigner', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    const receipt = { hash: '0x' + '22'.repeat(32), blockNumber: 5, index: 0, status: 1, logs: [] };
+    a.init = async () => undefined;
+    a.getRandomSampling = async () => ({ rs: {} });
+    const sendSpy = recorder(async () => receipt);
+    a.sendContractTransaction = sendSpy;
+    a.nextRandomSamplingSigner = recorder(async () => w1);
+
+    await a.submitProof(new Uint8Array([1, 2, 3]), []);
+
+    expect(a.nextRandomSamplingSigner.calls).toHaveLength(1);
+    expect(sendSpy.calls[0][1]).toBe('submitProof');
+    expect(sendSpy.calls[0][3]).toBe(w1); // the SELECTED signer
+  });
+
+  // ── self-heal for STALE eligibility: an out-of-band removed wallet that
+  // lingers in registeredOperationalAddresses reverts ProfileDoesntExist; the
+  // RS send evicts it and retries once on the primary signer (pool[0]).
+  const profileDoesntExistError = () => {
+    const iface = new Interface(['error ProfileDoesntExist(uint72 identityId)']);
+    const e: any = new Error('execution reverted: unknown custom error');
+    e.data = iface.encodeErrorResult('ProfileDoesntExist', [0n]); // enrichEvmError reads e.data
+    return e;
+  };
+
+  it('sendRandomSamplingTx self-heals a ProfileDoesntExist revert: evicts the stale wallet, retries on pool[0]', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w0 = a.signer;              // pool[0], the always-registered identity anchor
+    const w1 = a.signerPool[1];
+    expect(w1.address).not.toBe(w0.address);
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase()); // stale: in-set but removed on-chain
+    a.nextRandomSamplingSigner = async () => w1;                    // rotation picks the stale wallet
+    const okReceipt = { hash: '0xok', status: 1 } as any;
+    const sendSpy = recorder(async (_c: any, _m: any, _args: any, signer: any) => {
+      if (signer.address === w1.address) throw profileDoesntExistError();
+      return okReceipt;
+    });
+    a.sendContractTransaction = sendSpy;
+    const clearSpy = recorder(() => undefined);
+    a.clearIdentityIdForAddress = clearSpy;
+
+    const result = await a.sendRandomSamplingTx({}, 'createChallenge', [], 'label');
+
+    expect(result).toBe(okReceipt);
+    expect(sendSpy.calls).toHaveLength(2);            // w1 (reverts) → retry w0
+    expect(sendSpy.calls[0][3]).toBe(w1);
+    expect(sendSpy.calls[1][3]).toBe(w0);             // retried on the primary anchor
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(false); // evicted
+    expect(clearSpy.calls).toHaveLength(1);           // stale cached identityId dropped
+  });
+
+  it('sendRandomSamplingTx does NOT retry a non-ProfileDoesntExist revert (propagates, no eviction)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w1 = a.signerPool[1];
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase());
+    a.nextRandomSamplingSigner = async () => w1;
+    const sendSpy = recorder(async () => { throw new Error('This challenge is no longer active'); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow('no longer active');
+    expect(sendSpy.calls).toHaveLength(1);            // no retry
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(true); // not evicted
+  });
+
+  it('sendRandomSamplingTx does NOT self-heal when the PRIMARY signer reverts (nothing safer to retry)', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig()); // single wallet → pool[0] only
+    a.nextRandomSamplingSigner = async () => a.signer;
+    const sendSpy = recorder(async () => { throw profileDoesntExistError(); });
+    a.sendContractTransaction = sendSpy;
+
+    await expect(a.sendRandomSamplingTx({}, 'createChallenge', [], 'label')).rejects.toThrow();
+    expect(sendSpy.calls).toHaveLength(1);            // primary revert → no retry loop
+  });
+});
+
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const OTHER_PK = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b63b91100';
@@ -37,6 +535,10 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   return Object.assign(fn, { calls });
 }
 
+async function flushAsyncWork(turns = 8): Promise<void> {
+  for (let i = 0; i < turns; i++) await Promise.resolve();
+}
+
 function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterConfig {
   return {
     rpcUrl: 'http://127.0.0.1:59998',
@@ -44,6 +546,7 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     adminPrivateKey: ADMIN_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'evm:31337',
+    staticNetwork: false,
     ...overrides,
   };
 }
@@ -127,6 +630,23 @@ describe('decodeEvmError / enrichEvmError (07 EVM_MODULE — custom errors)', ()
   });
 });
 
+describe('isNoFundedPublisherWalletError (code-first + shared message marker)', () => {
+  it('matches the structured code', () => {
+    expect(isNoFundedPublisherWalletError({ code: 'NO_FUNDED_PUBLISHER_WALLET' })).toBe(true);
+  });
+  it('matches the shared message marker when .code is dropped by a wrapper', () => {
+    // Same semantics as the daemon-side predicate — keyed on the dkg-core
+    // "No operational wallet has enough funds" prefix, not the literal code.
+    expect(isNoFundedPublisherWalletError(new Error('No operational wallet has enough funds to publish.'))).toBe(true);
+  });
+  it('does NOT match unrelated errors', () => {
+    expect(isNoFundedPublisherWalletError({ code: 'CALL_EXCEPTION' })).toBe(false);
+    expect(isNoFundedPublisherWalletError(new Error('insufficient funds for gas'))).toBe(false);
+    expect(isNoFundedPublisherWalletError(undefined)).toBe(false);
+    expect(isNoFundedPublisherWalletError(null)).toBe(false);
+  });
+});
+
 describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('sets chainType, chainId default, and signer pool', () => {
     const a = new EVMChainAdapter(minimalConfig({ chainId: 'evm:84532' }));
@@ -175,7 +695,6 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     expect(a.getProvider()).toBeDefined();
     expect(typeof a.getProvider().getBlockNumber).toBe('function');
-    expect(a.getReadProvider()).toBeDefined();
   });
 
   it('issues un-batched JSON-RPC requests (batchMaxCount=1) so a rate-limited read rejects on its own awaited promise — issue #939', async () => {
@@ -237,10 +756,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       publishAuthorityAccountId: 0n,
     }));
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       getAccessPolicy,
       getContextGraph,
-    };
+    });
 
     await expect(a.getContextGraphAccessPolicy(6n)).resolves.toBe(1);
     expect(getAccessPolicy.calls.at(-1)).toEqual([6n]);
@@ -250,7 +769,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('parses accessPolicy from tuple fallback results', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       getAccessPolicy: recorder(async () => {
         throw new Error('selector unavailable');
       }),
@@ -265,7 +784,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         ethers.ZeroAddress,
         0n,
       ]),
-    };
+    });
 
     await expect(a.getContextGraphAccessPolicy(7n)).resolves.toBe(0);
   });
@@ -274,11 +793,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const rpcError = new Error('rpc unavailable');
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = {
+    (a as any).contracts.contextGraphStorage = connectable({
       isContextGraphActive: recorder(async () => {
         throw rpcError;
       }),
-    };
+    });
 
     await expect(a.isContextGraphActiveOnChain(8n)).rejects.toThrow('rpc unavailable');
   });
@@ -287,7 +806,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const isContextGraphActive = recorder(async (_id: bigint) => false);
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = { isContextGraphActive };
+    (a as any).contracts.contextGraphStorage = connectable({ isContextGraphActive });
 
     await expect(a.isContextGraphActiveOnChain(9n)).resolves.toBe(false);
     expect(isContextGraphActive.calls.at(-1)).toEqual([9n]);
@@ -310,11 +829,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       if (name === 'Token') throw new Error('Hub.Token should not be resolved when tokenAddress is configured');
       return contractAddress;
     });
-    (a as any).contracts.hub = {
+    (a as any).contracts.hub = connectable({
       getContractAddress,
       getAssetStorageAddress: recorder(async () => assetStorageAddress),
       on: recorder(async () => undefined),
-    };
+    });
 
     await (a as any).init();
 
@@ -618,8 +1137,19 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       expect(signSpy.calls[0][1].gasLimit).toBe(1_500_000n);
       // Signed against the BACKUP runner, not the rate-limited primary.
       expect(signSpy.calls[0][0].provider).toBe(backupProvider);
-      // Failover, not silent fallback — no "headroom not applied" warning.
-      expect(warnSpy.calls).toEqual([]);
+      // Failover, not silent fallback: the "headroom not applied" fallback
+      // warning must NOT fire (the buffer was applied on the healthy backup).
+      const headroomWarnings = warnSpy.calls.filter(
+        (c: unknown[]) => String(c[0]).includes('buffered gas estimation failed'),
+      );
+      expect(headroomWarnings).toEqual([]);
+      // The failover itself is now observable as exactly one dedup'd line (the
+      // W3 failover logger) — asserted separately from the gas-headroom concern
+      // so neither masks the other.
+      const failoverWarnings = warnSpy.calls.filter(
+        (c: unknown[]) => String(c[0]).includes('RPC failover'),
+      );
+      expect(failoverWarnings).toHaveLength(1);
     } finally {
       console.warn = origWarn;
     }
@@ -665,10 +1195,17 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 
     expect(thrown).toMatchObject({
       code: 'RPC_ENDPOINTS_EXHAUSTED',
+      // The structured rpcUrls property is the canonical config list (diagnostic;
+      // never serialized into an HTTP response body — only code/txHash/message
+      // reach clients).
       rpcUrls: ['https://primary.example', 'https://backup.example'],
     });
-    expect(thrown.message).toContain('https://primary.example');
-    expect(thrown.message).toContain('https://backup.example');
+    // The MESSAGE names the endpoints HOST-ONLY: a configured rpcUrl may carry
+    // an API key and err.message IS surfaced to HTTP clients via echoing paths
+    // (e.g. the create+publish 207 tail), so it must never embed full URLs.
+    expect(thrown.message).toContain('primary.example');
+    expect(thrown.message).toContain('backup.example');
+    expect(thrown.message).not.toContain('https://');
     expect(populateTransaction.calls).toHaveLength(2);
     expect(signPopulatedTransaction.calls).toEqual([]);
     expect(sendSignedTransactionAndWait.calls).toEqual([]);
@@ -752,6 +1289,37 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     await expect((a as any).sendSignedTransactionAndWait(signedTx, txHash, 'unit write')).resolves.toBe(receipt);
     expect(primary.broadcastTransaction.calls).toContainEqual([signedTx]);
     expect(backup.broadcastTransaction.calls).toContainEqual([signedTx]);
+  });
+
+  it('stamps RPC_ENDPOINTS_EXHAUSTED when broadcast fails over EVERY endpoint (#1329 review R-1)', async () => {
+    // Without the code stamp, a broadcast-time exhaustion (after a provider
+    // populated/signed) surfaces code-less and the daemon maps it to a generic
+    // 500 instead of the intended retryable 503.
+    const a = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+    }));
+    const signedTx = '0xdeadbeef';
+    const txHash = '0x' + '22'.repeat(32);
+    const throttled = (name: string) => ({
+      broadcastTransaction: recorder(async (_raw: string) => {
+        const err = new Error(`429 too many requests (${name})`);
+        (err as any).status = 429;
+        throw err;
+      }),
+    });
+    (a as any).providers = [throttled('primary'), throttled('backup')];
+    const origWarn = console.warn;
+    console.warn = (() => undefined) as typeof console.warn;
+    try {
+      await expect((a as any).broadcastSignedTransactionWithFailover(signedTx, txHash, 'unit write'))
+        .rejects.toMatchObject({
+          code: 'RPC_ENDPOINTS_EXHAUSTED',
+          rpcUrls: ['https://primary.example', 'https://backup.example'],
+        });
+    } finally {
+      console.warn = origWarn;
+    }
   });
 
   it('preserves the transaction hash when post-broadcast receipt lookup exhausts RPC endpoints', async () => {
@@ -844,10 +1412,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       })();
       await vi.advanceTimersByTimeAsync(180_001);
 
-      await expect(thrown).resolves.toMatchObject({
-        code: 'TIMEOUT',
-        txHash,
-      });
+      const timeoutErr = await thrown;
+      expect(timeoutErr).toMatchObject({ code: 'RPC_TIMEOUT', txHash });
+      // The production receipt-wait timeout emitter must throw a recognised
+      // chain-transport error (so the daemon maps it to 504), not a bare shape.
+      expect(isChainRpcTransportError(timeoutErr)).toBe(true);
       expect(populateTransaction.calls).toHaveLength(1);
       expect(signPopulatedTransaction.calls).toHaveLength(1);
       expect(provider.broadcastTransaction.calls).toContainEqual([signedTx]);
@@ -948,12 +1517,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
     const [firstAddress, secondAddress] = a.getSignerAddresses();
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphs = {
+    (a as any).contracts.contextGraphs = connectable({
       isAuthorizedPublisher: recorder(async () => {
         await Promise.resolve();
         return true;
       }),
-    };
+    });
 
     const [firstReserved, secondReserved] = await Promise.all([
       a.getAuthorizedPublisherAddress(1n),
@@ -969,30 +1538,228 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     expect(a.chainType).toBe('evm');
   });
 
-  it('startHubRotationListener swallows async provider rejections without unhandled-rejection or throw (Codex N15)', async () => {
-    // ethers v6 `Contract.on(...)` is async — providers that reject
-    // filter installation (e.g. HTTP-only endpoints, mocked providers)
-    // must NOT bubble as unhandled rejections, and the listener-started
-    // flag must NOT be flipped if subscription failed (so a future
-    // retry remains possible).
-    const a = new EVMChainAdapter(minimalConfig());
-    const fakeHub = {
-      on: async (_event: string, _cb: (...args: unknown[]) => void) => {
-        throw new Error('provider does not support filter subscriptions');
-      },
+  it('startHubRotationListener validates Hub binding with a startup head baseline but without RPC logs', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => {
+        throw new Error('startup should not read logs');
+      }),
     };
-    (a as any).contracts.hub = fakeHub;
-    (a as any).hubRotationListenerStarted = false;
-    let unhandled: unknown = null;
-    const onRejection = (reason: unknown) => { unhandled = reason; };
-    process.on('unhandledRejection', onRejection);
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+
+    expect(provider.getBlockNumber.calls).toEqual([[]]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(true);
+  });
+
+  it('startHubRotationListener refuses partial Hub rotation event ABI', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => []),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
-      await expect((a as any).startHubRotationListener()).resolves.toBeUndefined();
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      expect(unhandled).toBeNull();
-      expect((a as any).hubRotationListenerStarted).toBe(false);
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(
+        'Hub rotation poller setup disabled: Hub ABI is missing required rotation event AssetStorageChanged',
+      ));
     } finally {
-      process.off('unhandledRejection', onRejection);
+      warnSpy.mockRestore();
+    }
+
+    expect(provider.getBlockNumber.calls).toEqual([]);
+    expect(provider.getLogs.calls).toEqual([]);
+    expect(a.hubRotationPoller.isStarted).toBe(false);
+  });
+
+  it('startHubRotationListener uses one startup head baseline while backup reads still work', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: 'https://primary.example',
+      rpcUrls: ['https://backup.example'],
+      staticNetwork: true,
+    }));
+    const primaryError = new Error('429 too many requests');
+    (primaryError as any).status = 429;
+    const primaryProvider = {
+      send: recorder(async () => { throw primaryError; }),
+      getBlockNumber: recorder(async () => {
+        throw new Error('primary read should fail before blockNumber');
+      }),
+    };
+    const backupProvider = {
+      send: recorder(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        return '0x7a69';
+      }),
+      getBlockNumber: recorder(async () => 123),
+    };
+    a.primaryProvider = primaryProvider;
+    a.provider = primaryProvider;
+    a.providers = [primaryProvider, backupProvider];
+    a.rpcUrls = ['https://primary.example', 'https://backup.example'];
+    a.contracts.hub = {
+      interface: new ethers.Interface([
+        'event NewContract(string contractName, address newContractAddress)',
+        'event ContractChanged(string contractName, address newContractAddress)',
+        'event NewAssetStorage(string contractName, address newContractAddress)',
+        'event AssetStorageChanged(string contractName, address newContractAddress)',
+      ]),
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+    await flushAsyncWork();
+    expect(a.hubRotationPoller.isStarted).toBe(true);
+
+    await expect(a.readProvider('getBlockNumber', (p: any) => p.getBlockNumber()))
+      .resolves.toBe(123);
+    expect(primaryProvider.getBlockNumber.calls).toEqual([]);
+    expect(backupProvider.getBlockNumber.calls).toHaveLength(2);
+  });
+
+  it('startHubRotationListener wires Hub rotation names into adapter invalidation without subscriptions', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const changed = iface.encodeEventLog(iface.getEvent('ContractChanged')!, [
+      'ContextGraphs',
+      '0x00000000000000000000000000000000000000c1',
+    ]);
+    let head = 1_000;
+    let includeRotationLog = false;
+    const provider = {
+      getBlockNumber: recorder(async () => head),
+      getLogs: recorder(async (_filter: any) => includeRotationLog ? [{
+        blockNumber: 1_001,
+        blockHash: '0x' + '30'.repeat(32),
+        transactionHash: '0x' + '31'.repeat(32),
+        index: 0,
+        topics: changed.topics,
+        data: changed.data,
+      }] : []),
+      destroy: recorder(() => undefined),
+    };
+    const on = recorder(async () => {
+      throw new Error('ethers subscription should not be installed');
+    });
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+      on,
+    };
+    a.contracts.contextGraphs = { stale: true };
+    a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
+    a.initialized = true;
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      includeRotationLog = true;
+      head = 1_001;
+      await vi.advanceTimersByTimeAsync(30_000);
+      a.destroy();
+
+      expect(on.calls).toEqual([]);
+      expect(provider.getLogs.calls).toHaveLength(1);
+      expect(provider.getLogs.calls[0][0]).toMatchObject({
+        address: '0x0000000000000000000000000000000000000001',
+        fromBlock: 951,
+        toBlock: 1_001,
+      });
+      expect(provider.getLogs.calls[0][0].topics[0]).toEqual([
+        iface.getEvent('ContractChanged')!.topicHash,
+        iface.getEvent('NewContract')!.topicHash,
+        iface.getEvent('AssetStorageChanged')!.topicHash,
+        iface.getEvent('NewAssetStorage')!.topicHash,
+      ]);
+      expect(a.contracts.contextGraphs).toEqual({ stale: true });
+      expect(a.cachedKav10Address).toBeUndefined();
+      expect(a.initialized).toBe(false);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
+  it('destroy clears the Hub rotation poll interval', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async (_filter: any) => []),
+      destroy: recorder(() => undefined),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    a.contracts.hub = {
+      interface: iface,
+      getAddress: async () => '0x0000000000000000000000000000000000000001',
+    };
+
+    try {
+      await expect(a.startHubRotationListener()).resolves.toBeUndefined();
+      await flushAsyncWork();
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+
+      a.destroy();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(provider.getBlockNumber.calls).toHaveLength(1);
+      expect(provider.getLogs.calls).toHaveLength(0);
+      expect(provider.destroy.calls).toHaveLength(1);
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+    } finally {
+      a.destroy();
+      vi.useRealTimers();
     }
   });
 
@@ -1544,11 +2311,15 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('getEvmChainId issues exactly one provider.getNetwork call across repeat reads', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(await a.getEvmChainId()).toBe(31337n);
@@ -1574,9 +2345,9 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const minimumRequiredSignatures = recorder(async () => 3n);
     (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
     (a as unknown as { contracts: { parametersStorage: { minimumRequiredSignatures: () => Promise<bigint> } } }).contracts = {
-      parametersStorage: {
+      parametersStorage: connectable({
         minimumRequiredSignatures: minimumRequiredSignatures as unknown as () => Promise<bigint>,
-      },
+      }),
     };
 
     expect(await a.getMinimumRequiredSignatures()).toBe(3);
@@ -1587,12 +2358,16 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
 
   it('refreshes after the 1h TTL expires', async () => {
     vi.useFakeTimers({ now: 0 });
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let returned = 31337n;
     const getNetwork = recorder(async () => ({ chainId: returned }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(getNetwork.calls).toHaveLength(1);
@@ -1608,11 +2383,15 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('invalidatePublishPreflightCache forces a fresh read on next call', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     const getNetwork = recorder(async () => ({ chainId: 31337n }));
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     await a.getEvmChainId();
     await a.getEvmChainId();
@@ -1623,21 +2402,51 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
   });
 
   it('does NOT cache failures (next call retries the underlying read)', async () => {
-    const a = new EVMChainAdapter(minimalConfig());
+    const a = new EVMChainAdapter(minimalConfig({ staticNetwork: false }));
     let attempts = 0;
     const getNetwork = recorder(async () => {
       attempts += 1;
       if (attempts === 1) throw new Error('rate limited');
       return { chainId: 31337n };
     });
-    (a as unknown as { provider: { getNetwork: () => Promise<{ chainId: bigint }> } }).provider = {
+    // R1/#1336: getEvmChainId now reads via readProvider (this.rpcFailover.read)
+    // over this.providers[] (was this.provider.getNetwork). Mock this.providers[0];
+    // the TTL-cache / dedup / no-cache-on-failure behaviour is unchanged (the
+    // cache wraps the read facade), so the assertions below are preserved verbatim.
+    (a as unknown as { providers: Array<{ getNetwork: () => Promise<{ chainId: bigint }> }> }).providers = [{
       getNetwork: getNetwork as unknown as () => Promise<{ chainId: bigint }>,
-    };
+    }];
 
     await expect(a.getEvmChainId()).rejects.toThrow('rate limited');
     // Second call should retry — failure was not memoised.
     expect(await a.getEvmChainId()).toBe(31337n);
     expect(getNetwork.calls).toHaveLength(2);
+  });
+
+  it('abandons timed-out static chain-id validations so the next read retries', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig({ staticNetwork: true }));
+    let calls = 0;
+    const provider = {
+      send: vi.fn(async (method: string) => {
+        expect(method).toBe('eth_chainId');
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<never>(() => undefined);
+        }
+        return '0x7a69';
+      }),
+    };
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+
+    const first = a.getEvmChainId();
+    const firstTimeout = expect(first).rejects.toThrow('configured chainId validation timed out');
+    await vi.advanceTimersByTimeAsync(RPC_READ_STALL_TIMEOUT_MS);
+    await firstTimeout;
+
+    await expect(a.getEvmChainId()).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1936,10 +2745,12 @@ const V10_KA_ADDRESS = '0x' + 'aa'.repeat(20);
 // `allowance(...)` and connects it to the signer. `approve` itself goes through
 // the (stubbed) `sendContractTransaction`, so the recorder just needs to exist.
 function makeStubToken(allowance: bigint) {
-  const tokenWithSigner = {
+  // tokenWithSigner is read via readContract (this.rpcFailover.readContract)
+  // after token→signer rebind, so it too must be .connect-able (self no-op rebind).
+  const tokenWithSigner = connectable({
     allowance: recorder(async (..._a: unknown[]) => allowance),
     approve: recorder(() => undefined),
-  };
+  });
   const tokenRoot = {
     connect: recorder((..._a: unknown[]) => tokenWithSigner),
   };
@@ -1952,6 +2763,9 @@ function makeV10Adapter(approvalPolicy?: ApprovalPolicy, allowance: bigint = 0n)
   (a as any).contracts.token = tokenRoot;
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
+  // In-lock publish/update approvals receive the scoped unlocked sender;
+  // standalone approval tests call the serialized wrapper. Capture both.
+  (a as any).sendContractTransactionUnlocked = sendSpy;
   const signer = new ethers.Wallet(DEPLOYER_PK);
   return { a, signer, tokenRoot, tokenWithSigner, sendSpy };
 }
@@ -2102,6 +2916,7 @@ describe('ensureV10ApproveTrac — per-publish (default) approval gate', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
+    (a as any).sendContractTransactionUnlocked = sendSpy;
     (a as any).contracts.token = undefined;
     const signer = new ethers.Wallet(DEPLOYER_PK);
 
@@ -2398,6 +3213,8 @@ describe('ensureV10ApproveTrac — call-site invariants (publish vs update)', ()
     const a = new EVMChainAdapter(minimalConfig());
     const { tokenRoot } = makeStubToken(0n);
     (a as any).contracts.token = tokenRoot;
+    // Standalone approval calls use the serialized public sender; make that
+    // path throw so propagation is exercised.
     (a as any).sendContractTransaction = recorder(async () => {
       throw new Error('approve broadcast failed');
     });
@@ -2457,45 +3274,82 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     return new Map<string, bigint>();
   }
 
-  function makeMultiWalletV10Adapter(allowanceByOwner: Map<string, bigint>) {
+  const ABUNDANT_WEI = 10n ** 18n;
+
+  // Hardhat account #3 — a third distinct operational key for pool-rotation tests.
+  const THIRD_PK = '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6';
+
+  function makeMultiWalletV10Adapter(
+    allowanceByOwner: Map<string, bigint>,
+    funding?: { native?: Map<string, bigint>; trac?: Map<string, bigint> },
+    extraOperationalKeys: string[] = [],
+    configOverrides: Partial<EVMAdapterConfig> = {},
+  ) {
     const a = new EVMChainAdapter(minimalConfig({
       privateKey: DEPLOYER_PK,
-      additionalKeys: [OTHER_PK],
+      additionalKeys: [OTHER_PK, ...extraOperationalKeys],
+      ...configOverrides,
     }));
-    const [walletA, walletB] = (a as any).signerPool as [ethers.Wallet, ethers.Wallet];
+    const signerPool = (a as any).signerPool as ethers.Wallet[];
+    const [walletA, walletB] = signerPool;
 
     (a as any).initialized = true;
 
-    const tokenWithSigner = {
+    // Funding-aware selection reads native (provider.getBalance) + TRAC
+    // (token.balanceOf) for each candidate. Stub both deterministically —
+    // default ABUNDANT so funding-aware selection is a no-op (round-robin)
+    // unless a test sets specific per-wallet balances. Without these stubs the
+    // adapter would hit the dead test RPC (slow) and rely on fail-open.
+    const nativeByAddr = funding?.native ?? new Map<string, bigint>();
+    const tracByAddr = funding?.trac ?? new Map<string, bigint>();
+    (a as any).provider.getBalance = recorder(async (addr: string) =>
+      nativeByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x7a69';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+
+    // R1/#1336: readTracBalance now reads via readContractWith (failOpenFundingRead
+    // policy) → rebindContract does `token.connect(p).balanceOf(addr)`, so the
+    // CONNECTED contract (what token.connect returns) must expose balanceOf — not
+    // just the top-level token. (Native getBalance still works: the helper mutates
+    // this.provider.getBalance and this.provider === this.providers[0], so the
+    // shared object is what the read facade reads.)
+    const balanceOf = recorder(async (addr: string) =>
+      tracByAddr.get(String(addr).toLowerCase()) ?? ABUNDANT_WEI);
+    const tokenWithSigner = connectable({
       allowance: recorder(async (owner: string, _spender: string) => {
         return allowanceByOwner.get(owner.toLowerCase()) ?? 0n;
       }),
       approve: recorder(() => undefined),
-    };
+      balanceOf,
+    });
     (a as any).contracts.token = {
       connect: recorder(() => tokenWithSigner),
+      balanceOf, // kept for any direct (non-connected) top-level reader
     };
 
     const populateSpy = recorder(async () => ({
       to: PARITY_KA_ADDRESS,
       data: '0xdeadbeef',
     }));
-    const kavContract = {
+    const kavContract = connectable({
       getAddress: recorder(async () => PARITY_KA_ADDRESS),
       publish: { populateTransaction: populateSpy },
       update: { populateTransaction: populateSpy },
-    };
+    });
     (a as any).contracts.knowledgeAssetsLifecycle = {
       connect: recorder(() => kavContract),
       getAddress: recorder(async () => PARITY_KA_ADDRESS),
     };
 
-    (a as any).contracts.contextGraphs = {
+    (a as any).contracts.contextGraphs = connectable({
       isAuthorizedPublisher: recorder(async () => true),
-    };
+    });
 
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
+    (a as any).sendContractTransactionUnlocked = sendSpy;
 
     // Stop the publish/update flow right after the approval gate by throwing
     // a sentinel at the signing step. We only need to observe the signer
@@ -2505,7 +3359,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     });
     (a as any).signPopulatedTransaction = signSpy;
 
-    return { a, walletA, walletB, tokenWithSigner, sendSpy, signSpy, populateSpy };
+    return { a, walletA, walletB, wallets: signerPool, tokenWithSigner, sendSpy, signSpy, populateSpy, nativeByAddr, tracByAddr };
   }
 
   function makeV10PublishParams(publisherAddress?: string): any {
@@ -2580,7 +3434,11 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveSender).toBe(walletB);
 
     expect(signSpy.calls).toHaveLength(1);
-    expect(signSpy.calls[0][0]).toBe(walletB);
+    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
+    // Assert the signer ADDRESS, not object identity (#870 "publish signed by
+    // walletB, no mid-flight rotation" invariant is preserved).
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
   });
 
   it('publish path: when publisherAddress is omitted, round-robin signer is also the approve signer (no mid-flight rotation)', async () => {
@@ -2606,7 +3464,8 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveMethod).toBe('approve');
     expect(approveArgs).toEqual([PARITY_KA_ADDRESS, 1n]);
     expect(approveSender).toBe(walletA);
-    expect(signSpy.calls[0][0]).toBe(walletA);
+    // R1/OBS-1: signer reconnected per-provider — assert ADDRESS not identity.
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletA.address);
   });
 
   it('update path: approve fires from the on-chain publisher wallet, NOT a round-robin pick from the pool', async () => {
@@ -2627,21 +3486,21 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
 
     // Injected DI seams the update path needs in addition to the publish ones.
     const kaId = 42n;
-    (a as any).contracts.knowledgeAssetStorage = {
+    (a as any).contracts.knowledgeAssetStorage = connectable({
       getLatestMerkleRootPublisher: recorder(async () => walletB.address),
       getMerkleRoots: recorder(async () => []),
-    };
-    (a as any).contracts.contextGraphStorage = {
+    });
+    (a as any).contracts.contextGraphStorage = connectable({
       kaToContextGraph: recorder(async () => 0n),
-    };
+    });
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
-    // `provider.getNetwork()` is called for chainId; stub it so the update
-    // path doesn't try to hit the placeholder RPC.
-    (a as any).provider = {
-      getNetwork: recorder(async () => ({ chainId: 31337n })),
-    };
+    // `getEvmChainId()` validates chainId through this.providers[0]
+    // (=== this.provider), so mutate the shared object — replacing
+    // this.provider would orphan this.providers[0] and the read would dial the
+    // dead placeholder RPC instead.
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
 
     const updateParams: any = {
       kaId,
@@ -2685,8 +3544,636 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveLabel).toBe('approve V10 update TRAC');
 
     expect(signSpy.calls).toHaveLength(1);
-    expect(signSpy.calls[0][0]).toBe(walletB);
+    // R1/OBS-1: populateAndSignAcrossProviders signs on the per-provider runner
+    // (signer.connect(providers[i])) — same key/ADDRESS as walletB, new object.
+    // Assert the signer ADDRESS, not object identity (#870 "publish signed by
+    // walletB, no mid-flight rotation" invariant is preserved).
+    expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletB.address);
   });
+
+  it('update path: validates live chain id before approval/signing on static-network providers', async () => {
+    const allowanceByOwner = makeAllowanceByOwner();
+    const { a, walletB, sendSpy, signSpy, tokenWithSigner } =
+      makeMultiWalletV10Adapter(allowanceByOwner, undefined, [], { staticNetwork: true });
+
+    const kaId = 42n;
+    (a as any).contracts.knowledgeAssetStorage = connectable({
+      getLatestMerkleRootPublisher: recorder(async () => walletB.address),
+      getMerkleRoots: recorder(async () => []),
+    });
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
+    (a as any).provider.send = recorder(async (method: string) => {
+      if (method === 'eth_chainId') return '0x14a34';
+      throw new Error(`unexpected RPC method ${method}`);
+    });
+
+    const updateParams: any = {
+      kaId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('umr'))),
+      newByteSize: 100,
+      newMerkleLeafCount: 1,
+      newTokenAmount: 0n,
+      authorAddress: walletB.address,
+      authorR: new Uint8Array(32),
+      authorVS: new Uint8Array(32),
+      authorSchemeVersion: 1,
+      ackSignatures: [{
+        identityId: 1n,
+        r: new Uint8Array(32),
+        vs: new Uint8Array(32),
+      }],
+    };
+
+    await expect(
+      a.updateKnowledgeCollectionV10(updateParams),
+    ).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
+
+    expect(tokenWithSigner.allowance.calls).toHaveLength(0);
+    expect(sendSpy.calls).toHaveLength(0);
+    expect(signSpy.calls).toHaveLength(0);
+  });
+
+// -----------------------------------------------------------------------------
+// Funding-aware publish wallet selection. `nextAuthorizedSigner` must PREFER an
+// authorized wallet that holds native gas AND TRAC, so a publish is never
+// routed to an authorized-but-empty wallet (the unfunded-wallet publish
+// failure). Selection only PREFERS — when none is fundable it falls back to the
+// best-funded wallet, and the publish then surfaces an actionable
+// InsufficientPublisherFundsError instead of a raw "insufficient funds" string.
+// -----------------------------------------------------------------------------
+describe('createKnowledgeAssets — funding-aware wallet selection', () => {
+  const CG = 7n;
+  const lc = (addr: string) => addr.toLowerCase();
+  const ONE = 10n ** 18n;
+
+  it('prefers a funded authorized wallet over an unfunded one (skips the empty round-robin head)', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (round-robin head) has gas but ZERO TRAC; walletB is funded.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address);
+  });
+
+  it('rotates among multiple funded wallets (preserves cross-wallet nonce concurrency)', async () => {
+    const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // Both abundantly funded (helper default) → behaves like plain round-robin.
+    const first = await (a as any).nextAuthorizedSigner(CG);
+    const second = await (a as any).nextAuthorizedSigner(CG);
+    expect(first.address).toBe(walletA.address);
+    expect(second.address).toBe(walletB.address);
+    expect(first.address).not.toBe(second.address);
+  });
+
+  it('falls back to the best-funded authorized wallet when none is fundable', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // Neither fundable (both have 0 gas); walletB holds more TRAC → best-funded.
+    nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), 0n);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 5n);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address);
+  });
+
+  it('fails open: a balance-read error never blocks selection (returns the round-robin head)', async () => {
+    const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).provider.getBalance = recorder(async () => { throw new Error('rpc down'); });
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletA.address);
+  });
+
+  it('no token contract: only native gas gates selection', async () => {
+    const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.token = undefined; // read-only / no-token adapter
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    // walletA has 0 gas → skipped; walletB has gas → chosen (TRAC not gating).
+    expect(chosen.address).toBe(walletB.address);
+  });
+
+  it('treats a covering PCA agent wallet (zero own-TRAC) as fundable, preferring it over the unfundable round-robin head', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (head): gas, ZERO own-TRAC, NOT a PCA agent → unfundable.
+    // walletB: gas, ZERO own-TRAC, but a registered+covering PCA agent → its
+    // publish is paid from the conviction account, so it IS fundable.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {}; // PCA NFT deployed
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletB.address) ? 7n : 0n);
+    (a as any).convictionAccountCanCover = recorder(async () => true);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // chosen ONLY via the PCA fallback
+  });
+
+  it('does NOT treat a non-covering (squat) PCA agent wallet as fundable', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (head): gas, ZERO own-TRAC, registered PCA but CANNOT cover (squat).
+    // walletB: gas + own-TRAC → genuinely fundable.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async () => 9n); // registered
+    (a as any).convictionAccountCanCover = recorder(async () => false); // but can't cover
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // squat PCA head skipped for the funded wallet
+  });
+
+  it('still throws "no authorized publisher" when no wallet is authorized (unchanged)', async () => {
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+    await expect((a as any).nextAuthorizedSigner(CG)).rejects.toThrow(/No authorized publisher wallet/);
+  });
+
+  it('wraps an insufficient-funds publish failure into an actionable InsufficientPublisherFundsError listing per-wallet balances', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), 0n);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    // The signing step throws an ethers-style INSUFFICIENT_FUNDS error.
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('insufficient funds for gas * price + value');
+      e.code = 'INSUFFICIENT_FUNDS';
+      throw e;
+    });
+
+    let caught: any;
+    try {
+      await a.createKnowledgeAssets(makeV10PublishParams());
+    } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
+    expect(caught.message).toContain(walletA.address);
+    expect(caught.message).toContain(walletB.address);
+    expect(caught.message).toMatch(/Fund one of these wallets/i);
+    expect(caught.cause).toBeDefined(); // original error preserved
+  });
+
+  it('kill-switch DKG_DISABLE_FUNDED_WALLET_SELECTION reverts to balance-blind round-robin', async () => {
+    const prev = process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION;
+    process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION = '1';
+    try {
+      // Kill-switch is read in the constructor, so it must be set BEFORE the
+      // adapter is built (inside the helper).
+      const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      nativeByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletA.address), 0n);
+      const chosen = await (a as any).nextAuthorizedSigner(CG);
+      expect(chosen.address).toBe(walletA.address); // round-robin head, balance-blind
+      expect((a as any).provider.getBalance.calls.length).toBe(0); // no balance reads
+    } finally {
+      if (prev === undefined) delete process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION;
+      else process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION = prev;
+    }
+  });
+
+  it('no-contextGraphs adapter: funding-aware selection over the whole pool', async () => {
+    const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).contracts.contextGraphs = undefined; // no on-chain publish-authority surface
+    nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // skips the unfunded round-robin head
+  });
+
+  it('caches funding within the TTL (one balance read per wallet across selections; forceRefresh bypasses)', async () => {
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    await (a as any).nextAuthorizedSigner(CG);
+    const afterFirst = (a as any).provider.getBalance.calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    await (a as any).nextAuthorizedSigner(CG);
+    expect((a as any).provider.getBalance.calls.length).toBe(afterFirst); // cache hit, no new reads
+    await (a as any).getWalletFunding((a as any).signer.address, { forceRefresh: true });
+    expect((a as any).provider.getBalance.calls.length).toBeGreaterThan(afterFirst); // forceRefresh re-reads
+  });
+
+  it('rotates among the FUNDED subset when a middle wallet is unfunded (preserves #953 concurrency)', async () => {
+    const { a, wallets, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner(), undefined, [THIRD_PK]);
+    expect(wallets.length).toBe(3);
+    const [w0, w1, w2] = wallets;
+    nativeByAddr.set(lc(w1.address), 0n); tracByAddr.set(lc(w1.address), 0n); // middle wallet unfunded
+    const first = await (a as any).nextAuthorizedSigner(CG);
+    const second = await (a as any).nextAuthorizedSigner(CG);
+    const picked = [first.address, second.address];
+    expect(picked).not.toContain(w1.address);       // never the unfunded one
+    expect(new Set(picked).size).toBe(2);            // distinct → cross-wallet concurrency preserved
+    expect(picked.slice().sort()).toEqual([w0.address, w2.address].slice().sort());
+  });
+
+  it('does NOT wrap a non-funds contract revert on a funded wallet (no masking)', async () => {
+    const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner()); // both abundantly funded
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('execution reverted: InvalidAuthorAttestation');
+      e.code = 'CALL_EXCEPTION';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(makeV10PublishParams()); } catch (e) { caught = e; }
+    expect(caught).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.message).toContain('InvalidAuthorAttestation');
+  });
+
+  it('does NOT wrap a non-revert error (nonce) even on a zero-TRAC wallet', async () => {
+    const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('nonce has already been used');
+      e.code = 'NONCE_EXPIRED';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(makeV10PublishParams()); } catch (e) { caught = e; }
+    expect(caught).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.code).toBe('NONCE_EXPIRED');
+  });
+
+  it('emits NO_FUNDED when the only funded wallet is NOT authorized for the context graph (cannot be routed to)', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (selected/pinned): authorized, gas, ZERO TRAC. walletB: funded but UNAUTHORIZED.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.contextGraphs.isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
+      addr.toLowerCase() === walletA.address.toLowerCase());
+    const params = makeV10PublishParams(walletA.address);
+    params.tokenAmount = 1000n;
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
+      e.code = 'CALL_EXCEPTION';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(params); } catch (e) { caught = e; }
+    // The funded wallet is unauthorized → not a viable reroute → terminal NO_FUNDED.
+    expect(caught).toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
+  });
+
+  it('does NOT wrap a non-funds contract revert on a zero-TRAC signer (no funds marker, not masked)', async () => {
+    const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    // A generic contract revert (CALL_EXCEPTION) on a short wallet must surface
+    // unchanged — NOT be converted to NO_FUNDED_PUBLISHER_WALLET.
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('execution reverted: InvalidAuthorAttestation');
+      e.code = 'CALL_EXCEPTION';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(makeV10PublishParams()); } catch (e) { caught = e; }
+    expect(caught).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.message).toContain('InvalidAuthorAttestation');
+  });
+
+  it('does NOT claim NO_FUNDED when the SELECTED wallet is short but another authorized wallet can cover the cost', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // Pin walletA (gas + ZERO TRAC); walletB is funded for the cost.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    const params = makeV10PublishParams(walletA.address);
+    params.tokenAmount = 1000n;
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
+      e.code = 'CALL_EXCEPTION';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(params); } catch (e) { caught = e; }
+    // Pool has a funded wallet → preserve the original error (retry can reroute),
+    // do NOT mislabel as "no operational wallet has funds".
+    expect(caught).not.toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.message).toContain('transfer amount exceeds balance');
+  });
+
+  it('wraps a TRAC transferFrom revert on a zero-TRAC wallet that holds gas', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
+    (a as any).signPopulatedTransaction = recorder(async () => {
+      const e: any = new Error('execution reverted: ERC20: transfer amount exceeds balance');
+      e.code = 'CALL_EXCEPTION';
+      throw e;
+    });
+    let caught: any;
+    try { await a.createKnowledgeAssets(makeV10PublishParams()); } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(InsufficientPublisherFundsError);
+    expect(caught.code).toBe('NO_FUNDED_PUBLISHER_WALLET');
+  });
+
+  it('expires the funding cache past the TTL: a newly funded wallet is re-read and selected', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (head) unfunded (0 TRAC); walletB funded → B chosen first.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    const first = await (a as any).nextAuthorizedSigner(CG);
+    expect(first.address).toBe(walletB.address);
+    // walletA is funded, but its zero balance is still cached. Backdate every
+    // cache entry past the TTL so the next selection must re-read.
+    tracByAddr.set(lc(walletA.address), ONE);
+    for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number; tracTs: number }>).values()) {
+      entry.nativeTs = 0;
+      entry.tracTs = 0;
+    }
+    const second = await (a as any).nextAuthorizedSigner(CG);
+    expect(second.address).toBe(walletA.address); // re-read picks up the now-funded head
+  });
+
+  it('honors a non-zero minPublisherTracWei floor (strict > boundary)', async () => {
+    const FLOOR = 100n;
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).minPublisherTracWei = FLOOR;
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), FLOOR); tracByAddr.set(lc(walletB.address), FLOOR + 1n);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // A at exactly the floor is NOT fundable (strict >)
+  });
+
+  it('honors a non-zero minPublisherNativeWei floor (strict > boundary)', async () => {
+    const FLOOR = 100n;
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    (a as any).minPublisherNativeWei = FLOOR;
+    nativeByAddr.set(lc(walletA.address), FLOOR); nativeByAddr.set(lc(walletB.address), FLOOR + 1n);
+    tracByAddr.set(lc(walletA.address), ONE); tracByAddr.set(lc(walletB.address), ONE);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // A at exactly the native floor is NOT fundable
+  });
+
+  // The two tests above mutate the instance field AFTER construction, so they
+  // would pass even if the constructor stopped reading the config. These pin the
+  // CONSTRUCTOR path: the floor is injected via the adapter config and must be
+  // both stored on the instance and honored by selection.
+  it('reads minPublisherTracWei from the CONSTRUCTOR config (not a post-construction mutation)', async () => {
+    const FLOOR = 100n;
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner(), undefined, [], { minPublisherTracWei: FLOOR });
+    expect((a as any).minPublisherTracWei).toBe(FLOOR); // constructor consumed config.minPublisherTracWei
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), FLOOR); tracByAddr.set(lc(walletB.address), FLOOR + 1n);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // A at exactly the floor is skipped (strict >)
+  });
+
+  it('reads minPublisherNativeWei from the CONSTRUCTOR config (not a post-construction mutation)', async () => {
+    const FLOOR = 100n;
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } =
+      makeMultiWalletV10Adapter(makeAllowanceByOwner(), undefined, [], { minPublisherNativeWei: FLOOR });
+    expect((a as any).minPublisherNativeWei).toBe(FLOOR); // constructor consumed config.minPublisherNativeWei
+    nativeByAddr.set(lc(walletA.address), FLOOR); nativeByAddr.set(lc(walletB.address), FLOOR + 1n);
+    tracByAddr.set(lc(walletA.address), ONE); tracByAddr.set(lc(walletB.address), ONE);
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address);
+  });
+
+  it('cost-aware fallback selection: skips a dust-TRAC wallet that cannot cover the publish cost', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (head): gas + 1 wei TRAC (dust — above the 0n floor but below the
+    // publish cost). walletB: covers. createKnowledgeAssets (no publisherAddress)
+    // selects cost-aware against floorPublishTokenAmount(params.tokenAmount).
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 1n); tracByAddr.set(lc(walletB.address), ONE);
+    const params = makeV10PublishParams();
+    params.tokenAmount = 1000n; // publish costs 1000 wei TRAC
+    let chosenSigner: any;
+    (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
+    await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
+    expect(chosenSigner.address).toBe(walletB.address); // dust-TRAC head skipped for the covering wallet
+  });
+
+  it('skips a funded round-robin HEAD that is NOT authorized and selects a later authorized+funded wallet', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // Mixed case: both wallets abundantly funded, but walletA (the round-robin
+    // head) is UNAUTHORIZED for the CG and walletB is authorized. Authorization
+    // must gate selection so the funded-but-unauthorized head is never picked.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), ONE); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.contextGraphs.isAuthorizedPublisher = recorder(async (_cg: bigint, addr: string) =>
+      addr.toLowerCase() === lc(walletB.address));
+    const chosen = await (a as any).nextAuthorizedSigner(CG);
+    expect(chosen.address).toBe(walletB.address); // funded-but-unauthorized head filtered out
+  });
+
+  it('cost-aware PCA: prices convictionAccountCanCover at the publish cost and skips a PCA that covers only the 1-wei probe', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    // walletA (head): gas, ZERO own-TRAC, a registered PCA agent whose conviction
+    // account covers the 1-wei liveness probe but NOT a real publish cost.
+    // walletB: own-TRAC covers the cost. createKnowledgeAssets must price the PCA
+    // coverage check at floorPublishTokenAmount(tokenAmount) (NOT the 1-wei probe),
+    // so walletA is rejected and walletB is chosen.
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
+      addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
+    const coverCalls: bigint[] = [];
+    (a as any).convictionAccountCanCover = recorder(async (_id: bigint, cost: bigint) => {
+      coverCalls.push(cost);
+      return cost <= 1n; // covers the 1-wei liveness probe only, NOT a real publish cost
+    });
+    const params = makeV10PublishParams();
+    params.tokenAmount = 1000n;
+    let chosenSigner: any;
+    (a as any).signPopulatedTransaction = recorder(async (signer: any) => { chosenSigner = signer; throw new Error('SENTINEL'); });
+    await expect(a.createKnowledgeAssets(params)).rejects.toThrow('SENTINEL');
+    expect(chosenSigner.address).toBe(walletB.address); // PCA head can't cover the REAL cost → skipped
+    expect(coverCalls.length).toBe(1); // only walletA's PCA was probed (walletB fundable via own-TRAC)
+    expect(coverCalls[0] > 1n).toBe(true); // priced at the REAL publish cost, not the 1-wei liveness probe
+  });
+
+  // ── dispatcher Phase 3: the generalized selectSigner seam (RS/relay/update
+  // route through this later). Publish behaviour above is proven byte-identical
+  // through the nextAuthorizedSigner wrapper; these cover the NEW capabilities.
+  describe('selectSigner — generalized funding modes + idle preference', () => {
+    const nativeOnly = { kind: 'native-only' as const, nativeFloorWei: 0n };
+    // rotatable-free eligibility fails CLOSED to REGISTERED operational wallets
+    // (Phase 4). These tests exercise the funding/idle logic, so mark the whole
+    // pool registered; the fail-closed gate itself is covered separately below.
+    const registerPool = (a: any) => {
+      for (const w of (a.signerPool as ethers.Wallet[])) {
+        a.registeredOperationalAddresses.add(w.address.toLowerCase());
+      }
+    };
+    const nativeAndTrac = {
+      kind: 'native+trac' as const,
+      nativeFloorWei: 0n,
+      tracFloorWei: 0n,
+      requiredTracWei: 0n,
+      consultPca: true,
+    };
+
+    it('native-only funding gates on GAS ALONE — a gas-funded zero-TRAC wallet stays fundable', async () => {
+      const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // Head walletA: gas but ZERO own-TRAC. Under publish (native+trac) it would
+      // be skipped; under native-only it is fundable, so the head is chosen.
+      nativeByAddr.set(lc(walletA.address), ONE);
+      tracByAddr.set(lc(walletA.address), 0n);
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletA.address);
+    });
+
+    it('native-only still skips a gas-EMPTY wallet', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletB.address);
+    });
+
+    it('rotatable-free ignores the authorized-publisher filter (registered pool, not auth-gated)', async () => {
+      const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // No wallet is an authorized publisher → publish (rotatable-policy) throws…
+      (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+      await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeAndTrac }))
+        .rejects.toThrow(/No authorized publisher wallet/);
+      // …but rotatable-free never consults that surface — it picks from the
+      // registered pool regardless of publish authority.
+      const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      expect(chosen.address).toBe(walletA.address);
+    });
+
+    it('rotatable-free FAILS CLOSED: an UNREGISTERED funded+idle wallet is never selected', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      // Only pool[0] (walletA) is registered (constructor seed); walletB is NOT.
+      // Make walletA gas-poor AND busy, walletB abundantly funded AND idle — yet
+      // walletB must NOT be picked (unregistered → identity 0 → on-chain revert).
+      nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletA.address); // registered pool[0], despite gas-poor + busy
+        expect(chosen.address).not.toBe(walletB.address);
+      } finally { release(); }
+    });
+
+    it('preferIdle biases toward a funded wallet whose per-wallet lock is free', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // Both funded (helper default). Hold walletA (the round-robin head) busy.
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletB.address); // idle wallet preferred over the busy head
+      } finally { release(); }
+    });
+
+    it('preferIdle is fail-open: when NO funded wallet is idle it returns the first funded (never excludes)', async () => {
+      const { a, walletA, walletB } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      let releaseA!: () => void; let releaseB!: () => void;
+      const gA = new Promise<void>((r) => { releaseA = r; });
+      const gB = new Promise<void>((r) => { releaseB = r; });
+      void (a as any).signerTxSerializer.run(walletA.address, () => gA);
+      void (a as any).signerTxSerializer.run(walletB.address, () => gB);
+      try {
+        const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+        expect(chosen.address).toBe(walletA.address); // both busy → first funded (head), not excluded
+      } finally { releaseA(); releaseB(); }
+    });
+
+    it('native-only (RS) probes never poison the cached TRAC balance a publish relies on', async () => {
+      const { a, walletA, walletB, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      // walletA own-TRAC funded, walletB not — a publish must pick A.
+      tracByAddr.set(lc(walletA.address), ONE);
+      tracByAddr.set(lc(walletB.address), 0n);
+      // Prime both cache slots with a full (native+trac) read.
+      await (a as any).getWalletFunding(walletA.address);
+      await (a as any).getWalletFunding(walletB.address);
+      // TRAC reads start failing (store/RPC blip) while natives stay readable,
+      // and the native slots expire — the exact per-prover-tick RS shape.
+      (a as any).readTracBalance = async () => null;
+      for (const entry of ((a as any).fundingCache as Map<string, { nativeTs: number }>).values()) {
+        entry.nativeTs = 0;
+      }
+      // RS probe (native-only) re-reads natives; it must NOT touch TRAC slots.
+      await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly });
+      const cachedA = ((a as any).fundingCache as Map<string, { trac: bigint | null }>).get(lc(walletA.address));
+      expect(cachedA?.trac).toBe(ONE); // not clobbered to the failed-read null
+      // A publish inside the TTL still sees walletA as own-TRAC funded.
+      const chosen = await (a as any).nextAuthorizedSigner(CG);
+      expect(chosen.address).toBe(walletA.address);
+    });
+
+    it('nextRandomSamplingSigner requests exactly the RS spec (rotatable-free / native-only / preferIdle)', async () => {
+      // Pins the wrapper itself — every other test stubs it or calls
+      // selectSigner directly, so a wrong txClass/funding/preferIdle here
+      // would otherwise only surface on a live devnet.
+      const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      const specs: any[] = [];
+      (a as any).selectSigner = async (spec: any) => { specs.push(spec); return (a as any).signer; };
+      await (a as any).nextRandomSamplingSigner();
+      expect(specs).toEqual([{
+        txClass: 'rotatable-free',
+        funding: { kind: 'native-only', nativeFloorWei: 0n },
+        preferIdle: true,
+      }]);
+    });
+
+    it('RS selection revalidates the chosen wallet on-chain: an out-of-band re-registration is evicted', async () => {
+      // Out-of-band removal race: walletB was removed from THIS identity and
+      // re-registered to ANOTHER (identity 99) by a second node instance — the
+      // same-process set never saw it. The selection must detect the mismatch
+      // on the fresh chain read, evict B, and fall back to the primary.
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n); // primary gas-empty → B preferred first
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      const refreshed: string[] = [];
+      (a as any).refreshIdentityIdForAddress = async (addr: string) => {
+        refreshed.push(lc(addr));
+        return lc(addr) === lc(walletB.address) ? 99n : 5n;
+      };
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(refreshed).toContain(lc(walletB.address));
+      expect(chosen.address).toBe(walletA.address); // fell back to the primary anchor
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(false); // evicted
+    });
+
+    it('RS revalidation FAILS OPEN on a chain-read error (an RPC blip must not stall proofs)', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      (a as any).refreshIdentityIdForAddress = async () => { throw new Error('rpc down'); };
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(chosen.address).toBe(walletB.address); // kept despite the failed read
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+    });
+
+    it('RS revalidation keeps a wallet that still resolves to our identity', async () => {
+      const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+      registerPool(a);
+      nativeByAddr.set(lc(walletA.address), 0n);
+      nativeByAddr.set(lc(walletB.address), ONE);
+      (a as any).getIdentityId = async () => 5n;
+      (a as any).refreshIdentityIdForAddress = async () => 5n;
+      const chosen = await (a as any).nextRandomSamplingSigner();
+      expect(chosen.address).toBe(walletB.address);
+      expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+    });
+
+    it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {
+      const prev = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
+      process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = '1';
+      try {
+        const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        registerPool(a);
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        void (a as any).signerTxSerializer.run(walletA.address, () => gate);
+        try {
+          const chosen = await (a as any).selectSigner({ txClass: 'rotatable-free', funding: nativeOnly, preferIdle: true });
+          expect(chosen.address).toBe(walletA.address); // idle bias disabled → busy head still chosen
+        } finally { release(); }
+      } finally {
+        if (prev === undefined) delete process.env.DKG_DISABLE_IDLE_AWARE_SELECTION;
+        else process.env.DKG_DISABLE_IDLE_AWARE_SELECTION = prev;
+      }
+    });
+  });
+});
 });
 
 // -----------------------------------------------------------------------------
@@ -2735,14 +4222,17 @@ describe('isTooLowAllowanceError (#888)', () => {
 function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
   const a = new EVMChainAdapter(minimalConfig());
   let i = 0;
-  const tokenWithSigner = {
+  const tokenWithSigner = connectable({
     allowance: recorder(async () => values[Math.min(i++, values.length - 1)]),
     approve: recorder(() => undefined),
-  };
+  });
   const tokenRoot = { connect: recorder(() => tokenWithSigner) };
   (a as any).contracts.token = tokenRoot;
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
+  // In-lock publish/update approvals receive the scoped unlocked sender;
+  // standalone approval tests call the serialized wrapper. Capture both.
+  (a as any).sendContractTransactionUnlocked = sendSpy;
   const signer = new ethers.Wallet(DEPLOYER_PK);
   return { a, signer, tokenWithSigner, sendSpy };
 }
@@ -2825,7 +4315,7 @@ describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', 
     try {
       const a = new EVMChainAdapter(minimalConfig());
       // allowance() returns a promise that never settles — a hung RPC read.
-      const token = { allowance: recorder(() => new Promise<bigint>(() => {})) };
+      const token = connectable({ allowance: recorder(() => new Promise<bigint>(() => {})) });
       const done = recorder(() => undefined);
       const poll = (a as any)
         .confirmAllowanceVisible(token, '0xowner', V10_KA_ADDRESS, 1n)
@@ -2890,7 +4380,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
       const populate = recorder(async () => (
         populateQueue.shift() ?? (async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }))
       )());
-      const kaContract = { [method]: { populateTransaction: populate } };
+      const kaContract = connectable({ [method]: { populateTransaction: populate } });
 
       const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
         signer,
@@ -2922,7 +4412,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     const populate = recorder(async () => (
       populateQueue.shift() ?? (async () => ({ to: V10_KA_ADDRESS, data: '0xabcd' }))
     )());
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
       signer,
@@ -2944,7 +4434,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
   it('propagates a SECOND consecutive TooLowAllowance (recovery is one-shot, no infinite loop)', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw tooLowAllowanceRevert(); });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     await expect(
       (a as any).populateAndSignV10WithAllowanceRecovery(
@@ -2957,10 +4447,65 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     expect(signSpy.calls).toEqual([]);
   });
 
+  it('C6 (G-OBS1b): forces EXACTLY ONE approve across a provider-failover × TooLowAllowance interleaving (shared OUTER latch, not per-provider)', async () => {
+    // The case a PER-PROVIDER latch would double-fire: the inner per-provider
+    // populate loop fails over on provider #1's RETRYABLE 429, then provider #2
+    // reverts TooLowAllowance (non-retryable → propagates to the OUTER recovery),
+    // which fires ONE forced approve and re-runs the WHOLE inner loop (now
+    // succeeds). The forcedReapprove latch lives at the recovery OUTER scope, so
+    // it fires exactly once no matter how many endpoints the inner loop tried —
+    // immediate failover introduces ZERO extra approve txs (INV-1 + G-OBS1b).
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    (a as any).providers = [{}, {}]; // two endpoints so the inner loop fails over
+    const r429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
+    let call = 0;
+    const populate = recorder(async () => {
+      call += 1;
+      if (call === 1) throw r429();                   // provider[0], pass 1 → retryable → fail over
+      if (call === 2) throw tooLowAllowanceRevert();  // provider[1], pass 1 → non-retryable → propagate
+      return { to: V10_KA_ADDRESS, data: '0xabcd' };  // provider[0], pass 2 (post-approve) → succeeds
+    });
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    );
+
+    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(ensureSpy.calls).toHaveLength(1);  // EXACTLY ONE forced approve across the failover
+    expect(ensureSpy.calls[0][4]).toBe(true); // force=true
+    expect(signSpy.calls).toHaveLength(1);    // publish signed exactly once (INV-1)
+    expect(populate.calls).toHaveLength(3);   // p0(429) → p1(TooLow) → [approve] → p0(ok)
+  });
+
+  it('OBS-1: a RETRYABLE populate failure fails over to the next provider and signs exactly once (no double-sign)', async () => {
+    // Plain OBS-1 populate failover (no allowance recovery): provider #1's
+    // populate is rate-limited, provider #2 populates fine → signed once on #2.
+    const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
+    (a as any).providers = [{}, {}];
+    const r429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
+    let call = 0;
+    const populate = recorder(async () => {
+      call += 1;
+      if (call === 1) throw r429();                  // provider[0] → fail over
+      return { to: V10_KA_ADDRESS, data: '0xabcd' }; // provider[1] → populates
+    });
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
+
+    const result = await (a as any).populateAndSignV10WithAllowanceRecovery(
+      signer, kaContract, 'publish', {}, V10_KA_ADDRESS, 0n, 'label',
+    );
+
+    expect(result).toEqual({ signedTx: '0xsigned', txHash: '0xhash' });
+    expect(populate.calls).toHaveLength(2); // p0(429) → p1(ok)
+    expect(signSpy.calls).toHaveLength(1);  // signed once, on the healthy provider
+    expect(ensureSpy.calls).toEqual([]);    // no TooLowAllowance → no forced approve
+  });
+
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });
-    const kaContract = { publish: { populateTransaction: populate } };
+    const kaContract = connectable({ publish: { populateTransaction: populate } });
 
     let thrown: any;
     try {
@@ -2983,7 +4528,7 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
   it('propagates an unrelated revert immediately without forcing a re-approve', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw new Error('execution reverted: NotBatchPublisher()'); });
-    const kaContract = { update: { populateTransaction: populate } };
+    const kaContract = connectable({ update: { populateTransaction: populate } });
 
     await expect(
       (a as any).populateAndSignV10WithAllowanceRecovery(

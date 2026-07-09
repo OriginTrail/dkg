@@ -25,7 +25,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider } from '../src/publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, type V10ACKProvider, type V10ACKProviderParams } from '../src/publisher.js';
 import { generateConfirmedFullMetadata } from '../src/metadata.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
@@ -167,10 +167,10 @@ interface AckEpochCapture {
 
 function captureACKInputs(capture: AckEpochCapture): V10ACKProvider {
   const provider = mockChainStubACKProvider();
-  return async (...args: Parameters<V10ACKProvider>) => {
-    capture.epochs = args[6];
-    capture.tokenAmount = args[7];
-    return provider(...args);
+  return async (params: V10ACKProviderParams) => {
+    capture.epochs = params.epochs;
+    capture.tokenAmount = params.tokenAmount;
+    return provider(params);
   };
 }
 
@@ -385,6 +385,7 @@ class ContextAwareAdapterSigningChain extends MockChainAdapter {
 class AdapterManagedUpdateChain implements ChainAdapter {
   readonly chainId = 'mock:31337';
   capturedPublisherAddress?: string;
+  capturedPublisherNodeIdentityId?: bigint;
 
   constructor(
     private readonly publisherAddress?: string,
@@ -413,6 +414,7 @@ class AdapterManagedUpdateChain implements ChainAdapter {
 
   async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
     this.capturedPublisherAddress = params.publisherAddress;
+    this.capturedPublisherNodeIdentityId = params.publisherNodeIdentityId;
     return {
       success: this.success,
       hash: `0x${'12'.repeat(32)}`,
@@ -1187,6 +1189,37 @@ describe('DKGPublisher: no random publisher wallet without explicit key', () => 
 
     expect(updated.status).toBe('confirmed');
     expect(updated.onChainResult?.publisherAddress.toLowerCase()).toBe(wallet.address.toLowerCase());
+  });
+
+  it.each([
+    ['no attribution', 0n],
+    ['explicit publisher identity', 7n],
+  ])('threads publisherNodeIdentityIdOverride=%s through V10 update params', async (_label, override) => {
+    const keypair = await generateEd25519Keypair();
+    const wallet = new ethers.Wallet(TEST_KEY);
+    const chain = new AdapterManagedUpdateChain(wallet.address);
+    const publisher = new DKGPublisher({
+      store: new OxigraphStore(),
+      chain,
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherAddress: wallet.address,
+      publisherNodeIdentityId: 99n,
+    });
+
+    const updated = await updS(publisher, 99n, {
+      contextGraphId: '1',
+      quads: [{
+        subject: `urn:test:update-publisher-override:${override.toString()}`,
+        predicate: 'http://schema.org/name',
+        object: `"Override ${override.toString()}"`,
+        graph: 'did:dkg:context-graph:1',
+      }],
+      publisherNodeIdentityIdOverride: override,
+    });
+
+    expect(updated.status).toBe('confirmed');
+    expect(chain.capturedPublisherNodeIdentityId).toBe(override);
   });
 
   it('uses configured publisherAddress as update fallback when chain state and metadata miss', async () => {

@@ -36,11 +36,12 @@ dkg start
 # Check node status
 dkg status
 
-# Create a context graph (project), write RDF, promote to SWM, publish to VM
+# Create a context graph (project), write/finalize/share a KA, then publish to VM
 dkg context-graph create my-project
-dkg assertion import-file notes -f data.md -c my-project
-dkg assertion promote notes -c my-project
-dkg shared-memory publish my-project
+dkg ka import-file notes --input-file data.md -c my-project
+dkg ka finalize notes -c my-project
+dkg ka share notes -c my-project
+dkg ka publish-async notes -c my-project
 
 # Query the knowledge graph
 dkg query my-project -q "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 10"
@@ -247,14 +248,24 @@ modes auto-renewal can't recover from:
 | `dkg context-graph create <id>` | Create a local context graph (project) |
 | `dkg context-graph register <id>` | Register an existing CG on-chain (unlocks Verifiable Memory) |
 | `dkg context-graph list` | List subscribed context graphs |
-| `dkg context-graph invite <id> <peer>` | Invite a peer to a curated CG |
+| `dkg context-graph add-agent <id> --agent <addr>` | Add an agent to a curated CG allowlist |
 | `dkg context-graph subscribe <id>` | Subscribe to a CG without creating it |
-| `dkg assertion import-file <name> -f <file> -c <cg>` | Import a document into Working Memory |
-| `dkg assertion promote <name> -c <cg>` | Promote a WM assertion to Shared Working Memory |
-| `dkg assertion query <name> -c <cg>` | Read assertion quads from WM |
-| `dkg shared-memory write <cg>` | Write triples directly to Shared Working Memory |
-| `dkg shared-memory publish <cg>` | Publish from SWM to Verifiable Memory (costs TRAC) |
-| `dkg publish <cg>` | One-shot RDF publish to a context graph |
+| `dkg knowledge-asset ...` / `dkg ka ...` | First-class Knowledge Asset lifecycle namespace |
+| `dkg ka create <name> -c <cg> [--input-file <rdf>] [--share]` | Create a WM draft; optionally write/finalize/share in one call without VM publish |
+| `dkg ka write <name> -c <cg> --input-file <rdf>` | Append RDF payload quads into WM |
+| `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
+| `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
+| `dkg ka finalize <name> -c <cg> [--layer wm\|swm]` | Seal a WM draft, or seal SWM content with `--layer swm` |
+| `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
+| `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
+| `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
+| `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
+| `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
+| `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
+| `dkg ka discard <name> -c <cg>` | Discard a WM draft |
+| `dkg ka query <name> -c <cg>` | Read KA WM quads |
+| `dkg ka history <name> -c <cg>` | Show KA lifecycle state/history |
+| `dkg assertion ...` | Compatibility aliases for older assertion-oriented workflows |
 | `dkg verify <batchId>` | Propose M-of-N verification for a published batch |
 | `dkg endorse <ual>` | Endorse a published Knowledge Asset |
 | `dkg query [cg] -q <sparql>` | SPARQL query against the local store |
@@ -262,16 +273,24 @@ modes auto-renewal can't recover from:
 | `dkg subscribe <cg>` | Subscribe to a context graph and sync its data |
 | `dkg sync` | Catch up on data from peers |
 | `dkg index [directory]` | Index a code repository into the dev-coordination CG |
-| `dkg publisher ...` | Inspect and control the async publisher (jobs, wallets, stats) |
+| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async` |
 | `dkg auth show` | Display the current API auth token |
 | `dkg auth rotate` | Generate a new API auth token |
 | `dkg wallet` | Show operational wallet addresses and balances |
 | `dkg set-ask <amount>` | Set the node's on-chain ask (TRAC per KB·epoch) |
 | `dkg openclaw setup` | Install and configure the OpenClaw adapter |
-| `dkg update` | Update the node software (blue-green slots) |
+| `dkg update` | Update the node software from npm (blue-green slots for Core nodes) |
 | `dkg rollback` | Roll back to the previous software slot |
 
 Run `dkg <command> --help` for per-command options.
+
+NPM/dist-tag auto-update is the recommended production path. Advanced Core nodes
+can opt into daemon-polled git updates with `autoUpdate.source: "git"`,
+`repo`, and `branch` or `ref` in `~/.dkg/config.json`; git mode builds from
+source in the inactive blue-green slot and rollback is limited to already-built
+slots.
+
+Async publisher wallets need valid keys and native gas. Register the wallet as a PCA agent or fund TRAC for direct spend before expecting jobs to publish successfully. An on-chain node identity is optional publisher-node attribution; identity `0` is valid no-attribution mode. See [Async Publisher Wallets](../../docs/use-dkg/async-publisher-wallets.md).
 
 ## Source Workers
 
@@ -308,17 +327,25 @@ The handler module is loaded from the config file's directory:
 
 ```js
 export const sourceWorker = {
-  createSourceWorkerDeps({ sharedMemory, asyncLift }) {
+  createSourceWorkerDeps({ knowledgeAssets }) {
     return {
       async getFingerprint(source) {
         return source.contentHash;
       },
       async processSource(source, fingerprint) {
-        const share = await sharedMemory.share(source.contextGraphId, source.quads);
-        const jobId = await asyncLift.lift({
-          ...source.liftRequest,
-          shareOperationId: share.shareOperationId
-        });
+        const name = `source-${source.id}`;
+        const share = await knowledgeAssets.createAndShare(
+          source.contextGraphId,
+          name,
+          source.quads,
+          { subGraphName: source.subGraphName }
+        );
+        const publish = await knowledgeAssets.publishAsync(
+          source.contextGraphId,
+          name,
+          { subGraphName: source.subGraphName }
+        );
+        const jobId = publish.jobId;
         return {
           sourceId: source.id,
           skipped: false,
@@ -327,6 +354,9 @@ export const sourceWorker = {
           status: "queued",
           nextState: {
             fingerprint,
+            assertionName: name,
+            shareOperationId: share.shareOperationId,
+            intentKey: publish.intentKey,
             lastStatus: "queued",
             lastJobIds: [jobId],
             lastJobStatuses: { [jobId]: "queued" }
@@ -349,8 +379,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/status`, `GET /api/info` — node status and health
 - `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
 - `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
-- `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — Working Memory assertions
-- `POST /api/shared-memory/write`, `/publish` — Shared Working Memory and publishing to Verifiable Memory
+- `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
 - `POST /api/endorse`, `POST /api/verify`, `POST /api/update` — Verifiable Memory trust operations
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
@@ -368,9 +397,9 @@ The full API surface — including request bodies, response shapes, and error co
 ## Local Benchmarks
 
 The live publish/get benchmark measures four operation timings against a running
-DKG daemon: synchronous publish end-to-end latency, async publisher enqueue
-latency, async job completion/finalization latency, and SPARQL get latency for
-the published benchmark content.
+DKG daemon: synchronous publish end-to-end latency, async lifecycle publish
+request latency, async job completion/finalization latency, and SPARQL get
+latency for the published benchmark content.
 
 Prerequisites:
 

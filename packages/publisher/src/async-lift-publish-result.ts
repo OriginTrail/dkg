@@ -1,3 +1,4 @@
+import { NO_FUNDED_PUBLISHER_WALLET_CODE, messageIndicatesNoFundedPublisherWallet } from '@origintrail-official/dkg-core';
 import type { PublishResult } from './publisher.js';
 import {
   createLiftJobFailureMetadata,
@@ -53,18 +54,10 @@ export function mapPublishResultToLiftJobSuccess(params: {
   }
 
   if (!onChain) {
-    // GH #1013 — a private publish that failed to reach its chain-registered CG
-    // (no collectable ACKs) must NOT be reported as `finalized` with a
-    // provisional UAL. Fail honestly so callers can tell "stored locally, not on
-    // chain" from a real on-chain finalization. (Reaching chain for private CGs
-    // is the #1121 encryption work.) The data is still staged locally under the
-    // provisional UAL, surfaced in the error for debugging/recovery.
-    if (publishResult.status === 'tentative' && publishResult.localChainSkipReason === 'private-no-acks') {
+    if ((publishResult as { localChainSkipReason?: unknown }).localChainSkipReason === 'private-no-acks') {
       throw new Error(
-        `Async publish to a chain-registered context graph could not reach Verifiable Memory: ` +
-        `private payload had no collectable storage ACKs (peers cannot see private data). ` +
-        `Data is staged locally under provisional UAL ${publishResult.ual} but is NOT on chain. ` +
-        `See GH #1013 (honesty) and GH #1121 (encrypted private async publish).`,
+        'Async lift publish result cannot finalize legacy private-no-acks result as local success. ' +
+        'The publish targeted chain finalization but did not collect ACKs; keep the job terminal-failed or rerun publish.',
       );
     }
     if (publishResult.status === 'tentative') {
@@ -131,7 +124,23 @@ export function mapPublishExceptionToLiftJobFailure(
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   const lower = message.toLowerCase();
 
-  const code = classifyPublishFailureCode(lower, input.failedFromState);
+  // The funded-wallet-selection error (dkg-chain `InsufficientPublisherFundsError`,
+  // code `NO_FUNDED_PUBLISHER_WALLET`) carries a friendly "no operational wallet
+  // has enough funds" message that does NOT contain the literal "insufficient
+  // funds" substring `classifyPublishFailureCode` matches — so recognize it by
+  // its structured code (with a message-marker fallback, mirroring the daemon +
+  // node-ui, in case an intermediate re-wrap drops `.code`). Otherwise an
+  // unfundable publish would fall through to the retryable `rpc_unavailable`
+  // default and the queue would reset/retry a job that can never finalize (the
+  // same forever-retry trap #1013/#1121 fixed). `insufficient_funds` is only
+  // valid from the 'broadcast' state, so only force it there — funded selection
+  // is a broadcast-phase concern; any other state falls back to the classifier.
+  const errorCode = (input.error as { code?: unknown } | null | undefined)?.code;
+  const isNoFundedWallet = errorCode === NO_FUNDED_PUBLISHER_WALLET_CODE
+    || messageIndicatesNoFundedPublisherWallet(lower);
+  const code = isNoFundedWallet && input.failedFromState === 'broadcast'
+    ? 'insufficient_funds'
+    : classifyPublishFailureCode(lower, input.failedFromState);
 
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,
@@ -149,15 +158,6 @@ function classifyPublishFailureCode(
   lowerMessage: string,
   failedFromState: AsyncLiftPublishFailureInput['failedFromState'],
 ): LiftJobFailureMetadata['code'] {
-  // GH #1013/#1121 (Codex #1132 review): a private payload that could not reach
-  // Verifiable Memory (no collectable storage ACKs) is a DETERMINISTIC terminal
-  // failure — classifying it as the default retryable `rpc_unavailable` made the
-  // queue reset/retry forever a job that can never finalize until encrypted
-  // private async publish (#1121) lands. The message is emitted verbatim by
-  // mapPublishResultToLiftJobSuccess for this exact condition.
-  if (lowerMessage.includes('no collectable storage acks')) {
-    return 'private_unanchorable';
-  }
   if (lowerMessage.includes('timeout') || lowerMessage.includes('timed out')) {
     return failedFromState === 'included' ? 'finality_timeout' : 'tx_submit_timeout';
   }

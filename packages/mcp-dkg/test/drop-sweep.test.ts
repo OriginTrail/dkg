@@ -41,7 +41,6 @@ import { registerAssertionTools } from '../src/tools/assertions.js';
 import { registerMemorySearchTool } from '../src/tools/memory-search.js';
 import { registerSetupTools } from '../src/tools/setup.js';
 import { registerHealthTools } from '../src/tools/health.js';
-import { registerPublishTools } from '../src/tools/publish.js';
 import { registerChatTools } from '../src/tools/chat.js';
 import { FakeServer, FakeClient, makeConfig } from './harness.js';
 
@@ -88,7 +87,6 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
     registerMemorySearchTool(server.asMcpServer(), client.asDkgClient(), config);
     registerSetupTools(server.asMcpServer(), client.asDkgClient(), config);
     registerHealthTools(server.asMcpServer(), client.asDkgClient(), config);
-    registerPublishTools(server.asMcpServer(), client.asDkgClient(), config);
     registerChatTools(server.asMcpServer(), client.asDkgClient(), config);
   });
 
@@ -119,8 +117,12 @@ describe('drop-sweep — none of the 10 W2-dropped tools reappear in tools/list'
   // addressed-read provenance PR: +1 net-new read tool
   // (dkg_get_entity_sources) — describes an entity's facts each tagged with
   // the verifiable KA source — taking the surface from 30 → 31.
-  it('registered surface contains exactly 31 tools (full production surface, post-PR locked count)', () => {
-    expect(server.tools.size).toBe(31);
+  // #1087 API-tooling cleanup (W2): the whole publish.ts module is deleted —
+  // -2 tools (dkg_publish + dkg_shared_memory_publish), taking the surface from
+  // 31 → 29. The one-shot is NOT a new tool: it EXTENDS dkg_knowledge_asset_create
+  // with optional quads + alsoShareSwm [D3], so the count drops by exactly 2.
+  it('registered surface contains exactly 29 tools (full production surface, post-PR locked count)', () => {
+    expect(server.tools.size).toBe(29);
   });
 });
 

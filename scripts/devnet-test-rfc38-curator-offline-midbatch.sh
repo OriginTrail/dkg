@@ -9,14 +9,14 @@
 # the cores' opaque-host catchup substrate keeps the path forward.
 #
 # This devnet harness narrows that to the most operationally useful
-# slice: curator writes a batch, gets the envelopes onto the wire,
-# THEN goes offline. We then assert:
+# slice: M1 writes and shares a named KA while the curator is online,
+# then the curator goes offline. We then assert:
 #
 #   (a) Other members + cores can still serve catchup for the batch
 #       to a late-joining peer (they each have it locally either as
 #       decrypted triples or as opaque ciphertext).
 #   (b) For an OPEN publishPolicy CG, a non-curator member can call
-#       /api/shared-memory/publish to finish the path to VM without
+#       /api/knowledge-assets/<name>/vm/publish to finish the path to VM without
 #       the curator coming back online.
 #
 # Test phases:
@@ -25,11 +25,11 @@
 #      [curator, M1=N6, M2=N4] in the allowlist; all three pre-create.
 #      (curated access policy + open publish policy: only allowlisted
 #      members can read/write, but ANY of them can publish to VM.)
-#   2. Curator writes 4 triples. Both members + the core network
-#      catch up so the ciphertext is on their disks.
+#   2. M1 writes 4 triples through the named KA lifecycle. Both members
+#      + the core network catch up so the ciphertext is on their disks.
 #   3. Curator's daemon is stopped (simulating offline).
 #   4. M1 + M2 confirm they still have the 4 triples (no regression).
-#   5. M1 (non-curator) calls /api/shared-memory/publish. Must
+#   5. M1 (non-curator) calls /api/knowledge-assets/<name>/vm/publish. Must
 #      succeed: status=confirmed + a txHash.
 #   6. Outsider (N1) fetches the on-chain KC and verifies the
 #      merkleRoot decodes; this proves the publish landed without
@@ -217,7 +217,7 @@ if ! wait_for_m1_onchain_id; then
 fi
 
 # ===========================================================================
-act "2. Curator writes 4 triples; members catch up"
+act "2. M1 creates, seals, and shares 4 triples; members catch up"
 # ===========================================================================
 PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   const stamp = process.env.STAMP;
@@ -229,9 +229,9 @@ PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$PAYLOAD")
+WRITE_RESP=$(devnet_create_shared_ka "$M1_NODE" "$PAYLOAD")
 [ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "4" ] || fail "write expected 4 triples: $WRITE_RESP"
-log "✓ curator wrote 4 triples"
+log "✓ M1 wrote 4 triples through the named KA lifecycle"
 sleep 5
 
 # Codex PR #622 R-list: /api/shared-memory/list isn't a daemon route.
@@ -398,7 +398,7 @@ log "================================================================"
 log "  RFC-38 LU-6 C2 (curator-offline mid-batch): PASS"
 log "================================================================"
 log "  Curated CG:    $CG_ID  (onChainId=$ON_CHAIN_ID, publishPolicy=open)"
-log "  Triples in:    4 (curator-written, gossiped to members)"
+log "  Triples in:    4 (M1-written named KA, gossiped to members)"
 log "  Curator:       SIGTERMed before publish"
 log "  M1 published:  kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
 log "  Outsider:      observed merkleRoot on chain"

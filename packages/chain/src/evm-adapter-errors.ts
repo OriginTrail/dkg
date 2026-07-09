@@ -10,6 +10,11 @@
  * module.
  */
 import { ethers, Interface } from 'ethers';
+import {
+  NO_FUNDED_PUBLISHER_WALLET_CODE,
+  NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  messageIndicatesNoFundedPublisherWallet,
+} from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 
 export function errorMessage(err: unknown): string {
@@ -287,4 +292,76 @@ export function isTooLowAllowanceError(err: unknown): boolean {
     .filter((s): s is string => typeof s === 'string')
     .join(' ');
   return /TooLowAllowance/i.test(haystack);
+}
+
+/**
+ * True iff `err` is an ethers/RPC NATIVE-gas insufficient-funds error
+ * (`code: 'INSUFFICIENT_FUNDS'` or an `insufficient funds for gas * price + value`
+ * message). A TRAC-balance shortfall is NOT this — it surfaces as a generic
+ * contract revert (`transferFrom`), so callers confirm a TRAC shortfall with a
+ * balance read rather than this classifier.
+ */
+export function isInsufficientFundsError(err: unknown): boolean {
+  if (errorCode(err) === 'INSUFFICIENT_FUNDS') return true;
+  return /insufficient funds/i.test(errorMessage(err));
+}
+
+/** Machine-readable code carried by {@link InsufficientPublisherFundsError}.
+ *  Defined in dkg-core (UI-safe shared package) and re-exported here so chain
+ *  consumers can keep importing it from dkg-chain. */
+export { NO_FUNDED_PUBLISHER_WALLET_CODE };
+
+/** Per-operational-wallet balance snapshot for the no-funded-wallet diagnostic. */
+export interface PublisherWalletBalance {
+  address: string;
+  /** Native gas balance (wei), or `null` when it could not be read. */
+  nativeWei: bigint | null;
+  /** TRAC balance (wei), or `null` when it could not be read / no token contract. */
+  tracWei: bigint | null;
+}
+
+/**
+ * Thrown when a publish cannot proceed because no operational wallet holds the
+ * funds (native gas AND TRAC) a publish requires. Carries a stable `code` and
+ * the per-wallet balances so the daemon route / node-ui can surface an
+ * actionable "fund a wallet and retry" message instead of the raw ethers
+ * "insufficient funds" string the user sees today.
+ */
+export class InsufficientPublisherFundsError extends Error {
+  readonly code = NO_FUNDED_PUBLISHER_WALLET_CODE;
+  readonly balances: PublisherWalletBalance[];
+  constructor(message: string, balances: PublisherWalletBalance[], options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'InsufficientPublisherFundsError';
+    this.balances = balances;
+  }
+}
+
+/**
+ * True iff `err` is the no-funded-publisher-wallet failure — code-first, with a
+ * message-marker fallback for a wrapper that dropped `.code`. Uses the same
+ * shared dkg-core contract (`messageIndicatesNoFundedPublisherWallet`) as the
+ * daemon-side predicate, so the chain and daemon classifiers agree on semantics.
+ */
+export function isNoFundedPublisherWalletError(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null | undefined;
+  return e?.code === NO_FUNDED_PUBLISHER_WALLET_CODE
+    || messageIndicatesNoFundedPublisherWallet(e?.message);
+}
+
+function formatWeiOrUnknown(wei: bigint | null): string {
+  return wei === null ? 'unknown' : ethers.formatEther(wei);
+}
+
+/** Build the actionable, user-facing no-funded-wallet publish error message. */
+export function formatNoFundedPublisherWalletMessage(balances: PublisherWalletBalance[]): string {
+  const lines = balances
+    .map((b) => `  ${b.address}: ${formatWeiOrUnknown(b.tracWei)} TRAC, ${formatWeiOrUnknown(b.nativeWei)} gas`)
+    .join('\n');
+  return (
+    `${NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX} to publish to Verifiable Memory — ` +
+    'each publish needs native gas AND TRAC on the same wallet. ' +
+    'Operational wallet balances:\n' + lines + '\n' +
+    'Fund one of these wallets (run `dkg wallets` to list addresses) and retry the publish.'
+  );
 }

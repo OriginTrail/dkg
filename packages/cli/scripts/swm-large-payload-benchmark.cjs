@@ -21,8 +21,9 @@ const FAILURE_PATTERNS = [
 function usage() {
   return `Usage: pnpm --filter @origintrail-official/dkg benchmark:swm-large-payload -- [options]
 
-Writes large public SWM payloads to a running multi-node devnet and verifies that
-the replicated payload is not duplicated into dkg:publicStagedQuads metadata.
+Writes large public SWM payloads through named Knowledge Asset lifecycle
+create+seal+share calls to a running multi-node devnet and verifies that the
+replicated payload is not duplicated into dkg:publicStagedQuads metadata.
 
 Options:
   --ports <list>                 Comma-separated daemon API ports. Default derives from --api-port-base and --nodes.
@@ -30,7 +31,7 @@ Options:
   --nodes <count>                Node count when --ports is omitted. Default: 5.
   --context-graph-id <id>        Context graph to write/query. Default: devnet-test.
   --payload-mib-per-node <MiB>   Payload size written through each node. Default: 100.
-  --chunk-mib <MiB>              Payload literal size per SWM write. Default: 0.5.
+  --chunk-mib <MiB>              Payload literal size per named KA create+share. Default: 0.5.
   --write-concurrency <count>    Concurrent write requests. Default: 1.
   --replication-timeout-ms <ms>  Time to wait for every node to see every payload. Default: 900000.
   --poll-interval-ms <ms>        Replication polling interval. Default: 5000.
@@ -298,6 +299,23 @@ function resolveInputPath(value) {
   return isAbsolute(value) ? value : resolve(INVOCATION_CWD, value);
 }
 
+function assertionNamePart(value) {
+  return String(value)
+    .trim()
+    .replace(/[<>"{}|^`\\\s/]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'unknown';
+}
+
+function lifecycleAssetName(config, nodeNumber, chunkNumber) {
+  return [
+    assertionNamePart(config.namespace),
+    assertionNamePart(config.runId),
+    `n${nodeNumber}`,
+    `c${chunkNumber}`,
+  ].join('-').slice(0, 256);
+}
+
 function bytesFromMiB(value) {
   return Math.round(value * 1024 * 1024);
 }
@@ -432,25 +450,35 @@ async function writeChunk(config, plan, nodeIndex, chunkNumber) {
   const sizeBytes = payloadBytesForChunk(plan, chunkNumber);
   const subject = `${plan.rootPrefix}node:${nodeNumber}:chunk:${chunkNumber}`;
   const payload = makePayload(config.runId, nodeNumber, chunkNumber, sizeBytes);
+  const name = lifecycleAssetName(config, nodeNumber, chunkNumber);
   const startedAt = performance.now();
-  const response = await postJson(port, '/api/shared-memory/write', {
+  const response = await postJson(port, '/api/knowledge-assets', {
     contextGraphId: config.contextGraphId,
+    name,
     quads: [{
       subject,
       predicate: config.predicate,
       object: JSON.stringify(payload),
       graph: '',
     }],
+    finalize: true,
+    alsoShareSwm: true,
   }, config, config.requestTimeoutMs);
+  if (Array.isArray(response.errors) && response.errors.length > 0) {
+    throw new Error(`Lifecycle create+share for ${name} returned errors: ${JSON.stringify(response.errors)}`);
+  }
   const durationMs = performance.now() - startedAt;
   return {
     port,
     nodeNumber,
     chunkNumber,
+    assetName: name,
     subject,
     payloadBytes: sizeBytes,
     durationMs: Number(durationMs.toFixed(2)),
-    operationId: response.operationId,
+    operationId: response.assertionUri ?? name,
+    swmShared: response.swmShared === true,
+    promotedCount: response.promotedCount,
   };
 }
 

@@ -77,6 +77,27 @@
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "currentEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidCollectionRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
         "name": "lockDurationEpochs",
         "type": "uint256"
       },
@@ -109,6 +130,22 @@
       }
     ],
     "name": "NoConvictionAccount",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotAccountOwner",
     "type": "error"
   },
   {
@@ -163,6 +200,11 @@
       }
     ],
     "name": "PrimaryNodeUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "TreasuryNotSet",
     "type": "error"
   },
   {
@@ -330,6 +372,31 @@
       },
       {
         "indexed": true,
+        "internalType": "address",
+        "name": "owner",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "cleared",
+        "type": "uint256"
+      }
+    ],
+    "name": "AgentsCleared",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
         "internalType": "uint40",
         "name": "epoch",
         "type": "uint40"
@@ -360,6 +427,43 @@
       }
     ],
     "name": "CostCovered",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "fromWindow",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "toWindow",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "scheduled",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "treasuryFee",
+        "type": "uint96"
+      }
+    ],
+    "name": "EmissionScheduled",
     "type": "event"
   },
   {
@@ -416,6 +520,31 @@
       }
     ],
     "name": "ToppedUp",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
+    "name": "TreasuryEmissionCollected",
     "type": "event"
   },
   {
@@ -483,6 +612,19 @@
   },
   {
     "inputs": [],
+    "name": "TREASURY_SHARD_ID",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "chronos",
     "outputs": [
       {
@@ -492,6 +634,37 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "clearAgents",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "toEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "collectTreasuryEmission",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -717,6 +890,19 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256[]",
+        "name": "accountIds",
+        "type": "uint256[]"
+      }
+    ],
+    "name": "migrateEmissionSchedule",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "name",
     "outputs": [
@@ -797,6 +983,24 @@
       }
     ],
     "name": "registerAgent",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address[]",
+        "name": "agents",
+        "type": "address[]"
+      }
+    ],
+    "name": "registerAgents",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

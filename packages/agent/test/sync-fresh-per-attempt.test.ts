@@ -785,6 +785,100 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(supersededSessionId);
   });
 
+  it('drops a RESUMED session that aborts with a GENERIC transport error (network-path R1 fix)', async () => {
+    // 2026-07-07 sync storm. Over the wire the responder's "superseded" message
+    // is destroyed by the router's stream.abort, so the requester sees a
+    // GENERIC reset — not the text isSyncResponderSessionSupersededError
+    // matches. Before the fix this re-saved the doomed session and the retry
+    // resumed at offset>0 with a token the responder no longer honoured,
+    // looping ~10 min. Now a RESUMED round that aborts drops the session +
+    // checkpoint for a clean offset-0 restart, WITHOUT relying on the (lost)
+    // superseded message.
+    vi.setSystemTime(1_700_100_000_000);
+    const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
+    const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
+    const deletedCheckpoints: string[] = [];
+    const checkpointKey = `${REMOTE_PEER_ID}|generic-abort-resume-cg|durable|data`;
+    let sendMode: 'timeout' | 'abort' | 'complete' = 'timeout';
+
+    const checkpointStore = {
+      get: (key: string) => checkpointValues.get(key),
+      set: (key: string, value: number) => { checkpointValues.set(key, freshCheckpoint(value)); },
+      delete: (key: string) => { deletedCheckpoints.push(key); checkpointValues.delete(key); },
+    };
+
+    const runFetch = () => runFetchWithFakeTimers(
+      fetchSyncPages({
+        ctx: makeCtx(),
+        remotePeerId: REMOTE_PEER_ID,
+        contextGraphId: 'generic-abort-resume-cg',
+        includeSharedMemory: false,
+        phase: 'data',
+        graphUri: GRAPH_URI,
+        deadline: Date.now() + 60_000,
+        syncPageTimeoutMs: 5_000,
+        syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1,
+        syncPageSize: 1,
+        syncDeniedResponse: '#DENIED',
+        debugSyncProgress: false,
+        protocolSync: PROTOCOL_ID,
+        checkpointStore,
+        buildSyncRequest: async (
+          _contextGraphId,
+          offset,
+          _limit,
+          _includeSharedMemory,
+          _remotePeerId,
+          _phase,
+          _snapshotRef,
+          _sinceBatchId,
+          syncSessionId,
+        ) => {
+          observedBuilds.push({ offset, syncSessionId });
+          return new TextEncoder().encode(`request-${offset}`);
+        },
+        parseAndFilter: singleQuadParser,
+        send: async () => {
+          if (sendMode === 'timeout') {
+            vi.setSystemTime(1_700_100_060_001);
+            return new TextEncoder().encode('one-quad-line');
+          }
+          if (sendMode === 'abort') {
+            // GENERIC transport error — deliberately NOT the "superseded" text.
+            throw new Error('stream reset');
+          }
+          return new TextEncoder().encode('');
+        },
+        logWarn: noopLog,
+        logInfo: noopLog,
+        logDebug: noopLog,
+      }),
+    );
+
+    // Round 1: partial progress then timeout — persists a resumable session.
+    const first = await runFetch();
+    expect(first.completed).toBe(false);
+    expect(first.nextOffset).toBeGreaterThan(0);
+    checkpointValues.set(checkpointKey, freshCheckpoint(first.nextOffset));
+    const abortedSessionId = observedBuilds[0].syncSessionId;
+
+    // Round 2: RESUME (resumedFromOffset>0), then abort with a generic error.
+    sendMode = 'abort';
+    const before = deletedCheckpoints.length;
+    await expect(runFetch()).rejects.toThrow('stream reset');
+    // The fix: the resumed-then-aborted session's checkpoint is DROPPED even
+    // though no "superseded" message arrived — no 10-minute resume loop.
+    expect(deletedCheckpoints.slice(before)).toContain(checkpointKey);
+
+    // Round 3: clean restart at offset 0 with a FRESH session id.
+    sendMode = 'complete';
+    const resumed = await runFetch();
+    expect(resumed.resumedFromOffset).toBe(0);
+    expect(observedBuilds[observedBuilds.length - 1]).toMatchObject({ offset: 0 });
+    expect(observedBuilds[observedBuilds.length - 1].syncSessionId).not.toBe(abortedSessionId);
+  });
+
   it('restarts durable data checkpoints at offset zero with a stable sync session', async () => {
     const observedBuilds: Array<{
       offset: number;

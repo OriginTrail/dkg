@@ -12,6 +12,7 @@
  * Both are loaded at build time via Vite's import.meta.glob so the
  * UI bundle has them inline; no runtime fetch needed.
  */
+import { buildProjectOntologyTriples } from '@origintrail-official/dkg-core/project-ontology';
 import { authHeaders } from '../api.js';
 
 // Local POST helper. The api.ts module's `post` is private; re-using
@@ -96,64 +97,6 @@ function getStarter(slug: string): { ttl: string; guide: string } | null {
   return STARTERS[slug] ?? null;
 }
 
-const NS = {
-  rdf: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
-  rdfs: 'http://www.w3.org/2000/01/rdf-schema#',
-  schema: 'http://schema.org/',
-  dcterms: 'http://purl.org/dc/terms/',
-  xsd: 'http://www.w3.org/2001/XMLSchema#',
-  prov: 'http://www.w3.org/ns/prov#',
-  owl: 'http://www.w3.org/2002/07/owl#',
-};
-
-/** Build the same triple set that scripts/import-ontology.mjs writes. */
-function buildOntologyTriples(
-  contextGraphId: string,
-  starterSlug: string,
-  ttl: string,
-  guide: string,
-): { ontologyUri: string; guideUri: string; quads: Array<{ subject: string; predicate: string; object: string }> } {
-  const ontologyUri = `urn:dkg:project:${contextGraphId}:ontology`;
-  const guideUri = `${ontologyUri}:agent-guide`;
-  const nowIso = new Date().toISOString();
-
-  const escLit = (s: string) =>
-    s
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
-  const lit = (v: string, dt?: string) =>
-    dt ? `"${escLit(v)}"^^<${dt}>` : `"${escLit(v)}"`;
-
-  const quads = [
-    { subject: ontologyUri, predicate: NS.rdf + 'type', object: `<${NS.owl}Ontology>` },
-    { subject: ontologyUri, predicate: NS.rdf + 'type', object: `<${NS.prov}Entity>` },
-    { subject: ontologyUri, predicate: NS.rdfs + 'label', object: lit(`Project ontology — ${contextGraphId}`) },
-    { subject: ontologyUri, predicate: NS.schema + 'name', object: lit(`Project ontology — ${contextGraphId}`) },
-    { subject: ontologyUri, predicate: NS.dcterms + 'title', object: lit(`Project ontology — ${contextGraphId}`) },
-    { subject: ontologyUri, predicate: NS.dcterms + 'description', object: lit(`The active ontology for context graph ${contextGraphId}, derived from the '${starterSlug}' starter.`) },
-    { subject: ontologyUri, predicate: NS.dcterms + 'created', object: lit(nowIso, NS.xsd + 'dateTime') },
-    { subject: ontologyUri, predicate: NS.dcterms + 'modified', object: lit(nowIso, NS.xsd + 'dateTime') },
-    { subject: ontologyUri, predicate: NS.dcterms + 'source', object: lit(starterSlug) },
-    { subject: ontologyUri, predicate: NS.schema + 'encodingFormat', object: lit('text/turtle') },
-    { subject: ontologyUri, predicate: NS.schema + 'text', object: lit(ttl) },
-    { subject: ontologyUri, predicate: NS.dcterms + 'references', object: `<${guideUri}>` },
-
-    { subject: guideUri, predicate: NS.rdf + 'type', object: `<${NS.schema}DigitalDocument>` },
-    { subject: guideUri, predicate: NS.rdfs + 'label', object: lit(`Agent guide — ${contextGraphId} ontology`) },
-    { subject: guideUri, predicate: NS.schema + 'name', object: lit(`Agent guide — ${contextGraphId} ontology`) },
-    { subject: guideUri, predicate: NS.dcterms + 'title', object: lit(`Agent guide — ${contextGraphId} ontology`) },
-    { subject: guideUri, predicate: NS.dcterms + 'created', object: lit(nowIso, NS.xsd + 'dateTime') },
-    { subject: guideUri, predicate: NS.dcterms + 'modified', object: lit(nowIso, NS.xsd + 'dateTime') },
-    { subject: guideUri, predicate: NS.schema + 'encodingFormat', object: lit('text/markdown') },
-    { subject: guideUri, predicate: NS.schema + 'text', object: lit(guide) },
-    { subject: guideUri, predicate: NS.schema + 'about', object: `<${ontologyUri}>` },
-  ];
-  return { ontologyUri, guideUri, quads };
-}
-
 /**
  * Install a starter ontology into the given context graph. Idempotent —
  * re-running with the same starter replaces the assertion.
@@ -185,12 +128,12 @@ export async function installOntology(
     if (!String(err?.message ?? err).includes('already exists')) throw err;
   });
 
-  const { ontologyUri, guideUri, quads } = buildOntologyTriples(
+  const { ontologyUri, guideUri, quads } = buildProjectOntologyTriples({
     contextGraphId,
     starterSlug,
-    starter.ttl,
-    starter.guide,
-  );
+    ttl: starter.ttl,
+    guide: starter.guide,
+  });
 
   await post('/api/knowledge-assets/project-ontology/wm/discard', {
     contextGraphId,

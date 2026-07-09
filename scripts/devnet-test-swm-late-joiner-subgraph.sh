@@ -51,6 +51,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
 CURATOR_NODE="${CURATOR_NODE:-5}"
@@ -172,14 +175,14 @@ log "✓ sub-graph \"$SUB_GRAPH_NAME\" created"
 act "STEP 3: curator publishes $SUB_GRAPH_TRIPLES SWM triples into sub-graph + $ROOT_TRIPLES into root"
 # ===========================================================================
 SUB_PAYLOAD=$(build_swm_payload "$CG_ID" "$SUB_GRAPH_TRIPLES" "sub" "$SUB_GRAPH_NAME")
-WROTE_SUB=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$SUB_PAYLOAD")
+WROTE_SUB=$(devnet_create_shared_ka "$CURATOR_NODE" "$SUB_PAYLOAD")
 TRIPLES_WROTE_SUB=$(parse_json "$WROTE_SUB" '.triplesWritten')
 [ "$TRIPLES_WROTE_SUB" = "$SUB_GRAPH_TRIPLES" ] \
   || fail "expected $SUB_GRAPH_TRIPLES sub-graph triplesWritten, got '$TRIPLES_WROTE_SUB' (response: $WROTE_SUB)"
 log "✓ wrote $SUB_GRAPH_TRIPLES SWM triples into sub-graph \"$SUB_GRAPH_NAME\""
 
 ROOT_PAYLOAD=$(build_swm_payload "$CG_ID" "$ROOT_TRIPLES" "root" "")
-WROTE_ROOT=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$ROOT_PAYLOAD")
+WROTE_ROOT=$(devnet_create_shared_ka "$CURATOR_NODE" "$ROOT_PAYLOAD")
 TRIPLES_WROTE_ROOT=$(parse_json "$WROTE_ROOT" '.triplesWritten')
 [ "$TRIPLES_WROTE_ROOT" = "$ROOT_TRIPLES" ] \
   || fail "expected $ROOT_TRIPLES root triplesWritten, got '$TRIPLES_WROTE_ROOT' (response: $WROTE_ROOT)"

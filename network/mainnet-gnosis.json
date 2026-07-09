@@ -18,6 +18,15 @@
     "type": "evm",
     "chainId": "gnosis:100",
     "rpcUrl": "https://rpc.gnosischain.com",
+    "rpcUrls": [
+      "https://gnosis-rpc.publicnode.com",
+      "https://gnosis.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://rpc.gnosischain.com",
+      "https://gnosis-rpc.publicnode.com",
+      "https://gnosis.drpc.org"
+    ],
     "hubAddress": "0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f"
   },
   "autoUpdate": {

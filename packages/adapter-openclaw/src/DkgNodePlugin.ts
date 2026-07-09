@@ -2459,9 +2459,8 @@ export class DkgNodePlugin {
    * Register a context graph on-chain, tolerating the idempotent
    * "already registered" case (returns `undefined` so callers don't claim a
    * fresh registration). Any OTHER failure rethrows — the caller surfaces it as
-   * a tool error and must NOT proceed. Shared by handleSharedMemoryPublish and
-   * handleAssertionPublish (CONTRACT §G) so the register-then-publish logic
-   * can't drift between the two publish tools.
+   * a tool error and must NOT proceed. Used by handleAssertionPublish (CONTRACT
+   * §G) for the register-then-publish path of the canonical per-KA publish tool.
    */
   private async registerContextGraphIfNeeded(
     contextGraphId: string,
@@ -2502,7 +2501,6 @@ export class DkgNodePlugin {
       handleJoinRequestApprove: this.handleJoinRequestApprove.bind(this),
       handleJoinRequestReject: this.handleJoinRequestReject.bind(this),
       handleSubscribe: this.handleSubscribe.bind(this),
-      handlePublish: this.handlePublish.bind(this),
       handleQuery: this.handleQuery.bind(this),
       handleQueryCatalogList: this.handleQueryCatalogList.bind(this),
       handleQueryCatalogRun: this.handleQueryCatalogRun.bind(this),
@@ -2526,8 +2524,6 @@ export class DkgNodePlugin {
       handleAssertionHistory: this.handleAssertionHistory.bind(this),
       handleSubGraphCreate: this.handleSubGraphCreate.bind(this),
       handleSubGraphList: this.handleSubGraphList.bind(this),
-      handleSharedMemoryPublish: this.handleSharedMemoryPublish.bind(this),
-      handleShare: this.handleShare.bind(this),
       handleMemorySearch: this.handleMemorySearch.bind(this),
     };
   }
@@ -2800,77 +2796,6 @@ export class DkgNodePlugin {
       const result = await this.client.listContextGraphs();
       const graphs = filterContextGraphsForScope(result.contextGraphs ?? [], scope);
       return this.json({ contextGraphs: graphs, count: graphs.length, scope });
-    } catch (err: any) {
-      return this.daemonError(err);
-    }
-  }
-
-  private async handlePublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
-    try {
-      const contextGraphId = typeof args.context_graph_id === 'string' ? args.context_graph_id.trim() : '';
-      if (!contextGraphId) {
-        return this.error('"context_graph_id" is required.');
-      }
-      const rawQuads = args.quads;
-
-      if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
-        return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
-      }
-
-      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
-        return this.error('"register_if_needed" must be a boolean.');
-      }
-      const registerIfNeeded = args.register_if_needed === true;
-      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
-        return this.error('"access_policy" must be 0 (open) or 1 (private).');
-      }
-      // FIX S: `access_policy` only applies when registering the CG — reject it
-      // (rather than silently drop the privacy setting) when register_if_needed
-      // is not true.
-      if (args.access_policy !== undefined && !registerIfNeeded) {
-        return this.error('"access_policy" requires "register_if_needed": true — it only applies when registering the context graph.');
-      }
-
-      // CONTRACT §G: publishing requires the CG to be registered on-chain and the
-      // daemon does NOT auto-register. When `register_if_needed` is true, register
-      // first (idempotent — "already registered" is success) via the shared helper;
-      // a hard registration failure is a tool error and we do NOT publish. When
-      // false/omitted, publish directly and surface the daemon's not-registered
-      // error verbatim.
-      const registration = registerIfNeeded
-        ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
-        : undefined;
-
-      const result = await this.publisher.publishVerifiableMemory({ contextGraphId, quads: rawQuads });
-      const summary: Record<string, unknown> = {
-        kaId: result.kaId,
-        kaCount: result.kas?.length ?? 0,
-        quadsPublished: rawQuads.length,
-      };
-      if (result.ual !== undefined) summary.ual = result.ual;
-      if (registration) summary.registration = registration;
-
-      // Direct publish can return HTTP 207 with
-      // `contextGraphError` set when the KA minted on-chain but the context-graph
-      // binding FAILED. `this.post` treats 207 as success, so
-      // without this the partial reads as clean success. The UAL/kaId are valid and
-      // the asset IS published on-chain — surface a PARTIAL/warning. The agent must
-      // NOT re-run dkg_publish: each call mints a FRESH assertion, so a retry would
-      // DUPLICATE the already-published asset and still not re-bind the CG. The
-      // CG-binding retry is an operator/daemon concern.
-      const contextGraphError = (result as Record<string, unknown>).contextGraphError;
-      if (typeof contextGraphError === 'string' && contextGraphError.length > 0) {
-        return this.json({
-          ...summary,
-          partial: true,
-          warning:
-            'Partial publish: the asset IS published on-chain (the UAL/kaId are valid and final) — only the ' +
-            `context-graph binding failed (${contextGraphError}). Do NOT re-run dkg_publish: it would mint a ` +
-            'DUPLICATE asset and still not re-bind the context graph. Surface this to the operator to ' +
-            're-attempt the context-graph binding.',
-        });
-      }
-      return this.json(summary);
     } catch (err: any) {
       return this.daemonError(err);
     }
@@ -3558,10 +3483,72 @@ export class DkgNodePlugin {
         return this.error(`"name" is invalid: ${nameValidation.reason}`);
       }
       const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      // Create stays on the legacy assertion route: it preserves the
-      // `{ assertionUri, alreadyExists }` contract and name validation that the
-      // KA create route (an idempotent get-or-create) can't yet provide. Only
-      // the WM/SWM mutation verbs (write / promote / discard) move to KA.
+
+      // [D3] One-shot path: when `quads` are supplied, create → write → seal in a
+      // single call via the combined KA route, optionally sharing to SWM. Stops at
+      // a sealed WM draft by default; `also_share_swm:true` lands a publish-ready KA
+      // in SWM. This NEVER mints to VM — there is no `alsoPublishVm` here (publish is
+      // the separate dkg_knowledge_asset_publish step).
+      // Validate also_share_swm's shape uniformly (parity with MCP + Hermes) — even on the
+      // bare-create path where it is IGNORED — since the shared tool schema advertises a
+      // boolean. Done BEFORE the quads branch so the runtime contract is consistent.
+      if (args.also_share_swm !== undefined && typeof args.also_share_swm !== 'boolean') {
+        return this.error('"also_share_swm" must be a boolean.');
+      }
+      const rawQuads = args.quads;
+      if (rawQuads !== undefined) {
+        if (!Array.isArray(rawQuads) || rawQuads.length === 0) {
+          return this.error('"quads" must be a non-empty array of {subject, predicate, object} objects.');
+        }
+        // Default FALSE, passed EXPLICITLY so the createKnowledgeAsset client helper's
+        // internal seal-true default (dkg-client.ts) cannot leak and silently auto-share.
+        const alsoShareSwm = args.also_share_swm === true;
+        // Strip surrounding <…> on subject/predicate/object before normalizing (parity
+        // with the MCP + Hermes create one-shots) so a bracketed URI stays a URI rather
+        // than being quoted as a literal. Then auto-type objects + pin the per-KA `graph`
+        // via normalizeDkgPublisherQuads, so a one-shot create lands identical triples
+        // across all three adapters.
+        const stripBrackets = (t: unknown): unknown =>
+          typeof t === 'string' && t.length >= 2 && t.startsWith('<') && t.endsWith('>')
+            ? t.slice(1, -1)
+            : t;
+        const strippedQuads = (rawQuads as Array<Record<string, unknown>>).map((q) => ({
+          ...q,
+          subject: stripBrackets(q.subject),
+          predicate: stripBrackets(q.predicate),
+          object: stripBrackets(q.object),
+        }));
+        const quads = normalizeDkgPublisherQuads(
+          strippedQuads as Parameters<typeof normalizeDkgPublisherQuads>[0],
+        );
+        const result = await this.client.createKnowledgeAsset(contextGraphId, name, {
+          subGraphName,
+          quads,
+          alsoShareSwm,
+        });
+        // The daemon returns 207 + errors:[{phase:'swm-share'}] when create+seal lands
+        // but the opt-in SWM share fails; the client treats 207 as success. Judge from
+        // the OUTCOME, not the requested flag, so agents don't publish an asset that
+        // never reached SWM (parity with the MCP adapter's 207 handling).
+        const r = result as Record<string, unknown>;
+        const resultErrors = Array.isArray(r.errors)
+          ? (r.errors as Array<{ phase?: string; error?: string }>)
+          : [];
+        const shareError = resultErrors.find((e) => e?.phase === 'swm-share');
+        if (alsoShareSwm && (shareError || r.publishReady === false)) {
+          return this.error(
+            `Created and sealed knowledge asset "${name}" in "${contextGraphId}", but the opt-in ` +
+            `Shared Working Memory share FAILED${shareError?.error ? `: ${shareError.error}` : ''}. ` +
+            `The asset did NOT reach Shared Working Memory and is NOT publish-ready — do not publish yet; ` +
+            `retry the share with dkg_knowledge_asset_share, then publish.`,
+          );
+        }
+        return this.json(result);
+      }
+
+      // No quads → the unchanged bare create. Stays on the legacy assertion route: it
+      // preserves the `{ assertionUri, alreadyExists }` contract and name validation
+      // that the KA create route (an idempotent get-or-create) can't yet provide.
       const result = await this.publisher.createLocalWorkspace({
         contextGraphId,
         assertionName: name,
@@ -3749,8 +3736,8 @@ export class DkgNodePlugin {
       // CONTRACT §D: `clear_shared_memory_after` is NOT exposed on the per-asset
       // publish tool — on vm/publish it is graph-wide destructive (wipes every
       // other agent's unpublished SWM in the CG/sub-graph). The this-asset SWM
-      // cleanup runs unconditionally regardless. The CG-wide clear stays on
-      // dkg_publish / dkg_shared_memory_publish.
+      // cleanup runs unconditionally regardless; there is no agent-facing CG-wide
+      // SWM clear (the legacy bridge tools that carried it were removed in #1087).
 
       if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
         return this.error('"register_if_needed" must be a boolean.');
@@ -3770,9 +3757,9 @@ export class DkgNodePlugin {
       // (#1116) at gas/TRAC cost regardless of `register_if_needed`. When
       // `register_if_needed` is true we run an EXPLICIT register first (idempotent —
       // "already registered" is success) so the caller can choose the registration's
-      // access_policy, mirroring dkg_shared_memory_publish. A hard registration
-      // failure is a tool error: do NOT publish. When false/omitted, publish
-      // directly — the daemon auto-registers and defaults the policy.
+      // access_policy. A hard registration failure is a tool error: do NOT publish.
+      // When false/omitted, publish directly — the daemon auto-registers and defaults
+      // the policy.
       const registration = registerIfNeeded
         ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
         : undefined;
@@ -4046,143 +4033,6 @@ export class DkgNodePlugin {
       if (!contextGraphId) return this.error('"context_graph_id" is required.');
       const result = await this.client.listSubGraphs(contextGraphId);
       return this.json(result);
-    } catch (err: any) {
-      return this.daemonError(err);
-    }
-  }
-
-  private async handleSharedMemoryPublish(args: Record<string, unknown>): Promise<OpenClawToolResult> {
-    try {
-      const contextGraphId = String(args.context_graph_id ?? '').trim();
-      if (!contextGraphId) return this.error('"context_graph_id" is required.');
-      // Mirror handleAssertionPromote's `entities` validation shape: omit → daemon-side default
-      // (selection="all"), explicit array → must be non-empty and all strings. No other values
-      // allowed; a bogus scalar would silently 400 at the daemon.
-      const raw = args.root_entities;
-      let rootEntities: string[] | undefined;
-      if (raw === undefined || raw === null) {
-        rootEntities = undefined;
-      } else if (Array.isArray(raw) && raw.length > 0 && raw.every((e) => typeof e === 'string')) {
-        rootEntities = raw.map((e) => String(e));
-      } else {
-        return this.error('"root_entities" must be omitted or a non-empty array of root entity URIs.');
-      }
-      const subGraphName = args.sub_graph_name ? String(args.sub_graph_name) : undefined;
-      const registerIfNeeded = args.register_if_needed === true;
-      if (args.register_if_needed !== undefined && typeof args.register_if_needed !== 'boolean') {
-        return this.error('"register_if_needed" must be a boolean.');
-      }
-      if (args.reveal_on_chain !== undefined && typeof args.reveal_on_chain !== 'boolean') {
-        return this.error('"reveal_on_chain" must be a boolean.');
-      }
-      if (args.access_policy !== undefined && args.access_policy !== 0 && args.access_policy !== 1) {
-        return this.error('"access_policy" must be 0 (open) or 1 (private).');
-      }
-      // FIX S: `access_policy` only applies when registering the CG — reject it
-      // (rather than silently drop the privacy setting) when register_if_needed
-      // is not true.
-      if (args.access_policy !== undefined && !registerIfNeeded) {
-        return this.error('"access_policy" requires "register_if_needed": true — it only applies when registering the context graph.');
-      }
-      const registration = registerIfNeeded
-        ? await this.registerContextGraphIfNeeded(contextGraphId, args.access_policy as number | undefined)
-        : undefined;
-      const result = await this.publisher.publishSharedMemory({ contextGraphId, rootEntities, subGraphName });
-      return this.json(registration ? { ...result, registration } : result);
-    } catch (err: any) {
-      return this.daemonError(err);
-    }
-  }
-
-  private async handleShare(args: Record<string, unknown>): Promise<OpenClawToolResult> {
-    try {
-      // Type-validate at the runtime boundary. Without this, a malformed MCP
-      // call passing `content: {}` or `false` would coerce via String(...) to
-      // `"[object Object]"` / `"false"` and pollute SWM with garbage. Reject
-      // up front instead.
-      if (args.content !== undefined && typeof args.content !== 'string') {
-        return this.error('"content" must be a string.');
-      }
-      if (args.context_graph_id !== undefined && typeof args.context_graph_id !== 'string') {
-        return this.error('"context_graph_id" must be a string.');
-      }
-      if (
-        args.sub_graph_name !== undefined &&
-        args.sub_graph_name !== null &&
-        typeof args.sub_graph_name !== 'string'
-      ) {
-        return this.error('"sub_graph_name" must be a string.');
-      }
-      // Use the raw content for serialization so leading/trailing whitespace
-      // and terminal newlines are preserved verbatim — agents sharing code
-      // snippets or exact transcripts depend on this. Validate against the
-      // trimmed form so a whitespace-only payload still rejects as "empty".
-      const content = (args.content as string | undefined) ?? '';
-      const contextGraphId = ((args.context_graph_id as string | undefined) ?? '').trim();
-      if (!content.trim()) return this.error('"content" is required.');
-      if (!contextGraphId) return this.error('"context_graph_id" is required.');
-      const rawSub = args.sub_graph_name as string | undefined | null;
-      const subGraphName = rawSub === undefined || rawSub === null
-        ? undefined
-        : (rawSub.trim() || undefined);
-
-      // Best-effort node-identity attribution. Try the gated probes first
-      // (these warm the cache when the memory resolver API is attached),
-      // then fall back to a direct /api/agent/identity probe so dkg_share
-      // works in `memory.enabled: false` configurations too. If neither
-      // path resolves, we still mint a unique-per-call subject under an
-      // `anon` namespace — the share itself doesn't require identity
-      // (the daemon's /api/shared-memory/write doesn't), so refusing to
-      // write would over-couple the tool to a startup race.
-      await Promise.all([this.ensureNodeAgentAddress(), this.ensureNodePeerId()]);
-      let addr = this.resolveDefaultAgentAddress();
-      if (!addr) {
-        const probe = await this.client.getAgentIdentity().catch(() => null);
-        if (probe?.ok && probe.identity) {
-          if (probe.identity.agentAddress) this.nodeAgentAddress = probe.identity.agentAddress;
-          if (probe.identity.peerId) this.nodePeerId = probe.identity.peerId;
-          addr = this.resolveDefaultAgentAddress();
-        }
-      }
-      // Unique per call — the publisher's delete-then-insert upsert
-      // (dkg-publisher.ts:422-429) keys off the root entity, so a stable
-      // subject would replace the prior share. Random shareId guarantees
-      // a fresh root every time, regardless of attribution.
-      const shareId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-      const subject = addr
-        ? `urn:openclaw:${addr}:shared:${shareId}`
-        : `urn:openclaw:anon:shared:${shareId}`;
-      // Serialize content as an N-Triples literal. The canonical
-      // escapeDkgRdfLiteral from @origintrail-official/dkg-core handles
-      // the ECHAR set (\\, ", \n, \r, \t, \f, \b), but leaves other ASCII
-      // control bytes (0x00-0x07, 0x0B, 0x0E-0x1F, 0x7F) raw — those
-      // would still produce an invalid N-Triples literal. Defensive
-      // post-pass UCHAR-encodes the remaining bytes. (A canonical fix
-      // belongs in the core helper itself; tracked separately.)
-      const escaped = escapeDkgRdfLiteral(content).replace(
-        new RegExp(
-          '[' +
-            String.fromCharCode(0x00) + '-' + String.fromCharCode(0x1F) +
-            String.fromCharCode(0x7F) +
-          ']',
-          'g',
-        ),
-        (ch) => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0').toUpperCase(),
-      );
-      const literal = `"${escaped}"`;
-      const quads = [{
-        subject,
-        predicate: 'urn:openclaw:sharedContent',
-        object: literal,
-      }];
-      const result = await this.client.share(contextGraphId, quads, { subGraphName });
-      // Surface the minted subject so callers can target THIS share in a
-      // follow-up `dkg_shared_memory_publish({ root_entities: [...] })` or
-      // inspect it precisely. Field name is snake_case to match the
-      // consuming tool's argument shape — agents chaining `dkg_share` →
-      // `dkg_shared_memory_publish` can pass the value through without
-      // case translation.
-      return this.json({ ...result, subject, root_entities: [subject] });
     } catch (err: any) {
       return this.daemonError(err);
     }

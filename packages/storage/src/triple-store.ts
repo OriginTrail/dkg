@@ -38,10 +38,28 @@ export interface AskResult {
 
 export type QueryResult = SelectResult | ConstructResult | AskResult;
 export type QueryCancellationMode = 'interruptible' | 'pre-dispatch';
+export type StoreWorkPriority = 'ack' | 'normal' | 'background';
+
+export interface StorePressureSnapshot {
+  ackInflight: number;
+  normalInflight: number;
+  backgroundInflight: number;
+  ackQueued: number;
+  normalQueued: number;
+  backgroundQueued: number;
+  maxConcurrent: number;
+  ackReservedSlots: number;
+  backgroundReservedSlots?: number;
+}
 
 export interface QueryOptions {
   /** Human-readable caller tag used by adapters for diagnostics/telemetry. */
   source?: string;
+  /**
+   * Store admission priority. ACK verification uses `ack` so it can bypass
+   * queued background scans; sync/catch-up work may use `background`.
+   */
+  priority?: StoreWorkPriority;
   /**
    * Best-effort caller cancellation. Async backends should reject promptly when
    * aborted; synchronous embedded backends may only observe the signal before
@@ -60,18 +78,25 @@ export interface TripleStore {
    */
   readonly queryCancellation?: QueryCancellationMode;
 
-  insert(quads: Quad[]): Promise<void>;
-  delete(quads: Quad[]): Promise<void>;
-  deleteByPattern(pattern: Partial<Quad>): Promise<number>;
+  /**
+   * Optional live pressure snapshot for stores that own or wrap an admission
+   * scheduler. ACK deadline diagnostics use this capability instead of
+   * reaching into a specific adapter's process-global scheduler.
+   */
+  getPressureSnapshot?(): StorePressureSnapshot | undefined;
+
+  insert(quads: Quad[], options?: QueryOptions): Promise<void>;
+  delete(quads: Quad[], options?: QueryOptions): Promise<void>;
+  deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
   query(sparql: string, options?: QueryOptions): Promise<QueryResult>;
 
-  hasGraph(graphUri: string): Promise<boolean>;
+  hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean>;
   createGraph(graphUri: string): Promise<void>;
-  dropGraph(graphUri: string): Promise<void>;
+  dropGraph(graphUri: string, options?: QueryOptions): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
-  deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number>;
+  deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number>;
 
   /**
    * Run a SPARQL UPDATE (e.g. a server-side `INSERT { GRAPH dst {…} } WHERE
@@ -85,9 +110,9 @@ export interface TripleStore {
    * callers needing a byte-stable copy MUST guard on its presence and never
    * fall back to `insert(quads)` for already-stored terms.
    */
-  update?(sparql: string): Promise<void>;
+  update?(sparql: string, options?: QueryOptions): Promise<void>;
 
-  countQuads(graphUri?: string): Promise<number>;
+  countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
   /**
    * Force any pending writes to durable storage and resolve only once the
@@ -98,7 +123,7 @@ export interface TripleStore {
    * after the relevant `insert(...)` call. Optional so HTTP-backed and
    * memory-only adapters can omit it without breaking the interface.
    */
-  flush?(): Promise<void>;
+  flush?(options?: QueryOptions): Promise<void>;
 
   close(): Promise<void>;
 }

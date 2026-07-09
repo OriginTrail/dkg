@@ -5,7 +5,7 @@ import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
 } from '../src/merkle.js';
-import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK, STORAGE_ACK_DECLINE_CODES, isStorageACKDecline } from '@origintrail-official/dkg-core';
+import { encodeStorageACK, computePublishACKDigest, encodePublishIntent, decodeStorageACK, STORAGE_ACK_DECLINE_CODES, STORAGE_ACK_MAX_STAGING_BYTES, isStorageACKDecline } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -142,6 +142,7 @@ function buildCollectParams(overrides: Partial<Parameters<ACKCollector['collect'
     chainId: TEST_CHAIN_ID,
     kav10Address: TEST_KAV10_ADDR,
     merkleLeafCount: testMerkleLeafCount,
+    ackMode: { kind: 'public' },
     ...overrides,
   };
 }
@@ -369,11 +370,76 @@ describe('ACKCollector identity verification', () => {
     };
     const collector = new ACKCollector(deps);
 
-    await expect(collector.collect(buildCollectParams()))
-      .rejects.toThrow('storage_ack_insufficient');
+    let captured: any;
+    try {
+      await collector.collect(buildCollectParams());
+    } catch (err) {
+      captured = err;
+    }
+    expect(captured).toBeInstanceOf(Error);
+    expect(captured.message).toContain('storage_ack_insufficient');
+    expect(captured.message).toContain('ACK_VERIFY:rpc-error');
+    expect(captured.peerOutcomes.map((p: { reason?: string }) => p.reason))
+      .toEqual(['ACK_VERIFY:rpc-error', 'ACK_VERIFY:rpc-error', 'ACK_VERIFY:rpc-error']);
     expect(log.calls.some(
       (c: unknown[]) => /rpc-error/.test(c[0] as string),
     )).toBe(true);
+  });
+
+  it('invalid ACK signatures surface as terminal peer outcomes, not no_response', async () => {
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: async (peerId) => {
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        return encodeStorageACK({
+          merkleRoot,
+          coreNodeSignatureR: new Uint8Array(32),
+          coreNodeSignatureVS: new Uint8Array(32),
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+
+    let captured: any;
+    try {
+      await collector.collect(buildCollectParams());
+    } catch (err) {
+      captured = err;
+    }
+
+    expect(captured).toBeInstanceOf(Error);
+    expect(captured.message).toContain('storage_ack_insufficient');
+    expect(captured.message).toContain('INVALID_SIGNATURE');
+    expect(captured.peerOutcomes.map((p: { reason?: string }) => p.reason))
+      .toEqual(['INVALID_SIGNATURE', 'INVALID_SIGNATURE', 'INVALID_SIGNATURE']);
+  });
+
+  it('ACK merkle mismatches surface as terminal peer outcomes, not no_response', async () => {
+    const wrongRoot = ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('wrong-root')));
+    const deps: ACKCollectorDeps = {
+      gossipPublish: noop(),
+      sendP2P: buildSendP2P({ merkleRootOverride: wrongRoot }),
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: noop(),
+    };
+    const collector = new ACKCollector(deps);
+
+    let captured: any;
+    try {
+      await collector.collect(buildCollectParams());
+    } catch (err) {
+      captured = err;
+    }
+
+    expect(captured).toBeInstanceOf(Error);
+    expect(captured.message).toContain('storage_ack_insufficient');
+    expect(captured.message).toContain('MERKLE_ROOT_MISMATCH');
+    expect(captured.peerOutcomes.map((p: { reason?: string }) => p.reason))
+      .toEqual(['MERKLE_ROOT_MISMATCH', 'MERKLE_ROOT_MISMATCH', 'MERKLE_ROOT_MISMATCH']);
   });
 
   it('detailed verifier takes precedence over legacy boolean verifier', async () => {
@@ -905,11 +971,11 @@ describe('StorageACKHandler security', () => {
     expect(store.query.calls).toHaveLength(0);
   });
 
-  it('rejects stagingQuads > 4MB', async () => {
+  it('rejects stagingQuads over the shared StorageACK staging limit', async () => {
     const store = createRecordingStore();
     const handler = new StorageACKHandler(store, createConfig(), makeEventBus() as any);
 
-    const oversizedPayload = new Uint8Array(4 * 1024 * 1024 + 1).fill(0x41);
+    const oversizedPayload = new Uint8Array(STORAGE_ACK_MAX_STAGING_BYTES + 1).fill(0x41);
     const intent = encodePublishIntent({
       merkleRoot,
       contextGraphId: testCGIdStr,

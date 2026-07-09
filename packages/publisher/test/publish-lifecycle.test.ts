@@ -24,7 +24,8 @@ import { DKGPublisher } from '../src/dkg-publisher.js';
 import { PublishHandler } from '../src/publish-handler.js';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { autoPartition } from '../src/auto-partition.js';
-import { computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
+import { computePrivateRootV10, computeTripleHashV10 as computeTripleHash } from '../src/merkle.js';
+import type { LegacyV10ACKProvider, V10ACKProviderParams } from '../src/publisher.js';
 import { ethers } from 'ethers';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, createTestContextGraph, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
@@ -984,10 +985,9 @@ describe('Tentative publish UAL uniqueness', () => {
     // RC11 / PR3: previously `publisherNodeIdentityId: 0n` was enough
     // to force tentative because the self-signed ACK fallback gated
     // on it. With the fallback deleted (PR1) and the
-    // "no-v10ACKProvider" case made loudly-throwing (PR3), the only
-    // honest paths to tentative are: (a) non-numeric CG id,
-    // (b) hasPrivateData, (c) chain not V10-ready. Use a non-numeric
-    // SWM CG label so each iteration goes through
+    // "no-v10ACKProvider" case made loudly-throwing (PR3), the honest
+    // paths to tentative are: (a) non-numeric CG id, (b) chain not V10-ready.
+    // Use a non-numeric SWM CG label so each iteration goes through
     // `finalizeIntentionalLocalPublish` via the "no on-chain CG id"
     // branch — preserves the UAL-uniqueness invariant this test
     // pins without re-introducing the deleted self-sign path.
@@ -1033,6 +1033,90 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(result.status).toBe('confirmed');
     expect(result.ual).toBeTruthy();
     expect(result.ual).toContain('did:dkg:');
+  });
+
+  it('confirms folded public+private publishes on-chain when ACKs are available', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    const entity = 'did:dkg:agent:FoldedPrivateConfirm';
+    const publicQuads = [q(entity, 'http://schema.org/name', '"FoldedPrivateConfirm"')];
+    const privateQuads = [q(entity, 'http://dkg.io/ontology/secret', '"hidden"')];
+    const expectedPrivateRoot = computePrivateRootV10(privateQuads)!;
+    let receivedPrivateRoots: Uint8Array[] | undefined;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
+      receivedPrivateRoots = params.ackMode.kind === 'folded-private'
+        ? params.ackMode.privateMerkleRoots.map((root) => new Uint8Array(root))
+        : undefined;
+      return realProvider(params);
+    };
+
+    const result = await pubS(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      publisherPeerId: '12D3KooWPrivateConfirm',
+      quads: publicQuads,
+      privateQuads,
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(result.kaId > 0n).toBe(true);
+    expect(result.kaManifest[0]?.privateTripleCount).toBe(1);
+    expect(result.kaManifest[0]?.privateMerkleRoot).toBeDefined();
+    expect(receivedPrivateRoots).toHaveLength(1);
+    expect(receivedPrivateRoots![0]).toEqual(expectedPrivateRoot);
+  });
+
+  it('rejects encrypted private publishes before ACK collection even without a catalog floor', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const curatedCg = String(await createTestContextGraph(chain, undefined, 1, 0));
+    const curatedGraph = `did:dkg:context-graph:${curatedCg}`;
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    const entity = 'did:dkg:agent:CuratedFoldedPrivateUnsupported';
+    let ackCalled = false;
+    let encryptCalled = false;
+
+    await expect(pubS(publisher, {
+      contextGraphId: curatedCg,
+      publisherPeerId: '12D3KooWCuratedPrivateUnsupported',
+      quads: [
+        q(entity, 'http://schema.org/name', '"CuratedFoldedPrivateUnsupported"', curatedGraph),
+      ],
+      privateQuads: [
+        q(entity, 'http://dkg.io/ontology/secret', '"hidden"', curatedGraph),
+      ],
+      encryptInlinePayload: async (plaintext) => {
+        encryptCalled = true;
+        return plaintext;
+      },
+      v10ACKProvider: async () => {
+        ackCalled = true;
+        return [];
+      },
+    })).rejects.toThrow(/Encrypted inline publishes with privateQuads are not supported/);
+
+    expect(encryptCalled).toBe(false);
+    expect(ackCalled).toBe(false);
   });
 
   it('stores distinct KC metadata for each tentative publish', async () => {
@@ -1094,12 +1178,11 @@ describe('Tentative publish UAL uniqueness', () => {
   // mirror was dropped (zero readers); author attribution is now carried
   // solely by `prov:wasAttributedTo` on the KC row, which this test pins.
   //
-  // Both tests use the "private data — no ACKs collectable" intentional-
-  // local branch: a numeric on-chain CG + V10-ready chain means the
-  // publisher resolves a real `publisherSigner`, so the conditional
-  // spread of `authorAddress` (gated on either a precomputedAttestation
-  // or a resolved signer) is exercised end-to-end.
-  it('intentional-local tentative publish (private-data branch) attributes the author via prov:wasAttributedTo (RC11 / PR-A)', async () => {
+  // These tests use the non-on-chain-CG intentional-local branch. That branch
+  // does not resolve an on-chain publisher signer by context graph id, so this
+  // fixture supplies the author address through the precomputed attestation
+  // lane that production callers already use.
+  it('intentional-local tentative publish (no-chain branch) attributes the author via prov:wasAttributedTo (RC11 / PR-A)', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
@@ -1112,16 +1195,18 @@ describe('Tentative publish UAL uniqueness', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
+    const localContextGraph = 'local-provenance-cg';
+    const localGraph = `did:dkg:context-graph:${localContextGraph}`;
+    const result = await publisher.publish(await _withSeal({
+      contextGraphId: localContextGraph,
       publisherPeerId: '12D3KooWTestProvenance',
       quads: [
-        q('did:dkg:agent:ProvenanceProbe', 'http://schema.org/name', '"ProvenanceProbe"'),
+        q('did:dkg:agent:ProvenanceProbe', 'http://schema.org/name', '"ProvenanceProbe"', localGraph),
       ],
       privateQuads: [
-        q('did:dkg:agent:ProvenanceProbe', 'http://dkg.io/ontology/secret', '"hidden"'),
+        q('did:dkg:agent:ProvenanceProbe', 'http://dkg.io/ontology/secret', '"hidden"', localGraph),
       ],
-    });
+    }, _author, { provider: _provider, kav10Address: _kav10Address }));
 
     expect(result.status).toBe('tentative');
 
@@ -1155,7 +1240,7 @@ describe('Tentative publish UAL uniqueness', () => {
     }
   });
 
-  it('intentional-local tentative publish (private-data branch) remaps _meta quads to options.targetMetaGraphUri (RC11 / PR-A)', async () => {
+  it('intentional-local tentative publish (no-chain branch) remaps _meta quads to options.targetMetaGraphUri (RC11 / PR-A)', async () => {
     const store = new OxigraphStore();
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const bus = new TypedEventBus();
@@ -1168,17 +1253,18 @@ describe('Tentative publish UAL uniqueness', () => {
       publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
     });
 
-    const defaultMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
-    const customMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/sub-channel/_shared_memory_meta`;
+    const localContextGraph = 'local-meta-remap-cg';
+    const defaultMetaGraph = `did:dkg:context-graph:${localContextGraph}/_meta`;
+    const customMetaGraph = `did:dkg:context-graph:${localContextGraph}/sub-channel/_shared_memory_meta`;
 
     const result = await publisher.publish({
-      contextGraphId: CONTEXT_GRAPH,
+      contextGraphId: localContextGraph,
       publisherPeerId: '12D3KooWTestMetaRemap',
       quads: [
-        q('did:dkg:agent:MetaRemap', 'http://schema.org/name', '"MetaRemap"'),
+        q('did:dkg:agent:MetaRemap', 'http://schema.org/name', '"MetaRemap"', `did:dkg:context-graph:${localContextGraph}`),
       ],
       privateQuads: [
-        q('did:dkg:agent:MetaRemap', 'http://dkg.io/ontology/secret', '"hidden"'),
+        q('did:dkg:agent:MetaRemap', 'http://dkg.io/ontology/secret', '"hidden"', `did:dkg:context-graph:${localContextGraph}`),
       ],
       targetMetaGraphUri: customMetaGraph,
     });
@@ -1307,22 +1393,10 @@ describe('Tentative publish UAL uniqueness', () => {
     // succeeds — we still get to inspect everything the publisher
     // hands to the provider on the way through.
     const realProvider = hardhatACKProvider(_kav10Address);
-    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (
-      merkleRoot, cgId, kaCount,
-      rootEntities, byteSize, stagingQuads,
-      epochs, tokenAmount,
-      swmGraphId, subGraphName,
-      merkleLeafCount,
-    ) => {
-      receivedStagingQuads = stagingQuads;
-      receivedMerkleLeafCount = merkleLeafCount;
-      return realProvider(
-        merkleRoot, cgId, kaCount,
-        rootEntities, byteSize, stagingQuads,
-        epochs, tokenAmount,
-        swmGraphId, subGraphName,
-        merkleLeafCount,
-      );
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
+      receivedStagingQuads = params.stagingQuads;
+      receivedMerkleLeafCount = params.merkleLeafCount;
+      return realProvider(params);
     };
 
     const phases: [string, 'start' | 'end'][] = [];
@@ -1338,11 +1412,115 @@ describe('Tentative publish UAL uniqueness', () => {
     expect(receivedStagingQuads).toBeDefined();
     expect(receivedStagingQuads!.length).toBeGreaterThan(0);
     expect(receivedMerkleLeafCount).toBeGreaterThan(0);
-    const decoded = new TextDecoder().decode(receivedStagingQuads);
+    const decoded = new TextDecoder().decode(receivedStagingQuads!);
     expect(decoded).toContain('V10 Staging Test');
 
     const started = phases.filter(([, s]) => s === 'start').map(([p]) => p);
     expect(started).toContain('collect_v10_acks');
+  });
+
+  it('V10: public fromSharedMemory option omits staging quads for strict SWM ACKs', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    let receivedStagingQuads: Uint8Array | undefined;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: Parameters<DKGPublisher['publish']>[0]['v10ACKProvider'] = async (params: V10ACKProviderParams) => {
+      receivedStagingQuads = params.stagingQuads;
+      expect(params.ackMode.kind).toBe('public');
+      return realProvider(params);
+    };
+
+    const submitted = q(ENTITY, 'http://schema.org/name', '"fromSharedMemory Strict SWM"');
+    const result = await pubS(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [submitted],
+      fromSharedMemory: true,
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(receivedStagingQuads).toBeUndefined();
+  });
+
+  it('V10: public publishes still support legacy positional v10ACKProvider callbacks', async () => {
+    const store = new OxigraphStore();
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const bus = new TypedEventBus();
+    const keypair = await generateEd25519Keypair();
+
+    const publisher = new DKGPublisher({
+      kaAllocator: makeTestKaAllocator(),
+      store, chain, eventBus: bus, keypair,
+      publisherPrivateKey: HARDHAT_KEYS.CORE_OP,
+      publisherNodeIdentityId: BigInt(getSharedContext().coreProfileId),
+    });
+
+    let receivedContextGraphId: string | undefined;
+    let receivedKaCount = 0;
+    let receivedRootEntities: string[] = [];
+    let receivedStagingQuads: Uint8Array | undefined;
+    let receivedMerkleLeafCount = 0;
+    const realProvider = hardhatACKProvider(_kav10Address);
+    const v10ACKProvider: LegacyV10ACKProvider = async (
+      merkleRoot,
+      contextGraphId,
+      kaCount,
+      rootEntities,
+      publicByteSize,
+      stagingQuads,
+      epochs,
+      tokenAmount,
+      swmGraphId,
+      subGraphName,
+      merkleLeafCount,
+      isEncryptedPayload,
+      catalogCommitment,
+    ) => {
+      receivedContextGraphId = contextGraphId;
+      receivedKaCount = kaCount;
+      receivedRootEntities = [...rootEntities];
+      receivedStagingQuads = stagingQuads;
+      receivedMerkleLeafCount = merkleLeafCount;
+      expect(isEncryptedPayload).toBeUndefined();
+      expect(catalogCommitment).toBeUndefined();
+      return realProvider({
+        merkleRoot,
+        contextGraphId,
+        kaCount,
+        rootEntities,
+        publicByteSize,
+        stagingQuads,
+        epochs,
+        tokenAmount,
+        swmGraphId,
+        subGraphName,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    };
+
+    const result = await pubS(publisher, {
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [q(ENTITY, 'http://schema.org/name', '"Legacy ACK Provider"')],
+      v10ACKProvider,
+    });
+
+    expect(result.status).toBe('confirmed');
+    expect(receivedContextGraphId).toBe(CONTEXT_GRAPH);
+    expect(receivedKaCount).toBe(1);
+    expect(receivedRootEntities).toEqual([ENTITY]);
+    expect(receivedStagingQuads).toBeDefined();
+    expect(receivedMerkleLeafCount).toBeGreaterThan(0);
   });
 
   // -------------------------------------------------------------------------

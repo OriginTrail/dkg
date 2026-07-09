@@ -1,17 +1,26 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
+import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
+  computePrivateRootV10,
 } from '../src/merkle.js';
 import {
-  encodePublishIntent, decodeStorageACK, computePublishACKDigest,
-  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot,
+  encodePublishIntent, decodePublishIntent, encodeStorageACK, decodeStorageACK, computePublishACKDigest,
+  isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
 } from '@origintrail-official/dkg-core';
-import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { metrics } from '@opentelemetry/api';
+import {
+  MeterProvider,
+  PeriodicExportingMetricReader,
+  InMemoryMetricExporter,
+  AggregationTemporality,
+} from '@opentelemetry/sdk-metrics';
 
 // Test H5 prefix inputs — must match whatever `StorageACKHandlerConfig`
 // carries so that the ACK digest the test computes equals the one the
@@ -19,12 +28,43 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 // (production guard), so the test CG id is a plain numeric string.
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
+const TEST_ASSET_UAL = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/7`;
 
 function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
+/**
+ * Wrap a REAL OxigraphStore so only the named ops throw the classic mid-
+ * worker-restart oxigraph failure ('store is closed'); every other op keeps
+ * hitting the live store. Mirrors `storeWithFailingOps` in
+ * storage-ack-core-unavailable.test.ts — the curated-catalog store-failure
+ * regressions below need the SAME real-store-with-armed-failure model so
+ * they exercise the actual persist path (parse → verify → deleteByPattern →
+ * insert) up to the failing store call.
+ */
+function storeWithFailingOps(
+  base: OxigraphStore,
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'flush')[],
+): TripleStore {
+  return new Proxy(base as unknown as TripleStore, {
+    get(target, prop, receiver) {
+      if (typeof prop === 'string' && (failingOps as readonly string[]).includes(prop)) {
+        return async () => {
+          throw new Error('store is closed');
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 describe('StorageACKHandler', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+  });
+
   const contextGraphId = '42';
   const cgIdBigInt = 42n;
 
@@ -118,6 +158,366 @@ describe('StorageACKHandler', () => {
         ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
     });
     expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
+  });
+
+  it('does not emit a canonical lifecycle assetUal from an unverified PublishIntent field', async () => {
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+    });
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
+    expect(entries.some((message) => message.includes('stage=storage_ack'))).toBe(false);
+  });
+
+  it('emits receiver ACK lifecycle logs from the same ACK decision path', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return TEST_ASSET_UAL;
+    });
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+        detail: 'summary',
+      }),
+    } as any);
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
+
+    const response = await handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1', 'urn:entity:2'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      assetUal: spoofedAssetUal,
+    } as any), fakePeerId);
+
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    expect(isStorageACKDecline(decodeStorageACK(response))).toBe(false);
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
+    expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
+  });
+
+  it('bounds lifecycle assetUal resolution and still returns a valid ACK', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(() => new Promise<string>(() => {}));
+    const handler = await createHandler(swmQuads, {
+      ackHandlerDeadlineMs: 0,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+      }),
+    } as any);
+
+    const response = await Promise.race<Uint8Array | 'timed-out'>([
+      handler.handler(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1', 'urn:entity:2'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      }), fakePeerId),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 1_000)),
+    ]);
+
+    expect(response).not.toBe('timed-out');
+    expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    const ack = decodeStorageACK(response as Uint8Array);
+    expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
+  it('skips unobserved signed ACK lifecycle decisions before resolving assetUal', async () => {
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: () => false,
+      resolveAssetUalForPublishIntent: vi.fn(() => {
+        throw new Error('must not resolve assetUal for skipped ACK decisions');
+      }),
+    });
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack: {
+        contextGraphId,
+        merkleRoot,
+        nodeIdentityId: coreIdentityId,
+        coreNodeSignatureR: new Uint8Array(32),
+        coreNodeSignatureVS: new Uint8Array(32),
+      },
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+  });
+
+  it('logs declined ACK lifecycle decisions as summary when debug logging is off', async () => {
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: (decision) => isStorageACKDecline(decision.ack),
+      detailForDecision: (decision) => isStorageACKDecline(decision.ack) ? 'summary' : 'debug',
+      resolveAssetUalForPublishIntent: vi.fn(() => TEST_ASSET_UAL),
+    });
+    const ack = decodeStorageACK(encodeStorageACK({
+      merkleRoot: new Uint8Array(0),
+      coreNodeSignatureR: new Uint8Array(0),
+      coreNodeSignatureVS: new Uint8Array(0),
+      contextGraphId,
+      nodeIdentityId: 0,
+      declineCode: STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM,
+      declineMessage: 'missing shared working memory data',
+    }));
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack,
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+
+    expect(entries).toContainEqual(expect.stringContaining('stage=storage_ack'));
+    expect(entries).toContainEqual(expect.stringContaining('event=storage_ack_declined'));
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
+  });
+
+  it('emits ackHandlerTotal{outcome} through the REAL handler (ack + decline paths)', async () => {
+    // Review coverage gap: the inbound storage-ACK outcome metric is a separate
+    // contract from ACKCollector's — drive the real handler and assert it.
+    const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+    const mp = new MeterProvider({ readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })] });
+    metrics.setGlobalMeterProvider(mp);
+    rebuildMetrics();
+    try {
+      const handler = await createHandler(swmQuads);
+      const base = {
+        merkleRoot, contextGraphId, publisherPeerId: 'publisher-0', isPrivate: false,
+        kaCount: 1, rootEntities: ['urn:entity:1', 'urn:entity:2'], epochs: 1,
+        tokenAmountStr: '1000', merkleLeafCount: swmMerkleLeafCount,
+      };
+      // ACK path (valid byte size) then DECLINE path (byteSize=1 → underclaim).
+      await handler.handler(encodePublishIntent({ ...base, publicByteSize: 300 }), fakePeerId);
+      await handler.handler(encodePublishIntent({ ...base, publicByteSize: 1 }), fakePeerId);
+
+      await mp.forceFlush();
+      const pts: Array<Record<string, unknown>> = [];
+      for (const rm of exporter.getMetrics())
+        for (const sm of rm.scopeMetrics)
+          for (const m of sm.metrics)
+            if (m.descriptor.name === 'dkg.ack.handler.total')
+              for (const dp of m.dataPoints) pts.push(dp.attributes as Record<string, unknown>);
+
+      expect(pts.some((a) => a.outcome === 'ack')).toBe(true);
+      expect(pts.some((a) => a.outcome === 'decline' && a.decline_code === STORAGE_ACK_DECLINE_CODES.BYTESIZE_UNDERCLAIM)).toBe(true);
+      // Bounded labels only — no high-cardinality keys leak in.
+      const keys = new Set(pts.flatMap((a) => Object.keys(a)));
+      for (const bad of ['peer_id', 'operation_id', 'tx_hash', 'context_graph_id']) expect(keys.has(bad)).toBe(false);
+    } finally {
+      await mp.forceFlush().catch(() => {});
+      await mp.shutdown().catch(() => {});
+      metrics.disable();
+      rebuildMetrics();
+    }
+  });
+
+  it('returns valid StorageACK for folded public+private data using private root commitments', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:private-folded', 'urn:p', 'urn:public'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:private-folded', 'urn:p', '"secret"'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const handler = await createHandler(publicQuads);
+
+    const intent = encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:private-folded'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      privateMerkleRoots: [privateRoot],
+    });
+
+    const response = await handler.handler(intent, fakePeerId);
+    const ack = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(new Uint8Array(ack.merkleRoot)).toEqual(foldedRoot);
+
+    const digest = computePublishACKDigest(
+      TEST_CHAIN_ID,
+      TEST_KAV10_ADDR,
+      cgIdBigInt,
+      foldedRoot,
+      1n,
+      300n,
+      1n,
+      1000n,
+      BigInt(foldedLeafCount),
+    );
+    const recovered = ethers.recoverAddress(ethers.hashMessage(digest), {
+      r: ethers.hexlify(ack.coreNodeSignatureR instanceof Uint8Array
+        ? ack.coreNodeSignatureR : new Uint8Array(ack.coreNodeSignatureR)),
+      yParityAndS: ethers.hexlify(ack.coreNodeSignatureVS instanceof Uint8Array
+        ? ack.coreNodeSignatureVS : new Uint8Array(ack.coreNodeSignatureVS)),
+    });
+    expect(recovered.toLowerCase()).toBe(coreWallet.address.toLowerCase());
+  });
+
+  it('returns valid StorageACK for inline folded public+private stagingQuads', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-folded', 'urn:p', 'urn:public', 'did:dkg:context-graph:42'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-folded', 'urn:p', '"secret"', 'did:dkg:context-graph:42'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const stagingQuads = new TextEncoder().encode(
+      publicQuads
+        .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+        .join('\n'),
+    );
+    const handler = await createHandler([]);
+
+    const response = await handler.handler(encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingQuads.length,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:inline-private-folded'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      stagingQuads,
+      privateMerkleRoots: [privateRoot],
+    }), fakePeerId);
+    const ack = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(new Uint8Array(ack.merkleRoot)).toEqual(foldedRoot);
+  });
+
+  it('rejects inline folded public+private stagingQuads when private root commitment mismatches', async () => {
+    const publicQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-mismatch', 'urn:p', 'urn:public', 'did:dkg:context-graph:42'),
+    ];
+    const privateQuads: Quad[] = [
+      makeQuad('urn:entity:inline-private-mismatch', 'urn:p', '"secret"', 'did:dkg:context-graph:42'),
+    ];
+    const privateRoot = computePrivateRootV10(privateQuads)!;
+    const foldedRoot = computeFlatKCRoot(publicQuads, [privateRoot]);
+    const foldedLeafCount = computeFlatKCMerkleLeafCountV10(publicQuads, [privateRoot]);
+    const stagingQuads = new TextEncoder().encode(
+      publicQuads
+        .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+        .join('\n'),
+    );
+    const wrongPrivateRoot = new Uint8Array(privateRoot);
+    wrongPrivateRoot[0] ^= 0xff;
+    const handler = await createHandler([]);
+
+    await expect(handler.handler(encodePublishIntent({
+      merkleRoot: foldedRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingQuads.length,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:inline-private-mismatch'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: foldedLeafCount,
+      stagingQuads,
+      privateMerkleRoots: [wrongPrivateRoot],
+    }), fakePeerId)).rejects.toThrow('Merkle root mismatch (inline quads)');
+  });
+
+  it('rejects private root commitments on curated/encrypted ACK mode', async () => {
+    const privateRoot = computePrivateRootV10([
+      makeQuad('urn:entity:curated-mode-mix', 'urn:p', '"secret"'),
+    ])!;
+    const handler = await createHandler([]);
+
+    await expect(handler.handler(encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 1,
+      isPrivate: true,
+      kaCount: 1,
+      rootEntities: ['urn:entity:curated-mode-mix'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: swmMerkleLeafCount,
+      isEncryptedPayload: true,
+      privateMerkleRoots: [privateRoot],
+    }), fakePeerId)).rejects.toThrow('privateMerkleRoots are only valid for folded-private public-CG ACKs');
   });
 
   it('declines (BYTESIZE_UNDERCLAIM) when publicByteSize is below the real content lower bound', async () => {
@@ -251,6 +651,40 @@ describe('StorageACKHandler', () => {
     expect(isStorageACKDecline(ok)).toBe(false);
   });
 
+  it('otReviewAgent #1408 P2a: a malformed term is a bad request, NOT a transient store outage', async () => {
+    // A term with a SPARQL-breaking char (`|`) parses under the permissive
+    // parseSimpleNQuads and hashes into a self-consistent merkle root, but is
+    // not a valid store term. It must reset the stream (malformed request),
+    // not be mislabeled as a retryable CORE_TEMPORARILY_UNAVAILABLE decline.
+    const g = 'did:dkg:context-graph:42';
+    const badQuads: Quad[] = [makeQuad('urn:s|bad', 'urn:p', 'urn:o', g)];
+    const nquadsStr = badQuads
+      .map((q) => `<${q.subject}> <${q.predicate}> <${q.object}> <${q.graph}> .`)
+      .join('\n');
+    const stagingBytes = new TextEncoder().encode(nquadsStr);
+    const badRoot = computeFlatKCRoot(badQuads, []);
+    const badLeaf = computeFlatKCMerkleLeafCountV10(badQuads, []);
+
+    const handler = await createHandler([]); // inline payload; no SWM data
+    const intent = encodePublishIntent({
+      merkleRoot: badRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: stagingBytes.length,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:s|bad'],
+      epochs: 1,
+      tokenAmountStr: '1000',
+      merkleLeafCount: badLeaf,
+      stagingQuads: stagingBytes,
+    });
+
+    // Malformed → the persist validation throws (stream reset), it does NOT
+    // return a signed ACK nor a transient store-unavailable decline.
+    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(/unsafe|empty|iri/i);
+  });
+
   it('declines (SIGNER_NOT_REGISTERED) when the signer is no longer confirmed registered', async () => {
     // PR #557: this used to throw, which the publisher saw as a libp2p
     // stream reset; now the handler returns a typed decline so the
@@ -279,7 +713,13 @@ describe('StorageACKHandler', () => {
     expect(decoded.declineMessage).toContain('not confirmed on-chain');
   });
 
-  it('refuses to sign when signer registration lookup fails', async () => {
+  it('declines (CORE_TEMPORARILY_UNAVAILABLE) when signer registration lookup fails — still refuses to sign', async () => {
+    // Testnet dead-air fix: a THROWN lookup used to escape the handler,
+    // which ProtocolRouter surfaced as a bare stream reset — the publisher
+    // retried 3× and bucketed the peer as `no_response`. It now replies
+    // with a transient in-band decline (fail-closed still holds: no ACK is
+    // ever signed without a confirmed registration). The definitive
+    // `registered === false` verdict keeps SIGNER_NOT_REGISTERED above.
     const lookupFailed = vi.fn();
     const unregistered = vi.fn();
     const handler = await createHandler(swmQuads, {
@@ -300,9 +740,13 @@ describe('StorageACKHandler', () => {
       merkleLeafCount: swmMerkleLeafCount,
     });
 
-    await expect(handler.handler(intent, fakePeerId)).rejects.toThrow(
-      'StorageACK signer registration lookup failed; refusing to sign',
-    );
+    const response = await handler.handler(intent, fakePeerId);
+    const decoded = decodeStorageACK(response);
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toContain('signer registration lookup unavailable');
+    // The raw RPC error stays off the wire — it only reaches the local hook.
+    expect(decoded.declineMessage).not.toContain('rpc unavailable');
     expect(lookupFailed).toHaveBeenCalledOnce();
     expect(unregistered).not.toHaveBeenCalled();
   });
@@ -329,6 +773,56 @@ describe('StorageACKHandler', () => {
     expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM);
     expect(decoded.declineMessage).toContain('No data found in SWM');
     expect(decoded.declineMessage).toContain('urn:entity:1');
+  });
+
+  it('calls the decline hook with typed, bounded details when returning a decline', async () => {
+    const onDecline = vi.fn();
+    const handler = await createHandler([], { onDecline });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1'],
+    });
+
+    const response = await handler.handler(intent, fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM);
+    expect(onDecline).toHaveBeenCalledOnce();
+    expect(onDecline).toHaveBeenCalledWith({
+      code: STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM,
+      contextGraphId,
+      message: expect.stringContaining('No data found in SWM'),
+    });
+    const details = onDecline.mock.calls[0]?.[0];
+    expect(details.message.length).toBeLessThanOrEqual(240);
+  });
+
+  it('ignores decline hook failures and preserves the encoded decline', async () => {
+    const handler = await createHandler([], {
+      onDecline: async () => { throw new Error('logger unavailable'); },
+    });
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 300,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:entity:1'],
+    });
+
+    const response = await handler.handler(intent, fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM);
+    expect(decoded.declineMessage).toContain('No data found in SWM');
   });
 
   it('declines (MERKLE_MISMATCH_IN_SWM) when SWM data does not match the publisher merkle root', async () => {
@@ -504,6 +998,92 @@ describe('StorageACKHandler', () => {
       const decoded = decodeStorageACK(response);
       expect(isStorageACKDecline(decoded)).toBe(true);
       expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED);
+    });
+
+    // Build a curated handler over a REAL store whose named ops are armed to
+    // throw the classic 'store is closed' mid-restart error, reusing the
+    // curated fixtures above. The catalog is VALID (root/leaf/byteSize all
+    // check out) so the handler reaches the `<cg>/_catalog` persist —
+    // deleteByPattern + insert — which is the store-outage catch path this
+    // regression pins (otReviewAgent #1408:650).
+    async function curatedHandlerWithFailingStore(
+      failingOps: readonly ('deleteByPattern' | 'insert' | 'flush')[],
+      configOverrides: Partial<StorageACKHandlerConfig> = {},
+    ) {
+      const base = new OxigraphStore();
+      const config: StorageACKHandlerConfig = {
+        nodeRole: 'core',
+        nodeIdentityId: coreIdentityId,
+        signerWallet: coreWallet,
+        contextGraphSharedMemoryUri: (cgId: string) =>
+          `did:dkg:context-graph:${cgId}/_shared_memory`,
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        isCgCurated: async () => true,
+        ...configOverrides,
+      };
+      return new StorageACKHandler(
+        storeWithFailingOps(base, failingOps) as any,
+        config,
+        new TypedEventBus() as any,
+      );
+    }
+
+    it('curated catalog persist / deleteByPattern throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Dead-air regression: a curated encrypted publish with a VALID catalog
+      // root whose `<cg>/_catalog` REPLACE (deleteByPattern) hits a closed
+      // store used to throw out of the handler → stream reset → publisher
+      // no_response. It must instead reply with the transient decline.
+      const onDecline = vi.fn();
+      const handler = await curatedHandlerWithFailingStore(['deleteByPattern'], { onDecline });
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      // No signed ACK rides a decline — the signature fields stay empty.
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+      // Wire hygiene: the raw store error stays OFF the network...
+      expect(decoded.declineMessage).not.toContain('store is closed');
+      // ...but the local WARN hook still gets the real cause for the operator.
+      expect(onDecline).toHaveBeenCalledOnce();
+      expect(onDecline.mock.calls[0]?.[0]).toMatchObject({
+        code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+        contextGraphId,
+        message: expect.stringContaining('store is closed'),
+      });
+    });
+
+    it('curated catalog persist / insert throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+      // Same durability invariant, second store call: the deletes succeed but
+      // the catalog INSERT hits the closed store. Still a transient decline.
+      const handler = await curatedHandlerWithFailingStore(['insert']);
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
+    });
+
+    it('otReviewAgent #1408 P1b: catalog persist FLUSH throws → transient decline, NO signed ACK (durability boundary before sign)', async () => {
+      // The delete+insert succeed but the durability flush (forcing the write
+      // past the debounced-flush window, so a worker respawn can't roll back
+      // ACKed data) fails. We MUST decline rather than sign an ACK for data
+      // that isn't guaranteed durable.
+      const handler = await curatedHandlerWithFailingStore(['flush']);
+      const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(decoded.declineMessage).toBe('store unavailable');
+      const r = decoded.coreNodeSignatureR instanceof Uint8Array
+        ? decoded.coreNodeSignatureR : new Uint8Array(decoded.coreNodeSignatureR ?? []);
+      expect(r.length).toBe(0);
     });
   });
 

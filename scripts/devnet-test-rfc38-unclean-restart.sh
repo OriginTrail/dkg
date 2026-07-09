@@ -45,6 +45,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=devnet-publish-helpers.sh
+source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -66,7 +69,7 @@ CORE_NODE=1
 # above the 100 ms poll cadence below. Operators on slower boxes can
 # dial these back via the env vars.
 #
-# Codex r2 RED on #777: a single `/api/shared-memory/write` POST is
+# Codex r2 RED on #777: a single `/api/knowledge-assets` POST is
 # capped at `MAX_BODY_BYTES = 10 MiB` by the daemon — packing all
 # 1000 × 32 KiB quads into one request would 413 before catchup
 # starts. Split the writes across multiple `/write` calls of at most
@@ -239,7 +242,7 @@ while [ "$BATCH_START" -lt "$WRITES_COUNT" ]; do
     }
     console.log(JSON.stringify({ contextGraphId: cgId, quads }));
   ')
-  W=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$PAYLOAD")
+  W=$(devnet_create_shared_ka "$CURATOR_NODE" "$PAYLOAD")
   GOT=$(parse_json "$W" '.triplesWritten')
   [ "$GOT" = "$BATCH_LEN" ] || fail "batch [$BATCH_START..$BATCH_END) expected $BATCH_LEN triples, got '$GOT': $W"
   TOTAL_WRITTEN=$(( TOTAL_WRITTEN + BATCH_LEN ))

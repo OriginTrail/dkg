@@ -40,6 +40,25 @@ function freshCgId(prefix: string): string {
   return `${prefix}-${ethers.hexlify(ethers.randomBytes(4)).slice(2)}`;
 }
 
+function buildChunkedDescriptionQuads(prefix: string, bytes: number, fill: string) {
+  const chunkBytes = 16 * 1024;
+  const quads = [];
+  let remaining = bytes;
+  let index = 0;
+  while (remaining > 0) {
+    const size = Math.min(chunkBytes, remaining);
+    quads.push({
+      subject: `urn:swm:${prefix}:e${index}`,
+      predicate: 'http://schema.org/description',
+      object: `"${fill.repeat(size)}"`,
+      graph: '',
+    });
+    remaining -= size;
+    index += 1;
+  }
+  return quads;
+}
+
 beforeAll(async () => {
   _fileSnapshot = await takeSnapshot();
   const { hubAddress } = getSharedContext();
@@ -103,16 +122,9 @@ describe('A-2: SHARE 10 MB gossip-size boundary', () => {
     const cgId = freshCgId('bnd-hi');
     await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Hi', description: '' });
 
-    // One literal above the 10 MB cap is guaranteed to trip the pre-mutation guard.
-    const big = 'y'.repeat(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
-    const quads = [
-      {
-        subject: 'urn:swm:hi:alice',
-        predicate: 'http://schema.org/description',
-        object: `"${big}"`,
-        graph: '',
-      },
-    ];
+    // Many individually-safe literals exercise the aggregate gossip-message
+    // boundary without tripping the stricter per-literal Blazegraph guard.
+    const quads = buildChunkedDescriptionQuads('hi', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024, 'y');
 
     let caught: Error | null = null;
     try {
@@ -132,22 +144,14 @@ describe('A-2: SHARE 10 MB gossip-size boundary', () => {
     const cgId = freshCgId('bnd-atomic');
     await nodeA!.createContextGraph({ id: cgId, name: 'Boundary Atomic', description: '' });
 
-    const big = 'z'.repeat(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
-    const quads = [
-      {
-        subject: 'urn:swm:atomic:bob',
-        predicate: 'http://schema.org/description',
-        object: `"${big}"`,
-        graph: '',
-      },
-    ];
+    const quads = buildChunkedDescriptionQuads('atomic', DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024, 'z');
 
     await expect(nodeA!.share(cgId, quads)).rejects.toThrow(/SWM message too large/);
 
     // SWM view for this CG must be empty for the attempted subject: the
     // oversized share must not have half-written into the store.
     const qr = await nodeA!.query(
-      `SELECT ?o WHERE { <urn:swm:atomic:bob> <http://schema.org/description> ?o }`,
+      `SELECT ?o WHERE { <urn:swm:atomic:e0> <http://schema.org/description> ?o }`,
       { contextGraphId: cgId, view: 'shared-working-memory' },
     );
     expect(

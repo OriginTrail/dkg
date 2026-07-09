@@ -1,0 +1,15 @@
+[
+  {
+    "inputs": [],
+    "name": "minPcaCommitmentForCgWaiver",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

@@ -180,4 +180,35 @@ describe('@unit ParametersStorage contract', function () {
       ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
     });
   });
+
+  describe('minPcaCommitmentForCgWaiver (OT-RFC-53 waiver floor)', () => {
+    it('defaults to 25,000 TRAC', async () => {
+      expect(await ParametersStorage.minPcaCommitmentForCgWaiver()).to.equal(
+        hre.ethers.parseEther('25000'),
+      );
+    });
+
+    it('owner can set it, the value updates, and it emits ParameterChanged', async () => {
+      const v = hre.ethers.parseEther('5000');
+      const tx = await Hub.forwardCall(
+        await ParametersStorage.getAddress(),
+        ParametersStorageInterface.encodeFunctionData(
+          'setMinPcaCommitmentForCgWaiver',
+          [v],
+        ),
+      );
+      await expect(tx)
+        .to.emit(ParametersStorage, 'ParameterChanged')
+        .withArgs('minPcaCommitmentForCgWaiver', v);
+      expect(await ParametersStorage.minPcaCommitmentForCgWaiver()).to.equal(v);
+    });
+
+    it('setMinPcaCommitmentForCgWaiver reverts for non-owner', async () => {
+      await expect(
+        ParametersStorage.connect(accounts[1]).setMinPcaCommitmentForCgWaiver(
+          hre.ethers.parseEther('1'),
+        ),
+      ).to.be.revertedWith('Only Hub Owner, Hub, or Multisig Owner can call');
+    });
+  });
 });

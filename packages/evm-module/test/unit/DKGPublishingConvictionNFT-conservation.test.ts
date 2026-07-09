@@ -2,13 +2,19 @@
  * DKGPublishingConvictionNFT-conservation.test.ts — full-lifecycle TRAC
  * conservation invariant.
  *
- * V10 lazy-settlement model: over an account's complete lifetime the total
- * TRAC accounted to the staker pool MUST equal `committedTRAC +
- * sum(topUps)`. This integration test exercises the full path
- * (createAccount → mixed publishes across multiple billing windows →
- * topUps mid-lifetime → post-expiry settle), parses every
- * `WindowSettled`, `CostCovered`, and `AccountFinalSwept` event from
- * the NFT contract, and asserts the conservation invariant exactly.
+ * 10.0.8 deterministic-schedule model: over an account's complete lifetime
+ * the total TRAC accounted to the staker pool MUST equal `committedTRAC +
+ * sum(topUps)`, composed as
+ *
+ *   scheduled-at-create (== committedTRAC, dust included)
+ *   + Σ topUp-overflow draws at spend time (`CostCovered.drawnFromTopUp`)
+ *   + post-expiry topUp tail (`AccountFinalSwept.topUpSwept`)
+ *
+ * `CostCovered.drawnFromEpoch` is a BUDGET draw against already-scheduled
+ * money and must NOT be double-counted. `WindowSettled` never fires. This
+ * integration test exercises the full path (createAccount → mixed
+ * publishes across multiple billing windows → topUps mid-lifetime →
+ * post-expiry settle) and asserts the invariant exactly.
  */
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -123,9 +129,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
   });
 
   type Distribution = {
-    passive: bigint;
-    active: bigint;
+    scheduled: bigint;
+    scheduledFee: bigint;
+    budgetDraw: bigint;
+    topUpDraw: bigint;
     tail: bigint;
+    windowSettledCount: number;
   };
 
   async function tally(
@@ -134,9 +143,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     const receipt = await tx.wait();
     // Post-split: state-change events fire on `PublishingConviction`.
     const logicAddr = (await LogicContract.getAddress()).toLowerCase();
-    let passive = 0n;
-    let active = 0n;
+    let scheduled = 0n;
+    let scheduledFee = 0n;
+    let budgetDraw = 0n;
+    let topUpDraw = 0n;
     let tail = 0n;
+    let windowSettledCount = 0;
     for (const log of receipt!.logs) {
       if (log.address.toLowerCase() !== logicAddr) continue;
       let parsed: ReturnType<PublishingConviction['interface']['parseLog']> = null;
@@ -149,15 +161,19 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
         continue;
       }
       if (parsed === null) continue;
-      if (parsed.name === 'WindowSettled') {
-        passive += BigInt(parsed.args.remainderSwept);
+      if (parsed.name === 'EmissionScheduled') {
+        scheduled += BigInt(parsed.args.scheduled);
+        scheduledFee += BigInt(parsed.args.treasuryFee);
+      } else if (parsed.name === 'WindowSettled') {
+        windowSettledCount += 1;
       } else if (parsed.name === 'CostCovered') {
-        active += BigInt(parsed.args.drawnFromEpoch) + BigInt(parsed.args.drawnFromTopUp);
+        budgetDraw += BigInt(parsed.args.drawnFromEpoch);
+        topUpDraw += BigInt(parsed.args.drawnFromTopUp);
       } else if (parsed.name === 'AccountFinalSwept') {
         tail += BigInt(parsed.args.topUpSwept) + BigInt(parsed.args.dustSwept);
       }
     }
-    return { passive, active, tail };
+    return { scheduled, scheduledFee, budgetDraw, topUpDraw, tail, windowSettledCount };
   }
 
   it('createAccount + mixed publishes across N windows + topUp + post-expiry settle: total accounted == committed + topUps', async () => {
@@ -171,20 +187,24 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     const discountBps = expectedBps(committed);
     expect(discountBps).to.equal(3000n);
     const baseAllowance = committed / 12n;
-    const dust = committed - baseAllowance * 12n;
     const top1 = hre.ethers.parseEther('5000');
     const top2 = hre.ethers.parseEther('10000');
 
     await TokenContract.approve(await NFT.getAddress(), committed + top1 + top2);
     // RFC-51: createAccount(committedTRAC, primaryNode); conservation tests
     // don't assert allocation seeding → inert node = 0.
-    await NFT.createAccount(committed, 0);
+    // 10.0.8: the FULL commitment (dust included) is scheduled up front —
+    // this is the first term of the conservation identity.
+    const txCreate = await NFT.createAccount(committed, 0);
+    const dCreate = await tally(txCreate);
+    expect(dCreate.scheduled).to.equal(committed);
+    let totalAccounted = dCreate.scheduled;
     await NFT.registerAgent(1, agent.address);
 
     const epochLength = await ChronosContract.epochLength();
-    let totalAccounted = 0n;
+    let topUpDrawTotal = 0n;
 
-    // ---- Window 0: partial publish (uses base only) ----
+    // ---- Window 0: partial publish (base budget only — no pool effect) ----
     {
       const targetDisc = baseAllowance / 4n; // a quarter of base
       const baseCost = (targetDisc * BPS) / (BPS - discountBps);
@@ -197,12 +217,14 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
         LOCK_DURATION,
       );
       const d = await tally(tx);
-      expect(d.active).to.equal(expected);
-      expect(d.passive).to.equal(0n);
-      totalAccounted += d.active + d.passive + d.tail;
+      // Budget draw only — already-scheduled money, NOT added to the total.
+      expect(d.budgetDraw).to.equal(expected);
+      expect(d.topUpDraw).to.equal(0n);
+      expect(d.scheduled).to.equal(0n);
+      expect(d.windowSettledCount).to.equal(0);
     }
 
-    // ---- Window 1: advance + partial publish (settles window 0) ----
+    // ---- Window 1: advance + partial publish (nothing sweeps — ever) ----
     await time.increase(epochLength + 1n);
     {
       const targetDisc = baseAllowance / 2n;
@@ -216,32 +238,27 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
         LOCK_DURATION,
       );
       const d = await tally(tx);
-      expect(d.active).to.equal(expected);
-      // Window 0 passive sink = baseAllowance - actualDisc(w0). w0 used
-      // baseAllowance / 4 (with floor-division rounding), so remainder
-      // is baseAllowance - that.
-      expect(d.passive).to.be.gt(0n);
-      totalAccounted += d.active + d.passive + d.tail;
+      expect(d.budgetDraw).to.equal(expected);
+      expect(d.topUpDraw).to.equal(0n);
+      // 10.0.8: no passive sweep exists — elapsed windows were scheduled
+      // at creation.
+      expect(d.windowSettledCount).to.equal(0);
+      expect(d.scheduled).to.equal(0n);
     }
 
-    // ---- topUp mid-lifetime (lazy-settles, no new accounting) ----
+    // ---- topUp mid-lifetime (no accounting side effects) ----
     {
       const tx = await NFT.topUp(1, top1);
       const d = await tally(tx);
-      // No new passive sweep here — the current window (w1) is still
-      // active, and w0 is already settled by the previous publish.
-      expect(d.active).to.equal(0n);
-      expect(d.passive).to.equal(0n);
-      totalAccounted += d.active + d.passive + d.tail;
+      expect(d.budgetDraw + d.topUpDraw + d.scheduled + d.tail).to.equal(0n);
     }
 
-    // ---- Window 3: advance 2 more windows + drain base + topUp ----
+    // ---- Window 3: advance 2 more windows + drain base + dip into topUp ----
     await time.increase(epochLength * 2n + 1n);
     {
-      // Cover an amount large enough to drain w3 base and dip into
-      // topUp. Currently w1's base allowance is still half-spent.
-      const drainW1 = baseAllowance; // way more than needed
-      const baseCost = (drainW1 * BPS) / (BPS - discountBps) + 10n;
+      // Cover an amount large enough to drain w3's base and dip into topUp.
+      const drainW3 = baseAllowance;
+      const baseCost = (drainW3 * BPS) / (BPS - discountBps) + 10n;
       const expected = (baseCost * (BPS - discountBps)) / BPS;
       const startEpoch = await ChronosContract.getCurrentEpoch();
       const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
@@ -251,22 +268,22 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
         LOCK_DURATION,
       );
       const d = await tally(tx);
-      expect(d.active).to.equal(expected);
-      // w1 + w2 passive sweep (w0 was already settled before).
-      expect(d.passive).to.be.gt(0n);
-      totalAccounted += d.active + d.passive + d.tail;
+      // Base portion capped at the window allowance; the excess is the
+      // topUp overflow — the ONLY spend-time pool emission, and the second
+      // term of the conservation identity.
+      expect(d.budgetDraw).to.equal(baseAllowance);
+      expect(d.topUpDraw).to.equal(expected - baseAllowance);
+      expect(d.topUpDraw).to.be.gt(0n);
+      expect(d.windowSettledCount).to.equal(0);
+      topUpDrawTotal += d.topUpDraw;
+      totalAccounted += d.topUpDraw;
     }
 
-    // ---- Second top-up; advance to mid-expiry; settle (no expiry yet) ----
+    // ---- Second top-up (again no accounting side effects) ----
     {
       const tx = await NFT.topUp(1, top2);
       const d = await tally(tx);
-      // top-up itself only lazy-settles; advance was 2 windows + ~now we
-      // are in window 3. Window 3 was just touched (active), so the
-      // settle only covers up to window 2 — but w0..w2 should already
-      // be flushed by the prior publish.
-      expect(d.passive).to.equal(0n);
-      totalAccounted += d.active + d.passive + d.tail;
+      expect(d.budgetDraw + d.topUpDraw + d.scheduled + d.tail).to.equal(0n);
     }
 
     // ---- Advance past expiry; post-expiry settle ----
@@ -274,14 +291,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     {
       const tx = await NFT.settle(1);
       const d = await tally(tx);
-      // Remaining windows + tail (topUp leftover + dust). The exact
-      // tail value depends on whether earlier publishes overflowed
-      // into `topUpBalance` (due to floor-division rounding in
-      // discountedCost) — the conservation invariant below covers
-      // the bookkeeping precisely.
-      expect(d.passive).to.be.gte(0n);
-      expect(d.tail).to.be.gte(dust);
-      totalAccounted += d.active + d.passive + d.tail;
+      // Tail = leftover topUp ONLY (base + dust were scheduled at create;
+      // dustSwept is 0 since 10.0.8). Third term of the identity.
+      expect(d.tail).to.equal(top1 + top2 - topUpDrawTotal);
+      expect(d.scheduled).to.equal(0n);
+      expect(d.windowSettledCount).to.equal(0);
+      totalAccounted += d.tail;
     }
 
     // ---- Final conservation invariant: every wei in == every wei accounted ----
@@ -297,10 +312,10 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     // Idempotency: subsequent settles do nothing.
     const txNoop = await NFT.settle(1);
     const noop = await tally(txNoop);
-    expect(noop.active + noop.passive + noop.tail).to.equal(0n);
+    expect(noop.scheduled + noop.topUpDraw + noop.tail).to.equal(0n);
   });
 
-  it('protocol treasury fee: skims the configured bps from passive sweeps and pays the treasury (settle() stays reentrancy-safe)', async () => {
+  it('protocol treasury fee (10.0.8 basis): the base commitment splits net/fee at schedule time; the fee pays out via collectTreasuryEmission; the topUp tail keeps the immediate skim', async () => {
     const treasury = accounts[7];
     const ParametersStorageContract =
       await hre.ethers.getContract('ParametersStorage');
@@ -313,45 +328,83 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     );
     expect(await ParametersStorageContract.protocolTreasuryFee()).to.equal(300n);
 
-    // committed divisible by 12 → base allowance B = 10_000 ether, dust = 0.
-    // With NO active publishes every window sweeps the full B, so the fee
-    // is B * 300 / 10_000 = 300 ether per window (exact, no rounding).
-    const committed = hre.ethers.parseEther('120000');
-    const B = committed / 12n;
-    const perWindowFee = (B * 300n) / BPS; // 300 ether
-    const expectedTotalFee = perWindowFee * 12n; // 3600 ether
+    // 10.0.8 fee basis: with a treasury wired at schedule time, each window's
+    // budget splits fee → the treasury emission shard / net → the staker
+    // shard as pure ACCOUNTING (the frozen wrapper funds the CSS vault only
+    // AFTER the scheduling call, so no TRAC may move there). The physical
+    // payout is the deferred, per-elapsed-epoch collectTreasuryEmission.
+    const committed = hre.ethers.parseEther('120000'); // divisible by 12 — no dust
+    const top = hre.ethers.parseEther('10000');
+    const baseAllowance = committed / BigInt(LOCK_DURATION);
+    const feePerWindow = (baseAllowance * 300n) / BPS;
+    const expectedBaseFee = feePerWindow * BigInt(LOCK_DURATION); // 3600 ether
+    const expectedTailFee = (top * 300n) / BPS; // 300 ether
 
-    await TokenContract.approve(await NFT.getAddress(), committed);
-    // RFC-51: createAccount(committedTRAC, primaryNode); inert node = 0.
-    await NFT.createAccount(committed, 0);
+    await TokenContract.approve(await NFT.getAddress(), committed + top);
+    // CRITICAL regression guard: createAccount MUST NOT revert with a wired
+    // treasury (the vault is empty during the scheduling call — the split is
+    // accounting-only).
+    const txCreate = await NFT.createAccount(committed, 0);
+    const dCreate = await tally(txCreate);
+    expect(dCreate.scheduled).to.equal(committed - expectedBaseFee);
+    expect(dCreate.scheduledFee).to.equal(expectedBaseFee);
+    expect(dCreate.scheduled + dCreate.scheduledFee).to.equal(committed);
+    // Assessment moved no TRAC anywhere.
+    const treasuryBefore = await TokenContract.balanceOf(treasury.address);
+    await NFT.topUp(1, top);
 
     const cssAddr = await CSS.getAddress();
     const cssBefore = await TokenContract.balanceOf(cssAddr);
-    const treasuryBefore = await TokenContract.balanceOf(treasury.address);
 
-    // Advance past expiry and settle: all 12 windows sweep B each, tail = 0.
+    // Advance past expiry and settle: only the topUp tail sweeps, net of its
+    // immediate fee — the base fee sits on the treasury shard, not yet paid.
     const epochLength = await ChronosContract.epochLength();
     await time.increase(epochLength * BigInt(LOCK_DURATION + 1));
     await NFT.settle(1);
 
-    // Treasury physically receives exactly the summed per-window fee.
+    // Treasury physically receives exactly the tail fee — nothing more yet.
     expect(
       (await TokenContract.balanceOf(treasury.address)) - treasuryBefore,
-    ).to.equal(expectedTotalFee);
-    // Only the fee leaves the CSS vault; the net stays escrowed for stakers.
+    ).to.equal(expectedTailFee);
+    // Only the tail fee leaves the CSS vault at settle.
     expect(cssBefore - (await TokenContract.balanceOf(cssAddr))).to.equal(
-      expectedTotalFee,
+      expectedTailFee,
     );
 
     const info = await NFT.getAccountInfo(1);
     expect(info.fullySwept).to.equal(true);
 
     // Idempotency + settle() reentrancy-safety: a second settle moves no
-    // further TRAC (the cursor / fullySwept are persisted before any pay).
+    // further TRAC (fullySwept is persisted before any pay).
     const treasuryAfterFirst = await TokenContract.balanceOf(treasury.address);
     await NFT.settle(1);
     expect(await TokenContract.balanceOf(treasury.address)).to.equal(
       treasuryAfterFirst,
+    );
+
+    // Advance past the emission span end (window closes + lock epochs) and
+    // collect: the treasury receives the whole scheduled base fee except the
+    // few wei still riding the shard's accumulatedRemainder carry.
+    await time.increase(epochLength * BigInt(LOCK_DURATION + 2));
+    const ES = await hre.ethers.getContract('EpochStorageV8');
+    const cur = await (await hre.ethers.getContract('Chronos')).getCurrentEpoch();
+    let expectedCollect = 0n;
+    for (let e = 1n; e <= cur - 1n; e++) {
+      expectedCollect += await ES.getEpochRemainingPool(2n, e);
+    }
+    const feeCarry = await ES.accumulatedRemainder(2n);
+    expect(expectedCollect + feeCarry).to.equal(expectedBaseFee);
+
+    await LogicContract.collectTreasuryEmission(1n, cur - 1n);
+    expect(
+      (await TokenContract.balanceOf(treasury.address)) - treasuryAfterFirst,
+    ).to.equal(expectedCollect);
+
+    // Idempotent: re-collecting the same range moves nothing further.
+    const treasuryAfterCollect = await TokenContract.balanceOf(treasury.address);
+    await LogicContract.collectTreasuryEmission(1n, cur - 1n);
+    expect(await TokenContract.balanceOf(treasury.address)).to.equal(
+      treasuryAfterCollect,
     );
   });
 

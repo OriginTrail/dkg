@@ -87,6 +87,18 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
     /// `publish` / `topUp` / NFT-transfer work.
     uint256 public constant MAX_PUBLISHING_CONVICTION_EPOCHS = 60;
 
+    /// @notice OT-RFC-53: minimum PCA `committedTRAC` required for a PCA-backed
+    ///         Context Graph to qualify for the registration-deposit WAIVER. The
+    ///         waiver lets a PCA's locked TRAC pay the per-CG anti-spam cost
+    ///         instead of separate liquid TRAC, but only up to a per-PCA quota
+    ///         (`committedTRAC / contextGraphRegistrationDeposit`); this floor
+    ///         keeps the perk to serious PCAs and blocks the dust-PCA bypass
+    ///         (a 1-wei PCA minting unlimited deposit-free CGs). Defaults to the
+    ///         first conviction discount tier (25k TRAC).
+    /// @dev    Declared at the END of the state variables ON PURPOSE: appending
+    ///         (not inserting) keeps every prior storage slot unchanged.
+    uint96 public minPcaCommitmentForCgWaiver;
+
     // @dev Only transactions by HubController owner or one of the owners of the MultiSig Wallet
     modifier onlyOwnerOrMultiSigOwner() {
         _checkOwnerOrMultiSigOwner();
@@ -127,6 +139,12 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         // production automatically (no manual step, no silent-off) while keeping
         // test fixtures — which don't run that script — unaffected. Governance
         // can retune or disable it anytime.
+
+        // OT-RFC-53 waiver floor: unlike the deposit, this ships at a sane
+        // non-zero default (the first conviction discount tier, 25k TRAC) so the
+        // waiver is never accidentally floor-less. It is moot until the deposit
+        // is activated (the waiver path is gated on deposit > 0). Governance-tunable.
+        minPcaCommitmentForCgWaiver = 25_000 ether;
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -233,6 +251,12 @@ contract ParametersStorage is INamed, IVersioned, HubDependent {
         contextGraphRegistrationDeposit = amount;
 
         emit ParameterChanged("contextGraphRegistrationDeposit", amount);
+    }
+
+    function setMinPcaCommitmentForCgWaiver(uint96 amount) external onlyOwnerOrMultiSigOwner {
+        minPcaCommitmentForCgWaiver = amount;
+
+        emit ParameterChanged("minPcaCommitmentForCgWaiver", amount);
     }
 
     function setProtocolTreasuryFee(uint16 protocolTreasuryFee_) external onlyOwnerOrMultiSigOwner {

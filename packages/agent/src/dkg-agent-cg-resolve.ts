@@ -569,9 +569,31 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return true;
     }
 
+    // Track B perf (write-preflight resilience): this fallback used to be
+    // `graphManager.listContextGraphs()` — a store-WIDE named-graph
+    // enumeration on every declaration miss, exactly the kind of scan that
+    // blows the write-preflight budget on a large or slow store. The
+    // membership test it fed (`storedIds.includes(contextGraphId)`) can only
+    // ever be satisfied by one of this CG's five well-known graph names (the
+    // root data graph or its `_meta` / `_private` / `_shared_memory` /
+    // `_shared_memory_meta` bookkeeping graphs — anything deeper re-gains a
+    // "/" after suffix-stripping and is dropped by the scan), so probe those
+    // directly with bounded `hasGraph` point lookups. Curated ids
+    // (`<curator>/<slug>`) were never collected by the legacy scan (it drops
+    // ids containing "/"), so answer those without touching the store at all.
+    if (contextGraphId.includes('/')) return false;
     const graphManager = new GraphManager(this.store);
-    const storedContextGraphs = await graphManager.listContextGraphs();
-    return storedContextGraphs.includes(contextGraphId);
+    const survivorGraphUris = [
+      graphManager.dataGraphUri(contextGraphId),
+      graphManager.metaGraphUri(contextGraphId),
+      graphManager.privateGraphUri(contextGraphId),
+      graphManager.sharedMemoryUri(contextGraphId),
+      graphManager.sharedMemoryMetaUri(contextGraphId),
+    ];
+    for (const graphUri of survivorGraphUris) {
+      if (await this.store.hasGraph(graphUri)) return true;
+    }
+    return false;
   }
 
   /**
@@ -598,21 +620,22 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const prefix = `did:dkg:context-graph:${contextGraphId}`;
-    // ASK is cheap on Oxigraph; the FILTER keeps us inside this CG's
-    // namespace and excludes `_meta` / `_shared_memory_meta` bookkeeping
-    // which is written even for declaration-only discoveries.
-    const sparql = `ASK WHERE {
-      GRAPH ?g { ?s ?p ?o }
-      FILTER(STRSTARTS(STR(?g), "${prefix}"))
-      FILTER(!STRENDS(STR(?g), "/_meta"))
-      FILTER(!STRENDS(STR(?g), "/_shared_memory_meta"))
-    }`;
-    const result = await this.store.query(sparql, {
-      signal: options.signal,
-      source: 'agent.contextGraphHasLocalContent',
-    });
-    if (result.type === 'boolean') return result.value;
-    return result.type === 'bindings' && result.bindings.length > 0;
+    // A3 (O(store) relief): the old `ASK { GRAPH ?g {?s ?p ?o} FILTER(STRSTARTS(?g,…)) }`
+    // was a full-store scan — its worst case (no content) iterated every quad to
+    // prove absence, exactly the case this probe hits most. The named-graph
+    // index only tracks graphs that hold ≥1 quad, so "has local content"
+    // reduces to "is there a non-bookkeeping graph under this CG's prefix",
+    // answerable from the fast index (O(#graphs)) with no store scan. Excludes
+    // `_meta` / `_shared_memory_meta` bookkeeping, written even for
+    // declaration-only discoveries. Advisory + fail-safe: callers
+    // (`probeContextGraphWritePreflight`) treat a failure as UNKNOWN, never a
+    // hard deny.
+    const cgGraphs = this.store.listGraphsByPrefix
+      ? await this.store.listGraphsByPrefix(prefix, { signal: options.signal })
+      : (await this.store.listGraphs({ signal: options.signal })).filter((g) => g.startsWith(prefix));
+    return cgGraphs.some(
+      (g) => !g.endsWith('/_meta') && !g.endsWith('/_shared_memory_meta'),
+    );
   }
 
   async probeContextGraphWritePreflight(
@@ -654,17 +677,53 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
     `);
 
-    const [exists, hasLocalContent, persistedSubscription, declarationResult] = await Promise.all([
-      this.contextGraphExists(contextGraphId),
-      this.contextGraphHasLocalContent(contextGraphId),
-      persistedSubscriptionPromise,
-      declarationPromise,
-    ]);
+    // Track B (write-preflight resilience): these four reads were previously
+    // combined with `Promise.all`, so a single failing store read (slow-store
+    // abort timeout, "the store is closed" after an Oxigraph worker crash)
+    // threw the WHOLE probe away — including the in-memory subscription
+    // snapshot below, which needs zero store I/O. The daemon's write
+    // preflight was then left with no evidence at all and 503'd every write
+    // until the store recovered. Settle each read individually instead:
+    // store-derived fields degrade to `undefined` (UNKNOWN — never a
+    // definitive deny) and `storeUnavailable` carries the first failure
+    // message for diagnostics, while the in-memory registry state always
+    // survives.
+    const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
+      await Promise.allSettled([
+        this.contextGraphExists(contextGraphId),
+        this.contextGraphHasLocalContent(contextGraphId),
+        persistedSubscriptionPromise,
+        declarationPromise,
+      ]);
+
+    let storeUnavailable = false;
+    let storeErrorMessage: string | undefined;
+    const noteStoreFailure = (reason: unknown): undefined => {
+      storeUnavailable = true;
+      if (storeErrorMessage === undefined) {
+        storeErrorMessage = reason instanceof Error ? reason.message : String(reason);
+      }
+      return undefined;
+    };
+    const exists = existsRead.status === 'fulfilled'
+      ? existsRead.value
+      : noteStoreFailure(existsRead.reason);
+    const hasLocalContent = hasLocalContentRead.status === 'fulfilled'
+      ? hasLocalContentRead.value
+      : noteStoreFailure(hasLocalContentRead.reason);
+    const persistedSubscription = persistedSubscriptionRead.status === 'fulfilled'
+      ? persistedSubscriptionRead.value
+      : noteStoreFailure(persistedSubscriptionRead.reason);
+    const declarationResult = declarationRead.status === 'fulfilled'
+      ? declarationRead.value
+      : noteStoreFailure(declarationRead.reason);
 
     let accessPolicy: 'public' | 'private' | undefined;
-    let declarationFound = false;
+    // Tri-state: stays `undefined` (unknown) when the declaration read
+    // failed, so a store outage can never masquerade as "no declaration".
+    let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
     const curators: string[] = [];
-    if (declarationResult.type === 'bindings') {
+    if (declarationResult && declarationResult.type === 'bindings') {
       declarationFound = declarationResult.bindings.length > 0;
       let sawPublic = false;
       let sawPrivate = false;
@@ -698,15 +757,32 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const curatorMatch = curators.some((curator) =>
           this.curatorDidMatchesChecksumAgent(curator, checksum),
         );
-        callerAuthorized = curatorMatch
-          || await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
+        if (curatorMatch) {
+          callerAuthorized = true;
+        } else {
+          // The allowlist lookup is a store read too — the store can die
+          // between the settled reads above and here. Leave authorization
+          // UNKNOWN (never a deny) and flag the store instead of throwing
+          // the whole probe away.
+          try {
+            callerAuthorized = await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
+          } catch (err) {
+            noteStoreFailure(err);
+          }
+        }
       }
     }
 
     const inMemorySubscription = this.subscribedContextGraphs.get(contextGraphId);
     return {
-      exists,
-      hasLocalContent,
+      // Required typed boundary: `storeAvailable` is the inverse of
+      // `storeUnavailable`, emitted unconditionally so consumers cannot read
+      // any store-derived fact below without first establishing the store was
+      // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
+      // for the 503-diagnostics path (unchanged wire behaviour).
+      storeAvailable: !storeUnavailable,
+      ...(exists !== undefined ? { exists } : {}),
+      ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription
         ? { inMemorySubscription: {
             subscribed: inMemorySubscription.subscribed,
@@ -719,11 +795,92 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             synced: persistedSubscription.synced,
           } }
         : {}),
-      declarationFound,
+      ...(declarationFound !== undefined ? { declarationFound } : {}),
       ...(accessPolicy ? { accessPolicy } : {}),
       ...(curators[0] ? { curator: curators[0] } : {}),
       ...(callerAuthorized !== undefined ? { callerAuthorized } : {}),
+      ...(storeUnavailable
+        ? {
+            storeUnavailable: true,
+            ...(storeErrorMessage !== undefined ? { storeErrorMessage } : {}),
+          }
+        : {}),
     };
+  }
+
+  /**
+   * Track B (write-preflight resilience) — authoritative store-free proof that
+   * a candidate is an ACTIVE, PUBLIC context graph on-chain, for the daemon's
+   * last-resort write-preflight rescue that runs precisely when the local store
+   * is DOWN. The candidate's numeric on-chain id is resolved from the IN-MEMORY
+   * subscription registry only (zero store I/O — deliberately NOT
+   * `getContextGraphOnChainId`, whose fallback reads the ontology graph), then
+   * verified against the chain: `isContextGraphActiveOnChain` AND
+   * `getContextGraphAccessPolicy === 0` (public).
+   *
+   * Why PUBLIC is mandatory (security): with the store down the daemon cannot
+   * evaluate a private CG's per-caller authorization — that verdict is derived
+   * from the local `_meta` allowlist, which is exactly what's unavailable. The
+   * healthy write-preflight denies an authenticated-but-unauthorized caller of
+   * a PRIVATE CG (`exactProbeIsAuthoritativeBearerDeny`, which fires only for
+   * accessPolicy `private`). Admitting a private id here would silently convert
+   * that DENY into an accept. A PUBLIC CG has no such per-caller preflight deny
+   * (anyone may target it; publish-policy/curation is enforced downstream at the
+   * ACK/oracle layer, unaffected by this rescue), so admitting a proven-public
+   * id can never convert an existing deny — which is why this is the only
+   * store-free evidence we trust.
+   *
+   * Fail-closed by construction: resolves `true` ONLY on positive on-chain
+   * proof (active AND public) of an id the registry ALREADY tracks. No registry
+   * entry, no `onChainId`, an unparseable/zero id, an adapter missing either
+   * read, not-active, or non-public all resolve `false`; RPC errors propagate so
+   * the caller keeps its validation-unavailable response. A raw unknown
+   * candidate can never be accepted through here (shadow-CG fail-closed design).
+   */
+  async contextGraphActivePublicOnChainFromRegistry(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    const onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+    if (!onChainId) return false;
+    let numericId: bigint;
+    try {
+      numericId = BigInt(onChainId);
+    } catch {
+      return false;
+    }
+    if (numericId <= 0n) return false;
+    const isActive = this.chain?.isContextGraphActiveOnChain;
+    const getAccessPolicy = this.chain?.getContextGraphAccessPolicy;
+    if (typeof isActive !== 'function' || typeof getAccessPolicy !== 'function') return false;
+    // Sequential + short-circuit: don't pay the policy read if it isn't active.
+    if ((await isActive.call(this.chain, numericId)) !== true) return false;
+    return (await getAccessPolicy.call(this.chain, numericId)) === 0;
+  }
+
+  /**
+   * Track B (write-preflight resilience) — HIGH-LEVEL rescue decision the
+   * daemon calls when BOTH write-preflight legs failed (store down). This is
+   * the one method the HTTP utility layer invokes: it OWNS the chain-policy
+   * semantics (registry onChainId → `isContextGraphActiveOnChain` → public
+   * `getContextGraphAccessPolicy`) so the daemon never has to assemble on-chain
+   * access-policy meaning locally. Returns `true` ONLY on positive proof the
+   * candidate is an ACTIVE, PUBLIC context graph the registry ALREADY tracks;
+   * everything else — no registry entry, not-active, non-public, missing
+   * adapter — resolves `false` and the daemon keeps its fail-closed 503.
+   *
+   * Why PUBLIC is mandatory (security): with the store down the daemon cannot
+   * evaluate a private CG's per-caller authorization (that verdict comes from
+   * the local `_meta` allowlist, exactly what's unavailable). The healthy
+   * write-preflight denies an authenticated-but-unauthorized caller of a
+   * PRIVATE CG; admitting a private id here would silently convert that DENY
+   * into an accept. A PUBLIC CG has no such per-caller preflight deny, so a
+   * proven-public id can never convert an existing deny.
+   *
+   * The bounded eth_call timeout is enforced by the caller (the daemon wraps
+   * this in a `Promise.race`), so a hung RPC stack cannot stall a degraded
+   * write route. RPC errors propagate (the caller treats a throw as "no
+   * rescue" and keeps its validation-unavailable response).
+   */
+  async validateWriteTargetDuringStoreOutage(this: DKGAgent, candidateId: string): Promise<boolean> {
+    return this.contextGraphActivePublicOnChainFromRegistry(candidateId);
   }
 
   /**

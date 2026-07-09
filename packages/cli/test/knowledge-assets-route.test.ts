@@ -77,6 +77,44 @@ async function write(cg: string, name: string, quads: unknown[]) {
 async function wmQuads(cg: string, name: string) {
   return getJson(daemon, `/api/knowledge-assets/${encodeURIComponent(name)}/wm/quads?contextGraphId=${cg}`);
 }
+async function postJsonAsAgent(authToken: string, path: string, body: unknown) {
+  const r = await fetch(`${daemon.base}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+    body: JSON.stringify(body),
+  });
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+}
+async function getJsonAsAgent(authToken: string, path: string) {
+  const r = await fetch(`${daemon.base}${path}`, { headers: { Authorization: `Bearer ${authToken}` } });
+  return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
+}
+async function registerAgentClient(label: string) {
+  const reg = await postJson(daemon, '/api/agent/register', {
+    name: `${label}-${Date.now().toString(36)}`,
+    framework: 'test',
+  });
+  expect(reg.status, `${label} register: ${JSON.stringify(reg.body)}`).toBeLessThan(300);
+  const agentAddress = String(reg.body.agentAddress);
+  const authToken = String(reg.body.authToken);
+  expect(agentAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  expect(authToken.length).toBeGreaterThan(0);
+  return {
+    agentAddress,
+    authToken,
+    post: (path: string, body: unknown) => postJsonAsAgent(authToken, path, body),
+    get: (path: string) => getJsonAsAgent(authToken, path),
+  };
+}
+async function createRegisteredAgentContextGraph(
+  agent: Awaited<ReturnType<typeof registerAgentClient>>,
+  id: string,
+) {
+  const created = await agent.post('/api/context-graph/create', { id, name: id, accessPolicy: 1 });
+  expect(created.status, `agent CG create: ${JSON.stringify(created.body)}`).toBeLessThan(300);
+  const registered = await agent.post('/api/context-graph/register', { id, accessPolicy: 1 });
+  expect(registered.status, `agent CG register: ${JSON.stringify(registered.body)}`).toBe(200);
+}
 
 describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
   beforeAll(async () => {
@@ -170,6 +208,100 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       if (res.body.merkleRoot !== undefined) {
         expect(String(res.body.merkleRoot)).toMatch(/^0x[0-9a-f]{8,}$/);
       }
+    });
+
+    it('atomic create without an explicit author seals as the agent-scoped token', async () => {
+      const agent = await registerAgentClient('ka-atomic-default-author');
+      const cg = `ka-atomic-default-${Date.now().toString(36)}`;
+      await createRegisteredAgentContextGraph(agent, cg);
+
+      const res = await agent.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name: 'agent-default-atomic',
+        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
+        finalize: true,
+      });
+
+      expect(res.status, `agent atomic create: ${JSON.stringify(res.body)}`).toBe(201);
+      expect(String(res.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+      const descriptor = await agent.get(
+        `/api/knowledge-assets/agent-default-atomic?contextGraphId=${cg}&agentAddress=${agent.agentAddress}`,
+      );
+      expect(descriptor.status, `agent atomic descriptor: ${JSON.stringify(descriptor.body)}`).toBe(200);
+      expect(descriptor.body.status).toBe('wm-sealed');
+      expect(String(descriptor.body.agentAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+      expect(descriptor.body.wmCurrentAssertion).toBeTruthy();
+    });
+
+    it('atomic create canonicalizes a mixed-case self authorAgentAddress before sealing', async () => {
+      const agent = await registerAgentClient('ka-atomic-author-case');
+      const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
+      await createRegisteredAgentContextGraph(agent, cg);
+      const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
+      expect(mixedCaseAgent).not.toBe(agent.agentAddress);
+
+      const res = await agent.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name: 'agent-case-atomic',
+        quads: [{ subject: 'ex:Case', predicate: 'ex:p', object: '"x"' }],
+        finalize: true,
+        authorAgentAddress: mixedCaseAgent,
+      });
+
+      expect(res.status, `mixed-case atomic create: ${JSON.stringify(res.body)}`).toBe(201);
+      expect(String(res.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+    });
+
+    it('rejects mismatched atomic create authorAgentAddress before opening a draft', async () => {
+      const agentA = await registerAgentClient('ka-atomic-author-a');
+      const agentB = await registerAgentClient('ka-atomic-author-b');
+      const cg = `ka-atomic-author-guard-${Date.now().toString(36)}`;
+      const name = 'agent-mismatch-atomic';
+      await createRegisteredAgentContextGraph(agentA, cg);
+
+      const res = await agentA.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name,
+        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
+        finalize: true,
+        authorAgentAddress: agentB.agentAddress,
+      });
+
+      expect(res.status, `mismatched atomic create: ${JSON.stringify(res.body)}`).toBe(403);
+      expect(String(res.body.error)).toContain(agentA.agentAddress);
+      expect(String(res.body.error)).toContain(agentB.agentAddress);
+      const descriptor = await agentA.get(
+        `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agentA.agentAddress}`,
+      );
+      expect(descriptor.status, `post-403 descriptor: ${JSON.stringify(descriptor.body)}`).toBe(404);
+    });
+
+    it('rejects mismatched atomic create pre-signed author before opening a draft', async () => {
+      const agentA = await registerAgentClient('ka-atomic-attestation-a');
+      const agentB = await registerAgentClient('ka-atomic-attestation-b');
+      const cg = `ka-atomic-attestation-guard-${Date.now().toString(36)}`;
+      const name = 'agent-attestation-mismatch-atomic';
+      await createRegisteredAgentContextGraph(agentA, cg);
+
+      const res = await agentA.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name,
+        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
+        finalize: true,
+        preSignedAuthorAttestation: {
+          address: agentB.agentAddress,
+          reservedKaId: '1',
+          signature: { r: `0x${'11'.repeat(32)}`, vs: `0x${'22'.repeat(32)}` },
+        },
+      });
+
+      expect(res.status, `mismatched atomic attestation: ${JSON.stringify(res.body)}`).toBe(403);
+      expect(String(res.body.error)).toContain(agentA.agentAddress);
+      expect(String(res.body.error)).toContain(agentB.agentAddress);
+      const descriptor = await agentA.get(
+        `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agentA.agentAddress}`,
+      );
+      expect(descriptor.status, `post-403 descriptor: ${JSON.stringify(descriptor.body)}`).toBe(404);
     });
   });
 
@@ -351,6 +483,35 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
         expect(BigInt(atomic.body.kaId) >> 96n).toBe(BigInt(agentAddress));
       }
     });
+
+    it('node token finalizes an explicitly selected local author lane', async () => {
+      const agent = await registerAgentClient('ka-node-finalize-author');
+      const cg = `ka-node-finalize-${Date.now().toString(36)}`;
+      const name = 'node-explicit-author-finalize';
+      await createRegisteredAgentContextGraph(agent, cg);
+
+      const draft = await agent.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name,
+        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
+        finalize: false,
+      });
+      expect(draft.status, `agent draft create: ${JSON.stringify(draft.body)}`).toBe(201);
+      expect(draft.body.status).toBe('draft-open');
+
+      const fin = await postJson(daemon, `/api/knowledge-assets/${name}/wm/finalize`, {
+        contextGraphId: cg,
+        authorAgentAddress: agent.agentAddress,
+      });
+      expect(fin.status, `node finalize override: ${JSON.stringify(fin.body)}`).toBe(200);
+      expect(String(fin.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+
+      const descriptor = await agent.get(
+        `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agent.agentAddress}`,
+      );
+      expect(descriptor.status, `agent descriptor: ${JSON.stringify(descriptor.body)}`).toBe(200);
+      expect(descriptor.body.status).toBe('wm-sealed');
+    });
   });
 
   // ── swm/share ─────────────────────────────────────────────────────
@@ -363,6 +524,36 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.status).toBe(200);
       expect(res.body.swmShared).toBe(true);
       expect(res.body.promotedCount).toBeGreaterThan(0);
+    });
+
+    it('agent-scoped token full share auto-seals as the token agent', async () => {
+      const agent = await registerAgentClient('ka-share-default-author');
+      const cg = `ka-share-default-${Date.now().toString(36)}`;
+      const name = 'agent-default-share';
+      await createRegisteredAgentContextGraph(agent, cg);
+
+      const draft = await agent.post('/api/knowledge-assets', {
+        contextGraphId: cg,
+        name,
+        quads: [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }],
+        finalize: false,
+      });
+      expect(draft.status, `agent draft: ${JSON.stringify(draft.body)}`).toBe(201);
+      expect(draft.body.status).toBe('draft-open');
+
+      const res = await agent.post(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: cg });
+
+      expect(res.status, `agent share: ${JSON.stringify(res.body)}`).toBe(200);
+      expect(res.body.swmShared).toBe(true);
+      expect(res.body.sealed).toBe(true);
+      expect(res.body.publishReady).toBe(true);
+      const descriptor = await agent.get(
+        `/api/knowledge-assets/${name}?contextGraphId=${cg}&agentAddress=${agent.agentAddress}`,
+      );
+      expect(descriptor.status, `agent descriptor: ${JSON.stringify(descriptor.body)}`).toBe(200);
+      expect(descriptor.body.status).toBe('swm-shared');
+      expect(String(descriptor.body.agentAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
+      expect(String(descriptor.body.reservedUal).toLowerCase()).toContain(agent.agentAddress.toLowerCase());
     });
 
     // #1116 — the route's thin wrapper over the seal-by-default share contract.
@@ -500,6 +691,19 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(String(res.body.error)).toMatch(/authorAgentAddress/);
     });
 
+    it('rejects a pre-signed author override (the seal encodes the author) (400)', async () => {
+      const res = await postJson(daemon, '/api/knowledge-assets/share/vm/publish', {
+        contextGraphId: REG,
+        preSignedAuthorAttestation: {
+          address: `0x${'11'.repeat(20)}`,
+          reservedKaId: '1',
+          signature: { r: `0x${'aa'.repeat(32)}`, vs: `0x${'bb'.repeat(32)}` },
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(String(res.body.error)).toMatch(/preSignedAuthorAttestation/);
+    });
+
     it('does NOT down-classify a genuine publisher failure: a real ACK-quorum miss stays 5xx', async () => {
       // A finalized+shared KA on an EDGE node cannot reach StorageACK quorum
       // (no connected core peers) → the real publisher throws and the route
@@ -613,6 +817,31 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const other = await getJson(daemon, `/api/knowledge-assets/scoped?contextGraphId=${LOCAL}&agentAddress=${reg.body.agentAddress}`);
       expect(other.status).toBe(404);
     });
+
+    it('agent-token reads and discards its own WM draft without an explicit agentAddress query param', async () => {
+      const agent = await registerAgentClient('ka-token-lane-wm');
+      const cg = `ka-token-lane-wm-${Date.now().toString(36)}`;
+      const name = 'token-lane-draft';
+      await createRegisteredAgentContextGraph(agent, cg);
+
+      const writeRes = await agent.post(`/api/knowledge-assets/${name}/wm/write`, {
+        contextGraphId: cg,
+        quads: [{ subject: 'ex:token-lane', predicate: 'ex:p', object: '"token-lane"' }],
+      });
+      expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
+
+      const readRes = await agent.get(`/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}`);
+      expect(readRes.status, `read: ${JSON.stringify(readRes.body)}`).toBe(200);
+      expect(readRes.body.count).toBe(1);
+      expect(readRes.body.quads?.[0]?.subject).toBe('ex:token-lane');
+
+      const discardRes = await agent.post(`/api/knowledge-assets/${name}/wm/discard`, { contextGraphId: cg });
+      expect(discardRes.status, `discard: ${JSON.stringify(discardRes.body)}`).toBe(200);
+
+      const afterDiscard = await agent.get(`/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}`);
+      expect(afterDiscard.status, `after discard: ${JSON.stringify(afterDiscard.body)}`).toBe(200);
+      expect(afterDiscard.body.count).toBe(0);
+    });
   });
 
   // ── wm/pull-from ──────────────────────────────────────────────────
@@ -640,6 +869,38 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.body.seeded).toBeGreaterThanOrEqual(1);
       expect(res.body.entities).toBeGreaterThanOrEqual(1);
     });
+
+    it('agent-token pulls from its own SWM lane without an explicit agentAddress body field', async () => {
+      const agent = await registerAgentClient('ka-token-lane-pull');
+      const cg = `ka-token-lane-pull-${Date.now().toString(36)}`;
+      const name = 'token-lane-pull';
+      await createRegisteredAgentContextGraph(agent, cg);
+
+      const writeRes = await agent.post(`/api/knowledge-assets/${name}/wm/write`, {
+        contextGraphId: cg,
+        quads: [{ subject: 'ex:token-pull', predicate: 'ex:p', object: '"token-pull"' }],
+      });
+      expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
+
+      const shareRes = await agent.post(`/api/knowledge-assets/${name}/swm/share`, {
+        contextGraphId: cg,
+        skipSeal: true,
+      });
+      expect(shareRes.status, `share: ${JSON.stringify(shareRes.body)}`).toBe(200);
+
+      const pullRes = await agent.post(`/api/knowledge-assets/${name}/wm/pull-from`, {
+        contextGraphId: cg,
+        layer: 'swm',
+        onConflict: 'replace',
+      });
+      expect(pullRes.status, `pull: ${JSON.stringify(pullRes.body)}`).toBe(200);
+      expect(pullRes.body.seeded).toBeGreaterThan(0);
+
+      const readRes = await agent.get(`/api/knowledge-assets/${name}/wm/quads?contextGraphId=${cg}`);
+      expect(readRes.status, `read: ${JSON.stringify(readRes.body)}`).toBe(200);
+      expect(readRes.body.count).toBeGreaterThan(0);
+      expect(readRes.body.quads.some((q: any) => q.subject === 'ex:token-pull')).toBe(true);
+    });
   });
 
   // ── import-file (real multipart upload + extraction) ──────────────
@@ -656,6 +917,47 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const es = await getJson(daemon, `/api/knowledge-assets/imp-done/wm/extraction-status?contextGraphId=${LOCAL}`);
       expect(es.status).toBe(200);
       expect(es.body.status).toBe('completed');
+    });
+
+    it('replaces stale KA-scoped named graph draft content on same-name import', async () => {
+      const name = `imp-replace-mixed-${Date.now().toString(36)}`;
+      const namedGraph = 'urn:test:graph:stale-import-replace';
+      const createRes = await createKa(LOCAL, name);
+      expect([200, 201]).toContain(createRes.status);
+
+      const writeRes = await write(LOCAL, name, [
+        {
+          subject: 'urn:test:entity:old-default',
+          predicate: 'http://schema.org/name',
+          object: '"Old Default"',
+          graph: '',
+        },
+        {
+          subject: 'urn:test:entity:old-named',
+          predicate: 'http://schema.org/name',
+          object: '"Old Named"',
+          graph: namedGraph,
+        },
+      ]);
+      expect(writeRes.status, `write: ${JSON.stringify(writeRes.body)}`).toBe(200);
+
+      const before = await wmQuads(LOCAL, name);
+      expect(before.status, `before query: ${JSON.stringify(before.body)}`).toBe(200);
+      expect(before.body.quads).toEqual(expect.arrayContaining([
+        expect.objectContaining({ subject: 'urn:test:entity:old-named', graph: namedGraph }),
+      ]));
+
+      const res = await postMultipart(daemon, `/api/knowledge-assets/${name}/wm/import-file`, [
+        { name: 'contextGraphId', value: LOCAL },
+        { name: 'file', filename: 'replacement.md', contentType: 'text/markdown', value: '# Replacement\n\nFresh body.\n' },
+      ]);
+      expect(res.status, `import-file: ${JSON.stringify(res.body)}`).toBe(200);
+
+      const after = await wmQuads(LOCAL, name);
+      expect(after.status, `after query: ${JSON.stringify(after.body)}`).toBe(200);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-default')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.subject === 'urn:test:entity:old-named')).toBe(false);
+      expect(after.body.quads.some((q: any) => q.graph === namedGraph)).toBe(false);
     });
 
     it('returns the import-file-specific 400 when the file part is missing (not JSON-parsed)', async () => {
@@ -774,64 +1076,16 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
     expect(res.status).toBe(404);
   });
 
-  // ── POST /api/knowledge-assets/publish — explicit-quads one-shot publish ──
-  // The direct-publish route (added in main's #1181/#1182 publish-routing work)
-  // validates the request and resolves the write context graph BEFORE calling
-  // agent.publish. Every guard below is reproduced as a real HTTP round-trip
-  // against the real daemon — no fabricated agent.
-  //
-  // DEVNET-TIER (not single-edge-daemon, documented in the block at the bottom):
-  // the CONFIRMED happy path (200 + positive kaId + on-chain manifest), the 207
-  // mint-but-binding-fails partial, and the 502 tentative-publish cases all need
-  // a real on-chain mint + StorageACK quorum from ≥3 core peers, which an edge
-  // daemon cannot provide — they belong in the devnet tier alongside vm/publish.
-  describe('POST /api/knowledge-assets/publish (direct explicit-quads)', () => {
-    const QUADS = [{ subject: 'ex:A', predicate: 'ex:p', object: '"v"', graph: '' }];
-
-    it('rejects an empty quad array with 400 before publishing', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', { contextGraphId: LOCAL, quads: [] });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/Missing or invalid "quads"/);
-    });
-
-    it('rejects a bare (non-literal, non-IRI) object term with 400 before core SPARQL', async () => {
+  // ── POST /api/knowledge-assets/publish — retired direct publish surface ──
+  describe('POST /api/knowledge-assets/publish (removed)', () => {
+    it('returns a clear 404 pointing callers at the named KA lifecycle', async () => {
       const res = await postJson(daemon, '/api/knowledge-assets/publish', {
         contextGraphId: LOCAL,
-        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'bare string', graph: '' }],
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph: '' }],
       });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/RDF object must be a quoted literal term or absolute IRI/);
-    });
-
-    it('rejects a malformed onChainContextGraphId with 400 before direct publish', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: LOCAL,
-        quads: QUADS,
-        onChainContextGraphId: 'not-a-number',
-      });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/Invalid "onChainContextGraphId"/);
-    });
-
-    it('rejects an onChainContextGraphId with no trusted positive on-chain mapping (fail-closed)', async () => {
-      // LOCAL is a locally-created CG that was never registered on-chain, so the
-      // daemon has no trusted positive mapping to validate the override against.
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: LOCAL,
-        quads: QUADS,
-        onChainContextGraphId: '7',
-      });
-      expect(res.status).toBe(400);
-      expect(String(res.body.error)).toMatch(/no trusted positive on-chain mapping/);
-    });
-
-    it('fails closed with CONTEXT_GRAPH_NOT_FOUND when the write preflight cannot resolve the CG', async () => {
-      const res = await postJson(daemon, '/api/knowledge-assets/publish', {
-        contextGraphId: 'no-such-publish-cg',
-        quads: QUADS,
-      });
-      expect(res.status).toBe(400);
-      expect(res.body.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('DIRECT_PUBLISH_ROUTE_REMOVED');
+      expect(String(res.body.error)).toContain('/api/knowledge-assets/:name/vm/publish');
     });
   });
 });

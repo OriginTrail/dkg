@@ -61,6 +61,7 @@ targets before writing so they cannot accidentally create shadow context graphs.
 - "There seem to be multiple DKG installations on this machine" → run `dkg doctor`; the `state.cli.globalPath`, `state.daemon.entryPoint`, and orphan-repos check together identify the canonical install and any stray clones.
 - "The UI shows an old version even after I updated" → run `dkg doctor`; the served-UI / source-mismatch check flags stale browser / PWA / service-worker caches.
 - "I ran `npm install -g @origintrail-official/dkg@latest` but the daemon still reports the old version" → on Edge nodes the daemon needs a restart to pick up the new install (`dkg restart`). On Core nodes, the slot mechanism gates the visible version on `dkg update`'s atomic swap, not on `npm install -g` directly — use `dkg update` for Core nodes.
+- "Publishing or context-graph registration intermittently fails with an RPC/503 error" → the node uses **multiple chain RPC endpoints with automatic failover**. Each supported network ships a curated set of public RPCs: `chain.rpcUrl` is the primary and `chain.rpcUrls` is an ordered list of backups. A transient failure (rate-limit/timeout/network) on one endpoint silently fails over to the next; on-chain reverts and other application errors do **not** trigger failover. A `503`/`504` from a publish/register/identity/PCA route means **every** configured endpoint was exhausted — retry, or add a faster/private endpoint. Configure backups via `chain.rpcUrls` in `~/.dkg/config.json` or the **"Backup RPC URLs"** prompt in `dkg init`. Precedence: an operator-set `chain.rpcUrls` **replaces** the network defaults; setting only a private `chain.rpcUrl` keeps the public defaults as failover (set `"rpcUrls": []` to opt out). A wrong-chain backup fails the node loudly at startup (provider network-mismatch), never silently. Inspect failover activity at `GET /api/status` → `chain.rpcFailovers` / `chain.rpcExhaustions` / `chain.rpcFailoversByClass`, and per-endpoint reachability at `GET /api/chain/rpc-health`.
 
 The full design rationale lives in [OT-RFC-41](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md).
 
@@ -119,6 +120,31 @@ curl -X POST $BASE_URL/api/knowledge-assets/notes/vm/publish -H "Authorization: 
 curl -X POST $BASE_URL/api/query -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sparql":"SELECT * WHERE { ?s ?p ?o } LIMIT 10","contextGraphId":"my-project","view":"working-memory","agentAddress":"YOUR_PEER_ID"}'
 ```
 
+**CLI equivalents for shell-driving agents:**
+
+```bash
+dkg context-graph create my-project
+
+# RDF payload source: <name> is the Knowledge Asset name; --input-file is the local source.
+dkg ka create notes -c my-project --input-file ./notes.ttl --share
+
+# Document extraction source: import into WM, then finalize/share explicitly.
+dkg ka import-file notes-doc -c my-project --input-file ./notes.md
+dkg ka finalize notes-doc -c my-project
+dkg ka share notes-doc -c my-project
+
+# VM publish is always explicit and operates on a named KA already shared to SWM.
+dkg ka publish notes-doc -c my-project
+dkg ka publish-async notes-doc -c my-project
+
+# Recovery/edit loop.
+dkg ka pull-from notes-doc -c my-project --layer swm --on-conflict replace
+dkg ka query notes-doc -c my-project
+dkg ka history notes-doc -c my-project
+```
+
+`dkg ka create ... --share` is the one-shot create/write/finalize/share convenience and never VM-publishes. `-f` is a short alias for `--input-file`; prefer the long flag in docs and scripts so the local payload source is not confused with the positional KA `<name>`.
+
 ## 4. Authentication
 
 **Token usage:** Include `Authorization: Bearer $TOKEN` on all requests.
@@ -131,7 +157,7 @@ requests without an explicit caller fall back to the node's default agent.
 
 ### Token discovery
 
-**Co-located agents (running on the same machine as the daemon).** The daemon writes its admin token to `~/.dkg/auth.token` on first start. If your adapter provides a DKG client (e.g. the OpenClaw adapter's `DkgDaemonClient`), **prefer the adapter's high-level tools** (`createContextGraph`, `createAssertion`, `promoteAssertion`, etc.) — they load this file automatically and you never need to handle `$TOKEN` yourself. Only fall back to raw HTTP if no adapter tool covers what you need, in which case:
+**Co-located agents (running on the same machine as the daemon).** The daemon writes its admin token to `~/.dkg/auth.token` on first start. If your adapter provides a DKG client (for example MCP, Hermes, or OpenClaw), **prefer the adapter's high-level lifecycle tools** (`dkg_context_graph_create`, `dkg_knowledge_asset_create`, `dkg_knowledge_asset_share`, `dkg_knowledge_asset_publish`, etc.) — they load this file automatically and you never need to handle `$TOKEN` yourself. Only fall back to raw HTTP if no adapter tool covers what you need, in which case:
 
 ```bash
 TOKEN=$(cat ~/.dkg/auth.token)
@@ -166,6 +192,8 @@ On an **OpenClaw runtime** or **Hermes provider runtime**, prefer the `dkg_*` to
 
 Drop to HTTP when the operation isn't in the table — participant self-service join/sign routes (§6), conditional writes (§5), publisher jobs (§8), file retrieval (§7), endorse / verify / update (§5), SSE events (§8). Each tool's full schema lives in `DkgNodePlugin.ts`; this table exists to help you find the right name, not re-document it.
 
+> **Parameter spelling differs by runtime.** The `dkg_*` examples in this doc use the MCP/HTTP **camelCase** spelling (`alsoShareSwm`, `subGraphName`, `contextGraphId`). The **OpenClaw** and **Hermes** tools expose the *same fields* in **snake_case** (`also_share_swm`, `sub_graph_name`, `context_graph_id`). Match the spelling to your runtime's own tool schema — e.g. on OpenClaw/Hermes the one-shot is `dkg_knowledge_asset_create({ quads, also_share_swm: true })`. A wrong-case key is silently ignored (the asset would seal but not share).
+
 | Tool | Wraps | Short description |
 |---|---|---|
 | `dkg_status` | `GET /api/status` | Node health and subscribed CGs |
@@ -180,7 +208,7 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_join_request_list` | `GET /api/context-graph/{id}/join-requests` | List pending join requests for a context graph |
 | `dkg_join_request_approve` | `POST /api/context-graph/{id}/approve-join` | Approve a pending join request by agent address |
 | `dkg_join_request_reject` | `POST /api/context-graph/{id}/reject-join` | Reject a pending join request by agent address |
-| `dkg_knowledge_asset_create` | `POST /api/knowledge-assets` | Start a WM assertion (knowledge asset). Non-empty `quads` here write+seal in one call and **stop at a sealed WM draft**; pass `alsoShareSwm:true` to also share to SWM (the combined client `createKnowledgeAsset` defaults that on when sealing). Sealing needs no on-chain registration |
+| `dkg_knowledge_asset_create` | `POST /api/knowledge-assets` | Start a WM assertion (knowledge asset). **One-shot:** pass non-empty `quads` to write+seal in one call (**stops at a sealed WM draft**); add **`alsoShareSwm:true`** to also share to SWM in the same call — `dkg_knowledge_asset_create({ quads, alsoShareSwm:true })` is the recommended create→write→seal→share shortcut that lands a publish-ready KA in SWM (then `dkg_knowledge_asset_publish` to mint). `alsoShareSwm` defaults **false** (sharing — private→networked — is an explicit step); it never mints to VM. Sealing needs no on-chain registration |
 | `dkg_knowledge_asset_write` | `POST /api/knowledge-assets/{name}/wm/write` | Append triples (`{subject,predicate,object}` — no per-quad `graph`) to a WM assertion |
 | `dkg_knowledge_asset_finalize` | `POST /api/knowledge-assets/{name}/wm/finalize` | **Seal** the WM draft (the "git commit" — EIP-712 AuthorAttestation over the whole assertion). Returns `merkleRoot`, `authorAddress`, `schemeVersion`, `chainId`, `kav10Address`, `eip712Digest` |
 | `dkg_knowledge_asset_share` | `POST /api/knowledge-assets/{name}/swm/share` | Share a WM assertion's triples to SWM (formerly "promote"). A full share (`entities: "all"` / omitted) **seals by default** (publish-ready); `skipSeal:true` opts out; a subset share is SWM-only — see §5 |
@@ -193,9 +221,6 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_knowledge_asset_import_artifact_read_markdown` | `POST /api/knowledge-assets/import-artifact/read-markdown` | Safely read Markdown for a completed imported attachment by content-addressed hash |
 | `dkg_knowledge_asset_import_artifact_resolve` | `POST /api/knowledge-assets/import-artifact/resolve` | Optional metadata re-check for completed imported attachments |
 | `dkg_knowledge_asset_semantic_enrichment_write` | `POST /api/knowledge-assets/semantic-enrichment/write` | Append model-derived semantic triples and provenance to the imported assertion |
-| `dkg_publish` | `POST /api/knowledge-assets/publish` | **Direct explicit-quads one-shot publish**: sends the supplied quads inline to the publish route, so core ACK collection receives the payload directly and does **not** depend on SWM pre-positioning. Multi-root-safe in one mint. Does **not** auto-register the CG → accepts `register_if_needed` + `access_policy` to register a fresh CG on-chain first (§6). For a staged/named lifecycle publish use `dkg_knowledge_asset_publish`; for pre-existing SWM data use `dkg_shared_memory_publish` |
-| `dkg_shared_memory_publish` | `POST /api/shared-memory/publish` (`{selection}`) | **SWM-bridge / CG-wide publish (legacy, retained)**: publish existing SWM → VM, no fresh quads. Uses the **`selection` fork** — **single-root-per-call** (loop one root per call with `clearAfter:false` on all but the last, else `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Auto-registers the CG on first publish (OT-RFC-38 LU-6). For the per-KA sealed path use `dkg_knowledge_asset_publish` |
-| `dkg_share` | `POST /api/shared-memory/write` | Directly write concise team-visible knowledge to SWM without staging a WM assertion. Prefer the WM assertion → promote flow for durable/canonical work. Both Hermes and OpenClaw expose the same tool schema (required `content` and `context_graph_id`, optional `sub_graph_name`), so MCP-discovered call signatures are portable. The OpenClaw implementation additionally validates content as non-whitespace, mints a unique subject per share (returned in the response), and N-Triples-quotes content; Hermes is currently looser on those points — the parallel hardening is tracked in OriginTrail/dkg#414. |
 | `dkg_sub_graph_create` | `POST /api/sub-graph/create` | Register a sub-graph inside a CG |
 | `dkg_sub_graph_list` | `GET /api/sub-graph/list` | List sub-graphs in a CG |
 | `dkg_query` | `POST /api/query` | Read-only SPARQL across assertions in a CG. Pass `view` (`working-memory` / `shared-working-memory` / `verifiable-memory`) to pick the layer — when `view` is set, `context_graph_id` is required; for WM reads, optional `agent_address` targets another agent's WM (when omitted it defaults to this node's primary agent wallet, falling back to the peer ID on nodes without a configured default agent). Omit `view` for a legacy cross-graph data-path query. |
@@ -207,20 +232,19 @@ Drop to HTTP when the operation isn't in the table — participant self-service 
 | `dkg_read_messages` | `GET /api/messages` | Read inbound messages |
 | `dkg_invoke_skill` | `POST /api/invoke-skill` | Call another agent's skill (best-effort P2P) |
 
-P2P tools fail gracefully when the peer is offline. There are **three publish tools**, but only **two underlying forks** of `/api/shared-memory/publish` — the difference is *atomic per-assertion* vs *CG-wide selection*:
-
-- **Per-KA sealed publish** — `dkg_knowledge_asset_publish` (`/vm/publish`). Publishes one sealed assertion by name; takes **no selector** (the seal commits the whole assertion) and is multi-root-safe. This is the canonical step 5 of the `create → write → finalize → share → publish` lifecycle and the one that returns the **UAL**.
-- **One-shot atomic publish** — `dkg_publish` ("I have loose quads, publish now"). Two HTTP calls: `POST /api/knowledge-assets` (creates a fresh auto-named assertion with the quads) then `POST /api/shared-memory/publish` with `{assertionName}` — the **atomic finalized-assertion fork**, scoped to that one assertion's seal. **Multi-root-safe**: no single-root loop, no `409 MULTI_ROOT`. It does **not** auto-register the CG, so on a fresh never-registered CG pass `register_if_needed: true`.
-- **CG-wide SWM-bridge publish (legacy, retained)** — `dkg_shared_memory_publish` (publish existing SWM, no fresh quads). Uses the **`selection` fork** of `/api/shared-memory/publish` and is **single-root-per-call**: for multiple root entities, loop one root per call with `clearAfter: false` on all but the last (else the daemon returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`). Auto-registers the CG on first publish (OT-RFC-38 LU-6). Use it to flush existing SWM.
-
-`dkg_share` is a direct SWM convenience helper for quick team-visible notes, not a replacement for the knowledge-asset lifecycle.
+P2P tools fail gracefully when the peer is offline. **Publishing to Verifiable Memory has exactly one
+agent tool:** `dkg_knowledge_asset_publish` (`/vm/publish`) — it publishes one sealed assertion by name, takes
+**no selector** (the seal commits the whole assertion), is multi-root-safe, auto-registers the CG on first
+publish, and returns the **UAL**. It is step 5 of the canonical `create → write → finalize → share → publish`
+lifecycle (`finalize` = seal; a full `share` seals by default, so the explicit finalize is optional). To put
+knowledge into Shared Working Memory, author it as a **named knowledge asset** (`dkg_knowledge_asset_create`
+→ `dkg_knowledge_asset_share`); there is no separate loose-write or direct-bridge publish tool.
 
 **Bulk imports (>5,000 quads in one logical operation):** the per-call `dkg_knowledge_asset_*` loop IS the chunked-write API; there is no `/api/import/bulk`. Keep `/api/knowledge-assets/<name>/wm/write` payloads under the 10 MB body cap, keep `/api/knowledge-assets/<name>/swm/share` payloads under the 256 KB body cap, and remember that promotion can still fail at the 10 MB gossip-message cap even when the HTTP body is small. For multi-part imports, write a resumable manifest in the `meta` sub-graph (`scripts/lib/manifest.mjs` is the canonical helper), promote import roots in size-aware batches, and halve/retry on 413 rather than restarting the whole import. The expanded contract — chunking budgets, manifest pattern, HTTP 413 recipes, async-promote queue (`/api/knowledge-assets/<name>/swm/share-async`) — is served at `GET /.well-known/skill-importer.md` (the daemon's second canonical skill endpoint, same auth-public + ETag-cacheable shape as `/.well-known/skill.md`). Source checkouts also have the same file at `packages/cli/skills/dkg-importer/SKILL.md`.
 
 ### HTTP-only operations (no tool wrapper)
 
 - **Participant self-service join/sign flow** — see §6.
-- **Conditional writes** (`POST /api/shared-memory/conditional-write`) — see §5 SWM.
 - **Async publisher job queue** (`/api/publisher/*`) — see §8.
 - **Raw query catalog writes** (`POST /api/profile/query-catalog/write`) when not using `dkg_query_catalog_save` — see §5 "Saved Query Catalog".
 - **Raw file retrieval** (`GET /api/file/{fileHash}`) — see §7.
@@ -265,7 +289,7 @@ before promoting it to SWM (team) or through to VM (chain-anchored).
 
 ### Shared Working Memory (SWM) — Team-visible
 
-SWM is for knowledge you've promoted from WM and want peers to see. Data arrives here via `POST /api/knowledge-assets/{name}/swm/share` (from WM) or via direct SWM writes (escape hatch for team-visible data that doesn't need a WM staging step).
+SWM is for knowledge you've shared from WM and want peers to see. Agents put data here by authoring a **named knowledge asset** and sharing it: `POST /api/knowledge-assets/{name}/swm/share` (after `create` → `write`). There is no agent loose-write path — everything in SWM is a named, sealed, publishable knowledge asset.
 
 > **Visibility.** SWM gossips to peers in the context graph's allowlist.
 > For a **curated** CG (the default — see §6), only listed agents/peers
@@ -273,43 +297,30 @@ SWM is for knowledge you've promoted from WM and want peers to see. Data arrives
 > creation), every peer subscribed to the CG receives the gossip.
 > Working Memory is per-agent regardless of CG visibility.
 
-- `POST /api/shared-memory/write` — write triples directly to SWM (gossip-replicated). Body: `{ contextGraphId, quads, subGraphName? }`. Use the WM → promote path for most workflows; direct SWM writes are for bulk team data that skips the private draft stage.
-- `POST /api/shared-memory/conditional-write` — compare-and-swap write. Body: `{ contextGraphId, quads, conditions: [...], subGraphName? }`. Each condition is `{ subject: IRI, predicate: IRI, expectedValue: string | null }`; `null` means "must not exist", a string must match the current object after N-Triples serialization. Any mismatch throws `StaleWriteError` and leaves SWM unchanged. `conditions` must be non-empty — use `/api/shared-memory/write` for unconditional writes.
-- `POST /api/knowledge-assets/publish` — direct explicit-quads one-shot publish. Body: `{ contextGraphId, quads, privateQuads?, accessPolicy?, allowedPeers?, subGraphName? }`. Use this when the request already contains the exact quads to publish; the ACK path carries the inline payload and does not rely on SWM.
-- `POST /api/shared-memory/publish` — publish SWM triples → Verifiable Memory (costs TRAC). This is the explicit SWM-bridge / CG-wide path used by `dkg_shared_memory_publish`; it publishes data that must already be available in SWM on the target cores. Explicit root selections are single-root-per-call (resolving >1 root returns `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC` — loop one root per call with `clearAfter: false` on all but the last). For the per-KA sealed lifecycle path that takes no selector and returns a UAL, use `/api/knowledge-assets/{name}/vm/publish` (see VM below).
+- `POST /api/knowledge-assets/{name}/swm/share` — the canonical way an agent puts a named assertion into SWM (after `create` → `write`); a full share seals by default and is publish-ready. **This is the agent path** — see §5 WM and the lifecycle in §3.
+- `POST /api/knowledge-assets/{name}/swm/share-async` — enqueue the same WM→SWM share for the in-daemon worker. Use this for bulk importers that should not block on the synchronous share round.
+
+> **No loose SWM writes.** Agent-facing producers must author a named knowledge
+> asset and move it through WM→SWM→VM. The legacy loose-write SWM routes were
+> retired so shared/published data always has a lifecycle name, seal, and audit
+> record.
 
 ### Verifiable Memory (VM) — Permanent, on-chain
 
 > **Lifecycle VM publishing goes through SWM.** Named WM assertions are finalized,
-> shared to SWM, then published from there. One-shot requests that already carry
-> explicit quads use `POST /api/knowledge-assets/publish` so the publish ACK path
-> carries the payload directly.
+> shared to SWM, then published from there. The public daemon API no longer has
+> an unnamed direct explicit-quads publish route.
 
-**Two publish surfaces.** rc.17 has two ways to publish SWM → VM:
-
-- **Per-KA sealed publish (canonical)** — `POST /api/knowledge-assets/{name}/vm/publish`.
-  Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
-  select the assertion and encode the author, so this endpoint takes **no selector** —
-  `assertionName`, author overrides, and any `selection` other than `"all"` are
-  rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
-  Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
-  **Preconditions:** the assertion must be finalized **and** present in SWM (else
-  `409 VM_PUBLISH_PRECONDITION`), **and the context graph must be registered on-chain**
-  (else the daemon throws *"Context graph … is not registered on-chain. Run 'dkg
-  context-graph register …' first"*). A fresh project created via
-  `dkg_context_graph_create` is **local-only** (no chain) until its first registration —
-  see "Registering the CG for VM" below. Returns the **publish response body** below.
-- **One-shot atomic publish** — `dkg_publish`. Creates a fresh auto-named assertion from
-  loose quads (`POST /api/knowledge-assets`) then publishes it via the **atomic
-  finalized-assertion fork** of `/api/shared-memory/publish` (`{assertionName}`) — scoped
-  to that one assertion's seal, **multi-root-safe** (no `selection`, no single-root loop,
-  no `409 MULTI_ROOT`). Like `vm/publish` it does **not** auto-register the CG → pass
-  `register_if_needed: true` on a fresh CG. Use it for "I have loose quads, publish now".
-- **CG-wide SWM-bridge publish (legacy, retained)** — `dkg_shared_memory_publish` →
-  `POST /api/shared-memory/publish` with a **`selection`** selector. **Single-root-per-call**
-  (§5 SWM): loop one root per call (else `409 MULTI_ROOT_PUBLISH_NOT_ATOMIC`); auto-registers
-  the CG on first publish (LU-6). Use it to flush existing SWM that isn't a named lifecycle
-  assertion.
+**Canonical publish (the agent path):** `POST /api/knowledge-assets/{name}/vm/publish`.
+Mints (or updates) the **sealed** assertion on chain. The URL `:name` + the seal
+select the assertion and encode the author, so this endpoint takes **no selector** —
+`assertionName`, author overrides, and any `selection` other than `"all"` are
+rejected `400`. It is multi-root-safe (the seal commits the whole assertion).
+Body: `{ "contextGraphId": "...", "subGraphName"?: "...", "options"?: { "publishEpochs"?: N, "publisherNodeIdentityIdOverride"?: "N" } }`.
+**Preconditions:** the assertion must be finalized **and** present in SWM (else
+`409 VM_PUBLISH_PRECONDITION`), and the context graph must be registered on-chain — which
+`vm/publish` does **automatically on first publish** (no flag needed; costs gas/TRAC). Returns the
+**publish response body** below.
 
 **Publish response body (`vm/publish`).** A successful publish returns:
 
@@ -347,15 +358,7 @@ need to register it yourself first. Three things to know:
   **auto-registers** an unregistered CG on first publish (register-then-publish), so the whole
   create → write → seal → share → publish flow works on a never-registered CG with **no
   explicit register step and no flag** (the registration spends gas/TRAC; it is **not**
-  gas-free). The legacy CG-wide `POST /api/shared-memory/publish` auto-registers the same way.
-- **`register_if_needed` on the publish tools (to choose the policy):** all three publish tools —
-  `dkg_publish`, `dkg_knowledge_asset_publish`, and `dkg_shared_memory_publish` — accept
-  `register_if_needed: true` (`registerIfNeeded` on the MCP runtime) plus an optional
-  `access_policy` (`0` open / `1` private, used only when registering). For the auto-registering
-  routes (`vm/publish` / `shared-memory/publish`) it does **not** gate whether registration
-  happens — they auto-register regardless; set it only to run an **explicit** registration first
-  so you can choose its `access_policy`/`publishPolicy` (the implicit auto-register otherwise
-  defaults the policy). Default is `false`.
+  gas-free).
 - **Explicit register (optional):** `POST /api/context-graph/register` `{ id, accessPolicy?, publishPolicy? }` (CLI: `dkg context-graph register <id>`) — only needed to **pre-set** a custom `accessPolicy`/`publishPolicy` before publishing.
 
 **Seal on share (default — #1116).** A full `swm/share` (`entities: "all"` / omitted)
@@ -376,7 +379,6 @@ Subset shares are SWM-only and never sealed (`publishReady: false` by design). T
 asset that is unsealed-in-SWM, `wm/finalize` `layer:"swm"` seals it in place — then publish.
 
 - `POST /api/knowledge-assets/{name}/vm/publish` — per-KA sealed publish → VM (costs TRAC; returns the UAL). Canonical.
-- `POST /api/shared-memory/publish` — SWM-bridge / CG-wide publish → VM (costs TRAC; legacy, retained).
 - `POST /api/update` — update an existing Knowledge Asset on-chain. Body: `{ kaId, contextGraphId, quads, privateQuads?, precomputedUpdateAttestation? }` — the new data is passed **inline as `quads`** (it is NOT read from SWM). For the name-based edit loop, prefer `wm/pull-from` → edit → `wm/finalize` → `swm/share` → `vm/publish` instead.
 - `POST /api/endorse` — endorse a Knowledge Asset ("I vouch for this")
 - `POST /api/verify` — propose or approve M-of-N consensus verification
@@ -525,7 +527,7 @@ Respect these when producing writes — they're enforced at the node and produce
 
 - **Reorganizing assertions.** There is no rename-assertion or move-between-sub-graphs endpoint. To reorganize, create a new assertion (with `subGraphName?` for a different partition), copy the triples over via `/wm/write`, then `/wm/discard` the original. A new assertion starts a fresh lifecycle record in `_meta`.
 - **Reserved subject IRIs.** Subjects matching `urn:dkg:file:*` or `urn:dkg:extraction:*` are reserved for internal file/extraction metadata and are rejected at write time. Use a different subject IRI.
-- **SWM gossip size cap (10 MB).** A single promote or SWM write must fit in one 10 MB gossip message. Split larger assertions by root entity before promoting — use the `entities` parameter on `/swm/share` to promote subsets.
+- **SWM gossip size cap (10 MB).** A single share (`/swm/share`) must fit in one 10 MB gossip message. Split larger assertions by root entity before sharing — use the `entities` parameter on `/swm/share` to share subsets.
 - **SWM entity ownership (first-writer-wins).** The first peer to write a root entity in SWM becomes its owner; other peers' promotes or writes against that same root entity are rejected with an ownership error. Partition work by agent-owned root entities to avoid conflicts.
 - **Blank nodes are auto-skolemized.** Any `_:b0`-style blank nodes you submit are deterministically rewritten to UUID-backed URIs before storage, so IDs stay stable across sync and on-chain anchoring. Prefer explicit IRIs in production data.
 
@@ -772,14 +774,27 @@ dkg agent publish-profile   # retry after a partial-success rotate/revoke
 
 ### Async publishing (job queue)
 
-Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use synchronous `/api/shared-memory/publish` instead.
+Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead.
+
+CLI equivalents:
+
+```bash
+dkg ka publish-async <name> -c <context-graph-id>
+dkg publisher publish-async <context-graph-id> <name>   # operational alias
+dkg publisher publish-async <context-graph-id> <name> --publisher-node-identity-id 0
+dkg publisher jobs
+dkg publisher job <job-id>
+dkg publisher stats
+```
+
+Async publisher wallets need native gas plus PCA agent registration or TRAC for direct spend. They do not need on-chain identities/profiles to claim VM publish jobs. Identity `0` is valid no-attribution mode; a non-zero identity is optional publisher-node attribution only. Separate publisher wallets are not automatically attached to the node's Core identity; use `POST /api/operational-wallets` only when attribution to that node identity is desired. See `docs/use-dkg/async-publisher-wallets.md`.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/publisher/enqueue` | Enqueue a publish job. Body: `{ contextGraphId, selection?, ... }` (same shape as `/shared-memory/publish`). Returns `{ jobId }`. |
+| `POST` | `/api/knowledge-assets/{name}/vm/publish-async` | Enqueue VM publish for a named KA already shared to SWM. Body: `{ contextGraphId, options? }`; `options.publisherNodeIdentityIdOverride: "0"` forces no-attribution. Returns `202 { jobId, status: "accepted" }`. |
 | `GET`  | `/api/publisher/jobs?status=...` | List jobs, optionally filtered by status. |
 | `GET`  | `/api/publisher/job?id=...` | Fetch one job's status. |
-| `GET`  | `/api/publisher/job-payload?id=...` | Fetch a job's payload. |
+| `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs. Named lifecycle publish jobs return no raw payload. |
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/retry` | Retry a failed job. Body: `{ jobId }`. |
@@ -793,11 +808,21 @@ The worker runs in-daemon and is **on by default**. Disable per node with `confi
 
 | Method | Route | Purpose |
 |---|---|---|
-| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `202 { jobId, state: "queued", enqueuedAt }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
+| `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Read one job (`state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`). |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (subdivided an over-large entity set, restarted an upstream, etc.). |
+
+CLI equivalents:
+
+```bash
+dkg ka share-async <name> -c <context-graph-id>
+dkg ka share-jobs --context-graph-id <context-graph-id> --state queued,failed_retrying --limit 20
+dkg ka share-job <job-id>
+dkg ka cancel-share-job <job-id>
+dkg ka recover-share-job <job-id>
+```
 
 Failure classifications you'll see in `attempt.lastError.classification`:
 
@@ -851,7 +876,6 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 | 409 `UNSEALED_SHARE_BLOCKED` | a default (sealing) full `swm/share` could not seal — a rare capability gap (no local key / non-V10 adapter); **Working Memory is preserved** | Resolve the signing capability, or pass `skipSeal:true` to share unsealed (then seal later via `wm/finalize` `layer:"swm"`) |
 | 409 `VM_PUBLISH_PRECONDITION` | `vm/publish` on an assertion that is not finalized (e.g. shared with `skipSeal`), or has no quads in SWM | Seal it — `wm/finalize` (`layer:"swm"` if the content is already in SWM), then publish; or `swm/share` first if it isn't in SWM |
 | 409 `WM_DRAFT_CONFLICT` | `wm/pull-from` onto an existing dirty WM draft | Pass `onConflict: "replace"`, or `wm/discard` the draft first |
-| 409 `MULTI_ROOT_PUBLISH_NOT_ATOMIC` | `/api/shared-memory/publish` resolved >1 root entity | Loop one root per call (`clearAfter: false` on all but the last); or use per-KA `vm/publish` |
 | 409 | Conflict — name collision or concurrent modification | Retry with a different name |
 | 429 | Rate limited | Wait and retry with backoff |
 | 502 | Chain/upstream error — incl. `vm/publish` "did not confirm" | Retry — transient blockchain issue (do not blind-retry a confirmed mint) |
@@ -871,10 +895,10 @@ This entire surface was empirically driven by [PR #720](https://github.com/Origi
 > Shortcut: a full `swm/share` **seals by default**, so steps 4–5 collapse into a single
 > `swm/share` for the common case (see §5 VM). The explicit finalize in step 4 is still
 > available when you want custom attestation options. You can also pass `quads` directly to
-> `POST /api/knowledge-assets` (step 2) to write+seal in one call (it stops at a sealed WM
-> draft — add `alsoShareSwm:true` to also share, and `alsoPublishVm` to run the whole
-> lifecycle atomically) — and since `vm/publish` auto-registers, this now works on a
-> never-registered CG too.
+> `dkg_knowledge_asset_create` (step 2) to write+seal in one call (stops at a sealed WM
+> draft) — add **`alsoShareSwm:true`** to also share to SWM in the same call, landing a
+> publish-ready KA (`dkg_knowledge_asset_create({ quads, alsoShareSwm:true })`). It stops at
+> SWM; mint with `dkg_knowledge_asset_publish` (which auto-registers a never-registered CG).
 
 **Private project for me alone (the default):**
 

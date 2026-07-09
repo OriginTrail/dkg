@@ -537,11 +537,11 @@ function SharedMemoryTab() {
     setResult('');
     const graph = contextGraphId.startsWith('did:') ? contextGraphId : `did:dkg:context-graph:${contextGraphId}`;
     const quads = [{ subject, predicate, object: fmtObj(object), graph }];
-    const opId = addBroadcast('workspace', state.selectedNode, 'shared memory write');
+    const opId = addBroadcast('workspace', state.selectedNode, 'KA share');
     try {
-      const res = await api.share(state.selectedNode, contextGraphId, quads);
-      completeOperation(opId, 'success', res.shareOperationId);
-      setResult(`Written to shared memory.\nOperation: ${res.shareOperationId}`);
+      const res = await api.createSharedKnowledgeAsset(state.selectedNode, contextGraphId, quads);
+      completeOperation(opId, 'success', res.name);
+      setResult(`Created and shared knowledge asset.\nName: ${res.name}`);
     } catch (e: any) {
       completeOperation(opId, 'error', e.message);
       setResult(`Error: ${e.message}`);
@@ -566,29 +566,10 @@ function SharedMemoryTab() {
     }
   }, [contextGraphId, state.selectedNode]);
 
-  const doPublish = useCallback(async () => {
-    setBusy(true);
-    setResult('');
-    const opId = addBroadcast('publish', state.selectedNode, 'publish from shared memory');
-    try {
-      const res = await api.publishFromSharedMemory(state.selectedNode, contextGraphId, 'all', true);
-      completeOperation(opId, 'success', `KC: ${res.kaId}`);
-      setResult(
-        `Published to chain.\nKC: ${res.kaId}\nStatus: ${res.status}\nKAs: ${res.kas?.length ?? 0}` +
-        (res.txHash ? `\nTx: ${res.txHash}` : ''),
-      );
-    } catch (e: any) {
-      completeOperation(opId, 'error', e.message);
-      setResult(`Error: ${e.message}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [contextGraphId, state.selectedNode, addBroadcast, completeOperation]);
-
   return (
     <div className="tab-form">
       <div className="setup-hint">
-        Write triples to shared memory (free, no gas). When ready, publish them to the chain with full finality.
+        Create, seal, and share a named knowledge asset into shared working memory.
       </div>
 
       <div className="form-group">
@@ -627,16 +608,6 @@ function SharedMemoryTab() {
         Query Shared Memory
       </button>
       {sharedMemoryContents && <pre className="result-box code">{sharedMemoryContents}</pre>}
-
-      <div className="setup-divider" />
-
-      <div className="setup-section-title">Publish to Chain</div>
-      <p className="setup-hint">
-        Publish all shared memory content with full on-chain finality (costs TRAC + gas). Clears shared memory after.
-      </p>
-      <button className="btn btn-primary btn-wide" disabled={busy} onClick={doPublish}>
-        {busy ? 'Publishing...' : 'Publish All to Chain'}
-      </button>
 
       {result && <pre className="result-box code">{result}</pre>}
     </div>

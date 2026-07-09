@@ -150,6 +150,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       subGraphName: SUB_GRAPH_NAME,
       stagingQuads,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(result.acks).toHaveLength(3);
@@ -262,6 +263,7 @@ describe('V10 remap wire (PublishIntent.swmGraphId + subGraphName)', () => {
       swmGraphId: TARGET_CG_ID_STR,
       stagingQuads,
       merkleLeafCount,
+      ackMode: { kind: 'public' },
     });
 
     expect(dispatchedIntent).toBeDefined();

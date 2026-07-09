@@ -188,9 +188,8 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
+  oversizedRdfLiteralResponseBody,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -567,6 +566,9 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           error: "InvalidContent",
           message: err instanceof Error ? err.message : String(err),
         });
+      }
+      if (code === "OVERSIZED_RDF_LITERAL") {
+        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
       }
       return jsonResponse(res, 503, {
         error: "EnqueueFailed",

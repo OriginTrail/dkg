@@ -191,8 +191,8 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
     mapping(uint256 => uint96) public topUpBalance;
 
     /// @notice Per-account agent enumeration. Kept as an array so the
-    ///         transfer hook on the NFT wrapper can iterate and clear
-    ///         every registration in one call. The agent-side reverse
+    ///         owner-gated `PublishingConviction.clearAgents` can iterate and
+    ///         clear every registration in one call. The agent-side reverse
     ///         map is `agentToAccountId`.
     mapping(uint256 => address[]) internal _registeredAgents;
 
@@ -410,10 +410,11 @@ contract PublishingConvictionStorage is INamed, IVersioned, HubDependent, IIniti
     }
 
     /// @notice Bulk-clear every agent registration under `accountId`.
-    ///         Used by the NFT wrapper's transfer hook so the new owner
-    ///         starts with a clean agent slate (no inherited authorities
-    ///         from the prior owner). Idempotent on accounts with no
-    ///         registered agents.
+    ///         Invoked by the owner-gated `PublishingConviction.clearAgents`
+    ///         (the explicit allow-list reset). NOTE: this is NOT called on NFT
+    ///         transfer — the agent allow-list is PRESERVED across transfer and
+    ///         travels with the PCA. Idempotent on accounts with no registered
+    ///         agents.
     function clearAgents(uint256 accountId) external onlyContracts {
         address[] storage agents = _registeredAgents[accountId];
         uint256 len = agents.length;

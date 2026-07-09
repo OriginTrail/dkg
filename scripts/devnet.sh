@@ -43,6 +43,11 @@ UI_PORT="${UI_PORT:-5173}"
 UI_NODE_ID="${UI_NODE_ID:-1}"
 UI_PIDFILE="$DEVNET_DIR/node-ui.pid"
 UI_LOGFILE="$DEVNET_DIR/node-ui.log"
+# Devnet-only Hardhat config (solc 0.8.24 + cancun; the full WHY lives in the
+# config file itself). The `hardhat node` and `hardhat deploy` commands MUST
+# stay on the same config -- a split would compile with one solc but execute on
+# another hardfork -- so the path is defined ONCE here and reused by both.
+HARDHAT_CONFIG="hardhat.devnet.config.ts"
 NUM_OP_WALLETS=3
 # Hardhat block interval (ms). Without interval mining, Hardhat only mines
 # when a tx arrives → block.number / block.timestamp freeze the moment the
@@ -62,6 +67,10 @@ NUM_OP_WALLETS=3
 HARDHAT_BLOCK_INTERVAL_MS="${HARDHAT_BLOCK_INTERVAL_MS:-1000}"
 BLAZEGRAPH_PORT=9999
 BLAZEGRAPH_CONTAINER="devnet-blazegraph"
+# Webapp context path: the 2.1.5 Docker image serves under /bigdata; a native
+# 2.1.6 JAR (the Apple-silicon workaround) serves under /blazegraph. Override with
+# DEVNET_BLAZEGRAPH_CTX to match whichever Blazegraph is actually running.
+BLAZEGRAPH_CTX="${DEVNET_BLAZEGRAPH_CTX:-bigdata}"
 OXIGRAPH_SERVER_PORT_5=7878
 OXIGRAPH_SERVER_PORT_6=7879
 OXIGRAPH_CONTAINER_5="devnet-oxigraph-5"
@@ -143,7 +152,22 @@ start_hardhat() {
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
   rm -f "$DEVNET_DIR/hardhat/deployed"
 
-  npx hardhat node --port "$HARDHAT_PORT" --no-deploy \
+  # Focused smoke check for the devnet config itself: compile with it DIRECTLY
+  # before booting anything. A typo in the config, a base-config shape drift
+  # (the config asserts its single-compiler expectation and throws), or a
+  # solc-0.8.24/cancun regression fails right here with the compiler's own
+  # message -- instead of surfacing minutes later as an opaque UI-e2e boot
+  # failure. Hardhat caches compilation, so re-runs cost ~a second.
+  log "Validating devnet Hardhat config (compile smoke check)..."
+  if ! npx hardhat compile --config "$HARDHAT_CONFIG" > "$DEVNET_DIR/hardhat/compile.log" 2>&1; then
+    log "ERROR: devnet Hardhat config failed to compile -- see $DEVNET_DIR/hardhat/compile.log"
+    tail -20 "$DEVNET_DIR/hardhat/compile.log" >&2
+    exit 1
+  fi
+
+  # --config "$HARDHAT_CONFIG" (defined up top): devnet-only solc 0.8.24 + cancun.
+  # The full rationale lives in packages/evm-module/hardhat.devnet.config.ts.
+  npx hardhat node --port "$HARDHAT_PORT" --no-deploy --config "$HARDHAT_CONFIG" \
     > "$DEVNET_DIR/hardhat/node.log" 2>&1 &
   local hh_pid=$!
   echo "$hh_pid" > "$pidfile"
@@ -201,7 +225,7 @@ deploy_contracts() {
   log "Deploying contracts to local Hardhat node..."
   cd "$REPO_ROOT/packages/evm-module"
   RPC_LOCALHOST="http://127.0.0.1:$HARDHAT_PORT" \
-    npx hardhat deploy --network localhost \
+    npx hardhat deploy --network localhost --config "$HARDHAT_CONFIG" \
     > "$DEVNET_DIR/hardhat/deploy.log" 2>&1
 
   # Extract Hub address from deployment log
@@ -262,6 +286,14 @@ deploy_contracts() {
 BLAZEGRAPH_AVAILABLE=false
 
 start_blazegraph() {
+  # Use an EXTERNAL Blazegraph already serving on the port (e.g. a native arm64 JAR
+  # started out-of-band because the amd64 Docker image only runs under glacial qemu
+  # on Apple silicon). Skips Docker entirely; namespaces are the operator's job here.
+  if curl -sf --max-time 4 "http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/status" >/dev/null 2>&1; then
+    log "Blazegraph already serving on :${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX} (external) — using it (skip Docker)"
+    BLAZEGRAPH_AVAILABLE=true
+    return 0
+  fi
   if ! docker_responsive 3; then
     log "Docker not responsive within 3s — nodes 3-4 will use Oxigraph instead of Blazegraph"
     return 0
@@ -448,10 +480,15 @@ create_node_config() {
     # host must pin DISTINCT ports or the second collides ("Address already in
     # use"). Give each node its own (7900 + node_num), clear of the Dockerized
     # external Oxigraph on 7878/7879 (nodes 5-6) and a real node's 7878.
-    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $((7900 + node_num)) } },"
+    store_block="\"store\": { \"backend\": \"oxigraph-server\", \"options\": { \"port\": $(( ${DEVNET_OXIGRAPH_BASE:-7900} + node_num )) } },"
   elif [ "$node_num" -ge 3 ] && [ "$node_num" -le 4 ]; then
-    if [ "$BLAZEGRAPH_AVAILABLE" = true ]; then
-      store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/bigdata/namespace/node${node_num}/sparql\" } },"
+    # DEVNET_BLAZEGRAPH_NS overrides the per-node namespace with a single shared one
+    # (e.g. the built-in "kb") — used when Blazegraph runs as a native arm64 JAR and
+    # offline namespace-creation is unavailable. To avoid two nodes colliding on one
+    # namespace, only node 3 goes to Blazegraph in that mode; node 4 stays oxigraph.
+    if [ "$BLAZEGRAPH_AVAILABLE" = true ] && { [ -z "${DEVNET_BLAZEGRAPH_NS:-}" ] || [ "$node_num" -eq 3 ]; }; then
+      local bz_ns="${DEVNET_BLAZEGRAPH_NS:-node${node_num}}"
+      store_block="\"store\": { \"backend\": \"blazegraph\", \"options\": { \"url\": \"http://127.0.0.1:${BLAZEGRAPH_PORT}/${BLAZEGRAPH_CTX}/namespace/${bz_ns}/sparql\" } },"
     else
       store_block="\"store\": { \"backend\": \"oxigraph\" },"
     fi
@@ -576,6 +613,164 @@ EOCONF
   log "Node $node_num config: port=$api_port, libp2p=$libp2p_port, role=$node_role, wallets=$((NUM_OP_WALLETS + 1))"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-version support (mixed-version devnet).
+#
+# By default every node launches from the freshly-built repo ("current"). To run
+# a MIXED-VERSION cluster — e.g. edges lagging the cores during a rollout — set
+# DEVNET_VERSION_LAYOUT to a comma-separated list of SELECTOR:REF entries:
+#
+#   SELECTOR : all | cores | edges | <N> | <A-B>
+#   REF      : current | prev | <git-ref, e.g. v10.0.3>
+#
+# Later entries win, so "edges one release behind the cores" is:
+#
+#   DEVNET_VERSION_LAYOUT="all:current,edges:prev"
+#
+# N-version ready — any number of refs can coexist in one cluster:
+#
+#   DEVNET_VERSION_LAYOUT="1-2:current,3-4:v10.0.3,5-6:v10.0.2"
+#
+# "prev" resolves to DEVNET_PREV_VERSION if set, else the latest release tag —
+# i.e. the version immediately preceding the code under test on main. Non-current
+# refs are checked out as git worktrees under DEVNET_VERSIONS_DIR and built once
+# (cached across runs; DEVNET_VERSION_REBUILD=1 forces a rebuild).
+# ─────────────────────────────────────────────────────────────────────────────
+DEVNET_VERSION_LAYOUT="${DEVNET_VERSION_LAYOUT:-}"
+DEVNET_VERSIONS_DIR="${DEVNET_VERSIONS_DIR:-$REPO_ROOT/.devnet-versions}"
+
+# Latest release tag (vMAJOR.MINOR.PATCH) STRICTLY BELOW the current workspace
+# version, or DEVNET_PREV_VERSION if set. 'prev' must never resolve to the
+# CURRENT version: right after a release the newest tag equals the workspace
+# version (v10.0.3 tag while package.json says 10.0.3), and a prev==current
+# layout silently builds a single-version devnet whose mixed-version suite
+# self-skips — a falsely green lane. Echoes nothing when no older tag exists
+# (callers guard on empty and point at DEVNET_PREV_VERSION).
+resolve_prev_version() {
+  if [ -n "${DEVNET_PREV_VERSION:-}" ]; then
+    echo "$DEVNET_PREV_VERSION"
+    return 0
+  fi
+  local current tag bare
+  current="$(node -p "require('$REPO_ROOT/package.json').version" 2>/dev/null || true)"
+  for tag in $(git -C "$REPO_ROOT" tag --sort=-v:refname 2>/dev/null | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' || true); do
+    if [ -z "$current" ]; then
+      # Workspace version unreadable — degrade to the newest tag (legacy behavior).
+      echo "$tag"
+      return 0
+    fi
+    bare="${tag#v}"
+    if [ "$bare" = "$current" ]; then continue; fi
+    if [ "$(printf '%s\n%s\n' "$bare" "$current" | sort -V | head -1)" = "$bare" ]; then
+      echo "$tag" # newest-first scan → first tag strictly below current
+      return 0
+    fi
+  done
+  echo "[devnet] resolve_prev_version: no release tag strictly below current version ${current:-unknown}; set DEVNET_PREV_VERSION explicitly" >&2
+  return 0
+}
+
+# Map a version REF to its cli.js entry point. current/empty -> the repo build.
+version_cli_entry() {
+  local ref="$1"
+  if [ -z "$ref" ] || [ "$ref" = "current" ]; then
+    echo "$REPO_ROOT/packages/cli/dist/cli.js"
+    return 0
+  fi
+  if [ "$ref" = "prev" ]; then
+    ref="$(resolve_prev_version)"
+  fi
+  echo "$DEVNET_VERSIONS_DIR/$ref/packages/cli/dist/cli.js"
+}
+
+# A node's authoritative role from its written config (default edge).
+node_role_of() {
+  local node_num="$1"
+  node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).nodeRole||'edge')}catch(e){process.stdout.write('edge')}" \
+    "$DEVNET_DIR/node${node_num}/config.json" 2>/dev/null || printf edge
+}
+
+# Resolve the version REF node <num> (role <role>) should run, per the layout.
+# Later matching entries override earlier ones.
+node_version_ref() {
+  local node_num="$1" role="$2" ref="current"
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local sel="${entry%%:*}" r="${entry#*:}"
+    case "$sel" in
+      all)   ref="$r" ;;
+      cores) if [ "$role" = "core" ]; then ref="$r"; fi ;;
+      edges) if [ "$role" = "edge" ]; then ref="$r"; fi ;;
+      *-*)   local lo="${sel%-*}" hi="${sel#*-}"
+             if [ "$node_num" -ge "$lo" ] 2>/dev/null && [ "$node_num" -le "$hi" ] 2>/dev/null; then
+               ref="$r"
+             fi ;;
+      *)     if [ "$node_num" = "$sel" ]; then ref="$r"; fi ;;
+    esac
+  done
+  IFS="$oldifs"
+  echo "$ref"
+}
+
+# The cli.js a given node should launch from.
+node_cli_entry() {
+  local node_num="$1"
+  local role
+  role="$(node_role_of "$node_num")"
+  version_cli_entry "$(node_version_ref "$node_num" "$role")"
+}
+
+# Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
+prepare_version() {
+  local ref="$1"
+  if [ "$ref" = "prev" ]; then ref="$(resolve_prev_version)"; fi
+  if [ -z "$ref" ]; then
+    echo "[devnet] prepare_version: no ref resolved (set DEVNET_PREV_VERSION, or ensure release tags exist)" >&2
+    return 1
+  fi
+  local dest="$DEVNET_VERSIONS_DIR/$ref"
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
+    log "Version '$ref' already prepared at $dest"
+    return 0
+  fi
+  mkdir -p "$DEVNET_VERSIONS_DIR"
+  if [ ! -e "$dest/package.json" ]; then
+    log "Checking out version '$ref' as a worktree at $dest ..."
+    git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
+  fi
+  log "Building version '$ref' (runs once, then cached) ..."
+  ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  log "Version '$ref' prepared at $dest"
+}
+
+# Build every distinct non-current ref referenced by the layout (idempotent).
+prepare_layout_versions() {
+  if [ -z "$DEVNET_VERSION_LAYOUT" ]; then return 0; fi
+  local oldifs="$IFS"
+  IFS=','
+  local entry
+  local built=""
+  for entry in $DEVNET_VERSION_LAYOUT; do
+    if [ -z "$entry" ]; then continue; fi
+    local r="${entry#*:}"
+    if [ "$r" = "current" ] || [ -z "$r" ]; then continue; fi
+    if [ "$r" = "prev" ]; then r="$(resolve_prev_version)"; fi
+    case " $built " in *" $r "*) continue ;; esac
+    built="$built $r"
+    IFS="$oldifs"
+    prepare_version "$r"
+    IFS=','
+  done
+  IFS="$oldifs"
+}
+
+cmd_prepare_version() {
+  prepare_version "${2:-prev}"
+}
+
 start_node() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -635,9 +830,21 @@ start_node() {
   # RANDOM operational keys and the staking step (cmd_start) re-reads
   # wallets[0].privateKey directly, so the daemon must NOT migrate it to an
   # encrypted keystore (GH #11). Production daemons omit this and auto-migrate.
+  # Redirect console output to console.log, NOT daemon.log: the daemon already
+  # tees its full log stream into $DKG_HOME/daemon.log in-process (lifecycle.ts
+  # stdout/stderr tee). Pointing the shell redirect at the SAME file wrote every
+  # byte through two independent fds (one positional, one append), which left
+  # byte-replayed duplicate tail segments in daemon.log — and doubled the
+  # rpc_usage telemetry counts the rpc-quiet-window suite sums. console.log
+  # still captures pre-tee output from an early crash.
+  # Version-layout aware: `node_cli_entry` returns the repo build for `current`
+  # nodes and a prepared alternate-version dist for mixed-version layouts.
+  local cli_entry
+  cli_entry="$(node_cli_entry "$node_num")"
+  log "Node $node_num launching from $cli_entry"
   DKG_HOME="$node_dir" DKG_NO_BLUE_GREEN=1 DKG_WALLETS_NO_MIGRATE=1 \
-    node "$REPO_ROOT/packages/cli/dist/cli.js" start --foreground \
-    > "$node_dir/daemon.log" 2>&1 &
+    node "$cli_entry" start --foreground \
+    > "$node_dir/console.log" 2>&1 &
   local node_pid=$!
   echo "$node_pid" > "$pidfile"
 
@@ -671,7 +878,7 @@ start_node() {
   done
 
   if [ "$ready" = false ]; then
-    log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log)"
+    log "WARNING: Node $node_num not ready after ${max_wait}s (check $node_dir/daemon.log and $node_dir/console.log)"
   fi
 
   # Save THIS node's multiaddr so (a) node 1 serves as the universal relay and
@@ -819,9 +1026,16 @@ cmd_ui() {
 
 cmd_start() {
   log "Starting devnet with $NUM_NODES nodes..."
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    log "Mixed-version layout: $DEVNET_VERSION_LAYOUT"
+  fi
   mkdir -p "$DEVNET_DIR"
 
   ensure_built
+  # Build any alternate versions the layout references BEFORE starting nodes, so
+  # a mixed-version cluster comes up in one `start`. No-op for the default
+  # (all-current) layout.
+  prepare_layout_versions
   start_hardhat
   deploy_contracts
   start_blazegraph
@@ -1673,9 +1887,10 @@ cmd_restart_node() {
 }
 
 case "${1:-}" in
-  start)        cmd_start ;;
-  addnode)      cmd_addnode "$@" ;;
-  restart-node) cmd_restart_node "$@" ;;
+  start)            cmd_start ;;
+  addnode)          cmd_addnode "$@" ;;
+  restart-node)     cmd_restart_node "$@" ;;
+  prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;
   logs)         cmd_logs "$@" ;;
@@ -1690,6 +1905,9 @@ case "${1:-}" in
     echo "                          on-chain identity/stake/ask. (1 <= num <= 10)"
     echo "  restart-node <num>      Restart a single already-existing devnet node"
     echo "                          (pick up new code without rebuilding state)"
+    echo "  prepare-version [ref]   Check out + build an alternate version (default"
+    echo "                          'prev' = latest release tag) for mixed-version"
+    echo "                          runs. See DEVNET_VERSION_LAYOUT."
     echo "  stop                    Stop all devnet processes (incl. UI)"
     echo "  status                  Show running nodes (incl. UI) and their status"
     echo "  logs [N]                Tail logs for node N (default 1)"

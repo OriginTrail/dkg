@@ -103,8 +103,9 @@ interface PendingInternals {
     contextGraphId: string,
     subGraphName: string | undefined,
     authorAgentAddress: string | undefined,
-    publishContextGraphId: string | undefined,
+    explicitPolicyTargetContextGraphId: string | undefined,
     logPrefix: string,
+    options?: { aeadBindingContextGraphId?: string },
   ): Promise<{ chainKey: Uint8Array; aeadCgId: string; senderAddress: string } | undefined>;
 }
 
@@ -1342,9 +1343,11 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       sender.agentAddress,
       undefined,
       'LU-5',
+      { aeadBindingContextGraphId: '2' },
     );
 
     expect(resolved?.chainKey).toEqual(chainKey);
+    expect(resolved?.aeadCgId).toBe('2');
     expect(sendCalls).toHaveLength(1);
     expect(sendCalls[0].peerId).toBe(recipientPeerId);
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);

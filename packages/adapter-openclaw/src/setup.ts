@@ -28,10 +28,12 @@ import {
   ensureDkgNodeConfig,
   fundWalletsBestEffort,
   logManualFundingInstructions,
+  readPersistedNetworkConfigName,
   readWallets,
   readWalletsWithRetry,
   resolveCliPackageDir,
   resolveDkgConfigHome,
+  resolveSetupNetworkName,
   startDaemon,
 } from '@origintrail-official/dkg-core';
 import type { DkgOpenClawConfig } from './types.js';
@@ -73,6 +75,13 @@ export interface SetupOptions {
    * failed call logs manual `curl` instructions and setup continues.
    */
   fund?: boolean;
+  /**
+   * Network overlay to set up on (e.g. `mainnet-gnosis`, `mainnet-base`,
+   * `testnet`). Persisted as `config.networkConfig`. When omitted, a fresh
+   * node defaults to mainnet-gnosis and an existing node keeps its current
+   * network — see `resolveSetupNetworkName`.
+   */
+  network?: string;
   /**
    * Abort signal for cooperative cancellation. Checked at each step boundary
    * so an aborted job stops between steps without further filesystem writes
@@ -313,10 +322,11 @@ function readPersistedAgentName(): string | undefined {
 // `resolveCliPackageDir` was extracted to `@origintrail-official/dkg-core` in
 // S1 of issue #386. See the import + re-export at the top of this file.
 
-export function loadNetworkConfig(): NetworkConfig {
+export function loadNetworkConfig(networkName = 'testnet'): NetworkConfig {
+  const file = `${networkName}.json`;
   const cliDir = resolveCliPackageDir();
   if (cliDir) {
-    const candidate = join(cliDir, 'network', 'testnet.json');
+    const candidate = join(cliDir, 'network', file);
     if (existsSync(candidate)) {
       return JSON.parse(readFileSync(candidate, 'utf-8'));
     }
@@ -325,21 +335,60 @@ export function loadNetworkConfig(): NetworkConfig {
   // Monorepo pre-build fallback: the cli package copies `network/*.json`
   // from the repo root into `packages/cli/network/` during its build, so
   // before `pnpm build` has run the cli-scoped path above won't resolve.
-  // Probe the repo-root `network/testnet.json` directly so the monorepo dev
+  // Probe the repo-root `network/<name>.json` directly so the monorepo dev
   // flow (tests, scratch checkouts) keeps working pre-build.
-  const monorepoPath = resolve(__dirname, '..', '..', '..', 'network', 'testnet.json');
+  const monorepoPath = resolve(__dirname, '..', '..', '..', 'network', file);
   if (existsSync(monorepoPath)) {
     return JSON.parse(readFileSync(monorepoPath, 'utf-8'));
   }
-  const devPath = resolve(__dirname, '..', '..', '..', '..', 'network', 'testnet.json');
+  const devPath = resolve(__dirname, '..', '..', '..', '..', 'network', file);
   if (existsSync(devPath)) {
     return JSON.parse(readFileSync(devPath, 'utf-8'));
   }
 
   throw new Error(
-    'Could not find network/testnet.json. Ensure the DKG CLI is installed ' +
+    `Could not find network/${file}. Ensure the DKG CLI is installed ` +
     '(npm install -g @origintrail-official/dkg).',
   );
+}
+
+/**
+ * Resolve which network this setup run should use and load its config.
+ *
+ * The name follows {@link resolveSetupNetworkName}: an explicit `--network`
+ * wins; otherwise an existing node keeps its persisted `networkConfig`; a
+ * fresh node defaults to mainnet-gnosis; and a legacy config that never set
+ * a network stays on testnet. Loading the SAME name we persist keeps the
+ * written `networkConfig` and the network slice (relays/faucet/chain) in
+ * agreement.
+ */
+export function resolveSetupNetwork(
+  explicitNetwork?: string,
+): { networkName: string; network: NetworkConfig } {
+  const home = dkgDir();
+  const configExisted = existsSync(join(home, 'config.json')) || existsSync(join(home, 'config.yaml'));
+  const existingNetworkConfig = readPersistedNetworkConfigName(home);
+  // `--network` is honored only for a FRESH node (the user's stated scope:
+  // "when there is no config yet"). An existing node keeps its current
+  // network — switching is a deliberate `dkg init --network` or config edit,
+  // guarded at boot by detectNetworkSwitch.
+  const explicit = configExisted ? undefined : explicitNetwork;
+  const networkName = resolveSetupNetworkName({
+    explicit,
+    existingNetworkConfig,
+    configExisted,
+  });
+  const requested = explicitNetwork?.trim();
+  if (configExisted && requested && requested !== networkName) {
+    const current = existingNetworkConfig
+      ? `is already configured for "${networkName}"`
+      : `has no explicit network (defaults to "${networkName}")`;
+    warn(
+      `--network ${requested} ignored: this node ${current}. ` +
+      'Use `dkg init --network` to switch an existing node.',
+    );
+  }
+  return { networkName, network: loadNetworkConfig(networkName) };
 }
 
 export function resolveCanonicalNodeSkillSourcePath(): string {
@@ -458,6 +507,10 @@ export function writeDkgConfig(
   network: NetworkConfig,
   apiPort: number,
   overrides?: DkgConfigOverrides,
+  // Trailing + defaulted so legacy positional callers (and tests) keep
+  // working; `runSetup` always passes the resolved selection. The default
+  // mirrors this function's historical testnet-only behaviour.
+  networkConfigName = 'testnet',
 ): void {
   const configPath = join(dkgDir(), 'config.json');
 
@@ -497,7 +550,7 @@ export function writeDkgConfig(
 
   // Delegate the agent-agnostic field-level merge + write to dkg-core.
   // adapter-hermes will use the same helper in S2 (issue #386).
-  ensureDkgNodeConfig({ agentName, network, apiPort, existing, overrides });
+  ensureDkgNodeConfig({ agentName, network, networkConfigName, apiPort, existing, overrides });
 }
 
 // ---------------------------------------------------------------------------
@@ -1587,7 +1640,23 @@ export function verifyMemorySlotInvariants(configPath?: string): void {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-export async function runSetup(options: SetupOptions): Promise<void> {
+/**
+ * Injected runtime deps for `runSetup`. Kept separate from the user-facing
+ * `SetupOptions` so the adapter stays free of a `@origintrail-official/dkg-agent`
+ * dependency: the cli layer (which has dkg-agent) provides `loadOpWallets`.
+ */
+export interface RunSetupDeps {
+  /**
+   * Eagerly create the node's operational wallets (generate-if-absent) after
+   * the config write and before the daemon starts, so faucet funding and
+   * manual mainnet funding have wallets even if the daemon never fully boots
+   * (issue #1306). Best-effort; omitted by callers where the daemon is already
+   * running (the node-UI route) or in unit tests.
+   */
+  loadOpWallets?: (dir: string) => Promise<unknown>;
+}
+
+export async function runSetup(options: SetupOptions, deps: RunSetupDeps = {}): Promise<void> {
   const dryRun = options.dryRun ?? false;
   const shouldVerify = options.verify !== false;
   const shouldStart = options.start !== false;
@@ -1626,8 +1695,11 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // Step 3: Write DKG config
   throwIfAborted();
   let network: NetworkConfig | null = null;
+  let networkConfigName: string | undefined;
   try {
-    network = loadNetworkConfig();
+    const resolved = resolveSetupNetwork(options.network);
+    network = resolved.network;
+    networkConfigName = resolved.networkName;
   } catch (err: any) {
     if (dryRun) {
       warn(`Could not load network config: ${err.message}`);
@@ -1647,11 +1719,11 @@ export async function runSetup(options: SetupOptions): Promise<void> {
   // value so the dry-run / skipped-writeDkgConfig path still has something
   // sensible to pass.
   let effectiveAgentName = agentName;
-  if (!dryRun && network) {
+  if (!dryRun && network && networkConfigName) {
     writeDkgConfig(agentName, network, apiPort, {
       nameExplicit: options.name != null,
       portExplicit: options.port != null,
-    });
+    }, networkConfigName);
     // Read back the effective port AND effective name from the merged
     // config so downstream steps (daemon start, workspace config, verify,
     // faucet funding) use the persisted values even when an existing config
@@ -1668,6 +1740,21 @@ export async function runSetup(options: SetupOptions): Promise<void> {
     } catch { /* use pre-merge values */ }
   } else if (network) {
     log(`[dry-run] Would write ${join(dkgDir(), 'config.json')} (${network.networkName}, port ${apiPort})`);
+  }
+
+  // Eagerly ensure the node's wallets exist BEFORE the daemon starts (issue
+  // #1306) — matching `dkg init` — so faucet funding (testnet) and manual
+  // mainnet funding have wallets to target even if the daemon never fully
+  // boots. Runs regardless of `--no-fund` (mainnet has no faucet but still
+  // needs wallets). Best-effort; the daemon's boot-time loadOpWallets is an
+  // idempotent fallback. `loadOpWallets` is injected by the cli layer so the
+  // adapter stays dkg-agent-free.
+  if (!dryRun && deps.loadOpWallets) {
+    try {
+      await deps.loadOpWallets(dkgDir());
+    } catch (err: any) {
+      warn(`Could not pre-create wallets (${err?.message ?? String(err)}); the daemon will generate them on first start.`);
+    }
   }
 
   // Step 4: Preflight ~/.openclaw/openclaw.json BEFORE the daemon spins up

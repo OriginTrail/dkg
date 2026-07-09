@@ -131,10 +131,19 @@ select.input {
   background: var(--bg-elevated);
   color: var(--text-secondary);
 }
-.badge-success { background: rgba(34,197,94,.12); color: #22c55e; }
-.badge-error   { background: rgba(239,68,68,.12);  color: #ef4444; }
-.badge-warn    { background: rgba(245,158,11,.12); color: #f59e0b; }
-.badge-info    { background: rgba(59,130,246,.12); color: #3b82f6; }
+/* F7/M5: theme-aware text tokens (dark-on-tint in light theme) so these clear
+   WCAG 4.5:1 — the raw #22c55e/#ef4444/#3b82f6 failed in light theme. Mirrors
+   `.badge-warn` below. */
+.badge-success { background: rgba(34,197,94,.12); color: var(--text-success); }
+.badge-error   { background: rgba(239,68,68,.12);  color: var(--text-danger); }
+/* Warning semantics resolve to the theme-aware `--text-warning` token
+   (#fbbf24 dark / #92400e light) on `--amber-dim`, matching
+   `.v10-modal-warning` and the EmptyState `warning` tone so the whole
+   warning family shares ONE token. This is deliberately NOT the raw
+   `#f59e0b` (`--accent-amber` / `--layer-shared`), which is the SWM
+   layer-IDENTITY accent — those uses stay as-is. */
+.badge-warn    { background: var(--amber-dim); color: var(--text-warning); }
+.badge-info    { background: rgba(59,130,246,.12); color: var(--text-info); }
 
 /* Empty states */
 .empty-state {

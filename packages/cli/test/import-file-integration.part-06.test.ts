@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, ExtractionPipelineRegistry, autoPartition, findReservedSubjectPrefix, FileStore, parseBoundary, extractFromMarkdown, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, ImportFileRouteError, makeMockAgent, getDataGraphQuads, BOUNDARY, CRLF, buildMultipart, type ExtractionPipeline, type ExtractionInput, type ConverterOutput, type ExtractionStatusRecord, type CapturedQuad, type MockAgent } from './import-file-test-helpers';
+import { describe, it, expect, beforeEach, afterEach, mkdtemp, rm, readFile, tmpdir, join, existsSync, ExtractionPipelineRegistry, autoPartition, findReservedSubjectPrefix, FileStore, parseBoundary, extractFromMarkdown, contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri, assertionScopedGraphUri, ImportFileRouteError, makeMockAgent, getDataGraphQuads, BOUNDARY, CRLF, buildMultipart, type ExtractionPipeline, type ExtractionInput, type ConverterOutput, type ExtractionStatusRecord, type CapturedQuad, type MockAgent } from './import-file-test-helpers';
 import { runImportFileOrchestration } from './import-file-orchestration.shared';
 
 describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §10.2)', () => {
@@ -170,6 +170,52 @@ describe('import-file orchestration — source-file linkage (§10.1 / §6.3 / §
       // `_meta` rollback so the old `sourceFileHash` / `rootEntity` rows
       // come back alongside the old data graph.
       expect(totalInsertCalls).toBe(3);
+    });
+
+
+    it('restores KA-scoped named graph child data on failed re-import rollback', async () => {
+      const bodyV1 = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'file', name: 'file', filename: 'v1.md', contentType: 'text/markdown', content: Buffer.from('# V1\n\nThe original.\n', 'utf-8') },
+      ]);
+      await runImportFileOrchestration({
+        agent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: bodyV1, boundary: BOUNDARY, assertionName: 'named-rollback-test',
+      });
+      const assertionGraph = contextGraphAssertionUri('cg', agent.peerId, 'named-rollback-test');
+      const namedGraph = assertionScopedGraphUri(assertionGraph, 'urn:test:graph:named-rollback');
+      agent.insertedQuads.push({
+        subject: 'urn:test:entity:named-rollback-old',
+        predicate: `${DKG}contentHash`,
+        object: '"named-v1"',
+        graph: namedGraph,
+      });
+
+      const rollbackAgent = makeMockAgent('0xMockAgentPeerId', {
+        insertErrorPredicate: (_quads, callNumber) =>
+          callNumber === 1 ? new Error('simulated V2 insert failure') : null,
+      });
+      for (const q of agent.insertedQuads) {
+        rollbackAgent.insertedQuads.push({ ...q });
+      }
+
+      const bodyV2 = buildMultipart([
+        { kind: 'text', name: 'contextGraphId', value: 'cg' },
+        { kind: 'file', name: 'file', filename: 'v2.md', contentType: 'text/markdown', content: Buffer.from('# V2\n\nReplacement.\n', 'utf-8') },
+      ]);
+      await expect(runImportFileOrchestration({
+        agent: rollbackAgent, fileStore, extractionRegistry: registry, extractionStatus: status,
+        multipartBody: bodyV2, boundary: BOUNDARY, assertionName: 'named-rollback-test',
+      })).rejects.toThrow('simulated V2 insert failure');
+
+      expect(rollbackAgent.droppedGraphs).toContain(namedGraph);
+      expect(rollbackAgent.insertedQuads).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          subject: 'urn:test:entity:named-rollback-old',
+          object: '"named-v1"',
+          graph: namedGraph,
+        }),
+      ]));
     });
 
 

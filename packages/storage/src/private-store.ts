@@ -1,4 +1,5 @@
 import {
+  assertRdfLiteralMutf8Safe,
   assertSafeIri,
   assertSafeRdfTerm,
   escapeSparqlLiteral,
@@ -266,11 +267,19 @@ export class PrivateContentStore {
 
     const graphUri = this.privateStagingGraph(contextGraphId, shareOperationId, subGraphName);
     const subject = privateStageSubject(contextGraphId, shareOperationId, rootEntity, subGraphName);
+    const predicate = 'http://dkg.io/ontology/privateStagedQuads';
+    const stagedPayload = JSON.stringify(JSON.stringify(quads.map((q) => ({ ...q, graph: '' }))));
+    assertRdfLiteralMutf8Safe(stagedPayload, {
+      label: 'PrivateContentStore.storePrivateTriplesForOperation',
+      subject,
+      predicate,
+      graph: graphUri,
+    });
     await this.store.deleteByPattern({ graph: graphUri, subject });
     await this.store.insert([{
       subject,
-      predicate: 'http://dkg.io/ontology/privateStagedQuads',
-      object: JSON.stringify(JSON.stringify(quads.map((q) => ({ ...q, graph: '' })))),
+      predicate,
+      object: stagedPayload,
       graph: graphUri,
     }]);
   }

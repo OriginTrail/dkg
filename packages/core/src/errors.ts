@@ -15,6 +15,35 @@ export class DKGError extends Error {
 }
 
 /**
+ * Funded operational-wallet selection — cross-package error contract.
+ *
+ * Defined in this UI-safe shared package so every consumer references one
+ * source: the chain adapter (which throws the error + builds the message), the
+ * daemon route/lifecycle handlers, the publisher async-job classifier, and
+ * node-ui. dkg-chain re-exports NO_FUNDED_PUBLISHER_WALLET_CODE for chain-side
+ * imports.
+ */
+export const NO_FUNDED_PUBLISHER_WALLET_CODE = 'NO_FUNDED_PUBLISHER_WALLET';
+
+/** The literal prefix every InsufficientPublisherFundsError message starts with.
+ *  The chain formatter builds the message from this; consumers that only have a
+ *  (possibly re-wrapped, code-stripped) message string match on it via
+ *  {@link messageIndicatesNoFundedPublisherWallet}. */
+export const NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX =
+  'No operational wallet has enough funds';
+
+const NO_FUNDED_PUBLISHER_WALLET_MARKER = new RegExp(
+  NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
+  'i',
+);
+
+/** True iff a message string indicates a no-funded-wallet publish failure — the
+ *  fallback used when the structured `.code` was lost to a re-wrap. */
+export function messageIndicatesNoFundedPublisherWallet(message: unknown): boolean {
+  return typeof message === 'string' && NO_FUNDED_PUBLISHER_WALLET_MARKER.test(message);
+}
+
+/**
  * An error caused by invalid user input or a pre-condition that the user
  * can fix. CLI handlers can show these messages directly without a stack trace.
  */

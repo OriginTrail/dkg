@@ -119,7 +119,7 @@ QUADS_PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" TRIPLE_COUNT="$TRIPLE_COUNT" node 
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS_PAYLOAD")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$QUADS_PAYLOAD")
 WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
 [ "$WRITTEN" = "$TRIPLE_COUNT" ] || fail "expected $TRIPLE_COUNT triples written, got '$WRITTEN' — $WRITE_RESP"
 log "✓ $WRITTEN triples written to SWM"

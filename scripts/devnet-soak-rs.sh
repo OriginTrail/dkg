@@ -9,7 +9,7 @@
 #     eligible challenge, builds + submits proofs across many proof
 #     periods. We assert each core successfully submits across the
 #     soak window.
-#   - Publishing: a steady workload of `dkg publish` invocations
+#   - Publishing: a steady workload of `dkg ka create --share` + `dkg ka publish`
 #     spreads KCs across two registered context graphs, distributing
 #     publishes round-robin across all 4 core nodes' APIs (so the
 #     publisher path is exercised on every node, not just node 1).
@@ -364,28 +364,28 @@ const path = require("path");
 snapshot_stake_state "$STAKE_BEFORE"
 log "Stake snapshot BEFORE soak written to $STAKE_BEFORE"
 
-# --- 3. Negative scenario A: publish to unregistered CG --------------------
+# --- 3. Negative scenario A: create/share to unregistered CG ---------------
 
-log "Negative scenario A: publish to unregistered CG (expect HTTP 4xx)"
+log "Negative scenario A: create/share to unregistered CG (expect HTTP 4xx)"
 NEG_TMP=$(mktemp -d -t soak-neg)
 trap 'rm -rf "$NEG_TMP"' RETURN
-echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" <did:dkg:context-graph:does-not-exist-'"$ROUND"'> .' > "$NEG_TMP/neg.nq"
+echo '<urn:soak:bogus:'"$ROUND"'> <urn:soak:p> "neg-test" .' > "$NEG_TMP/neg.nt"
 NEG_RC=0
-DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" publish "does-not-exist-$ROUND" --file "$NEG_TMP/neg.nq" \
-  > "$OUT_DIR/neg-publish-bogus-cg.log" 2>&1 || NEG_RC=$?
+DKG_HOME="$DEVNET_DIR/node1" node "$CLI_JS" ka create "soak-neg-${ROUND}" --context-graph-id "does-not-exist-$ROUND" --input-file "$NEG_TMP/neg.nt" --share \
+  > "$OUT_DIR/neg-create-share-bogus-cg.log" 2>&1 || NEG_RC=$?
 if [ "$NEG_RC" -eq 0 ]; then
-  log "  WARNING: publish to unregistered CG SUCCEEDED — that should have failed"
-  echo '{"scenario":"publish_unregistered_cg","result":"unexpected_success"}' >> "$OUT_DIR/negative-results.jsonl"
+  log "  WARNING: create/share to unregistered CG SUCCEEDED - that should have failed"
+  echo '{"scenario":"create_share_unregistered_cg","result":"unexpected_success"}' >> "$OUT_DIR/negative-results.jsonl"
 else
-  log "  OK: publish to unregistered CG correctly failed (rc=$NEG_RC)"
-  echo "{\"scenario\":\"publish_unregistered_cg\",\"result\":\"correctly_rejected\",\"rc\":$NEG_RC}" >> "$OUT_DIR/negative-results.jsonl"
+  log "  OK: create/share to unregistered CG correctly failed (rc=$NEG_RC)"
+  echo "{\"scenario\":\"create_share_unregistered_cg\",\"result\":\"correctly_rejected\",\"rc\":$NEG_RC}" >> "$OUT_DIR/negative-results.jsonl"
 fi
 
 # --- 4. Background publisher loop (positive workload) ----------------------
 
 cat > "$OUT_DIR/publisher-loop.sh" <<'EOLOOP'
 #!/usr/bin/env bash
-# Publishes a steady workload of N-Quad fixtures across the two registered
+# Publishes a steady workload of default-graph RDF fixtures across the two registered
 # CGs and round-robin across all 4 core nodes. Times are second-resolution —
 # BSD `date` (macOS) does not honour `%N`, and bashs $((...)) cannot eat a
 # literal "N", so we deliberately stick to whole seconds.
@@ -404,15 +404,17 @@ while [ "$(date +%s)" -lt "$END_TS" ]; do
   node_idx=${NODES[$((i % ${#NODES[@]}))]}
   uniq="$(date +%s)-${i}-$$"
   subj="urn:soak:r${ROUND}:i${i}:${uniq}"
-  fixture="$TMP/q${i}.nq"
+  ka_name="soak-${ROUND}-${i}-${uniq}"
+  fixture="$TMP/q${i}.nt"
   cat > "$fixture" <<EOF
-<${subj}> <urn:soak:predicate> "value-${i}" <did:dkg:context-graph:${cg}> .
-<${subj}> <urn:soak:round> "${ROUND}" <did:dkg:context-graph:${cg}> .
-<${subj}> <urn:soak:emittedAt> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <did:dkg:context-graph:${cg}> .
+<${subj}> <urn:soak:predicate> "value-${i}" .
+<${subj}> <urn:soak:round> "${ROUND}" .
+<${subj}> <urn:soak:emittedAt> "$(date -u +%Y-%m-%dT%H:%M:%SZ)" .
 EOF
   start_s=$(date +%s)
   rc=0
-  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" publish "$cg" --file "$fixture" 2>&1) || rc=$?
+  out=$(DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka create "$ka_name" --context-graph-id "$cg" --input-file "$fixture" --share 2>&1 \
+    && DKG_HOME="$DEVNET_DIR/node${node_idx}" node "$CLI_JS" ka publish "$ka_name" --context-graph-id "$cg" 2>&1) || rc=$?
   end_s=$(date +%s)
   status="ok"
   [ "$rc" -ne 0 ] && status="fail"
@@ -644,7 +646,7 @@ while true; do
     rm -f "$DEVNET_DIR/node${RESTART_NODE}/daemon.pid"
     DKG_HOME="$DEVNET_DIR/node${RESTART_NODE}" DKG_NO_BLUE_GREEN=1 \
       node "$CLI_JS" start --foreground \
-      >> "$DEVNET_DIR/node${RESTART_NODE}/daemon.log" 2>&1 &
+      >> "$DEVNET_DIR/node${RESTART_NODE}/console.log" 2>&1 &
     new_pid=$!
     echo "$new_pid" > "$pidfile"
     log "  restarted node ${RESTART_NODE} pid=$new_pid; verifying API readiness..."
@@ -881,13 +883,13 @@ if (sortedByStake.length >= 2) {
   }
 }
 
-// 7. Negative scenario A: publish to unregistered CG was rejected
+// 7. Negative scenario A: create/share to unregistered CG was rejected
 const negResults = readLines(out.OUT_DIR + "/negative-results.jsonl").map(jsonOrNull).filter(Boolean);
-const negA = negResults.find(r => r.scenario === "publish_unregistered_cg");
+const negA = negResults.find(r => r.scenario === "create_share_unregistered_cg");
 if (negA && negA.result === "correctly_rejected") {
-  ok.push("NEG-A publish to unregistered CG correctly rejected (rc=" + negA.rc + ")");
+  ok.push("NEG-A create/share to unregistered CG correctly rejected (rc=" + negA.rc + ")");
 } else if (negA) {
-  fail.push("NEG-A publish to unregistered CG: " + JSON.stringify(negA));
+  fail.push("NEG-A create/share to unregistered CG: " + JSON.stringify(negA));
 } else {
   warn.push("NEG-A no record of unregistered-CG negative scenario");
 }

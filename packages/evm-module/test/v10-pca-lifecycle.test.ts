@@ -24,6 +24,7 @@ import {
   ParametersStorage,
   Profile,
   PublishingConviction,
+  PublishingConvictionStorage,
   StakingV10,
   Token,
 } from '../typechain';
@@ -75,6 +76,7 @@ async function deployFixture(): Promise<Fixture> {
     'ContextGraphStorage',
     'ContextGraphs',
     'ContextGraphValueStorage',
+    'ContextGraphWaiverStorage',
     'DKGPublishingConvictionNFT',
     'DKGStakingConvictionNFT',
     'StakingV10',
@@ -231,12 +233,18 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(await NFT.agentToAccountId(agent.address)).to.equal(0n);
     expect((await NFT.getAccountInfo(accountId)).agentCount).to.equal(0n);
 
-    // ---- settle: one elapsed window advances the lazy-settlement cursor ----
+    // ---- settle (10.0.8): the emission schedule is written at creation —
+    // lastSettledWindow doubles as the "schedule written" marker and already
+    // equals lockDurationEpochs; a pre-expiry settle is a pure no-op ----
     const epochLength = await Chronos.epochLength();
-    await time.increase(Number(epochLength));
-    await NFT.connect(stranger).settle(accountId); // permissionless
+    const lockEpochs = (await NFT.accounts(accountId))[5];
     expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(
-      1n,
+      lockEpochs,
+    );
+    await time.increase(Number(epochLength));
+    await NFT.connect(stranger).settle(accountId); // permissionless no-op
+    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(
+      lockEpochs,
     );
 
     // ---- settle: post-expiry final sweep marks the account fully swept ----
@@ -384,17 +392,19 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     });
 
     // Escrow (100) is drawn first; the 900 remainder flows through the PCA
-    // discount branch. Assert BOTH the consume event AND that the staker pool
-    // received only escrow-gross(100) + discounted-remainder(720) = 820 — NOT
-    // the discounted FULL amount (800 → pool 900) a "consume-but-still-charge-
-    // full-tokenAmount" regression would produce.
+    // discount branch. 10.0.8: the escrow consume still funds the pool on
+    // THIS tx, but the PCA remainder only DRAWS THE BUDGET (windowSpent) —
+    // its staker-pool emission was scheduled at createAccount. So the pool
+    // events here total exactly the escrow gross (100), and the discounted
+    // remainder (720) is asserted on windowSpent below. (A consume-but-
+    // still-charge-full regression would draw 900 from the budget.)
     const tx = await KAV10.connect(creator).publish(p);
     const receipt = await tx.wait();
     await expect(tx).to.emit(KAV10, 'RegistrationEscrowConsumed').withArgs(cgId, deposit);
 
     const remainder = tokenAmount - deposit; // 900
     const discountedRemainder = (remainder * (10_000n - EXPECTED_DISCOUNT_BPS)) / 10_000n; // 720
-    const expectedPool = deposit + discountedRemainder; // gross escrow 100 + 720 = 820
+    const expectedPool = deposit; // 10.0.8: escrow gross only — the PCA draw emits nothing here
     const epochStorageAddr = (await EpochStorageContract.getAddress()).toLowerCase();
     let poolSum = 0n;
     for (const log of receipt!.logs) {
@@ -412,6 +422,14 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
       }
     }
     expect(poolSum).to.equal(expectedPool);
+
+    // The PCA discount branch drew exactly the discounted remainder from
+    // the paying account's first billing window (10.0.8 budget gate).
+    const PCSx = await hre.ethers.getContract<PublishingConvictionStorage>(
+      'PublishingConvictionStorage',
+    );
+    const payingAccountId = await NFT.agentToAccountId(creator.address);
+    expect(await PCSx.windowSpent(payingAccountId, 0n)).to.equal(discountedRemainder);
 
     // Escrow fully consumed (1000 > 100).
     expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
@@ -979,9 +997,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     const receipt = await tx.wait();
     expect(receipt!.status).to.equal(1);
 
-    // The conviction branch funds the staker pool with the DISCOUNTED cost
-    // via the NFT's `coverPublishingCost` → `addTokensToEpochRange`. A
-    // direct-spend fallthrough would instead distribute the full amount.
+    // 10.0.8: the conviction branch draws the DISCOUNTED cost from the
+    // window budget and emits NOTHING to the pool at publish time (the base
+    // commitment's emission was scheduled at createAccount). A direct-spend
+    // fallthrough would still emit the full amount on this tx — so ZERO pool
+    // events here + the discounted windowSpent below is the on-chain proof
+    // the discount branch (not direct spend) executed.
     const epochStorageAddr = (
       await EpochStorageContract.getAddress()
     ).toLowerCase();
@@ -1005,18 +1026,25 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
         // not the event we're after
       }
     }
-    expect(activeSinkSum).to.equal(expectedDiscounted);
+    expect(activeSinkSum).to.equal(0n);
+    const PCSy = await hre.ethers.getContract<PublishingConvictionStorage>(
+      'PublishingConvictionStorage',
+    );
+    const payerAccountId = await NFT.agentToAccountId(creator.address);
+    const drawn = await PCSy.windowSpent(payerAccountId, 0n);
+    expect(drawn).to.equal(expectedDiscounted);
 
-    // KA records the FULL tokenAmount; only the staker-pool distribution is
-    // discounted — the on-chain proof the discount branch (not direct
-    // spend) executed. OT-RFC-43 Option 1 (1a): the minted kaId equals the
-    // packed reservedKaId we supplied (ids are no longer globally sequential).
+    // KA records the FULL tokenAmount while only the DISCOUNTED cost was
+    // drawn from the budget — the on-chain proof the discount branch (not
+    // direct spend) executed. OT-RFC-43 Option 1 (1a): the minted kaId equals
+    // the packed reservedKaId we supplied (ids are no longer globally
+    // sequential).
     const kaId = reservedKaId;
     expect(await DKGKnowledgeAssets.ownerOf(kaId)).to.equal(creator.address);
     const meta =
       await DKGKnowledgeAssets.getKnowledgeAssetMetadata(kaId);
     expect(meta[6]).to.equal(tokenAmount);
-    expect(activeSinkSum).to.be.lessThan(meta[6]);
+    expect(drawn).to.be.lessThan(meta[6]);
   });
 
   // --------------------------------------------------------------------------
@@ -2323,5 +2351,282 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(roots.length).to.equal(2);
     expect(roots[0].merkleRoot).to.equal(publishRoot);
     expect(roots[1].merkleRoot).to.equal(newRoot);
+  });
+
+  // --------------------------------------------------------------------------
+  // OT-RFC-53 — registration-deposit WAIVER for PCA-backed CGs.
+  // A CG whose publish authority is a PCA the CREATOR owns or is a registered
+  // agent of pays NO separate 100-TRAC deposit: the PCA already locks real TRAC
+  // (the anti-spam stake) and funds the CG's publishing. Caller authz is owner
+  // OR registered agent — NOT merely authority==owner (that would let a third
+  // party dodge the deposit against someone else's PCA).
+  // --------------------------------------------------------------------------
+  describe('OT-RFC-53 deposit waiver for PCA-backed CGs', () => {
+    const DEPOSIT = ethers.parseEther('100');
+
+    const setDeposit = async () => {
+      const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+      await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(DEPOSIT);
+    };
+    // Curated CG (publishPolicy 0) whose authority is `owner` and which is
+    // bound to PCA `accountId` — the PCA-authority shape the waiver keys on.
+    const createPcaCg = (caller: SignerWithAddress, owner: SignerWithAddress, accountId: bigint) =>
+      CGFacade.connect(caller).createContextGraph([], 0, 1, 0, owner.address, accountId, ethers.ZeroHash);
+
+    // Create a PCA with a SPECIFIC committed amount (createAccountFor is fixed at 50k).
+    const createAccountWith = async (owner: SignerWithAddress, amount: bigint): Promise<bigint> => {
+      await Token.mint(owner.address, amount);
+      await Token.connect(owner).approve(await NFT.getAddress(), amount);
+      await NFT.connect(owner).createAccount(amount, 0);
+      return NFT.totalSupply();
+    };
+
+    it('WAIVES the deposit when the PCA OWNER creates the CG (no TRAC pulled)', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner);
+      const before = await Token.balanceOf(owner.address); // owner funded nothing for a deposit
+
+      await expect(createPcaCg(owner, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDeposited');
+
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n); // no escrow
+      expect(await Token.balanceOf(owner.address)).to.equal(before); // nothing pulled
+    });
+
+    it('WAIVES the deposit when a REGISTERED AGENT of the PCA creates the CG', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const agent = accounts[3];
+      const accountId = await createAccountFor(owner);
+      await NFT.connect(owner).registerAgent(accountId, agent.address);
+      expect(await NFT.agentToAccountId(agent.address)).to.equal(accountId);
+
+      const before = await Token.balanceOf(agent.address);
+      await expect(createPcaCg(agent, owner, accountId)) // authority must be the owner (coherence)
+        .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(0n);
+      expect(await Token.balanceOf(agent.address)).to.equal(before);
+    });
+
+    it('does NOT waive for a non-owner non-agent — the deposit is still charged (caller guard)', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const stranger = accounts[4];
+      const accountId = await createAccountFor(owner);
+
+      // Stranger sets authority=owner so the coherence gate passes, but is
+      // neither owner nor a registered agent → must pay. Unfunded → revert.
+      await expect(createPcaCg(stranger, owner, accountId)).to.be.reverted;
+
+      // Funded + approved, the stranger CAN create it — but is CHARGED (not waived).
+      await Token.mint(stranger.address, DEPOSIT);
+      await Token.connect(stranger).approve(await CGFacade.getAddress(), DEPOSIT);
+      await expect(createPcaCg(stranger, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDeposited')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT);
+    });
+
+    it('does NOT waive a CG with no PCA (accountId 0) — normal deposit applies', async () => {
+      await setDeposit();
+      const creator = accounts[5];
+      // No PCA designated → unfunded create reverts (deposit charged, not waived).
+      await expect(
+        CGFacade.connect(creator).createContextGraph([], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash),
+      ).to.be.reverted;
+    });
+
+    // Review feedback: an EXPIRED or FULLY-SWEPT PCA has no live locked
+    // commitment, so it provides no anti-spam stake — the waiver must NOT apply
+    // (else the owner could mint unlimited zero-deposit CGs against a dead PCA).
+    it('does NOT waive when the PCA has EXPIRED (no live backing) — deposit charged', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner);
+      const expiresAtTimestamp = (await NFT.accounts(accountId))[4]; // tuple idx 4
+      await time.increaseTo(Number(expiresAtTimestamp) + 1);
+
+      // Owner is unfunded for a deposit (committed TRAC is spent; no facade
+      // approval) → waiver denied → _pullRegistrationDeposit reverts.
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+    });
+
+    it('does NOT waive when the PCA has been FULLY SWEPT — deposit charged', async () => {
+      await setDeposit();
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner);
+      const expiresAtTimestamp = (await NFT.accounts(accountId))[4];
+      await time.increaseTo(Number(expiresAtTimestamp) + 1);
+      // Post-expiry settle sweeps the unused account's tail and marks it swept.
+      await NFT.connect(owner).settle(accountId);
+      expect((await NFT.accounts(accountId))[8]).to.equal(true); // fullySwept
+
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+    });
+
+    // Review feedback (anti-spam): the waiver must NOT let one PCA mint unlimited
+    // free CGs. Two guards — a minimum-commitment floor and a per-PCA quota.
+    it('does NOT waive a PCA below the minimum-commitment floor — deposit charged', async () => {
+      await setDeposit(); // 100 TRAC; default floor = 25k
+      const owner = accounts[1];
+      const accountId = await createAccountWith(owner, ethers.parseEther('10000')); // < 25k floor
+      // Below floor → not waived → unfunded create reverts.
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+    });
+
+    it('waives only up to the per-PCA quota (committedTRAC / deposit), then charges', async () => {
+      const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+      // deposit 25k, PCA 50k → quota = 2 (floor 25k still satisfied by 50k).
+      await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(ethers.parseEther('25000'));
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner); // 50k committed
+
+      // First two are waived.
+      await expect(createPcaCg(owner, owner, accountId)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      await expect(createPcaCg(owner, owner, accountId)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      // Third exceeds the quota → charged → unfunded → revert.
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+
+      const Waiver = await hre.ethers.getContract('ContextGraphWaiverStorage');
+      expect(await (Waiver as any).waivedCgCount(accountId)).to.equal(2n);
+    });
+
+    it('waives a PCA exactly AT the floor (committed == minPcaCommitment) — pins < not <=', async () => {
+      await setDeposit(); // 100; default floor 25k
+      const owner = accounts[1];
+      const accountId = await createAccountWith(owner, ethers.parseEther('25000')); // == floor
+      await expect(createPcaCg(owner, owner, accountId)).to.emit(
+        CGFacade,
+        'ContextGraphRegistrationDepositWaived',
+      );
+    });
+
+    it('tryConsumeWaiver reverts for any caller other than ContextGraphs (counter anti-grief)', async () => {
+      const Waiver = await hre.ethers.getContract('ContextGraphWaiverStorage');
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner);
+      await expect(
+        (Waiver as any).connect(accounts[2]).tryConsumeWaiver(accountId, owner.address, ethers.parseEther('100')),
+      ).to.be.revertedWithCustomError(Waiver, 'OnlyContextGraphs');
+    });
+
+    // Review (otReviewAgent): the waiver depends on agent membership of the
+    // SPECIFIC backing PCA — `agentToAccountId(creator) == accountId`, not just
+    // "is a registered agent somewhere". An agent of a DIFFERENT PCA must not
+    // waive against this one.
+    it('does NOT waive when the caller is an agent of a DIFFERENT PCA (pins the equality check)', async () => {
+      await setDeposit(); // 100; floor 25k
+      const ownerA = accounts[1];
+      const ownerB = accounts[3];
+      const agentOfB = accounts[4];
+      const accountA = await createAccountFor(ownerA); // PCA #1 (50k)
+      const accountB = await createAccountFor(ownerB); // PCA #2 (50k)
+      await NFT.connect(ownerB).registerAgent(accountB, agentOfB.address); // agent of #2 only
+      expect(await NFT.agentToAccountId(agentOfB.address)).to.equal(accountB);
+
+      // agentOfB targets PCA #1 (ownerA's) → not its agent, not its owner →
+      // not waived → unfunded create reverts (deposit charged).
+      await expect(createPcaCg(agentOfB, ownerA, accountA)).to.be.reverted;
+    });
+
+    // Coverage (audit gap): quota = committedTRAC / deposit is read on the LIVE
+    // deposit each call, so raising the deposit shrinks the remaining quota of a
+    // partially-used PCA.
+    it('quota recomputes on the LIVE deposit — raising the deposit shrinks remaining quota', async () => {
+      const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+      await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(ethers.parseEther('25000')); // deposit 25k
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner); // 50k committed → quota 50k/25k = 2
+
+      // First is waived (used 1 of 2).
+      await expect(createPcaCg(owner, owner, accountId)).to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      // Governance raises the deposit to 50k → quota recomputes to 50k/50k = 1;
+      // used 1 >= 1 → the next CG is CHARGED (owner unfunded → reverts).
+      await Params.connect(accounts[0]).setContextGraphRegistrationDeposit(ethers.parseEther('50000'));
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+    });
+
+    // Coverage (audit HIGH gap): if ContextGraphWaiverStorage is unresolvable in
+    // the Hub (not yet registered / deregistered) while the deposit is ON, the
+    // waiver must FAIL CLOSED — an owner-eligible CG is CHARGED, never free.
+    it('fail-closed: ContextGraphWaiverStorage unregistered in the Hub → owner-eligible PCA CG is CHARGED, not waived', async () => {
+      await setDeposit(); // 100 TRAC; floor 25k
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner); // 50k — would normally be waived for the owner
+
+      // Unregister the waiver storage from the Hub → ContextGraphs resolves
+      // address(0) → the fail-closed branch charges the deposit.
+      await HubContract.connect(accounts[0]).removeContractByName('ContextGraphWaiverStorage');
+
+      // Fund the deposit so we can assert it is actually CHARGED (not merely reverting unfunded).
+      await Token.mint(owner.address, DEPOSIT);
+      await Token.connect(owner).approve(await CGFacade.getAddress(), DEPOSIT);
+
+      await expect(createPcaCg(owner, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDeposited')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT); // charged, not free
+    });
+
+    // Coverage (audit gap): the floor is GOVERNANCE-tunable and read LIVE by
+    // tryConsumeWaiver — a changed floor must flip the waiver decision end-to-end.
+    // The default-floor cases above can't catch a regression that hard-coded 25k.
+    it('floor is read live — lowering minPcaCommitmentForCgWaiver newly waives a sub-default PCA; raising it charges again', async () => {
+      const Params = await hre.ethers.getContract<ParametersStorage>('ParametersStorage');
+      await setDeposit(); // 100; default floor 25k
+      const owner = accounts[1];
+      const accountId = await createAccountWith(owner, ethers.parseEther('10000')); // 10k — BELOW the 25k default
+
+      // At the default 25k floor a 10k PCA is NOT waived → charged → unfunded → revert.
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+
+      // Governance LOWERS the floor to 5k → 10k now clears it → the next CG is WAIVED.
+      await Params.connect(accounts[0]).setMinPcaCommitmentForCgWaiver(ethers.parseEther('5000'));
+      await expect(createPcaCg(owner, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+
+      // Governance RAISES the floor above the 10k commitment (to 50k) → the PCA
+      // fails the floor again → the next CG is charged (owner unfunded → revert).
+      await Params.connect(accounts[0]).setMinPcaCommitmentForCgWaiver(ethers.parseEther('50000'));
+      await expect(createPcaCg(owner, owner, accountId)).to.be.reverted;
+    });
+
+    // Coverage (audit gap): the fail-closed guard must also cover a waiver storage
+    // that is REGISTERED (resolves non-zero, passes the address(0) check at
+    // ContextGraphs.sol:250) but whose tryConsumeWaiver REVERTS internally — the
+    // inner catch at :253, a different branch than the unregistered case above.
+    // Trick: ContextGraphs reads the deposit through its CACHED parametersStorage
+    // pointer (still valid), but ContextGraphWaiverStorage reads ParametersStorage
+    // LIVE via the Hub. Removing ParametersStorage from the Hub therefore leaves
+    // the deposit read intact while making tryConsumeWaiver revert inside.
+    it('fail-closed: a REGISTERED waiver storage whose tryConsumeWaiver REVERTS → owner-eligible PCA CG is CHARGED', async () => {
+      await setDeposit(); // 100; floor 25k — stored on the ParametersStorage contract
+      const owner = accounts[1];
+      const accountId = await createAccountFor(owner); // 50k — would normally be waived for the owner
+
+      // ContextGraphWaiverStorage STAYS registered. Remove ParametersStorage from
+      // the Hub → the storage's live `minPcaCommitmentForCgWaiver()` read hits
+      // address(0) and reverts inside tryConsumeWaiver. ContextGraphs's cached
+      // parametersStorage pointer still serves the deposit read, so we reach the
+      // waiver branch and fall into the inner catch → charge.
+      await HubContract.connect(accounts[0]).removeContractByName('ParametersStorage');
+
+      // Fund the deposit so we can assert it is actually CHARGED (not merely an unfunded revert).
+      await Token.mint(owner.address, DEPOSIT);
+      await Token.connect(owner).approve(await CGFacade.getAddress(), DEPOSIT);
+
+      await expect(createPcaCg(owner, owner, accountId))
+        .to.emit(CGFacade, 'ContextGraphRegistrationDeposited')
+        .and.not.to.emit(CGFacade, 'ContextGraphRegistrationDepositWaived');
+      const cgId = await CGS.getLatestContextGraphId();
+      expect(await CGS.getRegistrationEscrow(cgId)).to.equal(DEPOSIT); // charged, not free
+    });
   });
 });

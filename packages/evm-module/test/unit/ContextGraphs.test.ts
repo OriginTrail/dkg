@@ -706,9 +706,11 @@ describe('@unit ContextGraphs (facade)', () => {
   // now IGNORE the stored snapshot in PCA mode and live-resolve the current
   // NFT owner via `IDKGPublishingConvictionNFT.ownerOf(accountId)`.
   //
-  // Each test here documents the regression it blocks. Transferring the PCA
-  // NFT exercises the NFT contract's `_update` hook that clears agent
-  // mappings, so agent-based authorization paths also update in lockstep.
+  // Each test here documents the regression it blocks. NOTE: transferring the
+  // PCA NFT PRESERVES the agent allow-list (agents travel with the PCA; the
+  // reset is an explicit owner-gated `PublishingConviction.clearAgents` call).
+  // So the owner-drift fix below is what revokes the OLD owner on transfer,
+  // while a former owner's AGENTS retain authority until the new owner clears.
   describe('PCA transfer auth drift', () => {
     let alice: SignerWithAddress;        // original PCA owner + initial authority
     let bob: SignerWithAddress;          // new PCA owner after transfer
@@ -741,9 +743,9 @@ describe('@unit ContextGraphs (facade)', () => {
 
     async function transferPCA(from: SignerWithAddress, to: SignerWithAddress) {
       // Standard ERC-721 transfer. DKGPublishingConvictionNFT inherits
-      // from ERC721Enumerable, so `transferFrom` is available. The
-      // contract's `_update` hook clears `_registeredAgents` and
-      // `agentToAccountId` for pre-existing agents of this account.
+      // from ERC721Enumerable, so `transferFrom` is available. The `_update`
+      // hook settles billing but PRESERVES the agent allow-list (it travels
+      // with the PCA; reset is the explicit owner-gated clearAgents call).
       await NFT.connect(from).transferFrom(from.address, to.address, pcaAccountId);
     }
 
@@ -785,34 +787,33 @@ describe('@unit ContextGraphs (facade)', () => {
       expect(await Facade.isAuthorizedPublisher(cgId, stranger.address)).to.be.false;
     });
 
-    it('agents cleared on PCA transfer lose publish authority in lockstep', async () => {
+    it("a former owner's agent RETAINS publish authority after transfer until explicitly cleared", async () => {
       // Register Carol as an agent under Alice's PCA before the transfer.
       await NFT.connect(alice).registerAgent(pcaAccountId, carol.address);
-
-      // Pre-transfer: Carol is a registered agent of pcaAccountId, so the
-      // PCA branch authorizes her.
       expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.true;
 
-      // Transfer. The NFT contract's `_update` hook clears the agent
-      // registrations for this token id (see DKGPublishingConvictionNFT.sol
-      // _update branch), so `agentToAccountId[carol] == 0` post-transfer.
+      // Transfer Alice -> Bob. The allow-list is PRESERVED (agents travel with
+      // the PCA), so Carol — Alice's agent — stays an agent of the account and
+      // remains authorized on Bob's PCA. This is the deliberate trade-off of
+      // preserve-on-transfer; the new owner resets it explicitly below.
       await transferPCA(alice, bob);
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.true;
 
-      // Post-transfer: Carol's agent mapping was cleared, so she is no
-      // longer authorized. Defense-in-depth: the facade's PCA branch
-      // would ALSO reject her (live owner is Bob, not Carol), but this
-      // test exercises the agent-clearing path specifically.
+      // Bob (the new owner) drops the inherited allow-list via the explicit
+      // owner-gated clearAgents — only THEN does Carol lose authority.
+      const Logic = await hre.ethers.getContract('PublishingConviction');
+      await Logic.connect(bob).clearAgents(pcaAccountId);
       expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.false;
     });
 
     it('new PCA owner can register fresh agents post-transfer and they become authorized', async () => {
-      // Start from the cleared-state fixture: register Carol, transfer,
-      // confirm Carol was cleared.
+      // Register Carol under Alice, then transfer. The allow-list is PRESERVED,
+      // so Carol remains authorized under Bob's PCA.
       await NFT.connect(alice).registerAgent(pcaAccountId, carol.address);
       await transferPCA(alice, bob);
-      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.false;
+      expect(await Facade.isAuthorizedPublisher(cgId, carol.address)).to.be.true;
 
-      // Bob is now the PCA owner; he registers Dave as a fresh agent.
+      // Bob is now the PCA owner; he registers Dave as an ADDITIONAL agent.
       await NFT.connect(bob).registerAgent(pcaAccountId, dave.address);
 
       // Dave authorizes via the PCA-agent branch on live lookup.

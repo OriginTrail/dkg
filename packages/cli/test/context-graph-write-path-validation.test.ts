@@ -33,6 +33,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
+import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
 import {
   startLiveDaemon,
   stopLiveDaemon,
@@ -115,6 +117,32 @@ function rowProvider(rows: Row[]) {
       },
     },
   };
+}
+
+function preSignedAttestationFor(address: string) {
+  return {
+    address,
+    reservedKaId: '1',
+    signature: {
+      r: `0x${'11'.repeat(32)}`,
+      vs: `0x${'22'.repeat(32)}`,
+    },
+  };
+}
+
+function routeRes() {
+  const res: any = { statusCode: 0, body: '', headers: {} as Record<string, string>, writableEnded: false };
+  res.writeHead = (status: number, headers?: Record<string, string>) => {
+    res.statusCode = status;
+    if (headers) Object.assign(res.headers, headers);
+    return res;
+  };
+  res.setHeader = (key: string, value: string) => { res.headers[key] = value; };
+  res.end = (body?: string) => {
+    res.body = body ?? '';
+    res.writableEnded = true;
+  };
+  return res;
 }
 
 // The routes' real write-preflight opts (knowledge-assets.ts:478-482 /
@@ -279,7 +307,7 @@ describe('context-graph write-path validation — real daemon route wiring', () 
   const LOCAL_CG = 'write-path-cg';
 
   beforeAll(async () => {
-    daemon = await startLiveDaemon({ authEnabled: false });
+    daemon = await startLiveDaemon();
     const created = await postJson(daemon, '/api/context-graph/create', { id: LOCAL_CG, name: LOCAL_CG });
     expect(created.status).toBe(200);
   }, 90_000);
@@ -289,6 +317,42 @@ describe('context-graph write-path validation — real daemon route wiring', () 
   });
 
   const QUADS = [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }];
+
+  async function postJsonAsAgent(authToken: string, path: string, body: unknown) {
+    const res = await fetch(`${daemon.base}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authToken}` },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, any> };
+  }
+
+  async function registerAgentClient(label: string) {
+    const registered = await postJson(daemon, '/api/agent/register', {
+      name: `${label}-${Date.now().toString(36)}`,
+      framework: 'test',
+    });
+    expect(registered.status, `${label} register: ${JSON.stringify(registered.body)}`).toBeLessThan(300);
+    const agentAddress = String(registered.body.agentAddress);
+    const authToken = String(registered.body.authToken);
+    expect(agentAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    expect(authToken.length).toBeGreaterThan(0);
+    return {
+      agentAddress,
+      authToken,
+      post: (path: string, body: unknown) => postJsonAsAgent(authToken, path, body),
+    };
+  }
+
+  async function createRegisteredAgentContextGraph(
+    agent: Awaited<ReturnType<typeof registerAgentClient>>,
+    id: string,
+  ) {
+    const created = await agent.post('/api/context-graph/create', { id, name: id, accessPolicy: 1 });
+    expect(created.status, `agent CG create: ${JSON.stringify(created.body)}`).toBeLessThan(300);
+    const registered = await agent.post('/api/context-graph/register', { id, accessPolicy: 1 });
+    expect(registered.status, `agent CG register: ${JSON.stringify(registered.body)}`).toBe(200);
+  }
 
   // ── every write route rejects an unknown contextGraphId before mutating ──
   it('rejects unknown wm/write targets with CONTEXT_GRAPH_NOT_FOUND before mutation', async () => {
@@ -335,16 +399,25 @@ describe('context-graph write-path validation — real daemon route wiring', () 
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 
-  it('rejects unknown shared-memory write targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
-    const res = await postJson(daemon, '/api/shared-memory/write', { contextGraphId: 'missing-cg', quads: QUADS });
+  it('rejects unknown knowledge-asset create targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
+    const res = await postJson(daemon, '/api/knowledge-assets', { contextGraphId: 'missing-cg', name: 'draft', quads: QUADS });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
   });
 
-  it('rejects unknown shared-memory publish targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
-    const res = await postJson(daemon, '/api/shared-memory/publish', { contextGraphId: 'missing-cg', selection: 'all' });
+  it('rejects unknown vm/publish targets with CONTEXT_GRAPH_NOT_FOUND', async () => {
+    const res = await postJson(daemon, '/api/knowledge-assets/draft/vm/publish', { contextGraphId: 'missing-cg' });
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'CONTEXT_GRAPH_NOT_FOUND' });
+  });
+
+  // The legacy SWM-bridge publish route was removed (consolidated onto the
+  // per-KA vm/publish above). Guard against accidental reintroduction: the
+  // daemon must no longer recognize the route at all (route-not-found 404),
+  // rather than reach a handler.
+  it('no longer serves the removed /api/shared-memory/publish route (404)', async () => {
+    const res = await postJson(daemon, '/api/shared-memory/publish', { contextGraphId: LOCAL_CG });
+    expect(res.status).toBe(404);
   });
 
   // ── a real locally-created graph (and its full DID) is accepted ──

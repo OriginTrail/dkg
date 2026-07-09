@@ -31,42 +31,54 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async getLatestMerkleRoot(kaId: bigint): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await kas.getLatestMerkleRoot(kaId);
+    const rootHex: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRoot', 'getLatestMerkleRoot', kaId,
+    );
     return ethers.getBytes(rootHex);
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();
-    const count: bigint = BigInt(await kas.getMerkleLeafCount(kaId));
+    const count: bigint = BigInt(await this.readContract(
+      kas, 'kas.getMerkleLeafCount', 'getMerkleLeafCount', kaId,
+    ));
     return Number(count);
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rootHex: string = await kas.getCatalogRoot(kaId);
+    const rootHex: string = await this.readContract(
+      kas, 'kas.getCatalogRoot', 'getCatalogRoot', kaId,
+    );
     return ethers.getBytes(rootHex);
   }
 
   async getCatalogLeafCount(kaId: bigint): Promise<number> {
     await this.init();
     const kas = this.requireKCStorage();
-    const count: bigint = BigInt(await kas.getCatalogLeafCount(kaId));
+    const count: bigint = BigInt(await this.readContract(
+      kas, 'kas.getCatalogLeafCount', 'getCatalogLeafCount', kaId,
+    ));
     return Number(count);
   }
 
   async getLatestMerkleRootPublisher(kaId: bigint): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const publisher: string = await kas.getLatestMerkleRootPublisher(kaId);
+    const publisher: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRootPublisher', 'getLatestMerkleRootPublisher', kaId,
+    );
     return publisher;
   }
 
   async getLatestMerkleRootAuthor(kaId: bigint): Promise<string> {
     await this.init();
     const kas = this.requireKCStorage();
-    const author: string = await kas.getLatestMerkleRootAuthor(kaId);
+    const author: string = await this.readContract(
+      kas, 'kas.getLatestMerkleRootAuthor', 'getLatestMerkleRootAuthor', kaId,
+    );
     return author;
   }
 }

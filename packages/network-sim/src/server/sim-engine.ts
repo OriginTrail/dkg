@@ -256,8 +256,8 @@ async function execPublish(
 
   // RFC-001 §9.x — route through the knowledge-asset lifecycle (sign at
   // creation): the daemon's `/api/knowledge-assets` endpoint accepts a
-  // `quads + finalize: true + promote: true` shape that folds the
-  // create→write→finalize→promote chain into a single round-trip.
+  // `quads + finalize: true + alsoShareSwm: true` shape that folds the
+  // create→write→finalize→share chain into a single round-trip.
   // The publish call then forwards the seal verbatim.
   const assertionName = `netsim-publish-${Date.now()}-${rndId()}`;
   try {
@@ -269,7 +269,7 @@ async function execPublish(
         name: assertionName,
         quads,
         finalize: true,
-        promote: true,
+        alsoShareSwm: true,
       }),
       signal: opSignal(signal, 'publish'),
     });
@@ -286,10 +286,10 @@ async function execPublish(
         phases: {},
       };
     }
-    const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/publish`, {
+    const res = await fetch(`http://127.0.0.1:${node.port}/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ contextGraphId: config.contextGraph, assertionName }),
+      body: JSON.stringify({ contextGraphId: config.contextGraph }),
       signal: opSignal(signal, 'publish'),
     });
     const body = (await res.json()) as { kaId?: string; kas?: unknown[]; status?: string; error?: string; phases?: Record<string, number> };
@@ -380,13 +380,20 @@ async function execWorkspace(
   ];
 
   try {
-    const res = await fetch(`http://127.0.0.1:${node.port}/api/shared-memory/write`, {
+    const name = `netsim-workspace-${Date.now()}-${rndId()}`;
+    const res = await fetch(`http://127.0.0.1:${node.port}/api/knowledge-assets`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(node) },
-      body: JSON.stringify({ contextGraphId: config.contextGraph, quads }),
+      body: JSON.stringify({
+        contextGraphId: config.contextGraph,
+        name,
+        quads,
+        finalize: true,
+        alsoShareSwm: true,
+      }),
       signal: opSignal(signal, 'sharedMemory'),
     });
-    const body = (await res.json()) as { shareOperationId?: string; phases?: Record<string, number> };
+    const body = (await res.json()) as { phases?: Record<string, number> };
     const dur = Date.now() - t0;
     return {
       type: 'op',
@@ -394,7 +401,7 @@ async function execWorkspace(
       nodeId: node.id,
       success: res.ok,
       durationMs: dur,
-      detail: `opId: ${body.shareOperationId?.slice(0, 8) ?? '?'}`,
+      detail: `ka: ${name}`,
       phases: body.phases ?? {},
     };
   } catch (err) {

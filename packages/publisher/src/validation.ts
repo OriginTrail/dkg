@@ -1,6 +1,11 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { KAManifestEntry } from './publisher.js';
 import { isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
+import {
+  catalogTripleKey,
+  trustedCatalogTripleKeySet,
+  type TrustedCatalogTripleKeys,
+} from './catalog-trust.js';
 
 export interface ValidationResult {
   valid: boolean;
@@ -14,6 +19,11 @@ export interface ValidationOptions {
   upsertableEntities?: Set<string>;
   /** Override the expected named graph URI for Rule 1 (default: `did:dkg:context-graph:{contextGraphId}`). */
   expectedGraph?: string;
+  /**
+   * Exact generated public-catalog triples allowed to be present in nquads
+   * without a manifest root. This is not a generic metadata bypass.
+   */
+  trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
 }
 
 /**
@@ -29,6 +39,9 @@ export function validatePublishRequest(
   const errors: string[] = [];
   const contextGraph = options?.expectedGraph ?? `did:dkg:context-graph:${contextGraphId}`;
   const rootEntities = new Set(manifest.map((m) => m.rootEntity));
+  const trustedCatalogTriples = trustedCatalogTripleKeySet(
+    options?.trustedNonManifestCatalogTriples,
+  );
 
   // Rule 1: Every quad's named graph MUST be the target context graph URI
   // (or the sub-graph URI when expectedGraph is overridden).
@@ -43,6 +56,7 @@ export function validatePublishRequest(
   // Rule 2: Every triple's subject MUST be a rootEntity from the manifest
   // OR a skolemized URI whose prefix matches a rootEntity.
   for (const q of nquads) {
+    if (trustedCatalogTriples.has(catalogTripleKey(q))) continue;
     const s = q.subject;
     if (rootEntities.has(s)) continue;
     if (isSkolemizedUri(s)) {

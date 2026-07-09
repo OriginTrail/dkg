@@ -15,7 +15,7 @@
 #      → must return ok=false, reason=root-mismatch.
 #
 #   3. REJECTION GOSSIP — On the failed verify, member calls
-#      POST /api/shared-memory/report-batch-rejection. The endpoint
+#      POST /api/knowledge-assets/batch-rejections/report. The endpoint
 #      writes a structured BatchRejected record into SWM. We then query
 #      the local SWM via /api/query and confirm the record is present.
 #
@@ -108,7 +108,7 @@ QUADS=$(node -e "
   }
   console.log(JSON.stringify({ contextGraphId: '$PUB_CG', quads }));
 ")
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$QUADS")
 [ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "5" ] || fail "expected 5 triples written, got: $WRITE_RESP"
 
 log "Curator publishes selection to VM..."
@@ -222,7 +222,7 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" PUB_CG="$PUB_CG" STAMP="$STAMP" node -e '
     verifyResult: vr
   }));
 ')
-REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/shared-memory/report-batch-rejection "$REPORT_BODY")
+REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
 log "report response: $REPORT_RESP"
 REPORT_GOSSIPED=$(parse_json "$REPORT_RESP" '.gossiped')
 REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record.digest')

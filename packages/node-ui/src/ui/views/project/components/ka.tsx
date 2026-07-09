@@ -1,6 +1,6 @@
 import React, { useMemo, useState, Suspense } from 'react';
 import { api } from '../../../api-wrapper.js';
-import { promoteAssertion, describePromoteResult, describePromoteError, publishSharedMemory, type PromoteOutcome, type PublishResult } from '../../../api.js';
+import { promoteAssertion, describePromoteResult, describePromoteError, knowledgeAssetPublishWithSeal, SwmSubsetNotSealableError, partialPublishWarning, PARTIAL_PUBLISH_STATUS_SUFFIX, type PromoteOutcome, type PublishResult } from '../../../api.js';
 import { useMemoryEntities, canonicalEntityUri, isFirstClassEntity, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
@@ -53,8 +53,10 @@ export function SubGraphBadge({
 
 // ─── Verify on DKG CTA ───────────────────────────────────────
 // Two-step progression driven by the profile:
-//   WM  -> SWM  : promoteAssertion(sourceAssertion, [uri])  ("Propose…")
-//   SWM -> VM   : publishSharedMemory([uri])                ("Ratify…")
+//   WM  -> SWM  : promoteAssertion(sourceAssertion, [uri])         ("Propose…")
+//   SWM -> VM   : knowledgeAssetPublishWithSeal(sourceAssertion)   ("Ratify…")
+// The SWM→VM step publishes the entity's owning NAMED assertion as one
+// Knowledge Asset via the canonical per-KA /vm/publish (named-only, #1087).
 // Labels, hints and the promote-path assertion name all come from the
 // profile ontology (EntityTypeBinding + SubGraphBinding). A book-research
 // project that imports into "character-sheet" / "topic-index" assertions
@@ -136,8 +138,14 @@ export function VerifyOnDkgButton({
         label:    binding.publishLabel ?? 'Verify on DKG',
         hint:     binding.publishHint  ?? 'Anchors this entity on-chain.',
         busyCopy: 'Anchoring…',
-        disabled: false,
-        disabledReason: null,
+        // Named-only publish (#1087): /vm/publish is keyed by a named SWM
+        // assertion. We publish the entity's owning assertion (its
+        // `sourceAssertion`); an entity with no named source assertion (e.g. a
+        // loose root written straight to SWM) is not publishable from here.
+        disabled: !sgBinding?.binding.sourceAssertion,
+        disabledReason: !sgBinding?.binding.sourceAssertion
+          ? 'This entity is not part of a named Shared-Memory asset, so it cannot be published to Verifiable Memory from here.'
+          : null,
       };
 
   const handle = async () => {
@@ -166,16 +174,32 @@ export function VerifyOnDkgButton({
         // instead of the misleading "Promoted 0 triples" toast.
         setResult(describePromoteResult(assertionName, r));
       } else {
-        const r = await publishSharedMemory(contextGraphId, [entity.uri]);
-        setResult(r);
+        // Named-only publish (#1087): publish the entity's owning SWM assertion
+        // as one Knowledge Asset via the canonical per-KA /vm/publish (with the
+        // §4.4 catch→seal→retry safety net). We do NOT pre-register the CG: the
+        // daemon's /vm/publish checks the local preconditions first and only
+        // auto-registers (with the stored publish policy) on its
+        // `CG_NOT_REGISTERED` retry path, so a doomed publish never burns gas.
+        // The CTA is disabled above when no sourceAssertion resolves, so
+        // `sgBinding.sourceAssertion` is present here.
+        const r = await knowledgeAssetPublishWithSeal(
+          contextGraphId,
+          sgBinding!.binding.sourceAssertion!,
+          sgBinding!.subGraph ? { subGraphName: sgBinding!.subGraph } : {},
+        );
+        setResult(r as unknown as PublishResult);
       }
       onVerified();
     } catch (err: any) {
       // Issue #864 — `ASSERTION_NOT_PERSISTED` (HTTP 409) gets a
       // typed message that points the user at the re-import path
-      // instead of the raw backend error string.
+      // instead of the raw backend error string. A subset-share that can't be
+      // sealed in place surfaces the "share the full asset first" hint.
       const typed = action.kind === 'promote' ? describePromoteError(assertionName, err) : null;
-      setError(typed ? typed.message : (err?.message ?? 'Action failed'));
+      const message = err instanceof SwmSubsetNotSealableError
+        ? err.message
+        : (typed ? typed.message : (err?.message ?? 'Action failed'));
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -231,14 +255,24 @@ export function VerifyOnDkgButton({
         // Treat that as failure, not success, so the curator knows the data
         // is NOT in Verifiable Memory.
         const confirmed = result.status === 'confirmed' && !!result.txHash;
+        // PR #972 — a daemon 207 partial publish: the KA minted on-chain but the
+        // context-graph binding failed. Confirmed on-chain, but NOT a clean
+        // success. Re-publishing does NOT repair the binding (the KA is already
+        // minted), so we render a warning with the shared, accurate copy.
+        const partial = confirmed && !!result.contextGraphError;
         return (
-          <div className={confirmed ? 'v10-ka-verify-ok' : 'v10-ka-verify-err'}>
+          <div className={!confirmed ? 'v10-ka-verify-err' : partial ? 'v10-ka-verify-warn' : 'v10-ka-verify-ok'}>
             <div className="v10-ka-verify-ok-row">
               <span className="v10-ka-verify-ok-lbl">Status</span>
               <span className="v10-ka-verify-ok-val">
-                {confirmed ? '✓' : '✕'} {result.status}{confirmed ? '' : ' (NOT on-chain)'}
+                {!confirmed ? '✕' : partial ? '⚠' : '✓'} {result.status}{!confirmed ? ' (NOT on-chain)' : partial ? ` (${PARTIAL_PUBLISH_STATUS_SUFFIX})` : ''}
               </span>
             </div>
+            {partial && (
+              <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
+                {partialPublishWarning(result.contextGraphError)}
+              </div>
+            )}
             {result.txHash ? (
               <div className="v10-ka-verify-ok-row">
                 <span className="v10-ka-verify-ok-lbl">TX hash</span>

@@ -41,7 +41,10 @@ import {
 } from './db.js';
 
 const JOIN_TYPES = new Set(['join_request', 'join_approved', 'join_rejected']);
-const PANE_TYPES = new Set([...JOIN_TYPES, ASSERTION_ACTIVITY_TYPE]);
+/** B8 confirmed-discount alert — server-confirmed, wallet-scoped (the
+ *  publishing wallet's business, not the whole CG's; cf. invariant 3). */
+export const PCA_COST_COVERED_TYPE = 'pca_cost_covered';
+const PANE_TYPES = new Set([...JOIN_TYPES, ASSERTION_ACTIVITY_TYPE, PCA_COST_COVERED_TYPE]);
 
 export type NotifWire =
   | {
@@ -83,6 +86,26 @@ export type NotifWire =
         soleAuthor?: boolean;
         /** True when the sole author is the reading agent → render "You". */
         bySelf?: boolean;
+      };
+    }
+  | {
+      // B8 — a publish drew on a Publishing Conviction Account (CostCovered
+      // confirmed on-chain). Wallet-scoped to the publishing wallet. The UI
+      // derives the bps from baseCost/discountedCost.
+      type: 'pca_cost_covered';
+      id: number;
+      ts: number;
+      read: 0 | 1;
+      contextGraphId: string;
+      meta: {
+        contextGraphName?: string;
+        accountId: string;
+        epoch: number;
+        baseCost: string;
+        discountedCost: string;
+        drawnFromEpoch: string;
+        drawnFromTopUp: string;
+        publisherAddress: string;
       };
     };
 
@@ -169,6 +192,7 @@ export function scopeNotifications(
   const agentNameOf = (did: string): string | undefined => ctx.agentNames?.get(did);
 
   const joinWire: NotifWire[] = [];
+  const pcaWire: NotifWire[] = []; // B8 confirmed-discount alerts (wallet-scoped)
   // Dedup join_request to one row per (cg, agentAddress) — keep newest.
   const seenJoinRequest = new Map<string, number>(); // key → index in joinWire
   const activity = new Map<string, ActivityAccumulator>(); // digestKey → acc
@@ -213,6 +237,34 @@ export function scopeNotifications(
         acc.authors.add(actorDid);
         acc.lastAuthor = actorDid;
       }
+      continue;
+    }
+
+    if (row.type === PCA_COST_COVERED_TYPE) {
+      // Wallet-scoped (invariant 3): a confirmed discount is the PUBLISHING
+      // wallet's business, not the whole CG's — scope by publisherAddress ===
+      // caller (mirrors join_approved), fail closed if the caller is unknown.
+      // Placed BEFORE the join-family `meta.agentAddress` gate below (this row
+      // has `publisherAddress`, not `agentAddress`).
+      const publisher = asString(meta.publisherAddress);
+      if (!callerAddr || !publisher || lower(publisher) !== callerAddr) continue;
+      pcaWire.push({
+        type: 'pca_cost_covered',
+        id: row.id,
+        ts: row.ts,
+        read,
+        contextGraphId: cgId,
+        meta: {
+          ...(nameOf(cgId) ? { contextGraphName: nameOf(cgId) } : {}),
+          accountId: String(meta.accountId ?? ''),
+          epoch: Number(meta.epoch ?? 0),
+          baseCost: String(meta.baseCost ?? '0'),
+          discountedCost: String(meta.discountedCost ?? '0'),
+          drawnFromEpoch: String(meta.drawnFromEpoch ?? '0'),
+          drawnFromTopUp: String(meta.drawnFromTopUp ?? '0'),
+          publisherAddress: publisher,
+        },
+      });
       continue;
     }
 
@@ -297,7 +349,7 @@ export function scopeNotifications(
     });
   }
 
-  const notifications = [...joinWire, ...activityWire].sort((a, b) => b.ts - a.ts);
+  const notifications = [...joinWire, ...activityWire, ...pcaWire].sort((a, b) => b.ts - a.ts);
 
   // badgeCount = unread join_request + join_approved + activity digests.
   // join_rejected NEVER counts toward the badge (ux §2.4).

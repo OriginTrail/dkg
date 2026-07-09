@@ -21,6 +21,7 @@ import {
   getConfirmedStatusQuad,
   type KAMetadata,
 } from './metadata.js';
+import { insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { PublishJournal, type JournalEntry } from './publish-journal.js';
 
@@ -37,6 +38,7 @@ interface PendingPublish {
   expectedChainId: string;
   rootEntities: string[];
   createdAt: number;
+  restoredFromJournal: boolean;
 }
 
 /**
@@ -85,6 +87,13 @@ export class PublishHandler {
 
   get hasPendingPublishes(): boolean {
     return this.pendingPublishes.size > 0;
+  }
+
+  get hasRestoredPendingPublishes(): boolean {
+    for (const pending of this.pendingPublishes.values()) {
+      if (pending.restoredFromJournal) return true;
+    }
+    return false;
   }
 
   /**
@@ -308,7 +317,22 @@ export class PublishHandler {
         },
         kaMetadata,
       );
-      await this.store.insert(metadataQuads);
+      // #1233 follow-up — bound agents/_meta: this direct-protocol receive path
+      // is load-bearing (the `metadataQuads` we insert are the SAME object the
+      // tentative lifecycle expires/pends on below), so it cannot be skipped for
+      // the agents CG. INSERT then PRUNE (insert-first) via the helper: the
+      // just-inserted UAL is `recordUal` so the prune protects it, and a
+      // post-insert prune failure is swallowed (warned) inside the helper so it
+      // can never abort this ACK / orphan the pending publish below. The agents
+      // system CG (never confirms on-chain) keeps at most one live record per
+      // agent; no-op prune for every other CG (so it just inserts).
+      await insertBoundedAgentRegistryMeta({
+        store: this.store,
+        contextGraphId,
+        metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
+        recordUal: request.ual,
+        metadataQuads,
+      });
 
       // ── Tentative lifecycle timeout ──
       const timeout = setTimeout(
@@ -328,6 +352,7 @@ export class PublishHandler {
         expectedChainId: request.chainId ?? '',
         rootEntities: manifest.map(m => m.rootEntity),
         createdAt: Date.now(),
+        restoredFromJournal: false,
       });
       this.persistJournal();
 
@@ -509,6 +534,7 @@ export class PublishHandler {
         expectedChainId: entry.expectedChainId,
         rootEntities: entry.rootEntities ?? [],
         createdAt: entry.createdAt,
+        restoredFromJournal: true,
       });
       restored++;
     }

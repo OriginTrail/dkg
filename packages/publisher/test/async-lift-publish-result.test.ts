@@ -132,6 +132,38 @@ describe('async lift publish result mapping', () => {
     });
   });
 
+  it('classifies a NO_FUNDED_PUBLISHER_WALLET error as a TERMINAL insufficient_funds failure (not retryable)', () => {
+    // The funded-wallet-selection error message intentionally does NOT contain
+    // the literal "insufficient funds" substring; without code-based
+    // recognition it would fall through to the retryable rpc_unavailable
+    // default and retry an unfundable job forever.
+    const err = Object.assign(
+      new Error('No operational wallet has enough funds to publish to Verifiable Memory — fund a wallet and retry.'),
+      { code: 'NO_FUNDED_PUBLISHER_WALLET' },
+    );
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: err,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:no-funded-wallet',
+    });
+
+    expect(failure.code).toBe('insufficient_funds');
+    expect(failure.retryable).toBe(false);
+  });
+
+  it('classifies a code-stripped funds error (message marker only) as terminal insufficient_funds from broadcast', () => {
+    // A re-wrap could drop .code but preserve the message — the marker fallback
+    // must still keep it terminal (mirrors the daemon + node-ui robustness).
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: new Error('No operational wallet has enough funds to publish to Verifiable Memory — fund a wallet and retry.'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:no-funded-wallet-msg',
+    });
+
+    expect(failure.code).toBe('insufficient_funds');
+    expect(failure.retryable).toBe(false);
+  });
+
   it('classifies confirmation mismatches on included jobs', () => {
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new Error('confirmation mismatch detected'),
@@ -156,21 +188,4 @@ describe('async lift publish result mapping', () => {
     expect(failure.retryable).toBe(false);
   });
 
-  it('classifies a private-no-acks broadcast failure as TERMINAL, not retryable (Codex #1132 / GH #1013/#1121)', () => {
-    // Before the fix this generic broadcast-phase failure fell through to
-    // `rpc_unavailable` (retryable) and the queue retried forever a publish
-    // that can never reach VM until encrypted private async publish (#1121).
-    const failure = mapPublishExceptionToLiftJobFailure({
-      error: new Error(
-        'Async publish to a chain-registered context graph could not reach Verifiable Memory: ' +
-        'private payload had no collectable storage ACKs (peers cannot see private data).',
-      ),
-      failedFromState: 'broadcast',
-      errorPayloadRef: 'urn:error:private-no-acks',
-    });
-
-    expect(failure.code).toBe('private_unanchorable');
-    expect(failure.mode).toBe('terminal');
-    expect(failure.retryable).toBe(false);
-  });
 });

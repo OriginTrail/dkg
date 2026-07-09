@@ -337,23 +337,29 @@ async function publishAssertionVm(
   agentToken: string,
 ): Promise<bigint> {
   const doPublish = async () => {
-    const res = await apiFetch(node, '/api/shared-memory/publish', {
+    const res = await apiFetch(node, `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       method: 'POST',
       bearer: agentToken,
       body: JSON.stringify({
         contextGraphId: cgId,
-        assertionName: name,
-        clearAfter: true,
+        // Per-KA /vm/publish clears only this KA's own roots; do NOT pass
+        // clearSharedMemoryAfter (it would wipe the whole CG's unpublished SWM).
       }),
     });
-    if (!res.ok) {
-      throw new Error(`publish ${name}: ${res.status} ${await res.text()}`);
-    }
-    return (await res.json()) as {
+    // /vm/publish returns a NON-OK status (e.g. 502) for a TENTATIVE publish
+    // (publisher nonce race). Read the body before throwing so a tentative
+    // outcome flows to the retry below instead of failing here; only a genuine
+    // hard failure throws.
+    const j = (await res.json().catch(() => null)) as {
       status?: string;
       kaId?: string;
       txHash?: string;
-    };
+    } | null;
+    const tentative = !!j && (j.status === 'tentative' || j.kaId === '0');
+    if (!res.ok && !tentative) {
+      throw new Error(`publish ${name}: ${res.status} ${j ? JSON.stringify(j) : ''}`);
+    }
+    return j ?? {};
   };
   let j = await doPublish();
   if (j.status === 'tentative' || j.kaId === '0') {
@@ -373,10 +379,15 @@ async function publishEdgeSwmVm(
   entity: string,
 ): Promise<bigint> {
   const subject = `urn:devnet:rich:edge:${stamp}/${entity}`;
-  const writeRes = await apiFetch(edge, '/api/shared-memory/write', {
+  const assertionName = `rich-edge-${stamp}-${entity}`;
+  // Stage as a named KA (create → write → seal → share), then publish via the
+  // canonical per-KA route. (The legacy loose write + selection-publish bridge
+  // was removed; the named-KA lifecycle is the only publish path now.)
+  const writeRes = await apiFetch(edge, '/api/knowledge-assets', {
     method: 'POST',
     body: JSON.stringify({
       contextGraphId: cgId,
+      name: assertionName,
       quads: [
         {
           subject,
@@ -391,28 +402,39 @@ async function publishEdgeSwmVm(
           graph: '',
         },
       ],
+      finalize: true,
+      alsoShareSwm: true,
     }),
   });
   if (!writeRes.ok) {
     throw new Error(
-      `SWM write ${entity}: ${writeRes.status} ${await writeRes.text()}`,
+      `KA create ${entity}: ${writeRes.status} ${await writeRes.text()}`,
     );
   }
   await new Promise((r) => setTimeout(r, 1_500));
-  const pubRes = await apiFetch(edge, '/api/shared-memory/publish', {
-    method: 'POST',
-    body: JSON.stringify({
-      contextGraphId: cgId,
-      selection: 'all',
-      clearAfter: true,
-    }),
-  });
-  if (!pubRes.ok) {
-    throw new Error(
-      `edge publish ${entity}: ${pubRes.status} ${await pubRes.text()}`,
-    );
+  const doEdgePublish = async () => {
+    const pubRes = await apiFetch(edge, `/api/knowledge-assets/${encodeURIComponent(assertionName)}/vm/publish`, {
+      method: 'POST',
+      body: JSON.stringify({
+        contextGraphId: cgId,
+        // Per-KA /vm/publish clears only this KA's own roots; no CG-wide clear.
+      }),
+    });
+    // /vm/publish returns a NON-OK status (e.g. 502) for a TENTATIVE publish
+    // (publisher nonce race). Read the body before throwing so a tentative
+    // result flows to the retry below; only a genuine hard failure throws.
+    const body = (await pubRes.json().catch(() => null)) as { status?: string; kaId?: string } | null;
+    const tentative = !!body && (body.status === 'tentative' || body.kaId === '0');
+    if (!pubRes.ok && !tentative) {
+      throw new Error(`edge publish ${entity}: ${pubRes.status} ${body ? JSON.stringify(body) : ''}`);
+    }
+    return body ?? {};
+  };
+  let j = await doEdgePublish();
+  if (j.status === 'tentative' || j.kaId === '0') {
+    await new Promise((r) => setTimeout(r, 2_000));
+    j = await doEdgePublish();
   }
-  const j = (await pubRes.json()) as { status?: string; kaId?: string };
   if (j.status !== 'confirmed' || !j.kaId || j.kaId === '0') {
     throw new Error(`edge publish failed: ${JSON.stringify(j)}`);
   }
@@ -745,7 +767,7 @@ describe('Devnet rich scenario (~10 min)', () => {
       const name = `bulk-vm-${run.stamp}-${i}`;
       const { quads, rootSubject } = buildBulkQuads(name, batchTs + 200 + i);
       // KA create auto-finalizes + `alsoShareSwm` promotes to SWM; the
-      // separate /api/shared-memory/publish below lifts SWM→VM.
+      // separate per-KA vm/publish below lifts SWM→VM.
       const createRes = await apiFetch(core1, '/api/knowledge-assets', {
         method: 'POST',
         bearer: token,

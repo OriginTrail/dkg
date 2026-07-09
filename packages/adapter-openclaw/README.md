@@ -43,12 +43,13 @@ openclaw gateway restart
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
+| `--network <name>` | `mainnet-gnosis` (fresh node) | Network to set up on (`mainnet-gnosis` \| `mainnet-base` \| `testnet`), persisted as `config.networkConfig`. Applies to a FRESH node only; an existing node keeps its current network (switch with `dkg init --network`). |
 | `--no-fund` | off | Skip the testnet faucet call during setup. Use this if your wallets are already funded, the faucet is unreachable, or you're running offline. |
 | `--no-start` | off | Skip starting the DKG daemon (configure only). |
 | `--no-verify` | off | Skip the post-setup verification pass. |
 | `--dry-run` | off | Preview the setup actions without writing anything. |
 
-Faucet funding is best-effort: a failed call logs a manual `curl` block and setup continues. See the main repo's [Testnet Funding](../../README.md#testnet-funding) section and [`docs/setup/TESTNET_FAUCET.md`](../../docs/setup/TESTNET_FAUCET.md) for request/response semantics, rate limits, and error codes.
+Faucet funding only runs on testnet (mainnet networks have no faucet) and is best-effort: a failed call logs a manual `curl` block and setup continues. See the main repo's [Funding](../../README.md#funding) section and [`TESTNET_FAUCET.md`](../../docs/archive/internal/setup/TESTNET_FAUCET.md) for request/response semantics, rate limits, and error codes.
 
 ## Verification
 

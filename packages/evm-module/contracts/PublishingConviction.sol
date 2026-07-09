@@ -6,6 +6,7 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
+import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
@@ -38,42 +39,63 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     publisher-facing TRAC `transferFrom` paths. Every state read /
  *     write goes through PCS.
  *
- * Lazy-settlement model (preserved 1:1 from the legacy stateful NFT):
+ * Deterministic emission schedule (since 10.0.8):
  *   - Each account lifetime is divided into `lockDurationEpochs` billing
  *     windows of length `Chronos.epochLength()`, anchored at
  *     `Account.createdAtTimestamp`. Per-window base budget is
  *     `B = committedTRAC / lockDurationEpochs`.
- *   - Two sinks drain `B` per window:
- *       1. ACTIVE: `coverPublishingCost` distributes its
- *          `discountedCost` across the published KA's epoch range via
- *          `EpochStorage.addTokensToEpochRange`. The base portion drawn
- *          increments `windowSpent[id][w]`, capped at `B`.
- *       2. PASSIVE: at the end of window `w`, the unspent remainder
- *          `B - windowSpent[w]` is swept to the staker reward pool for
- *          the chain epochs that window overlaps. Settlement is lazy:
- *          triggered by the next `coverPublishingCost`, `topUp`,
- *          ERC-721 transfer (via `onTransfer`), or an explicit public
- *          `settle(accountId)` call.
+ *   - The staker-pool distribution of the ENTIRE committed amount is
+ *     written UP FRONT via `_scheduleRemaining`: each window's budget is
+ *     spread over the `lockDurationEpochs` epoch-lengths that FOLLOW that
+ *     window (prorated at chain-epoch boundaries via
+ *     `PublishingMathLib.prorateActiveSink`, anchored purely on STORED
+ *     account fields so the schedule is deterministic). The per-account
+ *     `committedTRAC % lockDurationEpochs` dust rides the last window.
+ *     The schedule is therefore a pure function of the commitment's own
+ *     terms (amount, lock length, creation time), fixed once at account
+ *     creation; publishing draws down the per-window budget against it
+ *     (see `windowSpent` below) without re-emitting already-scheduled
+ *     amounts. `lastSettledWindow == lockDurationEpochs` doubles as the
+ *     "schedule written" marker: `createAccount` schedules immediately;
+ *     accounts created before 10.0.8 are scheduled by the one-time
+ *     `migrateEmissionSchedule` batch or lazily on their first touch
+ *     (`coverPublishingCost` / `topUp` / `onTransfer` / `settle`).
+ *   - `windowSpent[id][w]` remains the per-window BUDGET GATE for
+ *     `coverPublishingCost`: spending draws down the allowance but emits
+ *     nothing further for the base portion (that TRAC is already
+ *     scheduled). Only the `topUpBalance` overflow drawn on a spend is
+ *     emitted at spend time — forward over `lockDurationEpochs` from the
+ *     current epoch, mirroring the base schedule's shape.
  *   - `topUpBalance[accountId]` is a separate prepaid usage buffer
- *     beyond the base budget. It is drawn only when the current
- *     window's base allowance is exhausted. Any leftover at account
- *     expiry is swept to the staker pool (final chain epoch) via the
- *     same `settle()` path.
+ *     beyond the base budget. Any leftover at account expiry is swept to
+ *     the staker pool (final chain epoch) via the same `settle()` path.
  *   - Invariant: over a full account lifetime, the total TRAC drained
  *     from the escrowed `committedTRAC + sum(topUps)` is conserved and
  *     splits into exactly two destinations:
  *       (a) the staker reward pool, credited via
  *           `EpochStorage.addTokensToEpochRange(STAKER_SHARD_ID, ...)`, and
- *       (b) the protocol treasury, paid via
- *           `ConvictionStakingStorage.transferStake(protocolTreasury, fee)`.
- *     The treasury fee (`ParametersStorage.protocolTreasuryFee`, bps) is
- *     skimmed from every staker-bound amount — the active-sink
- *     distribution, each passive window sweep, and the final dust/topUp
- *     tail — so `pool + treasury == committedTRAC + sum(topUps)` still
- *     holds. While `protocolTreasury == address(0)` the fee is 0 and the
- *     whole amount flows to the pool (legacy behaviour). Any
- *     `committedTRAC % lockDurationEpochs` dust is swept on the final
- *     settle alongside the topUp tail.
+ *       (b) the protocol treasury — as the treasury EMISSION pool
+ *           (`TREASURY_SHARD_ID`, scheduled alongside (a) and paid out
+ *           per elapsed epoch via `collectTreasuryEmission`) plus the
+ *           immediate `ConvictionStakingStorage.transferStake` skims on
+ *           the topUp flows.
+ *     Fee basis since 10.0.8: the treasury fee
+ *     (`ParametersStorage.protocolTreasuryFee`, bps — snapshot at
+ *     schedule time) is ASSESSED on the base commitment as an
+ *     accounting split inside `_scheduleRemaining`: each window's
+ *     remainder schedules `net` to the staker shard and `fee` to the
+ *     treasury shard on the SAME forward curve. No TRAC moves during
+ *     the scheduling call — the frozen wrapper funds the vault only
+ *     AFTER it ("forward-before-pull"), so a physical skim there would
+ *     revert; the deferred, per-epoch `collectTreasuryEmission` payout
+ *     runs strictly after mint completes, when the vault is funded.
+ *     TopUp flows (spend-time overflow, expiry tail) keep the
+ *     immediate skim — the vault is guaranteed funded at those points.
+ *     So `pool(shard 1) + pool(shard 2) + immediate fees ==
+ *     committedTRAC + sum(topUps)` holds, with every fee term 0 while
+ *     `protocolTreasury == address(0)` (the live state on every chain
+ *     today — note `protocolTreasuryFee` itself is live at 300 bps;
+ *     the unset recipient is the kill switch).
  *
  * Caller gates:
  *   - Mutating entry points driven by user actions are
@@ -85,9 +107,12 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     NFT, the NFT forwards here with the publishing agent's address,
  *     and we resolve the paying account via PCS's `agentToAccountId`.
  *     A trusted caller cannot pass a victim's accountId.
- *   - `settle(accountId)` is intentionally permissionless — any account
- *     (including a staker pool watcher) can flush pending sweeps. The
- *     account's `fullySwept` flag short-circuits redundant work.
+ *   - `settle(accountId)` is intentionally permissionless — anyone can
+ *     bring an account's schedule current (pre-10.0.8 accounts) and,
+ *     post-expiry, flush the topUp tail. The `fullySwept` flag
+ *     short-circuits redundant work.
+ *   - `migrateEmissionSchedule` is `onlyHubOwner` — a one-time batched
+ *     convenience over the same idempotent `_scheduleRemaining` path.
  */
 contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializable, IPublishingConvictionErrors {
     string private constant _NAME = "PublishingConviction";
@@ -127,13 +152,61 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     //           are byte-identical, so seed and move stay net-zero on K_total.
     // 10.0.5 — KC→KA terminology: error InvalidConvictionKcEpochs → InvalidConvictionKaEpochs
     //          (error selector change; no behavior change).
-    string private constant _VERSION = "10.0.5";
+    // 10.0.8 — deterministic emission schedule. The staker-pool distribution of
+    //          committedTRAC is written UP FRONT: each billing window's budget
+    //          B = committedTRAC / lockDurationEpochs is spread over the
+    //          lockDurationEpochs epoch-lengths FOLLOWING that window (prorated
+    //          at chain-epoch boundaries via prorateActiveSink, anchored on
+    //          stored account fields), with the % dust riding the last window —
+    //          so the pool schedule is fully determined by the commitment's
+    //          own terms at account creation. `coverPublishingCost` keeps
+    //          the windowSpent budget accounting but no longer re-emits the
+    //          base portion (only topUp-drawn overflow emits, forward over the
+    //          lock from the current epoch). The passive window sweep
+    //          (`_settleElapsed`/`_sweepWindowProrated`) is replaced by the
+    //          idempotent `_scheduleRemaining` (same call sites); `settle()`
+    //          and the transfer hook reduce to schedule-if-needed + the
+    //          post-expiry topUp tail. `lastSettledWindow == lockDurationEpochs`
+    //          doubles as the "schedule written" marker (no new storage).
+    //          One-time Hub-owner batch `migrateEmissionSchedule(uint256[])`
+    //          proactively schedules accounts created before this version;
+    //          any account missed by the batch self-heals on first touch.
+    //          `WindowSettled` is no longer emitted (declaration kept for
+    //          indexer/ABI compatibility); new event `EmissionScheduled`.
+    //          FEE-BASIS NOTE: the base-commitment treasury fee is ASSESSED
+    //          at schedule time (bps snapshot) as an ACCOUNTING split — each
+    //          window's remainder schedules net to `STAKER_SHARD_ID` and fee
+    //          to `TREASURY_SHARD_ID` on the same forward curve — and PAID
+    //          later, per elapsed epoch, via the permissionless
+    //          `collectTreasuryEmission`. Structural reason for the split:
+    //          the frozen wrapper's forward-before-pull order funds the CSS
+    //          vault only AFTER the scheduling call, so a physical skim at
+    //          create would revert on an empty vault once a treasury is
+    //          wired; deferring only the TRANSFER (never the assessment)
+    //          keeps the fee lever real on the base commitment. TopUp flows
+    //          (spend-time overflow, expiry tail) keep the immediate
+    //          `transferStake` skim. Accounts scheduled while
+    //          `protocolTreasury == address(0)` schedule 100% to the staker
+    //          shard (fee 0 by `_treasuryParams`) and are grandfathered —
+    //          a later treasury wiring never reduces already-scheduled
+    //          staker pools. No live impact today (recipient unset on all
+    //          chains; the bps parameter itself is live at 300).
+    string private constant _VERSION = "10.0.8";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
     /// @notice EpochStorage shard ID for the staker reward pool. Mirrors
     ///         the constant on `KnowledgeAssetsV10` and the legacy
     ///         stateful NFT so reward-distribution semantics are identical.
     uint256 public constant STAKER_SHARD_ID = 1;
+    /// @notice EpochStorage shard ID for the protocol-treasury emission pool
+    ///         (10.0.8). The base-commitment treasury fee is scheduled here —
+    ///         same forward curve as the staker shard, split at schedule time
+    ///         in `_scheduleRemaining` — and paid out per ELAPSED epoch via
+    ///         `collectTreasuryEmission`. `EpochStorage`'s pool mappings are
+    ///         generic over `shardId`, so this needs no storage change; shard
+    ///         2 was previously unused by any Hub contract. The `distributed`
+    ///         counter per epoch is the payout's idempotence source.
+    uint256 public constant TREASURY_SHARD_ID = 2;
 
     // ============================================================
     //                  Hub-wired dependencies
@@ -204,6 +277,12 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     );
     event AgentRegistered(uint256 indexed accountId, address indexed agent);
     event AgentDeregistered(uint256 indexed accountId, address indexed agent);
+    /// @notice Emitted when an owner bulk-clears a PCA's agent allow-list via
+    ///         `clearAgents`. `cleared` is the number of agents removed.
+    event AgentsCleared(uint256 indexed accountId, address indexed owner, uint256 cleared);
+
+    /// @notice The caller is not the current owner of `accountId`'s PCA NFT.
+    error NotAccountOwner(uint256 accountId, address caller);
     /// @notice OT-RFC-51: emitted when an account's designated primary node
     ///         changes (including the initial designation at creation, where
     ///         `oldNode == 0`).
@@ -213,8 +292,10 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         uint72 indexed newNode,
         uint40 changeEpoch
     );
-    /// @notice Emitted for each elapsed billing window that gets swept to
-    ///         the staker pool via the passive sink during lazy settlement.
+    /// @notice LEGACY (pre-10.0.8): was emitted per elapsed billing window by
+    ///         the passive sweep. The declaration is kept so existing indexer
+    ///         ABIs stay valid, but no 10.0.8 code path emits it — window
+    ///         budgets are scheduled up front (see `EmissionScheduled`).
     event WindowSettled(
         uint256 indexed accountId,
         uint40 indexed windowIndex,
@@ -222,6 +303,29 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         uint40 endChainEpoch,
         uint96 remainderSwept
     );
+    /// @notice Emitted when an account's remaining base-budget emission is
+    ///         written to the pool schedules (10.0.8+). Fires exactly
+    ///         once per account — at creation for new accounts, or at
+    ///         migration / first touch for accounts created before 10.0.8.
+    ///         `fromWindow`..`toWindow-1` are the windows scheduled by this
+    ///         call; `scheduled` is the staker-pool (shard 1) total and
+    ///         `treasuryFee` the treasury-emission-pool (shard 2) total —
+    ///         together they equal the remaining base budget exactly.
+    ///         `treasuryFee` is 0 while `protocolTreasury == address(0)` at
+    ///         schedule time (see `_scheduleRemaining`).
+    event EmissionScheduled(
+        uint256 indexed accountId,
+        uint40 fromWindow,
+        uint40 toWindow,
+        uint96 scheduled,
+        uint96 treasuryFee
+    );
+    /// @notice Emitted by `collectTreasuryEmission`: the accrued treasury
+    ///         emission pool over chain epochs `fromEpoch..toEpoch` (all
+    ///         strictly elapsed) was paid to `protocolTreasury`. `amount`
+    ///         can be 0 (nothing accrued / already collected — the call is
+    ///         idempotent via EpochStorage's `distributed` counter).
+    event TreasuryEmissionCollected(uint256 fromEpoch, uint256 toEpoch, uint96 amount);
     /// @notice Emitted once per account, when the post-expiry final sweep
     ///         finishes (base remainder + topUp buffer + dust all accounted).
     event AccountFinalSwept(
@@ -264,6 +368,15 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     ///         `PrimaryNodeChanged`, and run a pointless self-move loop — so it
     ///         is rejected.
     error PrimaryNodeUnchanged(uint256 accountId, uint72 node);
+    /// @notice `collectTreasuryEmission` called while `protocolTreasury` is
+    ///         unset — there is no recipient to pay (and nothing can have
+    ///         accrued on the treasury shard while it was unset).
+    error TreasuryNotSet();
+    /// @notice `collectTreasuryEmission` epoch range is malformed or reaches
+    ///         into the present/future: `fromEpoch <= toEpoch < currentEpoch`
+    ///         is required — the treasury collects an epoch only once it has
+    ///         fully elapsed, mirroring when stakers can claim theirs.
+    error InvalidCollectionRange(uint256 fromEpoch, uint256 toEpoch, uint256 currentEpoch);
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -315,6 +428,23 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     modifier onlyConvictionNFT() {
         if (msg.sender != hub.getContractAddress("DKGPublishingConvictionNFT")) {
             revert OnlyConvictionNFT(msg.sender);
+        }
+        _;
+    }
+
+    /// @dev Owner-gate for the direct-to-logic BULK agent actions (`clearAgents`,
+    ///      `registerAgents`). DELIBERATE, isolated exception to the usual pattern
+    ///      where owner validation lives on the NFT wrapper and logic is gated by
+    ///      `onlyConvictionNFT`: the wrapper is non-upgradeable and exposes no
+    ///      batch entry point, so these validate ownership here against the live
+    ///      `ownerOf`. New SINGLE agent ops still belong on the wrapper; only the
+    ///      batch operations the frozen wrapper cannot host live here. `ownerOf`
+    ///      reverts for a nonexistent account (and for an unresolvable address(0)
+    ///      NFT), so a bad id cannot slip past this gate.
+    modifier onlyCurrentPcaOwner(uint256 accountId) {
+        address nftAddr = hub.getContractAddress("DKGPublishingConvictionNFT");
+        if (IERC721(nftAddr).ownerOf(accountId) != msg.sender) {
+            revert NotAccountOwner(accountId, msg.sender);
         }
         _;
     }
@@ -418,6 +548,15 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         if (primaryNode != 0) {
             emit PrimaryNodeChanged(accountId, 0, primaryNode, currentEpoch);
         }
+
+        // 10.0.8: write the account's full staker-pool emission schedule up
+        // front (windowSpent is all-zero at creation, so this schedules the
+        // entire commitment). Runs for EVERY account — the money emission is
+        // node-independent (the pool is global); only the K_n score seeding
+        // above is gated on a designated node. Placed last: its internal
+        // `_payTreasury` is the only token-moving external call in this
+        // function and must be the final action (reentrancy discipline).
+        _scheduleRemaining(acct, accountId);
     }
 
     // ============================================================
@@ -604,7 +743,9 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             revert AccountExpired(accountId, acct.expiresAtEpoch);
         }
 
-        _settleElapsed(acct, accountId);
+        // Bring a pre-10.0.8 account's emission schedule current (no-op for
+        // accounts scheduled at creation).
+        _scheduleRemaining(acct, accountId);
 
         publishingConvictionStorage.increaseTopUpBalance(accountId, amount);
 
@@ -628,16 +769,20 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
      *          `agentToAccountId` map; KAV10 cannot pass a victim's
      *          accountId.
      *
-     *      Behavior — preserved 1:1 from the legacy stateful NFT:
+     *      Behavior (10.0.8):
      *        1. Reject if the publish's KA lifetime (`kaEpochs`) exceeds
      *           the account's `lockDurationEpochs`.
-     *        2. Lazily settle elapsed billing windows (passive sink).
+     *        2. Bring a pre-10.0.8 account's emission schedule current
+     *           (no-op for accounts scheduled at creation).
      *        3. Compute `discountedCost = baseCost * (1 - discountBps/1e4)`.
      *        4. Spend order against the current window: base allowance
-     *           first, then `topUpBalance` overflow.
-     *        5. Distribute the discounted cost across the KA's epoch
-     *           range via `EpochStorage.addTokensToEpochRange` —
-     *           prorating the partial first and last chain epoch.
+     *           first, then `topUpBalance` overflow. `windowSpent` is a
+     *           pure BUDGET GATE — the base portion emits nothing here
+     *           because that TRAC is already on the emission schedule.
+     *        5. Emit ONLY the topUp-drawn overflow, forward over
+     *           `lockDurationEpochs` from the current epoch (PCA money
+     *           always emits on the lock-shaped schedule; `kaStartEpoch`
+     *           no longer shapes emission and is kept for ABI stability).
      *
      *      Does NOT physically move TRAC; the escrowed amount is already
      *      in the CSS vault from `createAccount` / `topUp`. Returns the
@@ -649,6 +794,10 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         uint40 kaStartEpoch,
         uint40 kaEpochs
     ) external onlyConvictionNFT returns (uint96 discountedCost) {
+        // ABI-retained legacy parameter. Emission now anchors at the current
+        // epoch, but the name remains part of the public metadata contract.
+        kaStartEpoch;
+
         uint256 accountId = publishingConvictionStorage.agentToAccountId(publishingAgent);
         if (accountId == 0) revert NoConvictionAccount(publishingAgent);
 
@@ -662,12 +811,13 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             revert InvalidConvictionKaEpochs(uint256(acct.lockDurationEpochs), uint256(kaEpochs));
         }
 
-        // Re-read after settle: `_settleElapsed` may have advanced
-        // `lastSettledWindow` on storage. We don't actually depend on the
-        // updated cursor below (`currentBillingWindow` is independent of
-        // it), but keeping the in-memory snapshot consistent with storage
-        // avoids surprises if future logic adds a dependency.
-        _settleElapsed(acct, accountId);
+        // Bring a pre-10.0.8 account's emission schedule current BEFORE the
+        // spend below mutates `windowSpent` — the schedule subtracts only
+        // amounts that were emitted under the pre-10.0.8 active sink, and
+        // this ordering is what keeps that subtraction exact. No-op for
+        // accounts scheduled at creation. (`acct.lastSettledWindow` is
+        // updated in memory, keeping the snapshot consistent with storage.)
+        _scheduleRemaining(acct, accountId);
 
         uint40 currentEpoch = uint40(chronos.getCurrentEpoch());
         uint40 currentBillingWindow = _currentBillingWindow(acct);
@@ -721,17 +871,19 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             publishingConvictionStorage.increaseWindowSpent(accountId, currentBillingWindow, drawnFromEpoch);
         }
 
-        // Active sink: fund the KA's epoch range with the discounted
-        // cost. MUST mirror `KnowledgeAssetsV10._distributeTokens`
-        // semantics so conviction-funded and direct-spend reward curves
-        // are identical (modulo the conviction discount).
-        uint96 distributed = drawnFromEpoch + drawnFromTopUp;
-        if (distributed > 0) {
+        // 10.0.8: the base portion (`drawnFromEpoch`) emits NOTHING here —
+        // that TRAC is already on the emission schedule written at
+        // creation/migration, and `windowSpent` above is purely the budget
+        // gate. Only the topUp-drawn overflow is new money for the pool; it
+        // emits forward over the lock length from the current epoch,
+        // mirroring the base schedule's shape (PCA money always emits on
+        // the lock-shaped schedule, independent of the KA's lifetime).
+        if (drawnFromTopUp > 0) {
             (address treasury, uint256 feeBps) = _treasuryParams();
-            uint96 fee = _feeOf(distributed, feeBps);
-            uint96 net = distributed - fee;
+            uint96 fee = _feeOf(drawnFromTopUp, feeBps);
+            uint96 net = drawnFromTopUp - fee;
             if (net > 0) {
-                _distributeProrated(net, kaStartEpoch, uint256(kaEpochs));
+                _distributeProrated(net, currentEpoch, uint256(acct.lockDurationEpochs));
             }
             // PCS window/topUp writes (above) are already persisted, so
             // paying the treasury last keeps effects-before-interactions.
@@ -778,8 +930,8 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
     //                  Protocol treasury fee
     // ============================================================
 
-    /// @dev Snapshot the treasury config once per settlement so the per-
-    ///      window loops in `_settleElapsed` / `_finalSweep` don't pay a
+    /// @dev Snapshot the treasury config once per call so the per-window
+    ///      loop in `_scheduleRemaining` (and `_finalSweep`) doesn't pay a
     ///      cross-contract read on every iteration. Returns
     ///      `(address(0), 0)` while the fee is disabled (no treasury
     ///      wired), which makes `_feeOf` a no-op and `_payTreasury` skip.
@@ -810,30 +962,74 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         convictionStakingStorage.transferStake(treasury, totalFee);
     }
 
+    /**
+     * @notice Pay the protocol treasury its accrued emission pool
+     *         (`TREASURY_SHARD_ID`) for the fully ELAPSED chain epochs
+     *         `fromEpoch..toEpoch`. Permissionless — the recipient is
+     *         hard-wired to `ParametersStorage.protocolTreasury`, so any
+     *         caller can only ever move funds to the governance-configured
+     *         address. Idempotent per epoch: EpochStorage's `distributed`
+     *         counter tracks what has been paid, and only the remaining
+     *         pool (`getEpochRemainingPool`) is transferred, so re-calls
+     *         and overlapping ranges are safe no-ops.
+     *
+     * @dev  `toEpoch < currentEpoch` is required: the treasury collects an
+     *       epoch only once it has fully elapsed, mirroring when stakers
+     *       can claim that epoch's rewards — the treasury is never paid
+     *       ahead of the stakers it is scheduled alongside. Solvency: every
+     *       amount on the treasury shard was scheduled inside a completed
+     *       mint (the wrapper funds the vault in the same transaction,
+     *       right after the scheduling call), so by the time an epoch has
+     *       elapsed the vault holds the backing TRAC. Effects before
+     *       interactions: `payOutEpochTokens` persists `distributed` per
+     *       epoch BEFORE the single `transferStake` at the end.
+     */
+    function collectTreasuryEmission(uint256 fromEpoch, uint256 toEpoch) external {
+        address treasury = parametersStorage.protocolTreasury();
+        if (treasury == address(0)) revert TreasuryNotSet();
+
+        uint256 currentEpoch = chronos.getCurrentEpoch();
+        if (fromEpoch > toEpoch || toEpoch >= currentEpoch) {
+            revert InvalidCollectionRange(fromEpoch, toEpoch, currentEpoch);
+        }
+
+        uint96 total;
+        for (uint256 epoch = fromEpoch; epoch <= toEpoch; epoch++) {
+            uint96 amount = epochStorage.getEpochRemainingPool(TREASURY_SHARD_ID, epoch);
+            if (amount == 0) continue;
+            // `identityId = 0` — the treasury is not a node; `nodesPaidOut[0]`
+            // is a dead-letter counter. `distributed[shard][epoch]` is the
+            // idempotence source consumed by `getEpochRemainingPool` above.
+            epochStorage.payOutEpochTokens(TREASURY_SHARD_ID, epoch, 0, amount);
+            total += amount;
+        }
+
+        emit TreasuryEmissionCollected(fromEpoch, toEpoch, total);
+        _payTreasury(treasury, total);
+    }
+
     // ============================================================
     //          Lazy settlement (passive sink + final tail)
     // ============================================================
 
     /**
-     * @notice Public lazy-settlement entry point. Permissionless: anyone
+     * @notice Public settlement entry point. Permissionless: anyone
      *         (account owner, staker pool watcher, automation bot) can
-     *         flush pending sweeps. Idempotent — subsequent calls after
-     *         the post-expiry final sweep are no-ops.
+     *         call it. Idempotent — subsequent calls after the post-expiry
+     *         final sweep are no-ops.
      *
-     * @dev Flow:
-     *        - Pre-expiry: sweeps every elapsed billing window's unspent
-     *          base remainder (`B - windowSpent[w]`) into the staker
-     *          pool, prorated across the chain epochs the window
-     *          overlaps.
-     *        - Post-expiry: in addition to the above, finalises the
-     *          last window, sweeps any leftover `topUpBalance`, and
-     *          sweeps `committedTRAC % lockDurationEpochs` dust to the
-     *          final chain epoch. Sets `fullySwept = true`.
+     * @dev Flow (10.0.8):
+     *        - Writes the account's remaining base-budget emission
+     *          schedule if it has not been written yet (only reachable
+     *          for accounts created before 10.0.8 that the
+     *          `migrateEmissionSchedule` batch has not covered — a
+     *          public self-heal path). No-op otherwise.
+     *        - Post-expiry: sweeps any leftover `topUpBalance` to the
+     *          final chain epoch and sets `fullySwept = true`.
      *
-     *      No `onlyConvictionNFT` gate — public on purpose. Accounts
-     *      that have never been created revert via PCS's
-     *      `getAccount(...)` underflow path. `fullySwept` accounts
-     *      short-circuit before any work.
+     *      No `onlyConvictionNFT` gate — public on purpose. Unknown
+     *      accounts revert. `fullySwept` accounts short-circuit before
+     *      any work.
      */
     function settle(uint256 accountId) external {
         if (!publishingConvictionStorage.accountExists(accountId)) {
@@ -843,20 +1039,50 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
             publishingConvictionStorage.getAccount(accountId);
         if (acct.fullySwept) return;
 
-        _settleElapsed(acct, accountId);
+        _scheduleRemaining(acct, accountId);
 
         if (block.timestamp >= uint256(acct.expiresAtTimestamp)) {
             _finalSweep(acct, accountId);
         }
     }
 
-    /// @notice Trigger lazy-settlement from the NFT wrapper's transfer
-    ///         hook AND clear every agent registration so the new owner
-    ///         starts with a clean slate. Restricted to the NFT.
-    /// @dev    `from`/`to` arguments are not used internally — the
-    ///         wrapper passes them so a future audit-friendly extension
-    ///         (e.g. emitting a wrapper-layer transfer-settle event with
-    ///         both endpoints) does not require an interface change.
+    /**
+     * @notice One-time batched migration to the 10.0.8 deterministic
+     *         emission schedule: writes the remaining schedule for every
+     *         account in `accountIds` (accounts created before 10.0.8).
+     *         Idempotent per account — already-scheduled accounts (including
+     *         every account created at 10.0.8+) are skipped by the
+     *         `lastSettledWindow == lockDurationEpochs` marker, so the batch
+     *         can be safely re-run or split across transactions.
+     *
+     * @dev `onlyHubOwner` for release-day control of batch sizing/ordering;
+     *      the underlying `_scheduleRemaining` is the same idempotent path
+     *      the public `settle()` self-heal uses, so this gate is operational
+     *      convenience, not a safety boundary. Reverts on an unknown id
+     *      (owner-driven call — a typo should fail loudly, not skip).
+     */
+    function migrateEmissionSchedule(uint256[] calldata accountIds) external onlyHubOwner {
+        for (uint256 i = 0; i < accountIds.length; i++) {
+            uint256 accountId = accountIds[i];
+            if (!publishingConvictionStorage.accountExists(accountId)) {
+                revert UnknownAccount(accountId);
+            }
+            PublishingConvictionStorage.Account memory acct =
+                publishingConvictionStorage.getAccount(accountId);
+            _scheduleRemaining(acct, accountId);
+        }
+    }
+
+    /// @notice Bring the account's emission schedule current from the NFT
+    ///         wrapper's transfer hook (pre-10.0.8 accounts self-heal at
+    ///         ownership change; post-expiry the topUp tail is flushed).
+    ///         Restricted to the NFT.
+    /// @dev    The agent allow-list is intentionally PRESERVED across transfer —
+    ///         it travels with the PCA like the rest of the account's state. Use
+    ///         the owner-gated `clearAgents` to reset it explicitly (a new owner
+    ///         can drop inherited agents; an owner can wipe them before handing
+    ///         the PCA over). `from`/`to` are unused internally — the wrapper
+    ///         passes them so a future event extension needs no interface change.
     function onTransfer(
         uint256 accountId,
         address /* from */,
@@ -865,166 +1091,162 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         PublishingConvictionStorage.Account memory acct =
             publishingConvictionStorage.getAccount(accountId);
         if (acct.lockDurationEpochs != 0 && !acct.fullySwept) {
-            _settleElapsed(acct, accountId);
+            _scheduleRemaining(acct, accountId);
             if (block.timestamp >= uint256(acct.expiresAtTimestamp)) {
                 _finalSweep(acct, accountId);
             }
         }
-        publishingConvictionStorage.clearAgents(accountId);
     }
 
-    /// @notice Internal helper: sweep all CLOSED windows up to the
-    ///         current window into the staker pool. Idempotent and
-    ///         gas-bounded by `lockDurationEpochs - lastSettledWindow`.
-    /// @dev    Mutates `acct.lastSettledWindow` in memory so callers
-    ///         (e.g. `topUp`, `coverPublishingCost`) see a consistent
-    ///         snapshot after the call. The single SSTORE to PCS at
-    ///         the end keeps gas costs predictable.
-    function _settleElapsed(
+    /// @notice Internal helper: write the account's REMAINING base-budget
+    ///         emission schedule to the staker pool — every not-yet-scheduled
+    ///         window's `B − windowSpent[w]` (plus the `committedTRAC % lock`
+    ///         dust on the last window), each spread forward over the
+    ///         `lockDurationEpochs` epoch-lengths that follow that window.
+    ///         Idempotent: `lastSettledWindow == lockDurationEpochs` is the
+    ///         "schedule written" marker, set here in one shot.
+    /// @dev    For accounts created at 10.0.8+ this runs at `createAccount`
+    ///         (windowSpent all zero → schedules the full commitment). For
+    ///         accounts created earlier it runs at `migrateEmissionSchedule`
+    ///         or on their first touch; subtracting `windowSpent[w]` is exact
+    ///         because those spent amounts were already emitted at spend time
+    ///         under the pre-10.0.8 active sink (conservation per window:
+    ///         scheduled (B − spent) + already-emitted (spent) == B).
+    ///         Anchored purely on STORED account fields (never `block.timestamp`)
+    ///         so the resulting schedule is identical whenever it is written.
+    ///         Mutates `acct.lastSettledWindow` in memory so callers see a
+    ///         consistent snapshot after the call.
+    function _scheduleRemaining(
         PublishingConvictionStorage.Account memory acct,
         uint256 accountId
     ) internal {
-        uint40 currentWindow = _currentBillingWindow(acct);
         uint40 maxWindow = uint40(acct.lockDurationEpochs);
-        uint40 stopAt = currentWindow < maxWindow ? currentWindow : maxWindow;
+        uint40 fromWindow = uint40(acct.lastSettledWindow);
+        if (fromWindow >= maxWindow) return;
 
-        if (uint40(acct.lastSettledWindow) >= stopAt) return;
-
-        // Slither divide-before-multiply — `committedTRAC / lockDurationEpochs`
-        // executes BEFORE `_feeOf(remainder, feeBps)`'s multiplication. The
-        // truncation here is bounded:
-        //
-        //   * per-window rounding error ≤ (lockDurationEpochs − 1) wei
-        //     because integer division truncates the remainder.
-        //   * cumulative rounding error over an entire lock cycle ≤
-        //     lockDurationEpochs² wei. For the practical maximum of
-        //     lockDurationEpochs = 365 (one-year locks), that ceiling is
-        //     365² ≈ 1.3 × 10⁵ wei = 1.3 × 10⁻¹³ TRAC. Negligible
-        //     against any plausible TRAC balance or treasury fee.
-        //
-        // Re-ordering the operations to multiply first would require
-        // widening intermediate types to uint256 and adds gas without
-        // changing the on-chain payout to any observable precision.
+        // Slither divide-before-multiply — the truncation is bounded to
+        // (lockDurationEpochs − 1) wei and the dust is re-added below, so
+        // the scheduled sum equals committedTRAC exactly.
         // slither-disable-next-line divide-before-multiply
         uint96 baseAllowance = acct.committedTRAC / uint96(acct.lockDurationEpochs);
+        uint96 dust = acct.committedTRAC - baseAllowance * uint96(acct.lockDurationEpochs);
 
-        (address treasury, uint256 feeBps) = _treasuryParams();
-        uint96 accruedFee;
+        uint96 scheduled;
+        uint96 treasuryFee;
 
-        for (uint40 w = uint40(acct.lastSettledWindow); w < stopAt; w++) {
+        uint256 epLen = chronos.epochLength();
+
+        // Treasury fee on the base commitment: ASSESSED here (bps snapshot),
+        // as a pure accounting split — `fee` schedules to the treasury shard
+        // on the same forward curve as the staker `net`, and no TRAC moves
+        // in this call. The frozen NFT wrapper funds the CSS vault only
+        // AFTER the logic call ("forward-before-pull"), so a physical skim
+        // here would draw on an empty vault at `createAccount` and revert
+        // the moment a treasury is wired; the physical payout instead runs
+        // per elapsed epoch via `collectTreasuryEmission`, strictly after
+        // mint completes. While `protocolTreasury == address(0)` the split
+        // is 100/0 and this account is grandfathered — wiring a treasury
+        // later never reduces an already-written staker schedule.
+        (, uint256 feeBps) = _treasuryParams();
+        for (uint40 w = fromWindow; w < maxWindow; w++) {
             uint96 spent = publishingConvictionStorage.windowSpent(accountId, w);
             uint96 remainder = spent < baseAllowance ? baseAllowance - spent : 0;
-            (uint40 startEp, uint40 endEp) = _windowChainEpochRange(acct, w);
-            if (remainder > 0) {
-                uint96 fee = _feeOf(remainder, feeBps);
-                accruedFee += fee;
-                uint96 net = remainder - fee;
-                if (net > 0) {
-                    _sweepWindowProrated(acct, w, startEp, endEp, net);
-                }
+            if (w == maxWindow - 1) {
+                // The % dust rides the last window (destination-equivalent to
+                // the legacy final-sweep dust, scheduled up front instead).
+                remainder += dust;
             }
-            // `remainderSwept` stays gross (net to pool + fee to treasury).
-            emit WindowSettled(accountId, w, startEp, endEp, remainder);
+            if (remainder == 0) continue;
+            uint96 fee = _feeOf(remainder, feeBps);
+            uint96 net = remainder - fee; // fee floors, so net keeps the wei dust
+            uint256 windowCloseTs = uint256(acct.createdAtTimestamp) + (uint256(w) + 1) * epLen;
+            if (net > 0) {
+                scheduled += net;
+                _emitForwardFrom(STAKER_SHARD_ID, windowCloseTs, net, uint256(acct.lockDurationEpochs), epLen);
+            }
+            if (fee > 0) {
+                treasuryFee += fee;
+                _emitForwardFrom(TREASURY_SHARD_ID, windowCloseTs, fee, uint256(acct.lockDurationEpochs), epLen);
+            }
         }
 
-        acct.lastSettledWindow = uint16(stopAt);
-        publishingConvictionStorage.setLastSettledWindow(accountId, uint16(stopAt));
+        acct.lastSettledWindow = uint16(maxWindow);
+        publishingConvictionStorage.setLastSettledWindow(accountId, uint16(maxWindow));
 
-        // Effects (cursor SSTORE) complete; pay the treasury last so the
-        // permissionless `settle()` entry point is reentrancy-safe.
-        _payTreasury(treasury, accruedFee);
+        emit EmissionScheduled(accountId, fromWindow, maxWindow, scheduled, treasuryFee);
     }
 
-    /// @dev Distribute `amount` across the chain-epoch range
-    ///      `[startEp, endEp]` that billing window `w` of `acct`
-    ///      overlaps, proportional to wall-clock seconds shared with
-    ///      each chain epoch. A billing window is exactly
-    ///      `epochLength()` long, so it overlaps AT MOST two chain
-    ///      epochs (single chain epoch or one straddle).
-    function _sweepWindowProrated(
-        PublishingConvictionStorage.Account memory acct,
-        uint40 w,
-        uint40 startEp,
-        uint40 endEp,
-        uint96 amount
+    /// @dev Spread `amount` over the `lockEpochs` epoch-lengths starting at
+    ///      timestamp `fromTs` (a billing-window close), prorated at chain-
+    ///      epoch boundaries: partial first epoch (time to the next boundary),
+    ///      full middle epochs, dust-corrected partial tail — the exact
+    ///      3-range shape `PublishingMathLib.prorateActiveSink` produces, so
+    ///      base-budget emission and the K_n allocation schedule share one
+    ///      proration definition. Conservation: the ranges sum to `amount`
+    ///      exactly (the tail absorbs rounding). `shardId` selects the
+    ///      destination pool: `STAKER_SHARD_ID` for the net emission,
+    ///      `TREASURY_SHARD_ID` for the base-commitment fee — both sides of
+    ///      the `_scheduleRemaining` split ride the identical curve.
+    function _emitForwardFrom(
+        uint256 shardId,
+        uint256 fromTs,
+        uint96 amount,
+        uint256 lockEpochs,
+        uint256 epLen
     ) internal {
-        if (startEp == endEp) {
+        uint40 anchorEpoch = uint40(chronos.epochAtTimestamp(fromTs));
+        uint256 nextBoundary = chronos.timestampForEpoch(uint256(anchorEpoch) + 1);
+        uint256 timeRemaining = nextBoundary > fromTs ? nextBoundary - fromTs : 0;
+
+        PublishingMathLib.ActiveSinkRange[3] memory ranges = PublishingMathLib.prorateActiveSink(
+            amount,
+            anchorEpoch,
+            lockEpochs,
+            epLen,
+            timeRemaining
+        );
+
+        for (uint256 i; i < ranges.length; i++) {
+            if (ranges[i].tokenAmount == 0) continue;
             epochStorage.addTokensToEpochRange(
-                STAKER_SHARD_ID,
-                uint256(startEp),
-                uint256(endEp),
-                amount
-            );
-            return;
-        }
-        uint256 epochLengthSec = chronos.epochLength();
-        uint256 winStartTs = uint256(acct.createdAtTimestamp) + uint256(w) * epochLengthSec;
-        uint256 boundaryTs = chronos.timestampForEpoch(uint256(endEp));
-        uint256 startOverlap = boundaryTs - winStartTs;
-        uint96 startAllocation = uint96((uint256(amount) * startOverlap) / epochLengthSec);
-        uint96 endAllocation = amount - startAllocation;
-        if (startAllocation > 0) {
-            epochStorage.addTokensToEpochRange(
-                STAKER_SHARD_ID,
-                uint256(startEp),
-                uint256(startEp),
-                startAllocation
-            );
-        }
-        if (endAllocation > 0) {
-            epochStorage.addTokensToEpochRange(
-                STAKER_SHARD_ID,
-                uint256(endEp),
-                uint256(endEp),
-                endAllocation
+                shardId,
+                uint256(ranges[i].startEpoch),
+                uint256(ranges[i].endEpoch),
+                ranges[i].tokenAmount
             );
         }
     }
 
     /// @notice Post-expiry final sweep. Assumes
-    ///         `block.timestamp >= acct.expiresAtTimestamp`. Settles
-    ///         any windows `_settleElapsed` left for the final one,
-    ///         then sweeps `topUpBalance` and dust to the final chain
-    ///         epoch. Marks `fullySwept = true`.
+    ///         `block.timestamp >= acct.expiresAtTimestamp`. 10.0.8: the
+    ///         base budget and the `%` dust are fully covered by the
+    ///         emission schedule (written at creation / migration / first
+    ///         touch — `_scheduleRemaining` is called defensively here for
+    ///         self-sufficiency), so only the leftover `topUpBalance` can
+    ///         remain unaccounted. Sweeps it to the final chain epoch and
+    ///         marks `fullySwept = true`.
     function _finalSweep(
         PublishingConvictionStorage.Account memory acct,
         uint256 accountId
     ) internal {
         if (acct.fullySwept) return;
 
-        uint40 maxWindow = uint40(acct.lockDurationEpochs);
-        uint96 baseAllowance = acct.committedTRAC / uint96(acct.lockDurationEpochs);
+        // Defensive self-sufficiency: a pre-10.0.8 account whose first-ever
+        // touch is this final sweep still gets its full schedule written.
+        // No-op for every already-scheduled account.
+        _scheduleRemaining(acct, accountId);
 
         (address treasury, uint256 feeBps) = _treasuryParams();
         uint96 accruedFee;
 
-        for (uint40 w = uint40(acct.lastSettledWindow); w < maxWindow; w++) {
-            uint96 spent = publishingConvictionStorage.windowSpent(accountId, w);
-            uint96 remainder = spent < baseAllowance ? baseAllowance - spent : 0;
-            (uint40 startEp, uint40 endEp) = _windowChainEpochRange(acct, w);
-            if (remainder > 0) {
-                uint96 fee = _feeOf(remainder, feeBps);
-                accruedFee += fee;
-                uint96 net = remainder - fee;
-                if (net > 0) {
-                    _sweepWindowProrated(acct, w, startEp, endEp, net);
-                }
-            }
-            emit WindowSettled(accountId, w, startEp, endEp, remainder);
-        }
-        acct.lastSettledWindow = uint16(maxWindow);
-        publishingConvictionStorage.setLastSettledWindow(accountId, uint16(maxWindow));
-
         uint40 finalChainEpoch = uint40(
             chronos.epochAtTimestamp(uint256(acct.expiresAtTimestamp) - 1)
         );
-        uint96 dust = acct.committedTRAC - baseAllowance * uint96(acct.lockDurationEpochs);
         uint96 leftoverTopUp = publishingConvictionStorage.topUpBalance(accountId);
-        uint96 tailSweep = dust + leftoverTopUp;
-        if (tailSweep > 0) {
-            uint96 tailFee = _feeOf(tailSweep, feeBps);
+        if (leftoverTopUp > 0) {
+            uint96 tailFee = _feeOf(leftoverTopUp, feeBps);
             accruedFee += tailFee;
-            uint96 tailNet = tailSweep - tailFee;
+            uint96 tailNet = leftoverTopUp - tailFee;
             if (tailNet > 0) {
                 epochStorage.addTokensToEpochRange(
                     STAKER_SHARD_ID,
@@ -1033,15 +1255,16 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
                     tailNet
                 );
             }
-        }
-        if (leftoverTopUp > 0) {
             publishingConvictionStorage.clearTopUpBalance(accountId);
         }
 
         publishingConvictionStorage.setFullySwept(accountId, true);
-        emit AccountFinalSwept(accountId, leftoverTopUp, dust);
+        // `dustSwept` is 0 since 10.0.8 — the `%` dust is part of the
+        // up-front emission schedule, not the final sweep. Event shape kept
+        // for indexer compatibility.
+        emit AccountFinalSwept(accountId, leftoverTopUp, 0);
 
-        // All PCS state (cursor, topUp clear, fullySwept) is persisted;
+        // All PCS state (topUp clear, fullySwept) is persisted;
         // pay the treasury last for `settle()` reentrancy safety.
         _payTreasury(treasury, accruedFee);
     }
@@ -1158,6 +1381,52 @@ contract PublishingConviction is INamed, IVersioned, ContractStatus, IInitializa
         publishingConvictionStorage.removeAgent(accountId, agent);
         emit AgentDeregistered(accountId, agent);
     }
+
+    /// @notice Clear ALL registered publishing agents for `accountId` in a single
+    ///         call — the owner-gated bulk counterpart to the per-agent
+    ///         `deregisterAgent`.
+    /// @dev    PCA NFT transfers PRESERVE the allow-list (it travels with the
+    ///         token; see `onTransfer`). This is the explicit reset: a new owner
+    ///         can drop an inherited allow-list, or an owner can wipe it before
+    ///         transferring the PCA to another party.
+    function clearAgents(uint256 accountId) external onlyCurrentPcaOwner(accountId) {
+        uint256 cleared = publishingConvictionStorage.agentCount(accountId);
+        // slither-disable-next-line reentrancy-events -- the callee is the trusted
+        // Hub-registered PublishingConvictionStorage (onlyContracts), state is
+        // written there before this event, and no value is transferred.
+        publishingConvictionStorage.clearAgents(accountId);
+        emit AgentsCleared(accountId, msg.sender, cleared);
+    }
+
+    /// @notice Register MULTIPLE publishing agents for `accountId` in a single
+    ///         transaction — the owner-gated bulk counterpart to the per-agent
+    ///         `registerAgent`.
+    /// @dev    Direct-to-logic owner action (like `clearAgents`): the NFT wrapper
+    ///         is non-upgradeable and exposes no batch entry point. Each agent is
+    ///         validated EXACTLY as the single `registerAgent` path — non-zero,
+    ///         under the per-account cap (re-checked each iteration so the batch
+    ///         stops at the cap), and not already registered (PCS reverts
+    ///         AgentAlreadyRegistered, which also rejects in-array duplicates).
+    ///         ALL-OR-NOTHING: any invalid entry reverts the whole batch. Emits
+    ///         AgentRegistered per agent. Callee is the trusted Hub-registered
+    ///         PublishingConvictionStorage (onlyContracts).
+    // slither-disable-start reentrancy-events,calls-loop
+    function registerAgents(uint256 accountId, address[] calldata agents)
+        external
+        onlyCurrentPcaOwner(accountId)
+    {
+        uint256 cap = publishingConvictionStorage.maxAgentsPerAccount();
+        for (uint256 i = 0; i < agents.length; i++) {
+            address agent = agents[i];
+            if (agent == address(0)) revert ZeroAgentAddress();
+            if (publishingConvictionStorage.agentCount(accountId) >= cap) {
+                revert AgentCapReached(accountId, cap);
+            }
+            publishingConvictionStorage.addAgent(accountId, agent);
+            emit AgentRegistered(accountId, agent);
+        }
+    }
+    // slither-disable-end reentrancy-events,calls-loop
 
     // ============================================================
     //                  Discount tier ladder

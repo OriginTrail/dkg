@@ -152,7 +152,7 @@ QUADS_PAYLOAD=$(STAMP="$STAMP" CG_ID="$CG_ID" node -e '
   }
   console.log(JSON.stringify({ contextGraphId: cgId, quads }));
 ')
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS_PAYLOAD")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$QUADS_PAYLOAD")
 WRITTEN=$(parse_json "$WRITE_RESP" '.triplesWritten')
 if [ "$WRITTEN" != "6" ]; then
   WRITE_ERR=$(parse_json "$WRITE_RESP" '.error')

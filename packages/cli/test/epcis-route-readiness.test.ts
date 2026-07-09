@@ -223,6 +223,42 @@ describe('EPCIS async capture publisher readiness', () => {
     ]);
   });
 
+  it('maps oversized RDF literal publishAsync failures to structured 400 responses', async () => {
+    const oversized = Object.assign(
+      new Error('RDF literal exceeds safe MUTF-8 byte limit'),
+      {
+        code: 'OVERSIZED_RDF_LITERAL',
+        maxBytes: 60_000,
+        actualBytes: 60_002,
+        predicate: 'http://schema.org/text',
+      },
+    );
+    const ctx = createContext({
+      req: createRequest({ epcisDocument: VALID_OBJECT_EVENT_DOC }),
+      agent: {
+        publishAsync: async () => {
+          throw oversized;
+        },
+      } as unknown as RequestContext['agent'],
+      publisherRuntime: {
+        walletIds: ['0xpublisher'],
+        runner: {},
+        publisher: {},
+        stop: async () => {},
+      } as unknown as RequestContext['publisherRuntime'],
+    });
+
+    await handleEpcisRoutes(ctx);
+
+    expect(ctx.res.statusCode).toBe(400);
+    expect(responseBody(ctx)).toMatchObject({
+      code: 'OVERSIZED_RDF_LITERAL',
+      limitBytes: 60_000,
+      actualBytes: 60_002,
+      predicate: 'http://schema.org/text',
+    });
+  });
+
   it('returns 400 InvalidContent when neither body nor config supplies a contextGraphId', async () => {
     const ctx = createContext({
       req: createRequest({ epcisDocument: VALID_OBJECT_EVENT_DOC }),

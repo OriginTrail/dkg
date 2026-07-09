@@ -5,8 +5,11 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
   contextGraphAssertionUri,
+  contextGraphLayerUri,
+  parseContextGraphLayerUri,
   validateSubGraphName,
 } from '../src/constants.js';
+import { MemoryLayer } from '../src/memory-model.js';
 
 describe('sub-graph URI helpers', () => {
   const cgId = 'dkg-v10-dev';
@@ -57,6 +60,47 @@ describe('sub-graph URI helpers', () => {
     expect(contextGraphAssertionUri(cgId, '0xAgent', 'scan')).toBe(
       'did:dkg:context-graph:dkg-v10-dev/assertion/0xAgent/scan',
     );
+  });
+
+  it('parses root per-KA memory layer URIs built by contextGraphLayerUri', () => {
+    const uri = contextGraphLayerUri(
+      cgId,
+      MemoryLayer.SharedWorkingMemory,
+      '0x000000000000000000000000000000000000c10A',
+      7n,
+    );
+
+    expect(parseContextGraphLayerUri(uri)).toEqual({
+      contextGraphId: cgId,
+      layer: MemoryLayer.SharedWorkingMemory,
+      agentAddress: '0x000000000000000000000000000000000000c10A',
+      kaNumber: 7n,
+    });
+  });
+
+  it('parses sub-graph per-KA memory layer URIs built by contextGraphLayerUri', () => {
+    const uri = contextGraphLayerUri(
+      cgId,
+      MemoryLayer.VerifiableMemory,
+      '0x000000000000000000000000000000000000c10A',
+      '9',
+      'code',
+    );
+
+    expect(parseContextGraphLayerUri(uri)).toEqual({
+      contextGraphId: cgId,
+      subGraphName: 'code',
+      layer: MemoryLayer.VerifiableMemory,
+      agentAddress: '0x000000000000000000000000000000000000c10A',
+      kaNumber: 9n,
+    });
+  });
+
+  it('rejects bucket, staging, and malformed memory graph URIs', () => {
+    expect(parseContextGraphLayerUri(contextGraphSharedMemoryUri(cgId))).toBeUndefined();
+    expect(parseContextGraphLayerUri(`${contextGraphSharedMemoryUri(cgId)}/staging/tmp`)).toBeUndefined();
+    expect(parseContextGraphLayerUri(`${contextGraphSharedMemoryUri(cgId)}/0xabc/7`)).toBeUndefined();
+    expect(parseContextGraphLayerUri(`${contextGraphSharedMemoryUri(cgId)}/0x000000000000000000000000000000000000c10A/not-a-number`)).toBeUndefined();
   });
 
 });

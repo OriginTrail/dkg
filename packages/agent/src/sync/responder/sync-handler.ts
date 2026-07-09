@@ -1,6 +1,8 @@
 import {
   createOperationContext,
   QuietRetryableHandlerError,
+  withSpan,
+  getMetrics,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -63,6 +65,17 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /**
+   * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
+   * `_meta` snapshot for `contextGraphId` — the responder then replies with an
+   * empty (completed) meta page instead of materializing/serving it. Kept as an
+   * injected dependency so daemon config policy (the `DKG_SERVE_AGENTS_META`
+   * kill-switch + the agents-registry-CG check) lives at the wiring site, NOT in
+   * the sync responder. Omitted / returns falsy ⇒ serve normally (the pre-#1233
+   * behaviour), so callers that don't wire it are unaffected. The production
+   * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
+   */
+  shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
 }
@@ -231,6 +244,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     publicSnapshotStore,
     parseSyncRequest,
     authorizeSyncRequest,
+    shouldWithholdDurableMeta,
     logWarn,
     logDebug,
   } = params;
@@ -297,9 +311,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     };
   };
 
-  register(protocolSync, async (data, peerId, options) => {
+  register(protocolSync, async (data, peerId, options) => withSpan('sync.response', async (span) => {
+    span.setAttribute('dkg.protocol_id', protocolSync);
     const signal = options?.signal;
     const handlerStartedAt = Date.now();
+    // Outer guard over ALL pre-limiter work (parse + validation + abort). A
+    // synchronous throw here — e.g. parseSyncRequest on malformed peer bytes —
+    // escapes BEFORE the limiter promise's ok/error recording, so without this
+    // it would be invisible in dkg.sync.response.total. The returned limiter
+    // promise is NOT awaited inside this try, so its async outcomes are still
+    // recorded by its own .then/.catch (no double counting).
+    try {
     const request = parseSyncRequest(data);
     const offset = Math.max(0, Math.min(Number.isSafeInteger(Number(request.offset)) ? Number(request.offset) : 0, 1_000_000));
     const limit = Math.max(1, Math.min(Number.isSafeInteger(Number(request.limit)) ? Number(request.limit) : syncPageSize, syncPageSize));
@@ -307,6 +329,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const isWorkspace = request.includeSharedMemory;
     const contextGraphId = request.contextGraphId;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
+      // Count this early return too — it short-circuits before limiter.run, so
+      // without this it would never reach the syncResponseTotal{ok}/{error}
+      // recording on the limiter promise below.
+      getMetrics().syncResponseTotal.add(1, { outcome: 'invalid' });
       return new TextEncoder().encode('');
     }
     throwIfAborted(signal);
@@ -435,33 +461,52 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
         if (nquads.length === 0) return new TextEncoder().encode('');
       } else if (phase === 'meta') {
-        const queryStartedAt = Date.now();
-        const session = prepareResponderSession(
-          'Durable meta',
-          `${peerId}:durable-meta:${contextGraphId}`,
-          request.syncSessionId,
-          offset,
-        );
-        const rows = await readDurableMetaPage({
-          store,
-          contextGraphId,
-          registeredSubGraphNames: await subGraphRegistrationMemo.get(
+        // Durable-meta serve-skip (#1233). When the injected policy predicate
+        // says to withhold this CG's `_meta` (production: the agents registry
+        // system CG, whose `_meta` is bloated per-heartbeat KA/KC records with NO
+        // cross-node consumer — agent facts are served from the DATA phase — and
+        // serving it just re-propagates the bloat across the mesh), skip
+        // materializing/serializing it and leave `nquads` empty, which returns an
+        // empty (completed) meta page. The requester tolerates this exactly like
+        // a legitimately-empty meta graph — it treats an empty body as clean EOF
+        // (page-fetch.ts: `if (!nquadsText) break`). Only THIS durable-meta
+        // snapshot is withheld: the DATA phase, and any CG the predicate does not
+        // flag, are untouched. The predicate reads the `DKG_SERVE_AGENTS_META`
+        // kill-switch per call at the wiring site, so it is reversible at runtime.
+        if (shouldWithholdDurableMeta?.(contextGraphId)) {
+          logDebug(
+            createOperationContext('sync'),
+            `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
+          );
+        } else {
+          const queryStartedAt = Date.now();
+          const session = prepareResponderSession(
+            'Durable meta',
+            `${peerId}:durable-meta:${contextGraphId}`,
+            request.syncSessionId,
+            offset,
+          );
+          const rows = await readDurableMetaPage({
+            store,
             contextGraphId,
-            { refresh: offset === 0, signal },
-          ),
-          offset,
-          limit,
-          signal,
-          rowListMemo: session ? durableMetaRowsMemo : undefined,
-          rowListCacheKey: session?.rowListCacheKey,
-          refreshRowList: session?.refreshRowList,
-        });
-        const queryDurationMs = Date.now() - queryStartedAt;
-        const serializeStartedAt = Date.now();
-        const serialized = serializeResponderRows(rows);
-        if (serialized) nquads.push(serialized);
-        const serializeDurationMs = Date.now() - serializeStartedAt;
-        logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+            registeredSubGraphNames: await subGraphRegistrationMemo.get(
+              contextGraphId,
+              { refresh: offset === 0, signal },
+            ),
+            offset,
+            limit,
+            signal,
+            rowListMemo: session ? durableMetaRowsMemo : undefined,
+            rowListCacheKey: session?.rowListCacheKey,
+            refreshRowList: session?.refreshRowList,
+          });
+          const queryDurationMs = Date.now() - queryStartedAt;
+          const serializeStartedAt = Date.now();
+          const serialized = serializeResponderRows(rows);
+          if (serialized) nquads.push(serialized);
+          const serializeDurationMs = Date.now() - serializeStartedAt;
+          logDebug(createOperationContext('sync'), `Sync responder durable meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
+        }
       } else {
         const queryStartedAt = Date.now();
         const session = prepareResponderSession(
@@ -495,12 +540,19 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
       return new TextEncoder().encode(nquads.join('\n'));
+    }).then((res) => {
+      getMetrics().syncResponseTotal.add(1, { outcome: 'ok' });
+      return res;
     }).catch((err) => {
       if (err instanceof SyncResponderBusyError) {
+        getMetrics().syncResponseTotal.add(1, { outcome: 'busy' });
+        span.setAttribute('dkg.sync_response_outcome', 'busy');
         logDebug(createOperationContext('sync'), `Sync responder busy for "${contextGraphId}" from peer ${peerId} (phase=${phase}): ${err.message}`);
         throw new QuietRetryableHandlerError(err.message);
       }
       if (err instanceof SyncRowSnapshotLimitError) {
+        getMetrics().syncResponseTotal.add(1, { outcome: 'limit' });
+        span.setAttribute('dkg.sync_response_outcome', 'limit');
         logWarn(
           createOperationContext('sync'),
           `Sync responder snapshot limit for "${contextGraphId}" from peer ${peerId} (phase=${phase}, workspace=${isWorkspace}): active=${err.activeEntries}/${err.maxEntries} cached=${err.cachedEntries} inflight=${err.inflightEntries} key=${err.key}`,
@@ -509,7 +561,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           `sync responder snapshot limit exceeded (active=${err.activeEntries}/${err.maxEntries})`,
         );
       }
+      getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;
     });
-  });
+    } catch (preLimiterErr) {
+      // Malformed/unparseable request or a pre-limiter validation/abort throw —
+      // count it as an invalid outcome before preserving the throw (withSpan
+      // still records the span ERROR + the stream reset behaviour is unchanged).
+      getMetrics().syncResponseTotal.add(1, { outcome: 'invalid' });
+      throw preLimiterErr;
+    }
+  }));
 }

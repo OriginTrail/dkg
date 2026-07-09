@@ -42,22 +42,20 @@ describe('Hermes Python provider', () => {
 
 
 
-  it('dkg_share mints unique subjects per call, N-Triples-quotes content, and surfaces snake_case root_entities', () => {
-    // Closes OriginTrail/dkg#414 — the same three SWM-write bugs PR #413
-    // fixed for OpenClaw, applied to Hermes:
-    //   1. Constant subject → publisher upserts and overwrites prior shares.
-    //   2. Raw content → storage parser coerces to invalid IRI.
-    //   3. Partial _quote_literal escaping → control bytes leak through.
+  it('[D3] dkg_knowledge_asset_create writes + seals quads in one call and shares on also_share_swm', () => {
+    // The one-call create+write(+share) shortcut (api-agent-tooling cleanup D3):
+    //   - quads supplied -> daemon writes + SEALS in this call (finalize default-true);
+    //   - also_share_swm=true -> daemon ALSO shares the sealed asset to SWM;
+    //   - also_share_swm WITHOUT quads is IGNORED (nothing to seal/share -> plain draft, no error).
     const script = String.raw`
 import importlib.util
 import json
-import re
 import sys
 import tempfile
 import types
 from pathlib import Path
 
-home = Path(tempfile.mkdtemp(prefix="hermes-dkg-share-hardening-"))
+home = Path(tempfile.mkdtemp(prefix="hermes-dkg-create-d3-"))
 
 agent_pkg = types.ModuleType("agent")
 memory_provider = types.ModuleType("agent.memory_provider")
@@ -101,111 +99,81 @@ provider._agent_name = "tester"
 class CapturingClient:
     def __init__(self):
         self.calls = []
-    def share(self, context_graph_id, quads, sub_graph_name=None):
+    def create_assertion(self, context_graph_id, name, sub_graph_name=None, quads=None, also_share_swm=False):
         self.calls.append({
             "context_graph_id": context_graph_id,
-            "quads": quads,
+            "name": name,
             "sub_graph_name": sub_graph_name,
+            "quads": quads,
+            "also_share_swm": also_share_swm,
         })
-        return {"shareOperationId": f"swm-{len(self.calls)}", "triplesWritten": len(quads)}
+        return {"assertionUri": f"urn:ka:{name}", "sealed": bool(quads), "swmShared": bool(also_share_swm)}
 
 client = CapturingClient()
 provider._client = client
 
-# Bug 1 fix — successive shares mint distinct subjects so the publisher
-# does not upsert and overwrite prior facts.
-r1 = json.loads(provider.handle_tool_call("dkg_share", {"content": "first fact", "context_graph_id": "cg:test"}))
-r2 = json.loads(provider.handle_tool_call("dkg_share", {"content": "second fact", "context_graph_id": "cg:test"}))
-subject1 = client.calls[0]["quads"][0]["subject"]
-subject2 = client.calls[1]["quads"][0]["subject"]
-assert subject1 != subject2, (subject1, subject2)
-assert re.match(r"^urn:hermes:tester:shared:\d+-[0-9a-f]+$", subject1), subject1
-assert re.match(r"^urn:hermes:tester:shared:\d+-[0-9a-f]+$", subject2), subject2
+# Bare create (no quads) stays a primitive: quads None, no share.
+provider.handle_tool_call("dkg_knowledge_asset_create", {"context_graph_id": "cg:test", "name": "empty"})
+assert client.calls[0]["quads"] is None, client.calls[0]
+assert client.calls[0]["also_share_swm"] is False, client.calls[0]
 
-# Response shape parity with OpenClaw: subject + snake_case root_entities.
-assert r1["subject"] == subject1, r1
-assert r1["root_entities"] == [subject1], r1
-assert r1.get("rootEntities") is None, r1
-assert "shareOperationId" in r1, r1
-
-# Bug 2 fix — content is wrapped as an N-Triples literal (quoted) before
-# being handed to the daemon, not as a bare string the storage layer would
-# coerce to an IRI.
-obj1 = client.calls[0]["quads"][0]["object"]
-assert obj1.startswith('"') and obj1.endswith('"'), obj1
-assert obj1 == '"first fact"', obj1
-
-# Bug 3 fix — _quote_literal escapes the full ECHAR set (\\, ", \\b, \\t,
-# \\n, \\f, \\r) and UCHAR-encodes any other ASCII control bytes (NUL, VT,
-# DEL, etc.) so a payload with mixed control characters round-trips cleanly.
-r3 = json.loads(provider.handle_tool_call("dkg_share", {
-    "content": "a\nb\rc\td\fe\bf \"q\" \\ end",
+# Create + write quads (one call). The handler normalizes quads exactly like
+# dkg_knowledge_asset_write: a plain-literal object is N-Triples-quoted, a URI
+# object passes through unquoted, and any per-quad graph slot is dropped.
+r_quads = json.loads(provider.handle_tool_call("dkg_knowledge_asset_create", {
     "context_graph_id": "cg:test",
+    "name": "withquads",
+    "quads": [
+        {"subject": "urn:s", "predicate": "urn:p", "object": "o", "graph": "urn:g"},
+        {"subject": "urn:s", "predicate": "urn:p2", "object": "urn:uri-object"},
+    ],
 }))
-obj_echar = client.calls[2]["quads"][0]["object"]
-assert obj_echar == '"a\\nb\\rc\\td\\fe\\bf \\"q\\" \\\\ end"', obj_echar
+assert client.calls[1]["quads"] == [
+    {"subject": "urn:s", "predicate": "urn:p", "object": '"o"'},
+    {"subject": "urn:s", "predicate": "urn:p2", "object": "urn:uri-object"},
+], client.calls[1]
+assert client.calls[1]["also_share_swm"] is False, client.calls[1]
+assert r_quads["sealed"] is True, r_quads
 
-NUL = chr(0x00)
-VT = chr(0x0B)
-DEL = chr(0x7F)
-r4 = json.loads(provider.handle_tool_call("dkg_share", {
-    "content": f"x{NUL}y{VT}z{DEL}",
+# Create + write + share to SWM (one call).
+r_share = json.loads(provider.handle_tool_call("dkg_knowledge_asset_create", {
     "context_graph_id": "cg:test",
+    "name": "shared",
+    "quads": [{"subject": "urn:s2", "predicate": "urn:p", "object": "o2"}],
+    "also_share_swm": True,
 }))
-obj_uchar = client.calls[3]["quads"][0]["object"]
-assert obj_uchar == '"x\\u0000y\\u000Bz\\u007F"', obj_uchar
+assert client.calls[2]["quads"] == [{"subject": "urn:s2", "predicate": "urn:p", "object": '"o2"'}], client.calls[2]
+assert client.calls[2]["also_share_swm"] is True, client.calls[2]
+assert r_share["swmShared"] is True, r_share
 
-# sub_graph_name still plumbs through, schema unchanged on that axis.
-provider.handle_tool_call("dkg_share", {"content": "scoped", "context_graph_id": "cg:test", "sub_graph_name": "protocols"})
-assert client.calls[4]["sub_graph_name"] == "protocols", client.calls[4]
+# also_share_swm WITHOUT quads is IGNORED (parity with MCP + OpenClaw / plan
+# §2.6): no error, a plain create fires with no quads, and the client never
+# emits alsoShareSwm to the wire (covered at the wire level in
+# test_no_per_quad_graph.py::test_create_without_quads_never_sends_also_share_swm).
+calls_before = len(client.calls)
+ignored = json.loads(provider.handle_tool_call("dkg_knowledge_asset_create", {
+    "context_graph_id": "cg:test",
+    "name": "ignoredshare",
+    "also_share_swm": True,
+}))
+assert "error" not in ignored, ignored
+assert len(client.calls) == calls_before + 1, client.calls
+assert client.calls[-1]["quads"] is None, client.calls[-1]
 
-# Schema parity with OpenClaw — content + context_graph_id required, sub_graph_name optional.
-share_schema = next(s for s in provider.get_tool_schemas() if s["name"] == "dkg_share")
-assert share_schema["parameters"]["required"] == ["content", "context_graph_id"], share_schema
-assert "sub_graph_name" in share_schema["parameters"]["properties"], share_schema
+# also_share_swm must be a boolean.
+err_type = json.loads(provider.handle_tool_call("dkg_knowledge_asset_create", {
+    "context_graph_id": "cg:test",
+    "name": "badtype",
+    "quads": [{"subject": "urn:s", "predicate": "urn:p", "object": "o"}],
+    "also_share_swm": "yes",
+}))
+assert "error" in err_type and "also_share_swm must be a boolean" in err_type["error"], err_type
 
-# Round 1 — type validation at the runtime boundary. Malformed MCP payloads
-# must surface a structured tool_error rather than crashing inside
-# _quote_literal with AttributeError on .replace.
-client.calls.clear()
-err_obj = json.loads(provider.handle_tool_call("dkg_share", {"content": {}, "context_graph_id": "cg:test"}))
-assert "error" in err_obj and "must be a string" in err_obj["error"], err_obj
-err_bool = json.loads(provider.handle_tool_call("dkg_share", {"content": False, "context_graph_id": "cg:test"}))
-# False also trips the "Content is required" check before the type check;
-# either is acceptable as long as it's a structured error and no daemon call fired.
-assert "error" in err_bool, err_bool
-err_cg = json.loads(provider.handle_tool_call("dkg_share", {"content": "hello", "context_graph_id": ["cg:test"]}))
-assert "error" in err_cg and ("context_graph_id" in err_cg["error"]), err_cg
-err_sub = json.loads(provider.handle_tool_call("dkg_share", {"content": "hello", "context_graph_id": "cg:test", "sub_graph_name": 42}))
-assert "error" in err_sub and "sub_graph_name" in err_sub["error"], err_sub
-assert client.calls == [], client.calls
-
-# Round 2 — daemon failures must pass through untouched. The Python client
-# returns failure shapes ({success: False}, {ok: False}, or bare {error: ...})
-# on errors (it doesn't throw), so a write that 4xx'd at the daemon would
-# otherwise have synthetic subject / root_entities attached, masking the
-# failure for chained publish calls. _handle_share routes through
-# _client_result_failed() so all three shapes are caught the same way as
-# elsewhere in the module.
-class FailingClient:
-    def __init__(self, failure):
-        self.failure = failure
-    def share(self, *args, **kwargs):
-        return self.failure
-
-for failure_shape in [
-    {"success": False, "error": "context graph not registered"},
-    {"ok": False, "error": "auth required"},
-    {"error": "stream closed"},
-]:
-    provider._client = FailingClient(failure_shape)
-    fail_result = json.loads(provider.handle_tool_call("dkg_share", {"content": "x", "context_graph_id": "cg:test"}))
-    assert "subject" not in fail_result, (failure_shape, fail_result)
-    assert "root_entities" not in fail_result, (failure_shape, fail_result)
-    # Failure result must pass through untouched.
-    for key, expected in failure_shape.items():
-        assert fail_result.get(key) == expected, (failure_shape, fail_result)
-provider._client = client
+# Schema exposes the new optional params; required is unchanged.
+create_schema = next(s for s in provider.get_tool_schemas() if s["name"] == "dkg_knowledge_asset_create")
+assert "quads" in create_schema["parameters"]["properties"], create_schema
+assert "also_share_swm" in create_schema["parameters"]["properties"], create_schema
+assert create_schema["parameters"]["required"] == ["context_graph_id", "name"], create_schema
 `;
     const result = spawnSync('python', ['-B', '-c', script], {
       cwd: process.cwd(),

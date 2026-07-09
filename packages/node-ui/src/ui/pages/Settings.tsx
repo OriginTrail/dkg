@@ -13,6 +13,7 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
+import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -503,6 +504,9 @@ function GeneralSettingsTab() {
           ) : null}
         </div>
       </section>
+
+      {/* Publisher Conviction */}
+      <PcaSettingsCard />
 
       {/* Network Telemetry */}
       <NetworkTelemetrySection />

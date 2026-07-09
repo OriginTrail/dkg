@@ -89,7 +89,7 @@ QUADS=$(node -e "
     quads: [{ subject: '$LEAF_SUBJECT', predicate: '$LEAF_PREDICATE', object: '$LEAF_OBJECT', graph: '' }]
   }));
 ")
-WRITE_RESP=$(api_call "$CURATOR_NODE" POST /api/shared-memory/write "$QUADS")
+WRITE_RESP=$(devnet_create_shared_ka "$CURATOR_NODE" "$QUADS")
 [ "$(parse_json "$WRITE_RESP" '.triplesWritten')" = "1" ] || fail "expected 1 triple written: $WRITE_RESP"
 log "✓ Wrote 1 triple"
 

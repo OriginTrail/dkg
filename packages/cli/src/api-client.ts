@@ -2,6 +2,14 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
+import {
+  finalizedPublishOptionsPayload,
+  type KnowledgeAssetFinalizedPublishOptions,
+} from './finalized-publish-options.js';
+import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+
+export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
 export type QueryResult =
   | { type: 'bindings'; bindings: Array<Record<string, string>> }
@@ -11,7 +19,7 @@ export type QueryResult =
 export interface PreSignedAuthorAttestationPayload {
   address: string;
   /**
-   * OT-RFC-43 §F2 — the packed reservedKaId the author signed the
+   * OT-RFC-43 Section F2 -- the packed reservedKaId the author signed the
    * AuthorAttestation over, as a decimal string (uint256-safe over JSON).
    * Required: the digest binds it, so the daemon honours the author's
    * reserved slot rather than re-allocating.
@@ -20,41 +28,142 @@ export interface PreSignedAuthorAttestationPayload {
   signature: { r: string; vs: string };
 }
 
-export interface KnowledgeAssetFinalizedPublishOptions {
-  /**
-   * SDK-friendly spelling for the finalized publish cleanup flag. The
-   * knowledge-assets daemon route forwards `clearSharedMemoryAfter` to
-   * `publishFromFinalizedAssertion`, so the client translates before POST.
-   */
-  clearAfter?: boolean;
-  publishEpochs?: number;
-  publisherNodeIdentityIdOverride?: bigint;
+export interface KnowledgeAssetWritableQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
 }
 
-const FINALIZED_PUBLISH_OPTION_KEYS = new Set([
-  'clearAfter',
-  'publishEpochs',
-  'publisherNodeIdentityIdOverride',
-]);
+export interface KnowledgeAssetCreateOptions {
+  subGraphName?: string;
+  quads?: KnowledgeAssetWritableQuad[];
+  /**
+   * Seal the draft after writing `quads` (default true). `false` keeps an
+   * editable WM draft and never touches the chain. Cannot be combined with
+   * `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
+   */
+  finalize?: boolean;
+  authorAgentAddress?: string;
+  preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
+  schemeVersion?: number;
+  alsoShareSwm?: boolean;
+  alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
+  awaitCuratorAck?: boolean;
+}
 
-function finalizedPublishOptionsPayload(
-  options?: KnowledgeAssetFinalizedPublishOptions,
-  allowedExtraKeys: readonly string[] = [],
-): Record<string, unknown> | undefined {
-  if (!options) return undefined;
-  const unsupportedKeys = Object.keys(options).filter(
-    (key) => !FINALIZED_PUBLISH_OPTION_KEYS.has(key) && !allowedExtraKeys.includes(key),
-  );
-  if (unsupportedKeys.length > 0) {
-    throw new Error(`Unsupported finalized publish option(s): ${unsupportedKeys.join(', ')}`);
-  }
-  const payload: Record<string, unknown> = {};
-  if (options.clearAfter !== undefined) payload.clearSharedMemoryAfter = options.clearAfter;
-  if (options.publishEpochs !== undefined) payload.publishEpochs = options.publishEpochs;
-  if (options.publisherNodeIdentityIdOverride !== undefined) {
-    payload.publisherNodeIdentityIdOverride = options.publisherNodeIdentityIdOverride.toString();
-  }
-  return Object.keys(payload).length > 0 ? payload : undefined;
+export interface KnowledgeAssetCreateResponse {
+  name?: string;
+  assertionUri?: string;
+  status?: string;
+  written?: number;
+  merkleRoot?: string;
+  shareOperationId?: string;
+  swmShared?: boolean;
+  promotedCount?: number;
+  publishReady?: boolean;
+  errors?: KnowledgeAssetLifecycleError[];
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetWriteResponse {
+  written: number;
+}
+
+export interface KnowledgeAssetShareResponse {
+  swmShared: boolean;
+  promotedCount: number;
+  sealed?: boolean;
+  publishReady?: boolean;
+  shareOperationId?: string;
+  errors?: KnowledgeAssetLifecycleError[];
+}
+
+export interface KnowledgeAssetShareTargetOptions {
+  subGraphName?: string;
+  entities?: string[] | 'all';
+}
+
+export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOptions {
+  awaitCuratorAck?: boolean;
+  skipSeal?: boolean;
+}
+
+export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
+
+export interface KnowledgeAssetPublishResponse {
+  kaId?: string;
+  ual?: string;
+  txHash?: string;
+  status?: string;
+  error?: string;
+  errors?: KnowledgeAssetLifecycleError[];
+  contextGraphError?: unknown;
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetLifecycleError {
+  phase?: string;
+  code?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+export interface KnowledgeAssetPublishAsyncResponse {
+  jobId: string;
+  status: string;
+  contextGraphId: string;
+  name: string;
+  subGraphName?: string;
+  shareOperationId?: string;
+  rootsCount?: number;
+  sealMerkleRoot?: string;
+  intentKey?: string;
+}
+
+export type KnowledgeAssetShareJobState =
+  | 'queued'
+  | 'running'
+  | 'failed'
+  | 'failed_retrying'
+  | 'succeeded';
+
+export interface KnowledgeAssetShareJobView {
+  jobId: string;
+  state: KnowledgeAssetShareJobState;
+  contextGraphId: string;
+  assertionName: string;
+  subGraphName?: string;
+  entities: readonly string[] | 'all';
+  enqueuedAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  entitiesPromoted?: number;
+  attempts: number;
+  maxAttempts: number;
+  nextRetryAt?: string;
+  lastError?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+  };
+  reason?: string;
+}
+
+export interface AssertionCreateResponse extends Record<string, unknown> {
+  assertionUri: string;
+  written?: number;
+  seal?: {
+    merkleRoot: string;
+    authorAddress: string;
+    schemeVersion: number;
+    chainId: string;
+    kav10Address: string;
+    eip712Digest: string;
+  };
+  promotedCount?: number;
+  shareOperationId?: string;
 }
 
 function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, unknown> {
@@ -68,6 +177,28 @@ function createAlsoPublishVmPayload(value: unknown): boolean | Record<string, un
     );
   }
   throw new Error('alsoPublishVm must be a boolean or publish-options object');
+}
+
+function hasOwnKey<K extends PropertyKey>(value: unknown, key: K): value is Record<K, unknown> {
+  return value !== null
+    && typeof value === 'object'
+    && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function assertSupportedAsyncShareOptions(options: KnowledgeAssetShareAsyncOptions | undefined): void {
+  if (hasOwnKey(options, 'skipSeal') && options.skipSeal !== undefined) {
+    throw new Error('skipSeal is not supported for async share; use knowledgeAssetShare() for unsealed synchronous shares');
+  }
+  if (hasOwnKey(options, 'awaitCuratorAck') && options.awaitCuratorAck !== undefined) {
+    throw new Error('awaitCuratorAck is not supported for async share; use knowledgeAssetShare() when curator acknowledgement must block');
+  }
+}
+
+function assertionCreateResponse(result: KnowledgeAssetCreateResponse): AssertionCreateResponse {
+  if (typeof result.assertionUri !== 'string' || result.assertionUri.length === 0) {
+    throw new Error('Knowledge asset create response missing assertionUri for assertion compatibility');
+  }
+  return { ...result, assertionUri: result.assertionUri };
 }
 
 function assertExclusiveAuthorFields(args: {
@@ -91,7 +222,7 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
     args.preSignedAuthorAttestation != null ||
     args.schemeVersion !== undefined;
   // These fields only take effect at finalize, so they require both non-empty
-  // quads AND finalize !== false — mirrors the daemon create-route guard.
+  // quads AND finalize !== false -- mirrors the daemon create-route guard.
   const willFinalize = Array.isArray(args.quads) && args.quads.length > 0 && args.finalize !== false;
   if (hasFinalizeOnlyField && !willFinalize) {
     throw new Error('authorAgentAddress, preSignedAuthorAttestation, and schemeVersion require non-empty quads and finalize !== false');
@@ -103,7 +234,7 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
  * `RandomSamplingStatus` from `@origintrail-official/dkg-agent` but
  * lives here so the CLI doesn't take a runtime dep on the agent
  * package (only types). The `loop.lastOutcome` is intentionally
- * `unknown` — the CLI prints it as JSON; the structured discrimination
+ * `unknown` -- the CLI prints it as JSON; the structured discrimination
  * is the prover's concern, not the CLI's.
  */
 export interface RandomSamplingStatusResponse {
@@ -448,149 +579,28 @@ export class ApiClient {
   }
 
   /**
-   * One-shot publish with explicit quads. This uses the daemon's direct
-   * publish route so StorageACK collection receives the publish payload
-   * inline and never depends on target cores already having SWM state.
-   *
-   * Use `publishAssertion(contextGraphId, name, quads, opts)` when you
-   * deliberately want the named assertion lifecycle (WM -> SWM -> VM).
-   */
-  async publish(contextGraphId: string, quads: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>, privateQuads?: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>, options?: {
-    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-    allowedPeers?: string[];
-    publishEpochs?: number;
-    publisherNodeIdentityIdOverride?: bigint;
-  }): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    batchId?: string;
-    publisherAddress?: string;
-  }> {
-    return this.post('/api/knowledge-assets/publish', {
-      contextGraphId,
-      quads,
-      ...(privateQuads !== undefined ? { privateQuads } : {}),
-      ...(options?.accessPolicy !== undefined ? { accessPolicy: options.accessPolicy } : {}),
-      ...(options?.allowedPeers !== undefined ? { allowedPeers: options.allowedPeers } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
-  }
-
-  /**
-   * Direct SWM write — appends loose triples to shared memory without
-   * creating a named WM assertion. Triples land ungrouped; downstream
-   * selection-based publishes (see `publishFromSharedMemory`) seal
-   * them at the publish boundary via the agent's selection bridge.
-   *
-   * Use this for "write loose content, decide what to publish later"
-   * workflows (e.g. node-ui MemoryLayer, mcp `dkg_share`). For
-   * sealed-from-creation provenance, use `createAssertion` /
-   * `appendToAssertion` / `publishAssertion` instead — the seal then
-   * binds to the named assertion at finalize time.
-   */
-  async sharedMemoryWrite(contextGraphId: string, quads: Array<{
-    subject: string; predicate: string; object: string; graph: string;
-  }>): Promise<{
-    shareOperationId: string;
-    contextGraphId: string;
-    graph: string;
-    triplesWritten: number;
-    skolemizedBlankNodes?: number;
-  }> {
-    return this.post('/api/shared-memory/write', { contextGraphId, quads });
-  }
-
-  /**
-   * Selection-based publish — publishes one selected SWM rootEntity to
-   * verifiable memory. Passing `"all"` is accepted only when the source
-   * SWM currently resolves to a single publishable root. The agent mints the
-   * AuthorAttestation seal inline at the selection boundary using
-   * the calling agent's bearer-token identity / explicit
-   * `authorAgentAddress` / `preSignedAuthorAttestation`, or falls
-   * back to the publisher's wallet. The publisher refuses any
-   * on-chain publish without a seal — sign-at-creation is preserved
-   * at the daemon boundary regardless of which fork the caller used
-   * to put content into SWM.
-   *
-   * For finalized-assertion publishes (seal from creation), use
-   * `publishFromFinalizedAssertion` instead — that path threads the
-   * already-signed seal through verbatim with no re-signing.
-   */
-  async publishFromSharedMemory(
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] } = 'all',
-    clearAfter = true,
-    options?: { subGraphName?: string; publishEpochs?: number; publisherNodeIdentityIdOverride?: bigint },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
-    return this.post('/api/shared-memory/publish', {
-      contextGraphId,
-      selection,
-      clearAfter,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
-  }
-
-  /**
    * Create an assertion in WM, optionally writing quads + finalizing +
    * promoting in the same call. Maps directly to the extended
    * `POST /api/knowledge-assets` body.
    *
-   * RFC-001 §9.x — the assertion lifecycle is the canonical entry
-   * point for staging content for VM publish. Callers that previously
-   * went through the legacy `/api/shared-memory/write` (now removed)
-   * use this method instead.
+   * RFC-001 Section 9.x -- the assertion lifecycle is the canonical entry
+   * point for staging content for VM publish.
    */
-  // ── OT-RFC-43 §10.5 — GitHub-shaped Knowledge Asset SDK ──────────────────
-  // Layer-explicit wrappers over /api/knowledge-assets/... (the new clean
-  // surface). The legacy assertion/* + shared-memory/* methods below remain
-  // for back-compat during the migration window.
+  // -- OT-RFC-43 Section 10.5 -- GitHub-shaped Knowledge Asset SDK ------------------
+  // Layer-explicit wrappers over /api/knowledge-assets/... (the clean product surface).
 
   /**
    * Create a KA + open a WM draft. Pass `quads` to write them atomically; by
    * default the draft is also sealed (finalized). Pass `finalize: false` to
-   * write a draft WITHOUT sealing — an editable WM-only assertion that never
+   * write a draft WITHOUT sealing -- an editable WM-only assertion that never
    * touches the chain (the only lifecycle available to local-only /
    * on-chain-unregistered CGs).
    */
   async createKnowledgeAsset(
     contextGraphId: string,
     name: string,
-    options?: {
-      subGraphName?: string;
-      quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
-      /**
-       * Seal the draft after writing `quads` (default true). `false` keeps an
-       * editable WM draft and never touches the chain. Cannot be combined with
-       * `alsoShareSwm`/`alsoPublishVm` (those require a sealed assertion).
-       */
-      finalize?: boolean;
-      authorAgentAddress?: string;
-      preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
-      schemeVersion?: number;
-      alsoShareSwm?: boolean;
-      alsoPublishVm?: boolean | KnowledgeAssetFinalizedPublishOptions;
-    },
-  ): Promise<Record<string, unknown>> {
+    options?: KnowledgeAssetCreateOptions,
+  ): Promise<KnowledgeAssetCreateResponse> {
     assertExclusiveAuthorFields(options ?? {});
     assertCreateFinalizeFieldsHaveQuads(options ?? {});
     const payload: Record<string, unknown> = { contextGraphId, name, ...(options ?? {}) };
@@ -601,8 +611,12 @@ export class ApiClient {
   }
 
   /** GET a KA's lifecycle state by name. */
-  async getKnowledgeAsset(contextGraphId: string, name: string, subGraphName?: string): Promise<Record<string, unknown>> {
-    const qs = new URLSearchParams({ contextGraphId, ...(subGraphName ? { subGraphName } : {}) }).toString();
+  async getKnowledgeAsset(contextGraphId: string, name: string, subGraphName?: string, agentAddress?: string): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams({
+      contextGraphId,
+      ...(subGraphName ? { subGraphName } : {}),
+      ...(agentAddress ? { agentAddress } : {}),
+    }).toString();
     return this.get(`/api/knowledge-assets/${encodeURIComponent(name)}?${qs}`);
   }
 
@@ -610,9 +624,9 @@ export class ApiClient {
   async knowledgeAssetWrite(
     contextGraphId: string,
     name: string,
-    quads: Array<{ subject: string; predicate: string; object: string; graph: string }>,
+    quads: KnowledgeAssetWritableQuad[],
     options?: { subGraphName?: string },
-  ): Promise<{ written: number }> {
+  ): Promise<KnowledgeAssetWriteResponse> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/write`, { contextGraphId, quads, ...(options ?? {}) });
   }
 
@@ -622,6 +636,7 @@ export class ApiClient {
     name: string,
     options?: {
       subGraphName?: string;
+      layer?: 'wm' | 'swm';
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
@@ -649,13 +664,49 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }
 
-  /** Advance the SWM pointer (WM → SWM; git push origin <branch>). */
+  /** Advance the SWM pointer (WM -> SWM; git push origin <branch>). */
   async knowledgeAssetShare(
     contextGraphId: string,
     name: string,
-    options?: { subGraphName?: string; entities?: string[] | 'all' },
-  ): Promise<{ swmShared: boolean; promotedCount: number }> {
+    options?: KnowledgeAssetShareOptions,
+  ): Promise<KnowledgeAssetShareResponse> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+  }
+
+  async knowledgeAssetShareAsync(
+    contextGraphId: string,
+    name: string,
+    options?: KnowledgeAssetShareAsyncOptions,
+  ): Promise<{ jobId: string; state: 'queued' }> {
+    assertSupportedAsyncShareOptions(options);
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+  }
+
+  async knowledgeAssetShareJobs(options?: {
+    contextGraphId?: string;
+    state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
+    limit?: number;
+  }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
+    const params = new URLSearchParams();
+    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
+    if (options?.state) {
+      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
+    }
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    const qs = params.toString();
+    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+  }
+
+  async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
+    return this.get(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async knowledgeAssetCancelShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {
+    return this.del(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async knowledgeAssetRecoverShareJob(jobId: string): Promise<{ jobId: string; state: KnowledgeAssetShareJobState }> {
+    return this.post(`/api/knowledge-assets/swm/share-jobs/${encodeURIComponent(jobId)}/recover`, {});
   }
 
   /** Publish to VM (mint or update on chain; git push origin main). */
@@ -663,11 +714,26 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
-  ): Promise<Record<string, unknown>> {
-    const publishOptions = finalizedPublishOptionsPayload(options, ['subGraphName']);
+  ): Promise<KnowledgeAssetPublishResponse> {
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
       contextGraphId,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
+      ...(publishOptions ? { options: publishOptions } : {}),
+    });
+  }
+
+  async knowledgeAssetPublishAsync(
+    contextGraphId: string,
+    name: string,
+    options?: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions,
+  ): Promise<KnowledgeAssetPublishAsyncResponse> {
+    const { subGraphName, ...finalizedOptions } = options ?? {};
+    const publishOptions = finalizedPublishOptionsPayload(finalizedOptions);
+    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish-async`, {
+      contextGraphId,
+      ...(subGraphName ? { subGraphName } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
     });
   }
@@ -679,41 +745,18 @@ export class ApiClient {
       subGraphName?: string;
       quads?: Array<{ subject: string; predicate: string; object: string; graph: string }>;
       finalize?: boolean;
-      promote?: boolean;
+      alsoShareSwm?: boolean;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
       schemeVersion?: number;
     },
-  ): Promise<{
-    assertionUri: string;
-    written?: number;
-    seal?: {
-      merkleRoot: string;
-      authorAddress: string;
-      schemeVersion: number;
-      chainId: string;
-      kav10Address: string;
-      eip712Digest: string;
-    };
-    promotedCount?: number;
-  }> {
-    return this.post('/api/knowledge-assets', {
+  ): Promise<AssertionCreateResponse> {
+    const result = await this.createKnowledgeAsset(
       contextGraphId,
       name,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.quads ? { quads: options.quads } : {}),
-      ...(options?.finalize !== undefined ? { finalize: options.finalize } : {}),
-      ...(options?.promote !== undefined ? { promote: options.promote } : {}),
-      ...(options?.authorAgentAddress
-        ? { authorAgentAddress: options.authorAgentAddress }
-        : {}),
-      ...(options?.preSignedAuthorAttestation
-        ? { preSignedAuthorAttestation: options.preSignedAuthorAttestation }
-        : {}),
-      ...(options?.schemeVersion !== undefined
-        ? { schemeVersion: options.schemeVersion }
-        : {}),
-    });
+      options,
+    );
+    return assertionCreateResponse(result);
   }
 
   /**
@@ -736,7 +779,7 @@ export class ApiClient {
   }
 
   /**
-   * Finalize a previously-created assertion. RFC-001 §9.x — computes
+   * Finalize a previously-created assertion. RFC-001 Section 9.x -- computes
    * the canonical merkleRoot, builds the EIP-712 AuthorAttestation,
    * signs (custodial / pre-signed / publisher fallback), and stamps
    * the seal triples to `_meta`.
@@ -786,6 +829,12 @@ export class ApiClient {
    * Pre-condition: the assertion must be both finalized AND promoted
    * to SWM. The high-level `publishAssertion` helper handles the
    * whole sequence in one call.
+   *
+   * Routes to the canonical per-KA publish `POST
+   * /api/knowledge-assets/:name/vm/publish` (the URL name selects the
+   * assertion). Kept as a thin wrapper over `knowledgeAssetPublish` so
+   * lifecycle callers (`dkg publisher publish-async`, `dkg index`,
+   * `publishAssertion`) keep a narrow typed return.
    */
   async publishFromFinalizedAssertion(
     contextGraphId: string,
@@ -807,22 +856,23 @@ export class ApiClient {
     blockNumber?: number;
     contextGraphError?: string;
   }> {
-    return this.post('/api/shared-memory/publish', {
-      contextGraphId,
-      assertionName,
-      ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
-      ...(options?.clearAfter !== undefined ? { clearAfter: options.clearAfter } : {}),
-      ...(options?.publishEpochs !== undefined ? { publishEpochs: options.publishEpochs } : {}),
-      ...(options?.publisherNodeIdentityIdOverride !== undefined
-        ? { publisherNodeIdentityIdOverride: options.publisherNodeIdentityIdOverride.toString() }
-        : {}),
-    });
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
+      kaId: string;
+      status: 'tentative' | 'confirmed';
+      assertionUri: string;
+      authorAddress: string;
+      merkleRoot: string;
+      kas: Array<{ tokenId: string; rootEntity: string }>;
+      txHash?: string;
+      blockNumber?: number;
+      contextGraphError?: string;
+    }>;
   }
 
   /**
-   * High-level convenience: create → write → finalize → promote →
+   * High-level convenience: create -> write -> finalize -> promote ->
    * publish, all in two HTTP round-trips. The composite mirrors what
-   * a typical OpenClaw/Hermes client does — stage content, commit it,
+   * a typical OpenClaw/Hermes client does -- stage content, commit it,
    * push it on-chain. Use this unless you need fine-grained control
    * over the individual steps.
    */
@@ -853,7 +903,7 @@ export class ApiClient {
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
       quads,
       finalize: true,
-      promote: true,
+      alsoShareSwm: true,
       ...(options?.authorAgentAddress
         ? { authorAgentAddress: options.authorAgentAddress }
         : {}),
@@ -894,12 +944,12 @@ export class ApiClient {
     };
   }
 
-  // ─── Publishing Conviction Account (PCA) ────────────────────────────
+  // --- Publishing Conviction Account (PCA) ----------------------------
 
   async createPca(request: {
     tokens: string;
     // OT-RFC-51: the node identityId this PCA's committed TRAC funds. Required
-    // — a PCA created with no node seeds publishing allocation to nobody.
+    // -- a PCA created with no node seeds publishing allocation to nobody.
     primaryNode: string;
   }): Promise<{
     accountId: string;
@@ -940,14 +990,13 @@ export class ApiClient {
     return this.post(`/api/pca/${encodeURIComponent(accountId)}/funds`, { tokens });
   }
 
-  async registerPcaAgent(accountId: string, agent: string): Promise<{
-    accountId: string;
-    agent: string;
-    registered: boolean;
-    txHash: string;
-    blockNumber: number;
-  }> {
-    return this.post(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+  // The client is the version-skew boundary: it posts, then PARSES + normalizes
+  // the raw JSON (validated at runtime, not just cast) into a stable
+  // `{ registered, advisory }` result — so callers render directly and a
+  // malformed/incoherent wire shape fails loudly here rather than mis-rendering.
+  async registerPcaAgent(accountId: string, agent: string): Promise<RegisterPcaAgentResult> {
+    const raw = await this.post<unknown>(`/api/pca/${encodeURIComponent(accountId)}/agent`, { agent });
+    return parseRegisterPcaAgentResult(raw);
   }
 
   async getPcaInfo(accountId: string, probeKey?: string): Promise<{
@@ -966,39 +1015,105 @@ export class ApiClient {
     agentCount: number;
     lastSettledWindow: number;
     fullySwept: boolean;
+    // OT-RFC-51 node association (string uint72; '0' = unset).
+    primaryNode?: string;
     probedKey?: { key: string; registered: boolean; adapterSupported?: boolean; error?: string };
   }> {
     const qs = probeKey ? `?key=${encodeURIComponent(probeKey)}` : '';
     return this.get(`/api/pca/${encodeURIComponent(accountId)}${qs}`);
   }
 
-  async publisherEnqueue(request: {
-    contextGraphId: string;
-    shareOperationId: string;
-    roots: string[];
-    namespace: string;
-    scope: string;
-    authorityProofRef: string;
-    swmId?: string;
-    transitionType?: 'CREATE' | 'MUTATE' | 'REVOKE';
-    authorityType?: 'owner' | 'multisig' | 'quorum' | 'capability';
-    priorVersion?: string;
-    subGraphName?: string;
-    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-    allowedPeers?: string[];
-    // V10 sign-at-enqueue. Absent `seal` → tentative; supply for on-chain attestation.
-    entityProofs?: boolean;
-    publishEpochs?: number;
-    /** Stringified bigint; `'0'` = mode d (no attribution) per RFC-001 §4. */
-    publisherNodeIdentityIdOverride?: string;
-    seal?: {
-      merkleRoot: `0x${string}`;
-      authorAddress: `0x${string}`;
-      signature: { r: `0x${string}`; vs: `0x${string}` };
-      schemeVersion: number;
-    };
-  }): Promise<{ jobId: string; contextGraphId: string; shareOperationId: string; rootsCount: number }> {
-    return this.post('/api/publisher/enqueue', request);
+  /**
+   * List the PCAs owned by this node's operational wallet, each annotated with
+   * its OT-RFC-51 `primaryNode` association and whether it funds this node.
+   */
+  async listPcas(): Promise<{
+    accounts: Array<{
+      accountId: string;
+      owner: string;
+      committedTRAC: string;
+      committedTRACTrac: string;
+      baseEpochAllowance: string;
+      topUpBuffer: string;
+      topUpBufferTrac: string;
+      createdAtEpoch: number;
+      expiresAtEpoch: number;
+      createdAtTimestamp: number;
+      expiresAtTimestamp: number;
+      discountBps: number;
+      agentCount: number;
+      lastSettledWindow: number;
+      fullySwept: boolean;
+      primaryNode?: string;
+      fundsThisNode?: boolean;
+    }>;
+  }> {
+    return this.get('/api/pca');
+  }
+
+  /** OT-RFC-51 owner-gated re-designation of the node a PCA funds. */
+  async setPcaPrimaryNode(accountId: string, node: string): Promise<{
+    accountId: string;
+    primaryNode: string;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post(`/api/pca/${encodeURIComponent(accountId)}/primary-node`, { node });
+  }
+
+  // ─── Node operational wallets (Identity operational keys) ────────────
+
+  /** List the node's local operational wallets (addresses only) + on-chain status. */
+  async listOperationalWallets(): Promise<{
+    identityId: string;
+    hasProfile: boolean;
+    adminKeyConfigured: boolean;
+    canManage: boolean;
+    wallets: Array<{
+      address: string;
+      isAdmin: boolean;
+      isPrimary: boolean;
+      registered: boolean | null;
+    }>;
+  }> {
+    return this.get('/api/operational-wallets');
+  }
+
+  /** Authorize an address as an operational key on the node identity (admin-signed). */
+  async addOperationalWallet(address: string): Promise<{
+    address: string;
+    added: boolean;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.post('/api/operational-wallets', { address });
+  }
+
+  /** De-authorize an operational key (admin-signed); refuses the primary wallet. */
+  async removeOperationalWallet(address: string): Promise<{
+    address: string;
+    removed: boolean;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    return this.del(`/api/operational-wallets/${encodeURIComponent(address)}`);
+  }
+
+  /** List a local agent's workspace encryption keys (public fields only). */
+  async getAgentEncryptionKeys(address: string): Promise<{
+    agentAddress: string;
+    agentDid: string;
+    keys: Array<{
+      encryptionKeyId: string;
+      encryptionKeyAlgorithm: string;
+      publicEncryptionKey: string;
+      encryptionKeyProof: string;
+      createdAt: string;
+      revokedAt: string | null;
+      status: 'active' | 'revoked';
+    }>;
+  }> {
+    return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
   async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
@@ -1030,7 +1145,7 @@ export class ApiClient {
     return this.post('/api/publisher/clear', { status });
   }
 
-  // ───────────────────────── EPCIS ─────────────────────────────────────
+  // ------------------------- EPCIS -------------------------------------
 
   async captureEpcis(request: {
     epcisDocument: unknown;
@@ -1113,7 +1228,7 @@ export class ApiClient {
   }
 
   /**
-   * Run SPARQL via the daemon. `opts` covers the full /api/query surface —
+   * Run SPARQL via the daemon. `opts` covers the full /api/query surface --
    * memory-layer routing (`view`, `graphSuffix`, `verifiedGraph`,
    * `subGraphName`, `includeSharedMemory`, `includeContextGraphPartitions`,
    * `agentAddress`, `assertionName`), and P-13's `minTrust` (only meaningful
@@ -1390,7 +1505,7 @@ export class ApiClient {
      * Atomic combined-flow flag. When `true`, the daemon registers the
      * CG on-chain in the same call after the local create step
      * succeeds. Required when `pcaAccountId` is supplied (a standalone
-     * `createContextGraph` does NOT persist PCA ids — Codex PR #502
+     * `createContextGraph` does NOT persist PCA ids -- Codex PR #502
      * round-3).
      */
     register?: boolean;
@@ -1399,7 +1514,7 @@ export class ApiClient {
      * the combined-flow path. Only meaningful together with
      * `register: true`. The agent otherwise defaults
      * `publishPolicy = curated (0)` for curated/private CGs and
-     * `publishPolicy = open (1)` for public CGs — which makes the
+     * `publishPolicy = open (1)` for public CGs -- which makes the
      * valid `{ accessPolicy: 0 (public), publishPolicy: 0 (curated),
      * pcaAccountId }` combo unreachable unless the caller can pin
      * `publishPolicy` explicitly. Codex PR #502 round-10 (raised by
@@ -1501,7 +1616,7 @@ export class ApiClient {
    * the local agent produced; does NOT forward over P2P. To deliver it
    * to the curator, follow up with `requestJoin(...)` and the
    * `curatorPeerId` from the V10 invite. PR #448 split sign vs forward
-   * to fix a duplicate-forward bug — see daemon route comment.
+   * to fix a duplicate-forward bug -- see daemon route comment.
    *
    * The `delegation` shape mirrors `SignedAgentDelegation` from
    * `@dkg/agent`: `version` is part of the digest grammar (see
@@ -1628,7 +1743,7 @@ export class ApiClient {
     /**
      * Optional. If supplied it MUST match the address resolved from
      * the bearer token; the daemon rejects any mismatch with 403.
-     * Prefer omitting and relying on the token — see A-12 review on
+     * Prefer omitting and relying on the token -- see A-12 review on
      * /api/endorse for the provenance-forgery rationale.
      */
     agentAddress?: string;

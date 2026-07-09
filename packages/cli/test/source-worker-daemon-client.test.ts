@@ -1,29 +1,19 @@
 /**
- * Source-worker daemon clients — REAL daemon round-trips, NO mocks.
+ * Source-worker daemon client - REAL daemon round-trips, NO mocks.
  *
- * The retired version replaced `globalThis.fetch` with a stub that returned
- * canned `{ shareOperationId: 'swm-1' }` / `{ jobId: 'job-1' }` / finalized
- * job bodies for any matching URL — so a renamed route, a reshaped response,
- * or a changed required field kept it green while the real round-trip broke
- * (the exact drift class the no-mocks policy removes).
- *
- * This version drives both clients against a REAL edge daemon:
- *   - `share()` writes real quads into a real context graph's SWM and gets a
- *     REAL shareOperationId back,
- *   - `lift()` enqueues a real async-lift job (the daemon's persistent
- *     publisher queue accepts and stores it) and returns the REAL jobId,
- *   - `getJobStatus()` reads the REAL stored job back and deserializes the
- *     real lifecycle fields.
- * Runs in the standard cli lane against the shared Hardhat node.
+ * This drives the lifecycle client against a REAL edge daemon:
+ *   - createAndShare() creates, seals, and shares a real named KA into SWM,
+ *   - publishAsync() enqueues a named KA VM publish job and returns the REAL jobId,
+ *   - getJobStatus() reads the REAL stored job back and deserializes lifecycle fields.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createDaemonAsyncLiftJobClient, createDaemonSharedMemoryWriteClient } from '../src/source-worker-daemon-client.js';
+import { createDaemonKnowledgeAssetLifecycleClient } from '../src/source-worker-daemon-client.js';
 import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from './helpers/live-daemon.js';
 
 const CG = `swdc-${Date.now().toString(36)}`;
 const ROOT = `urn:swdc:${Date.now().toString(36)}:s`;
 
-describe('source worker daemon clients (real daemon)', () => {
+describe('source worker daemon client (real daemon)', () => {
   let daemon: LiveDaemon;
 
   beforeAll(async () => {
@@ -36,46 +26,36 @@ describe('source worker daemon clients (real daemon)', () => {
     await stopLiveDaemon(daemon);
   });
 
-  it('share() writes real SWM quads and returns the daemon-issued shareOperationId', async () => {
-    const share = createDaemonSharedMemoryWriteClient(daemon.base, daemon.token ?? '');
-    const result = await share.share(CG, [{ subject: ROOT, predicate: 'urn:p', object: '"v"' }]);
-    // The daemon mints `swm-<timestamp>-<rand>` ids — assert the real shape,
-    // not a canned constant.
-    expect(result.shareOperationId).toMatch(/^swm-/);
+  it('createAndShare() creates, seals, and shares a real named KA', async () => {
+    const client = createDaemonKnowledgeAssetLifecycleClient(daemon.base, daemon.token ?? '');
+    const result = await client.createAndShare(CG, 'source-worker-create', [
+      { subject: ROOT, predicate: 'urn:p', object: '"v"', graph: '' },
+    ]);
+    expect(result.promotedCount).toBeGreaterThan(0);
+    expect(result.shareOperationId).toMatch(/^[0-9a-z]+-[0-9a-z]+$/);
   });
 
-  it('lift() enqueues a real job and getJobStatus() reads the real stored job back', async () => {
-    const share = createDaemonSharedMemoryWriteClient(daemon.base, daemon.token ?? '');
-    const jobs = createDaemonAsyncLiftJobClient(daemon.base, daemon.token ?? '');
-
-    const { shareOperationId } = await share.share(CG, [
-      { subject: ROOT, predicate: 'urn:p:type', object: 'urn:Note' },
+  it('publishAsync() enqueues a real job and getJobStatus() reads the real stored job back', async () => {
+    const client = createDaemonKnowledgeAssetLifecycleClient(daemon.base, daemon.token ?? '');
+    const name = 'source-worker-async-publish';
+    const share = await client.createAndShare(CG, name, [
+      { subject: ROOT, predicate: 'urn:p:type', object: 'urn:Note', graph: '' },
     ]);
 
-    const jobId = await jobs.lift({
-      swmId: 'swm-live',
-      shareOperationId,
-      roots: [ROOT],
-      contextGraphId: CG,
-      namespace: 'ns',
-      scope: 'scope',
-      transitionType: 'CREATE',
-      authority: { type: 'owner', proofRef: 'proof' },
-    } as never);
-    // Real daemon issues a UUID job id.
+    const publish = await client.publishAsync(CG, name);
+    const jobId = publish.jobId;
     expect(jobId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(publish.shareOperationId).toBe(share.shareOperationId);
+    expect(publish.rootsCount).toBeGreaterThan(0);
+    expect(publish.intentKey).toMatch(/^sha256:[0-9a-f]{64}$/);
 
-    const status = await jobs.getJobStatus(jobId);
-    // The job was REALLY persisted: a real lifecycle status comes back (the
-    // edge daemon has no publisher runtime processing the queue, so the job
-    // sits in its initial state — any real status string proves the
-    // round-trip; a canned 'finalized' would prove nothing).
+    const status = await client.getJobStatus(jobId);
     expect(typeof status.status).toBe('string');
     expect(status.status.length).toBeGreaterThan(0);
   });
 
   it('getJobStatus() surfaces a real not-found for an unknown job id', async () => {
-    const jobs = createDaemonAsyncLiftJobClient(daemon.base, daemon.token ?? '');
-    await expect(jobs.getJobStatus('00000000-0000-0000-0000-000000000000')).rejects.toThrow();
+    const client = createDaemonKnowledgeAssetLifecycleClient(daemon.base, daemon.token ?? '');
+    await expect(client.getJobStatus('00000000-0000-0000-0000-000000000000')).rejects.toThrow();
   });
 });

@@ -1,0 +1,21 @@
+# PRODUCTION — run ONLY Alloy on the host that runs Loki (the polaris box).
+# Alloy receives OTLP from DKG nodes and writes to the existing local Loki 2.5.0.
+#
+#   deploy:  docker compose -f docker-compose.alloy.yml up -d
+#
+# network_mode: host lets Alloy reach Loki at 127.0.0.1:3100. The OTLP port
+# (4318) MUST NOT be open to the internet directly — expose it only through the
+# Cloudflare tunnel/hostname (see RUNBOOK.md), and firewall 4318 from public.
+services:
+  alloy:
+    image: grafana/alloy:v1.5.1
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=127.0.0.1:12345
+    environment:
+      - LOKI_PUSH_URL=http://127.0.0.1:3100/loki/api/v1/push
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro

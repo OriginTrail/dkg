@@ -76,7 +76,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
   'getProvider',            // returns a JsonRpcProvider; mock has none
-  'getReadProvider',        // returns the EVM fallback read provider; mock has no RPC provider
+  'getReadProvider',        // @deprecated bare-primary accessor; mock has no RPC provider
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
   'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress
@@ -89,6 +89,29 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'nextSigner',
   'nextAuthorizedSigner',
   'findSignerByAddress',
+  // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
+  // internals (the generalized wallet selector, the funding predicate behind
+  // it, the RS-specific selector wrapper, and the serialized RS send). Not
+  // ChainAdapter interface methods; the mock has no wallet pool, funding, or
+  // nonce surface to mirror — same category as the neighbours in this list.
+  'selectSigner',
+  'isWalletFundable',
+  'nextRandomSamplingSigner',
+  'sendRandomSamplingTx',
+  // Funding-aware publish wallet selection internals (native+TRAC balance
+  // reads, the fundability gate, the cache, and the insufficient-funds error
+  // enrichment). EVM-only — the mock has no provider/ERC-20 balance surface
+  // and selects from its single signerAddress, so there is nothing to mirror.
+  'selectFundedSigner',
+  'isWalletPublishFundable',
+  'isConvictionFundedAgent',
+  'getWalletFunding',
+  'readNativeBalance',
+  'readTracBalance',
+  'snapshotPublisherWalletBalances',
+  'poolHasFundableSigner',
+  'enrichInsufficientPublisherFundsError',
+  'looksLikeFundsRevert',
   'walletKeyHash',
   'hasAdminPurpose',
   'hasOperationalPurpose',
@@ -102,9 +125,29 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getTransactionReceiptWithFailover',
   'waitForReceiptWithFailover',
   'signPopulatedTransaction',
+  // #1336 read-facade + populate plumbing: the chain-concept read facades over
+  // the `RpcFailoverClient` transport — `readContract` (string-method point read),
+  // `readContractWith` (policy/classifier-bearing contract read), and the raw
+  // `readProvider` — plus the event-log scan wrapper, the contract rebind helper,
+  // and the populate+sign-across-providers delegator. Protected EVM-only helpers
+  // over `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
+  // contract methods — same category as the write-failover helpers above.
+  'readContract',
+  'readContractWith',
+  'readProvider',
+  'readTipProvider',
+  'readProviderRetryingNull',
+  'queryFilterWithFailover',
+  'rebindContract',
+  'populateAndSignAcrossProviders',
   'sendSignedTransactionAndWait',
   'sendPopulatedTransaction',
   'sendContractTransaction',
+  // TS-private / protected write-serialization plumbing. The EVM adapter uses
+  // this scope to expose an unlocked sender only while the per-wallet serializer
+  // is held; the mock has no nonce-sign-broadcast window to mirror.
+  'withSerializedSignerWrite',
+  'sendContractTransactionUnlocked',
   'parseV10PublishReceipt',
   'parseV9PublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
@@ -145,6 +188,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'withHubStaleRetryAny',
   'invalidateAllBoundContracts',
   'startHubRotationListener',
+  'applyHubRotationEventName',
+  'invalidateHubBindingOnRotation',
+  'invalidateHubBinding',
+  'finalizeKnownHubRotation',
   'invalidateRandomSamplingPair',
   'resolveAndAssignRandomSamplingPair',
   'isContractMissingRevert',
@@ -158,6 +205,16 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // (no mock equivalent — mock raises typed reverts directly).
   'requireConvictionNFT',
   'pcaWrite',
+  'pcaWriteAndInvalidate',
+  // Identity read-cache helpers are EVM-only: the mock's identity registry is
+  // in-memory and its writes are already immediately visible.
+  'invalidateIdentityStorageBinding',
+  'identityStorageAddressChanged',
+  'readIdentityIdFromStorage',
+  'readIdentityIdForAddress',
+  'refreshIdentityIdForAddress',
+  'clearIdentityIdForAddress',
+  'seedIdentityIdForAddress',
   // The seven V10 Publishing Conviction NFT methods (issue #519 /
   // TB-0002) are now mirrored on MockChainAdapter (in-memory account
   // map + agent reverse map + owner gating) — no longer exempt.
@@ -166,6 +223,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // round-trips to cache in the first place; a no-op shim would just
   // pad parity for no behavioural reason.
   'invalidatePublishPreflightCache',
+  'ensureConfiguredStaticChainIdValidated',
   // #820 (RFC-39 ciphertext/immutable ACK binding): EVM-only surfaces.
   //  - `computeV10UpdateAckDigest` mirrors the on-chain
   //    `KnowledgeAssetsLifecycle._executeUpdateCore` ACK-digest packing for

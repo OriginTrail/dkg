@@ -41,6 +41,7 @@ import { validateAssertionName } from "@origintrail-official/dkg-core";
 import {
   promoteJobToView,
   asyncPromoteUnavailable,
+  scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
 
 // ── POST /api/knowledge-assets/:name/swm/share-async ──────────────────────────
@@ -109,7 +110,11 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
     const result = await agent.assertion.promoteAsync(
       resolvedContextGraphId,
       name,
-      { entities: entities ?? "all", subGraphName },
+      {
+        entities: entities ?? "all",
+        subGraphName,
+        ...scopedTokenPromoteLane(writePreflightCallerAgentAddress),
+      },
     );
     return jsonResponse(res, 200, {
       jobId: result.jobId,

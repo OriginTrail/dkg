@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -146,7 +146,9 @@ import {
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
+import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -379,6 +381,24 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+// The bounded-probe retry helper is co-located with its outcome model in the
+// confirmation module (imported here for the facade, not re-exported from index).
+import { confirmPcaAgentRegistration, type PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
+
+// The single PCA capability boundary: narrows the optional
+// `chain.isPublishingConvictionAgent` into a bound boolean probe, or `null` when
+// the adapter lacks the read, so both the direct read and the confirmation
+// derive supported/unsupported from one place. `.call(chain, …)` preserves the
+// adapter's `this` binding.
+function pcaRegisteredProbe(
+  chain: { isPublishingConvictionAgent?: (accountId: bigint, agent: string) => Promise<boolean> },
+  accountId: bigint,
+  agent: string,
+): (() => Promise<boolean>) | null {
+  const read = chain.isPublishingConvictionAgent;
+  return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
 
 export class AgentRegistryMethods extends DKGAgentBase {
   async publishProfile(this: DKGAgent): Promise<PublishResult> {
@@ -1473,6 +1493,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return typeof this.chain.getPublishingConvictionAccountInfo === 'function';
   }
 
+  /** True when the adapter can serve the daemon's PCA browser-read RPC bridge. */
+  get supportsPublishingConvictionRpc(): boolean {
+    return typeof this.chain.requestPublishingConvictionRpc === 'function';
+  }
+
   // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
   // funds via the publishing factor) is REQUIRED — no silent `0n` default. A
   // PCA created with node 0 seeds no allocation to anyone, and the SDK exposes
@@ -1502,8 +1527,22 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   async isPublishingConvictionAgent(this: DKGAgent, accountId: bigint, agent: string): Promise<boolean | null> {
-    if (typeof this.chain.isPublishingConvictionAgent !== 'function') return null;
-    return this.chain.isPublishingConvictionAgent(accountId, agent);
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    return probe ? probe() : null;
+  }
+
+  // Best-effort on-chain confirmation of a just-mined agent registration. The
+  // receipt is already authoritative for `registered:true`; this only refines the
+  // advisory `PcaConfirmationOutcome` and never flips the registration. The
+  // capability gap (`unsupported`) is decided here via `pcaRegisteredProbe`, so
+  // the retry state machine only reasons about boolean reads.
+  async confirmPublishingConvictionAgentRegistration(this: DKGAgent,
+    accountId: bigint,
+    agent: string,
+  ): Promise<PcaConfirmationOutcome> {
+    const probe = pcaRegisteredProbe(this.chain, accountId, agent);
+    if (!probe) return 'unsupported';
+    return confirmPcaAgentRegistration(probe);
   }
 
   async settlePublishingConvictionAccount(this: DKGAgent, accountId: bigint): Promise<TxResult | null> {
@@ -1513,9 +1552,122 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async getPublishingConvictionAccountInfo(this: DKGAgent,
     accountId: bigint,
+    opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     if (typeof this.chain.getPublishingConvictionAccountInfo !== 'function') return null;
-    return this.chain.getPublishingConvictionAccountInfo(accountId);
+    return this.chain.getPublishingConvictionAccountInfo(accountId, opts);
+  }
+
+  /** OT-RFC-51 designated primary node for a PCA; `null` = no chain surface, `0n` = unset. */
+  async getConvictionPrimaryNode(this: DKGAgent, accountId: bigint): Promise<bigint | null> {
+    if (typeof this.chain.getConvictionPrimaryNode !== 'function') return null;
+    return this.chain.getConvictionPrimaryNode(accountId);
+  }
+
+  /** Addresses + chainId for the browser wallet-connect path; `null` = no chain surface. */
+  async getPcaContractContext(this: DKGAgent): Promise<{ chainId: number; hubAddress: string; nftAddress: string; tokenAddress: string } | null> {
+    if (typeof this.chain.getPcaContractContext !== 'function') return null;
+    return this.chain.getPcaContractContext();
+  }
+
+  /** Enumerate PCAs owned by the bound wallet, annotated with their node association. */
+  async listNodePublishingConvictionAccounts(this: DKGAgent): Promise<NodePublishingConvictionAccount[] | null> {
+    if (typeof this.chain.listNodePublishingConvictionAccounts !== 'function') return null;
+    return this.chain.listNodePublishingConvictionAccounts();
+  }
+
+  /** OT-RFC-51 owner-gated re-designation of a PCA's primary node. */
+  async setPublishingConvictionPrimaryNode(this: DKGAgent, accountId: bigint, primaryNode: bigint): Promise<TxResult | null> {
+    if (typeof this.chain.setPublishingConvictionPrimaryNode !== 'function') return null;
+    return this.chain.setPublishingConvictionPrimaryNode(accountId, primaryNode);
+  }
+
+  // ----- Node operational-wallet (Identity key) management -----
+  // Admin-signed on-chain key txs. `null` = no chain surface (→ 503); the
+  // adapter throws on missing admin key / not-an-admin / no-profile (→ 409).
+
+  /** The bound node's on-chain identityId (`0n` when no profile is registered). */
+  async getNodeIdentityId(this: DKGAgent): Promise<bigint> {
+    return this.chain.getIdentityId();
+  }
+
+  /** Whether `address` is a registered OPERATIONAL_KEY for `identityId`; `null` = no chain surface. */
+  async isOperationalWalletRegistered(this: DKGAgent, identityId: bigint, address: string): Promise<boolean | null> {
+    if (typeof this.chain.isOperationalWalletRegistered !== 'function') return null;
+    return this.chain.isOperationalWalletRegistered(identityId, address);
+  }
+
+  /** Add an operational wallet to the node identity (admin-signed). `null` = no chain surface. */
+  async addOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
+    if (typeof this.chain.addOperationalWallet !== 'function') return null;
+    return this.chain.addOperationalWallet(address, options);
+  }
+
+  /** Remove an operational wallet from the node identity (admin-signed). `null` = no chain surface. */
+  async removeOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
+    if (typeof this.chain.removeOperationalWallet !== 'function') return null;
+    return this.chain.removeOperationalWallet(address, options);
+  }
+
+  /** Enumerate registered publishing agents (operational wallets) for a PCA.
+   *  `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async getPublishingConvictionAgents(this: DKGAgent,
+    accountId: bigint,
+  ): Promise<string[] | null> {
+    if (typeof this.chain.getPublishingConvictionAgents !== 'function') return null;
+    return this.chain.getPublishingConvictionAgents(accountId);
+  }
+
+  /** Reverse-resolve which PCA a wallet is a registered publishing agent of,
+   *  via the on-chain `agentToAccountId` map. `0n` = not registered on any
+   *  account; `null` = adapter lacks the surface (daemon maps null → 503).
+   *  Chain-scoped DISCOVERY (may surface an account the node does not track);
+   *  callers route the id through coverage classification, never treating
+   *  "registered" as "covered". */
+  async getConvictionAgentAccountId(
+    this: DKGAgent,
+    agent: string,
+    opts?: { strict?: boolean },
+  ): Promise<bigint | null> {
+    if (typeof this.chain.getConvictionAgentAccountId !== 'function') return null;
+    return this.chain.getConvictionAgentAccountId(agent, opts);
+  }
+
+  /** GAP-1 — enumerate every PCA the given wallets relate to (owned + agent-on).
+   *  `null` when the adapter lacks the surface (daemon maps null → 503). */
+  async listPublishingConvictionAccountsForWallets(
+    this: DKGAgent,
+    wallets: string[],
+  ): Promise<PcaAccountRelation[] | null> {
+    if (typeof this.chain.listPublishingConvictionAccountsForWallets !== 'function') return null;
+    return this.chain.listPublishingConvictionAccountsForWallets(wallets);
+  }
+
+  /** B-staked-nodes — the sharding table of designatable PCA primary nodes.
+   *  `opts.fresh` bypasses the adapter's TTL cache. `null` when the adapter
+   *  lacks the surface (daemon maps null → 503). */
+  async listDesignatableNodes(this: DKGAgent, opts?: { fresh?: boolean }): Promise<ShardingTableNode[] | null> {
+    if (typeof this.chain.listDesignatableNodes !== 'function') return null;
+    return this.chain.listDesignatableNodes(opts);
+  }
+
+  /** Browser-bootstrap contract addresses + chain params for the HW signing
+   *  layer (sub-PR #2). `null` when the adapter lacks the surface (daemon → 503). */
+  async getPublishingConvictionContracts(this: DKGAgent): Promise<PcaContracts | null> {
+    if (typeof this.chain.getPublishingConvictionContracts !== 'function') return null;
+    return this.chain.getPublishingConvictionContracts();
+  }
+
+  /** Daemon-internal JSON-RPC read bridge for PCA browser reads. The daemon
+   *  route owns the method allowlist and response shaping; the adapter owns the
+   *  provider/failover execution. */
+  async requestPublishingConvictionRpc(
+    this: DKGAgent,
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (typeof this.chain.requestPublishingConvictionRpc !== 'function') throw new PcaUnavailableError();
+    return this.chain.requestPublishingConvictionRpc(method, params);
   }
 
   // ---------------------------------------------------------------------------
@@ -1663,13 +1815,32 @@ export class AgentRegistryMethods extends DKGAgentBase {
     });
   }
 
+  async assertPeerAdmittedForExplicitConnect(
+    this: DKGAgent,
+    peerId: string,
+    ctx: OperationContext,
+    options?: NetworkAdmissionAttemptOptions,
+  ): Promise<void> {
+    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx, options)) return;
+    throw new NetworkAdmissionRejectedError(peerId);
+  }
+
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
+    const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
+    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
+      const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
+      (error as any).code = 'INVALID_PEER_ID';
+      throw error;
+    }
     await connectToMultiaddr(
       this.node.libp2p as any,
       multiaddress,
       (message) => this.log.info(ctx, message),
     );
+    if (targetPeerId) {
+      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);
+    }
   }
 
   /**
@@ -1738,12 +1909,20 @@ export class AgentRegistryMethods extends DKGAgentBase {
       throw error;
     }
 
+    const startedAt = Date.now();
+    const signal = AbortSignal.timeout(timeoutMs);
+    const remainingTimeoutMs = () => Math.max(0, timeoutMs - (Date.now() - startedAt));
+
     // Fast-path: already connected (e.g. via gossipsub mesh / mDNS / a
     // prior invite). Resolver step 1 would also short-circuit on this,
     // but the early return preserves the existing log message and skips
     // the rest of the resolution machinery entirely.
     const existing = this.node.libp2p.getConnections(peerId);
     if (existing.length > 0) {
+      await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+        signal,
+        timeoutMs: remainingTimeoutMs(),
+      });
       this.log.info(ctx, `Already connected to ${peerIdStr}`);
       return;
     }
@@ -1754,9 +1933,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // final dial, so a slow DHT walk plus a slow dial could exceed the
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
-    const startedAt = Date.now();
-    const signal = AbortSignal.timeout(timeoutMs);
-
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
     const addrs = await this.peerResolver.resolve(peerIdStr, {
       signal,
@@ -1791,7 +1967,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // budget is honoured end-to-end.
     try {
       await this.node.libp2p.dial(peerId, { signal });
-      this.log.info(ctx, `Connected to ${peerIdStr}`);
     } catch (err: any) {
       // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
       // covers BOTH resolution and dial. If most of the budget went
@@ -1822,6 +1997,11 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }
+    await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+      signal,
+      timeoutMs: remainingTimeoutMs(),
+    });
+    this.log.info(ctx, `Connected to ${peerIdStr}`);
   }
 
 }

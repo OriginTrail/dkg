@@ -95,8 +95,8 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -149,6 +149,8 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { NetworkAdmissionService } from './p2p/network-admission.js';
+import { NetworkAdmissionCoordinator } from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -212,6 +214,8 @@ import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
@@ -346,7 +350,7 @@ import {
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
-  type DKGAgentConfig,
+  type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
@@ -425,23 +429,23 @@ export function createListContextGraphsCacheInvalidatingStore(
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
-    insert(quads) {
+    insert(quads, options) {
       return invalidateAfterMutation(
-        () => innerStore.insert(quads),
+        () => innerStore.insert(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
       );
     },
-    delete(quads) {
+    delete(quads, options) {
       return invalidateAfterMutation(
-        () => innerStore.delete(quads),
+        () => innerStore.delete(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(),
       );
     },
-    deleteByPattern(pattern) {
+    deleteByPattern(pattern, options) {
       return invalidateAfterMutation(
-        () => innerStore.deleteByPattern(pattern),
+        () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
       );
@@ -459,9 +463,9 @@ export function createListContextGraphsCacheInvalidatingStore(
     createGraph(graphUri) {
       return innerStore.createGraph(graphUri);
     },
-    dropGraph(graphUri) {
+    dropGraph(graphUri, options) {
       return invalidateAfterMutation(
-        () => innerStore.dropGraph(graphUri),
+        () => innerStore.dropGraph(graphUri, options),
         () => true,
         () => markProjectionDirty?.(),
       );
@@ -474,15 +478,15 @@ export function createListContextGraphsCacheInvalidatingStore(
         ? innerStore.listGraphsByPrefix(prefix, options)
         : innerStore.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix)));
     },
-    deleteBySubjectPrefix(graphUri, prefix) {
+    deleteBySubjectPrefix(graphUri, prefix, options) {
       return invalidateAfterMutation(
-        () => innerStore.deleteBySubjectPrefix(graphUri, prefix),
+        () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
       );
     },
-    countQuads(graphUri) {
-      return innerStore.countQuads(graphUri);
+    countQuads(graphUri, options) {
+      return innerStore.countQuads(graphUri, options);
     },
     // Defined iff the inner store supports it, so the capability propagates
     // truthfully up the decorator chain (callers gate on `typeof store.update
@@ -490,13 +494,13 @@ export function createListContextGraphsCacheInvalidatingStore(
     // mutate projected content, so it invalidates the listGraphs cache and
     // marks the projection dirty just like insert/delete.
     update: innerStore.update
-      ? (sparql: string) => invalidateAfterMutation(
-        () => innerStore.update!(sparql),
+      ? (sparql, options) => invalidateAfterMutation(
+        () => innerStore.update!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
       )
       : undefined,
-    flush: innerStore.flush ? () => innerStore.flush!() : undefined,
+    flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();
     },
@@ -539,6 +543,8 @@ export class DKGAgentBase {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   messenger!: Messenger;
+  networkAdmission: NetworkAdmissionService = new NetworkAdmissionService();
+  networkAdmissionCoordinator!: NetworkAdmissionCoordinator;
   /** Single in-process peer-address resolver (RFC 07 §3). Used by Messenger
    * today; ProtocolRouter / /api/connect migrate in PR-3 / PR-4. */
   peerResolver!: PeerResolver;
@@ -921,7 +927,7 @@ export class DKGAgentBase {
   // re-submitting `ensureProfile()` while a prior one may still be settling on
   // chain — which would risk a duplicate profile / double-stake.
   protected profileProvisioningInFlight = false;
-  protected readonly config: DKGAgentConfig;
+  protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
@@ -957,11 +963,40 @@ export class DKGAgentBase {
     this.listContextGraphsInFlight.clear();
   }
 
-  protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
-    await this.store.insert(quads);
-    if (quads.length > 0) {
+  /**
+   * Oversize tombstone log — lazily constructed so every sync-ingest seam
+   * shares one bounded ring + JSONL file (OT-RFC-56 §4.2). See
+   * sync/oversize-filter.ts for the guard this records for.
+   */
+  private oversizeTombstoneLogInstance?: OversizeTombstoneLog;
+  protected get oversizeTombstoneLog(): OversizeTombstoneLog {
+    if (!this.oversizeTombstoneLogInstance) {
+      this.oversizeTombstoneLogInstance = new OversizeTombstoneLog({
+        dataDir: this.config.dataDir,
+        logWarn: (message) => this.log.warn(createOperationContext('sync'), message),
+      });
+    }
+    return this.oversizeTombstoneLogInstance;
+  }
+
+  /**
+   * Sync-ingest store insert (durable sync + registry meta pulls). Guarded by
+   * the oversize filter (OT-RFC-56): quads whose literal exceeds the protocol
+   * size invariant are dropped + tombstoned BEFORE the insert, so the sync
+   * offset cursor advances past pages containing them instead of the store
+   * throwing and the page being re-fetched from every peer forever (the
+   * 2026-07-08 mainnet poison-literal retry storm).
+   */
+  protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
+    const inserted = await insertWithOversizeGuard(
+      (kept) => this.store.insert(kept, options),
+      quads,
+      { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+      'durable-sync',
+    );
+    if (inserted.length > 0) {
       this.invalidateListContextGraphsCache();
-      this.contextGraphMetaProjection.markDirtyFromQuads(quads);
+      this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
     }
   }
   protected readonly gossipRegistered = new Set<string>();
@@ -1177,6 +1212,7 @@ export class DKGAgentBase {
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly knownCorePeerIds = new Set<string>();
+  protected readonly knownCorePeerIdsV2 = new Set<string>();
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before
@@ -1380,7 +1416,7 @@ export class DKGAgentBase {
   protected _pendingSkillAcl: SkillAclCheck | null = null;
 
   protected constructor(
-    config: DKGAgentConfig,
+    config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
     node: DKGNode,
     store: TripleStore,
@@ -1409,8 +1445,29 @@ export class DKGAgentBase {
     this.kaNumberAllocator = config.kaNumberAllocator;
     this.discovery = new DiscoveryClient(queryEngine);
     this.profileManager = new ProfileManager(publisher, store);
+    this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
+      admission: this.networkAdmission,
+      selfPeerId: '',
+      sign: (payload) => wallet.sign(payload),
+      sendIdentityProbe: async () => {
+        throw new Error('network admission coordinator is not started');
+      },
+      getConnections: () => [],
+      deletePeerFromPeerStore: async () => {},
+    });
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
+  }
+
+  /**
+   * RpcUsageDrainable: drain the chain adapter's raw JSON-RPC usage window
+   * (delta since the previous drain — the provider-billing unit). The
+   * adapter capability is optional; an adapter without it reports an empty
+   * window here, so consumers never see the optionality. Keeps `chain`
+   * protected instead of the daemon reaching through a cast.
+   */
+  drainRpcUsage(): RpcUsageWindow {
+    return this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
   }
 }

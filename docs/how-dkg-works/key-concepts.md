@@ -35,7 +35,7 @@ A DKG node is the local gateway into the network. It owns local graph storage, A
 
 ### Core Node and Edge Node
 
-Core Nodes provide resilient network infrastructure. Edge Nodes are local gateways for users, teams, applications, and agents. Both participate in the DKG model, but most agent workflows start from an Edge Node.
+Core Nodes provide resilient network infrastructure and use an on-chain node profile (`identityId`) for staking, Storage ACKs, Random Sampling, and node-operator authorization. Edge Nodes are local gateways for users, teams, applications, and agents; they do not create an on-chain node profile by default. Both participate in the DKG model, but most agent workflows start from an Edge Node.
 
 ### Context Graph
 

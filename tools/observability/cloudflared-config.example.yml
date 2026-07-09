@@ -1,0 +1,16 @@
+# cloudflared ingress for the node→Alloy ingest hostname.
+# IMPORTANT: do NOT attach a Cloudflare Access (SSO) policy to this hostname —
+# nodes cannot do interactive login. Authenticate with the bearer token instead
+# (a Cloudflare WAF custom rule on the Authorization header — see RUNBOOK.md).
+#
+# Install: place at /etc/cloudflared/config.yml on the Loki host, then:
+#   cloudflared tunnel create dkg-logs
+#   cloudflared tunnel route dns dkg-logs logs-ingest.xtrmstrngth.com
+#   cloudflared service install   # or: cloudflared tunnel run dkg-logs
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: logs-ingest.xtrmstrngth.com
+    service: http://localhost:4318   # Alloy OTLP/HTTP receiver on the same host
+  - service: http_status:404

@@ -1,0 +1,21 @@
+# systemd alternative to Docker for running Alloy on the Loki host.
+# Install Alloy (https://grafana.com/docs/alloy/latest/set-up/install/), then:
+#   sudo cp config.alloy /etc/alloy/config.alloy
+#   sudo cp alloy.systemd.service /etc/systemd/system/dkg-alloy.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now dkg-alloy
+#   journalctl -u dkg-alloy -f      # should show "now listening", no errors
+[Unit]
+Description=Grafana Alloy — DKG OTLP log ingest bridge → local Loki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=LOKI_PUSH_URL=http://127.0.0.1:3100/loki/api/v1/push
+ExecStart=/usr/bin/alloy run /etc/alloy/config.alloy --server.http.listen-addr=127.0.0.1:12345
+Restart=on-failure
+RestartSec=5
+# Alloy's OTLP receiver binds 0.0.0.0:4318 — keep 4318 firewalled from the
+# public internet; only cloudflared (localhost) should reach it.
+
+[Install]
+WantedBy=multi-user.target

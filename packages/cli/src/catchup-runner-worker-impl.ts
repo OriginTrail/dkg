@@ -1,4 +1,5 @@
 import { parentPort } from 'node:worker_threads';
+import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS, mapWithConcurrency } from '@origintrail-official/dkg-agent';
 import { catchupPeerResponded, catchupPeerSucceeded, type CatchupJobResult, type CatchupRunRequest } from './catchup-runner.js';
 
 type InvokeResultMessage = {
@@ -91,20 +92,27 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     },
   };
 
-  // Run per-peer syncs in parallel. The sequential version here used to
-  // walk the peer set one at a time, which meant a curated-CG denial
+  // Run per-peer syncs in parallel, but BOUNDED. The sequential version here
+  // used to walk the peer set one at a time, which meant a curated-CG denial
   // from a 10-peer pool took 10 × (syncDurable timeout + syncSharedMemory
-  // timeout) to report back — often minutes. The agent-side
-  // `syncContextGraphFromConnectedPeers` (InlineCatchupRunner) already
-  // uses `Promise.all`, but the daemon subscribe path goes through this
-  // Worker implementation, so Codex N18 pointed out the parallel fix
-  // never reached `/api/context-graph/subscribe`. Mirror the inline path
-  // here so both runners have the same latency characteristics.
-  const checked = await Promise.all(
-    prepared.peerIds.map(async (peerId) => ({
+  // timeout) to report back — often minutes. Codex N18 then parallelised this
+  // Worker path (the daemon `/api/context-graph/subscribe` route) with an
+  // unbounded `Promise.all` — which made it the 2026-07-07 mainnet sync-storm
+  // engine: one subscribe on a high-degree node fired a full durable+SWM pull
+  // at EVERY sync-capable peer at once, saturating the triple store. Mirror
+  // the agent-side `syncContextGraphFromConnectedPeers` fix: run the fan-out
+  // through `mapWithConcurrency` under the shared cap
+  // (CATCHUP_MAX_CONCURRENT_PEER_SYNCS, env DKG_CATCHUP_MAX_CONCURRENT_PEERS)
+  // so both runners have the same latency AND the same load ceiling. The
+  // protocol probe below is lighter but fans out over the full post-prime-dial
+  // peer list, so it gets the same bound.
+  const checked = await mapWithConcurrency(
+    prepared.peerIds,
+    CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+    async (peerId) => ({
       peerId,
       hasSync: await invoke<boolean>('waitForSyncProtocol', peerId),
-    })),
+    }),
   );
   const syncCapable: string[] = [];
   for (const { peerId, hasSync } of checked) {
@@ -155,14 +163,21 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     failedPhases: 0,
     deniedPhases: 0,
   });
-  const perPeerResults = await Promise.all(
-    syncCapable.map(async (peerId) => {
+  // Bounded fan-out (sync-storm mitigation C-1): at most
+  // CATCHUP_MAX_CONCURRENT_PEER_SYNCS full per-peer sync rounds in flight.
+  // Every sync-capable peer is still synced and the result array is unchanged
+  // (input order, one entry per peer, per-peer failures isolated by the
+  // `.catch`es inside the callback) — the load is just staggered into waves.
+  const perPeerResults = await mapWithConcurrency(
+    syncCapable,
+    CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+    async (peerId) => {
       const durable = await invoke<any>('syncDurable', peerId, request.contextGraphId).catch(() => emptyDurable());
       const shared = request.includeSharedMemory
         ? await invoke<any>('syncSharedMemory', peerId, request.contextGraphId).catch(() => emptyShared())
         : null;
       return { durable, shared };
-    }),
+    },
   );
   for (const { durable, shared } of perPeerResults) {
     let peerDenied = false;

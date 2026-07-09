@@ -121,13 +121,13 @@ The authoritative reference is [`packages/cli/skills/dkg-node/SKILL.md`](mdc:pac
 
 **Read**: `dkg_memory_search` (was `dkg_search`), `dkg_query` (was `dkg_sparql`), `dkg_get_entity`, `dkg_list_context_graphs` (was `dkg_list_projects`), `dkg_sub_graph_list` (was `dkg_list_subgraphs`), `dkg_list_activity`, `dkg_get_agent`, `dkg_knowledge_asset_query`, `dkg_knowledge_asset_history`, `dkg_status`.
 
-**Write (auto-shared via `autoShare: true`)**: `dkg_knowledge_asset_create` + `dkg_knowledge_asset_write` + `dkg_knowledge_asset_share`, `dkg_knowledge_asset_discard`, `dkg_share` (direct SWM), `dkg_sub_graph_create`.
+**Write (auto-shared via `autoShare: true`)**: `dkg_knowledge_asset_create` (pass `quads`+`alsoShareSwm:true` for a create→write→seal→share one-shot) + `dkg_knowledge_asset_write` + `dkg_knowledge_asset_share`, `dkg_knowledge_asset_discard`, `dkg_sub_graph_create`. (There is no loose-SWM `dkg_share` tool — author a named knowledge asset.)
 
 **Inter-agent**: `dkg_send_message`, `dkg_check_inbox` / `dkg_read_messages`, `dkg_subscribe`.
 
-**HUMAN-GATED**: `dkg_shared_memory_publish` (SWM → VM, on-chain, costs TRAC). Don't call without explicit operator instruction.
+**HUMAN-GATED**: `dkg_knowledge_asset_publish` (the sealed named KA → VM, on-chain, costs TRAC). Don't call without explicit operator instruction.
 
-**Retired (do not call)**: `dkg_annotate_turn`, `dkg_propose_decision`, `dkg_add_task`, `dkg_comment`, `dkg_request_vm_publish`, `dkg_set_session_privacy`, `dkg_get_chat`, `dkg_get_ontology`, `dkg_search`, `dkg_sparql`, `dkg_list_projects`, `dkg_list_subgraphs`.
+**Retired (do not call)**: `dkg_publish`, `dkg_shared_memory_publish`, `dkg_share`, `dkg_annotate_turn`, `dkg_propose_decision`, `dkg_add_task`, `dkg_comment`, `dkg_request_vm_publish`, `dkg_set_session_privacy`, `dkg_get_chat`, `dkg_get_ontology`, `dkg_search`, `dkg_sparql`, `dkg_list_projects`, `dkg_list_subgraphs`.
 
 ## Query gotchas
 
@@ -147,7 +147,7 @@ Things that consistently bite agents writing SPARQL via `dkg_query`:
 
 - **Don't fabricate URIs.** Look-before-mint or skip the edge.
 - **Don't skip turns to "save tokens".** A three-step annotation is cheap. Coverage wins.
-- **Don't publish to VM via MCP.** `dkg_shared_memory_publish` is operator-gated.
+- **Don't publish to VM via MCP.** `dkg_knowledge_asset_publish` is operator-gated.
 - **Don't normalise slugs in your `dkg_memory_search` query.** Pass the unnormalised label.
 - **Don't try to compute the turn URI yourself.** The `<dkg-session-context>` block gives it to you. Reading capture-chat's session state files is brittle and unnecessary.
 - **Don't write `chat:Turn` entities yourself.** The capture hook owns them. You write annotations that LINK to them.

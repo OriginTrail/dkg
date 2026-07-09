@@ -351,8 +351,6 @@ provider._client = QueryClient()
 provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
 for tool_name, args in [
     ("memory_search", {"query": "alpha beta", "context_graph": "legacy"}),
-    ("dkg_share", {"content": "alpha", "context_graph": "legacy"}),
-    ("dkg_shared_memory_publish", {"context_graph": "legacy"}),
     ("dkg_knowledge_asset_write", {
         "context_graph": "legacy",
         "name": "notes",
@@ -407,72 +405,6 @@ assert result["peerId"] == "peer-friend", result
 assert result["curatorMultiaddr"] == "/ip4/203.0.113.10/tcp/8900/p2p/peer-public", result
 assert result["inviteCode"] == "cg:test\n/ip4/203.0.113.10/tcp/8900/p2p/peer-public", result
 
-class RegisterFailClient:
-    def __init__(self):
-        self.published = False
-
-    def register_context_graph(self, context_graph_id, access_policy=None):
-        return {"success": False, "error": "wallet missing"}
-
-    def publish(self, *args, **kwargs):
-        self.published = True
-        raise AssertionError("publish should not run")
-
-provider._config = {"publish_tool": "direct", "allow_direct_publish": True}
-provider._client = RegisterFailClient()
-result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
-    "context_graph_id": "cg:test",
-    "register_if_needed": True,
-}))
-assert result["success"] is False and "wallet missing" in result["error"], result
-assert provider._client.published is False
-
-class AlreadyRegisteredClient(RegisterFailClient):
-    def register_context_graph(self, context_graph_id, access_policy=None):
-        return {"success": False, "error": "context graph already registered"}
-
-    def publish(self, *args, **kwargs):
-        self.published = True
-        return {"success": True}
-
-provider._client = AlreadyRegisteredClient()
-result = json.loads(provider.handle_tool_call("dkg_shared_memory_publish", {
-    "context_graph_id": "cg:test",
-    "register_if_needed": True,
-}))
-assert result["success"] is True and provider._client.published is True, result
-# FIX H (#1084:1810): the already-registered short-circuit normalizes the
-# registration to a success shape — it must NOT carry the raw {success:false}.
-assert result["registration"] == {"alreadyRegistered": True}, result
-
-# dkg_publish (one-shot) routes through the direct publish helper
-# (client.publish_quads): send explicit quads inline to the publish route —
-# no per-root selection/loop (parity w/ OpenClaw+MCP).
-class PublishClient:
-    def __init__(self):
-        self.publish_quads_call = None
-
-    def publish_quads(self, context_graph_id, quads, sub_graph_name=None):
-        self.publish_quads_call = (context_graph_id, quads, sub_graph_name)
-        return {"kaId": "ka", "ual": "did:dkg:1/0xabc/5", "status": "confirmed"}
-
-provider._client = PublishClient()
-result = json.loads(provider.handle_tool_call("dkg_publish", {
-    "context_graph_id": "cg:test",
-    "quads": [
-        {"subject": "urn:root:1", "predicate": "urn:p", "object": "one"},
-        {"subject": "urn:root:2", "predicate": "urn:p", "object": "two"},
-        {"subject": "urn:root:1", "predicate": "urn:p2", "object": "three"},
-    ],
-}))
-# Multi-subject quads publish atomically in ONE call — no 409, no over-scope.
-assert result["ual"] == "did:dkg:1/0xabc/5", result
-assert result["quadsPublished"] == 3, result
-assert provider._client.publish_quads_call[0] == "cg:test", provider._client.publish_quads_call
-assert len(provider._client.publish_quads_call[1]) == 3, provider._client.publish_quads_call
-# The obsolete selection-fork result fields are gone.
-for _k in ("rootEntities", "partial", "publishedRoots", "failedRoot", "notAttemptedRoots"):
-    assert _k not in result, _k
 `;
     const result = spawnSync(process.env.PYTHON ?? 'python3', ['-B', '-c', script], {
       cwd: process.cwd(),

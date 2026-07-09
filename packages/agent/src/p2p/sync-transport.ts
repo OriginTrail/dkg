@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { withRetry } from '@origintrail-official/dkg-core';
+import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { markSyncTransportFailure } from '../sync/error-tags.js';
 
 /**
@@ -82,7 +82,11 @@ interface SyncSendParams {
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
-  return withRetry(
+  return withSpan(
+    'sync.request',
+    async () => {
+      try {
+        const out = await withRetry(
     async () => {
       throwIfAborted(params.signal);
       const requestBytes = await params.requestFactory();
@@ -114,6 +118,15 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       isRetryable: () => params.signal?.aborted !== true,
       onRetry: params.onRetry,
     },
+        );
+        getMetrics().syncRequestTotal.add(1, { outcome: 'ok', protocol_id: params.protocolId });
+        return out;
+      } catch (err) {
+        getMetrics().syncRequestTotal.add(1, { outcome: 'error', protocol_id: params.protocolId });
+        throw err;
+      }
+    },
+    { attributes: { 'dkg.protocol_id': params.protocolId } },
   );
 }
 

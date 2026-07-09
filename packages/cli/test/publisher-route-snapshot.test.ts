@@ -42,20 +42,17 @@ describe('publisher routes with disk public snapshot refs', () => {
     ], { publisherPeerId: 'peer-route' });
 
     const publisherControl = createPublisherControlFromStore(store, publicSnapshotStore);
-    const enqueue = createContext('POST', '/api/publisher/enqueue', {
+    const jobId = await publisherControl.lift({
       contextGraphId: CONTEXT_GRAPH,
+      swmId: write.shareOperationId,
       shareOperationId: write.shareOperationId,
       roots: [ENTITY],
       namespace: 'aloha',
       scope: 'person-profile',
       transitionType: 'CREATE',
-      authorityProofRef: 'proof:owner:route',
-      publishEpochs: '9',
-    }, publisherControl);
-
-    await handlePublisherRoutes(enqueue);
-    expect(responseStatus(enqueue)).toBe(200);
-    const jobId = String(responseBody(enqueue).jobId);
+      authority: { type: 'owner', proofRef: 'proof:owner:route' },
+      publishEpochs: 9,
+    });
 
     const payloadCtx = createContext('GET', `/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`, undefined, publisherControl);
     await handlePublisherRoutes(payloadCtx);

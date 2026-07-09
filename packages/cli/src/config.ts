@@ -10,7 +10,15 @@ import {
   findPackageRepoDir,
   isDkgMonorepoRoot,
   resolveDkgConfigHome,
+  SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
+import {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
+} from '@origintrail-official/dkg-publisher';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -36,12 +44,28 @@ export interface AutoUpdateBuildTimeouts {
   markitdown?: number;
 }
 
+export const AUTO_UPDATE_GIT_ONLY_FIELDS = [
+  'repo',
+  'branch',
+  'ref',
+  'sshKeyPath',
+  'sshCommand',
+  'buildTimeoutMs',
+  'verifyTagSignature',
+] as const;
+
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
   repo?: string;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
   branch?: string;
+  /**
+   * Optional git ref for the advanced git updater. When set, this wins over
+   * `branch`. Bare values are treated as branches (`main` ->
+   * `refs/heads/main`); full refs such as `refs/heads/main` are accepted.
+   */
+  ref?: string;
   /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
   allowPrerelease?: boolean;
   /**
@@ -85,11 +109,12 @@ export interface AutoUpdateConfig {
    *     (`repoDir() === null`). Treated as `'npm'` under rc.12+ via
    *     `resolveStandaloneInstall()`.
    *
-   *   `'git'` (legacy; pre-rc.12): the now-removed git-build update
-   *     path. Treated as `'monorepo'` under rc.12+ (the daemon does
-   *     not auto-update, no git pull/build). User-facing `dkg
-   *     update` from such a config refuses to run — see OT-RFC-41
-   *     §4.2 and `cli.ts dkg update`.
+   *   `'git'`: advanced/experimental Core-node updater. The daemon
+   *     polls `repo` + `ref`/`branch`, builds the target commit from
+   *     source in the inactive blue-green slot, swaps slots, then exits
+   *     through the supervised restart flow. NPM/dist-tag updates remain
+   *     recommended for production because rollback expectations differ:
+   *     git mode can only roll back to an already-built slot.
    *
    * Implementation: read once at boot via `resolveStandaloneInstall(source)`
    * in `daemon/state.ts`, which writes the result into the shared
@@ -109,6 +134,7 @@ export interface AutoUpdateConfig {
 export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
   repo: string;
   branch: string;
+  ref?: string;
   checkIntervalMinutes: number;
 };
 
@@ -126,6 +152,7 @@ export interface NetworkConfig {
     enabled: boolean;
     repo: string;
     branch: string;
+    ref?: string;
     allowPrerelease?: boolean;
     /** npm dist-tag this network's nodes track — see `AutoUpdateConfig.channel`. */
     channel?: string;
@@ -146,6 +173,8 @@ export interface NetworkConfig {
     type: 'evm';
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Public RPC URLs safe to expose to browser wallets for wallet_addEthereumChain. */
+    walletRpcUrls?: string[];
     hubAddress: string;
     tokenAddress?: string;
     chainId: string;
@@ -154,6 +183,13 @@ export interface NetworkConfig {
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
     cgRegistryScanPageSize?: number;
+    /**
+     * Network-level per-chain funding floors (wei). See
+     * `ChainConfig.minPublisher*Wei`. Overlay JSON can only carry
+     * string/number; both are normalized to bigint in `resolveChainConfig`.
+     */
+    minPublisherNativeWei?: bigint | string | number;
+    minPublisherTracWei?: bigint | string | number;
   };
   faucet?: {
     url: string;
@@ -229,6 +265,8 @@ export interface ChainConfig {
   rpcUrl: string;
   /** Ordered JSON-RPC backup endpoints. `rpcUrl` remains the primary endpoint. */
   rpcUrls?: string[];
+  /** Public RPC URLs safe to expose to browser wallets for wallet_addEthereumChain. */
+  walletRpcUrls?: string[];
   /** Hub contract address */
   hubAddress: string;
   /** Optional token contract address override. When omitted, resolve from Hub.Token. */
@@ -253,10 +291,32 @@ export interface ChainConfig {
    * Defaults to the EVM adapter's 2,000-block common provider cap.
    */
   cgRegistryScanPageSize?: number;
+  /**
+   * Funding floors for funding-aware operational-wallet selection (wei of the
+   * native gas token / TRAC). A wallet is preferred for a publish only when its
+   * native balance > `minPublisherNativeWei` AND its own-TRAC covers the publish
+   * above `minPublisherTracWei`; below the floor it is deprioritized (best-funded
+   * fallback still sends). Both default to `0n` (only strictly-empty wallets are
+   * skipped) — per-chain non-zero native defaults are supplied by the network
+   * overlay.
+   *
+   * Persisted config (JSON/YAML) cannot express a bigint: use a decimal wei
+   * **string** (recommended — wei amounts overflow the safe number range) or an
+   * integer number. `resolveChainConfig` normalizes + validates both into the
+   * strict bigint that reaches `EVMAdapterConfig.minPublisher*Wei`, failing
+   * fast at startup on decimals, negatives, or unsafe-precision numbers.
+   */
+  minPublisherNativeWei?: bigint | string | number;
+  minPublisherTracWei?: bigint | string | number;
 }
 
-export type ResolvedChainConfig = Partial<Omit<ChainConfig, 'approvalPolicy'>> & {
+export type ResolvedChainConfig = Partial<
+  Omit<ChainConfig, 'approvalPolicy' | 'minPublisherNativeWei' | 'minPublisherTracWei'>
+> & {
   approvalPolicy?: ApprovalPolicyConfig;
+  /** Normalized funding floors — always bigint past resolution. */
+  minPublisherNativeWei?: bigint;
+  minPublisherTracWei?: bigint;
 };
 
 export interface LargeLiteralStorageConfig {
@@ -429,6 +489,11 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
+export interface LoggingConfig {
+  /** Emit detailed KA publish lifecycle logs. Default: false. */
+  kaPublishLifecycleDebug?: boolean;
+}
+
 export interface DkgConfig {
   name: string;
   /**
@@ -515,6 +580,8 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /** Local daemon logging controls. */
+  logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
@@ -551,6 +618,16 @@ export interface DkgConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Disable expensive peer-connect SWM catch-up for bulk benchmark/devnet runs. */
   syncSharedMemoryOnConnect?: boolean;
+  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  syncReconcilerEnabled?: boolean;
+  /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
+  syncOnConnectEnabled?: boolean;
+  /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
+  durableSyncEnabled?: boolean;
+  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  syncGlobalMaxInflight?: number;
+  /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
+  storageAckHandlerDeadlineMs?: number;
   /**
    * STRICT curator-ack gate (OT-RFC-49 curator-leader), default OFF. When true,
    * a non-`localOnly` write to a PRIVATE context graph must be applied+ack'd by
@@ -560,10 +637,18 @@ export interface DkgConfig {
    */
   swmAwaitCuratorAck?: boolean;
   /**
-   * Keep durable sync of `did:dkg:context-graph:agents/_meta` enabled by
-   * default. Edge-node operators can set this to false to sync the `agents`
-   * phonebook data without pulling the large system KA/KC lifecycle metadata.
-   * Ignored on core nodes, which always sync system graph metadata.
+   * Durable sync of the system `did:dkg:context-graph:agents/_meta` graph.
+   * Defaults to OFF on every node role, cores included: `agents/_meta` is
+   * bloated KA/KC lifecycle metadata with no cross-node consumer and was a hot
+   * contributor to the mainnet sync-retry storm. Set this to `true` (or export
+   * `DKG_SYNC_AGENTS_META=1`) to re-enable fetching it. The `agents` DATA graph
+   * (the peer phonebook) is always synced regardless of this flag.
+   *
+   * NOTE: this flag is read once at daemon construction (restart required to
+   * change it). Re-enabling fetch on ONE node is not enough on its own — serving
+   * cores withhold `agents/_meta` by default too, so a re-enabled fetcher still
+   * receives empty pages unless the serving cores also set
+   * `DKG_SERVE_AGENTS_META=1` (that serve switch IS runtime-hot, no restart).
    */
   syncAgentsMeta?: boolean;
   /**
@@ -578,8 +663,65 @@ export interface DkgConfig {
    * on first start and stored in `<DKG_HOME>/auth.token`.
    */
   auth?: { enabled?: boolean; tokens?: string[] };
-  /** Opt-in telemetry streaming to central network dashboard. */
-  telemetry?: { enabled?: boolean };
+  /**
+   * Opt-in telemetry streaming to a central network dashboard.
+   * `enabled` is the master gate: when false, NOTHING is forwarded off the
+   * node (local logging — SQLite + daemon.log — is always on regardless).
+   */
+  telemetry?: {
+    enabled?: boolean;
+    /**
+     * Remote log forwarding (opt-in). Active only when `enabled` is true.
+     */
+    logs?: {
+      /**
+       * Outbound transport for logs. 'none' = local only; 'otlp' = OTLP/HTTP
+       * to an OpenTelemetry collector; 'syslog' = legacy RFC 5424 → Graylog.
+       * Defaults to 'syslog' when unset (preserves prior behaviour).
+       */
+      exporter?: 'none' | 'otlp' | 'syslog';
+      /**
+       * OTLP/HTTP logs endpoint, e.g. http://localhost:4318/v1/logs. Falls
+       * back to the per-network default (TELEMETRY_ENDPOINTS[network].otlpLogs).
+       */
+      endpoint?: string;
+      /** Bearer credential for the operator's collector. Treated as a secret. */
+      token?: string;
+      /** Minimum level forwarded remotely. Local sink keeps everything. Default 'info'. */
+      level?: 'debug' | 'info' | 'warn' | 'error';
+      /** Extra sensitive key names to redact from messages before they leave the node. */
+      redact?: string[];
+      /** Bounded in-memory buffer; drop-oldest on overflow. Default 500. */
+      bufferMaxEntries?: number;
+    };
+    /**
+     * OTel trace export (opt-in, independent of logs). Registers the tracer
+     * ONLY when an endpoint resolves (config or OTEL_EXPORTER_OTLP_* env);
+     * never falls back to a guessed prod URL.
+     */
+    traces?: {
+      enabled?: boolean;
+      /** OTLP traces endpoint, e.g. http://localhost:4318/v1/traces. */
+      endpoint?: string;
+      /** Bearer credential. Treated as a secret. */
+      token?: string;
+      /** Parent-based ratio sampler 0..1. Default 1.0. */
+      sampleRatio?: number;
+    };
+    /**
+     * OTel metric export (opt-in, independent of logs). Registers the meter
+     * ONLY when an endpoint resolves (config or OTEL_EXPORTER_OTLP_* env).
+     */
+    metrics?: {
+      enabled?: boolean;
+      /** OTLP metrics endpoint, e.g. http://localhost:4318/v1/metrics. */
+      endpoint?: string;
+      /** Bearer credential. Treated as a secret. */
+      token?: string;
+      /** PeriodicExportingMetricReader interval. Default 30000ms. */
+      exportIntervalMs?: number;
+    };
+  };
   /** Shared memory (workspace) data TTL in milliseconds. Default: 30 days (2592000000). Set to 0 to disable cleanup. */
   sharedMemoryTtlMs?: number;
   /** @deprecated Legacy alias for sharedMemoryTtlMs */
@@ -643,6 +785,15 @@ export interface DkgConfig {
    * the `DKG_MAX_CONNECTIONS` env var. Defaults to 256.
    */
   maxConnections?: number;
+  /**
+   * C1: StorageACK timing tunables. Resolved by `resolveStorageAckTiming()` so
+   * defaults, partial overrides, and the handler-vs-send safety margin are
+   * enforced at the CLI config boundary before daemon/agent wiring consumes it.
+   */
+  storageAck?: {
+    handlerDeadlineMs?: number;
+    sendTimeoutMs?: number;
+  };
   /**
    * V10 Random Sampling prover (core-only). When the node is `core`
    * AND has an on-chain identity, the agent automatically schedules
@@ -776,22 +927,37 @@ export interface DkgConfig {
  * Nodes resolve the correct endpoints from the network they're on.
  * Operators only see a single toggle — no endpoint configuration.
  */
-export const TELEMETRY_ENDPOINTS: Record<string, { syslog: { host: string; port: number }; otlp: string }> = {
+export const TELEMETRY_ENDPOINTS: Record<
+  string,
+  { syslog: { host: string; port: number }; otlp: string }
+> = {
   testnet: {
     syslog: { host: 'loggly.origin-trail.network', port: 12201 },
     otlp: 'https://telemetry-testnet.origintrail.io/v1/metrics',
   },
   mainnet: {
-    syslog: { host: 'loggly.origin-trail.network', port: 0 }, // TODO: assign mainnet syslog port
+    syslog: { host: 'loggly.origin-trail.network', port: 0 }, // legacy syslog — OTLP is the mainnet path
     otlp: 'https://telemetry.origintrail.io/v1/metrics',
   },
 };
+// NOTE: there is intentionally NO per-network OTLP *logs* endpoint here. The
+// OTLP log exporter resolves its endpoint env-first (OTEL_EXPORTER_OTLP_*) then
+// from `config.telemetry.logs.endpoint` (see startOtlpExporter) — never from a
+// hardcoded default — so a node can't ship logs to a placeholder URL.
 
 const DEFAULT_CONFIG: DkgConfig = {
   name: 'dkg-node',
   apiPort: 9200,
   listenPort: 0,
   nodeRole: 'edge',
+};
+
+export {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
 };
 
 /** Resolve context graphs from config. */
@@ -900,6 +1066,50 @@ export function resolveApprovalPolicy(
     targetAllowance,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Normalize a persisted wei amount (funding floors) into a bigint.
+ *
+ * JSON/YAML configs and the network overlay can only produce strings and
+ * numbers, never bigints — so accept all three and fail fast at startup on
+ * anything that would otherwise silently mis-compare downstream: decimal
+ * strings (`BigInt('0.002')` throws — good), empty strings (`BigInt('')` is
+ * silently `0n` — guarded), non-integer or unsafe-precision numbers (would
+ * lose wei), and negatives (would invert the floor comparison).
+ */
+export function parseWeiFloor(
+  value: bigint | string | number | undefined,
+  label: string,
+): bigint | undefined {
+  if (value === undefined) return undefined;
+  let parsed: bigint;
+  if (typeof value === 'bigint') {
+    parsed = value;
+  } else if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(
+        `${label} must be an integer within Number.MAX_SAFE_INTEGER when given as a number — use a decimal wei string for larger amounts (got: ${value})`,
+      );
+    }
+    parsed = BigInt(value);
+  } else {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      throw new Error(`${label} must be a decimal wei bigint string (got an empty string)`);
+    }
+    try {
+      parsed = BigInt(trimmed);
+    } catch (err: any) {
+      throw new Error(
+        `${label} must be a decimal wei bigint string (got: ${JSON.stringify(value)}, ${err?.message ?? err})`,
+      );
+    }
+  }
+  if (parsed < 0n) {
+    throw new Error(`${label} must be non-negative (got: ${parsed})`);
+  }
+  return parsed;
 }
 
 let _networkConfig: NetworkConfig | null = null;
@@ -1056,6 +1266,7 @@ export function resolveAutoUpdateConfig(
   const proj = loadProjectConfig();
   const repo = cfg?.repo ?? net?.repo ?? proj.repo;
   const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
+  const ref = cfg?.ref ?? net?.ref;
   const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
@@ -1081,6 +1292,7 @@ export function resolveAutoUpdateConfig(
     enabled: true,
     repo,
     branch,
+    ...(ref ? { ref } : {}),
     allowPrerelease,
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
@@ -1096,6 +1308,31 @@ export function resolveAutoUpdateSource(
   network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
 ): AutoUpdateConfig['source'] {
   return config?.autoUpdate?.source ?? network?.autoUpdate?.source;
+}
+
+/**
+ * True for a loopback / local-host RPC URL (localhost, 127.0.0.0/8, ::1,
+ * 0.0.0.0). Such a primary is a LOCAL chain (Hardhat / devnet), so the
+ * network's PUBLIC backup endpoints must NOT be auto-attached behind it:
+ * ethers' FallbackProvider hard-rejects mixing providers on different chains
+ * ("cannot mix providers on different networks"), which would break chain
+ * init. A real operator's private RPC is non-loopback and still inherits the
+ * public backups for failover.
+ */
+function isLoopbackRpcUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return (
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host === '0.0.0.0' ||
+      host === '::1' ||
+      host === '[::1]' ||
+      /^127\./.test(host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1147,7 +1384,26 @@ export function resolveChainConfig(
     type: cfg?.type ?? net?.type ?? 'evm',
   };
   const primaryRpcUrl = cfg?.rpcUrl ?? net?.rpcUrl;
-  const backupRpcUrls = cfg?.rpcUrls ?? net?.rpcUrls ?? [];
+  // Don't inherit the network's PUBLIC backups when the operator pins their OWN
+  // PRIMARY rpcUrl on a DIFFERENT chain than the overlay — either a loopback/
+  // local primary (Hardhat/devnet) OR a custom primary whose `chainId` differs
+  // from the network's. Either would build a cross-chain FallbackProvider
+  // (e.g. local 31337 + public Base Sepolia 84532) that ethers rejects at init.
+  // The cross-chain risk only exists when the PRIMARY itself is off-overlay, so
+  // this requires a custom `rpcUrl`: a `chainId` override with NO custom rpcUrl
+  // leaves the primary on the network RPC (same chain as the backups), so the
+  // backups stay valid failover and must NOT be dropped. A non-loopback private
+  // primary on the SAME chain still inherits the public backups; explicit
+  // operator `rpcUrls` always win.
+  const operatorPinnedOffOverlayPrimary =
+    typeof cfg?.rpcUrl === 'string' &&
+    (
+      isLoopbackRpcUrl(cfg.rpcUrl) ||
+      (cfg?.chainId !== undefined && net?.chainId !== undefined && cfg.chainId !== net.chainId)
+    );
+  const suppressInheritedBackups = cfg?.rpcUrls === undefined && operatorPinnedOffOverlayPrimary;
+  const backupRpcUrls =
+    cfg?.rpcUrls ?? (suppressInheritedBackups ? [] : net?.rpcUrls) ?? [];
   const orderedRpcUrls: string[] = [];
   for (const candidate of [primaryRpcUrl, ...backupRpcUrls]) {
     if (typeof candidate !== 'string') continue;
@@ -1159,6 +1415,15 @@ export function resolveChainConfig(
   if (orderedRpcUrls.length > 1 || cfg?.rpcUrls !== undefined || net?.rpcUrls !== undefined) {
     merged.rpcUrls = orderedRpcUrls.slice(1);
   }
+  const walletRpcUrls = cfg?.walletRpcUrls ?? (operatorPinnedOffOverlayPrimary ? undefined : net?.walletRpcUrls);
+  if (walletRpcUrls !== undefined) {
+    merged.walletRpcUrls = Array.from(new Set(
+      walletRpcUrls
+        .filter((candidate): candidate is string => typeof candidate === 'string')
+        .map((candidate) => candidate.trim())
+        .filter(Boolean),
+    ));
+  }
   const hubAddress = cfg?.hubAddress ?? net?.hubAddress;
   if (hubAddress !== undefined) merged.hubAddress = hubAddress;
   const tokenAddress = cfg?.tokenAddress ?? net?.tokenAddress;
@@ -1169,6 +1434,20 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  // Funding floors: local config wins, else the network overlay's per-chain
+  // default (both default 0n downstream in the adapter when unset). Persisted
+  // values arrive as string/number — normalize to bigint here, failing fast on
+  // garbage instead of letting it reach the adapter's balance comparisons.
+  const minPublisherNativeWei = parseWeiFloor(
+    cfg?.minPublisherNativeWei ?? net?.minPublisherNativeWei,
+    'chain.minPublisherNativeWei',
+  );
+  if (minPublisherNativeWei !== undefined) merged.minPublisherNativeWei = minPublisherNativeWei;
+  const minPublisherTracWei = parseWeiFloor(
+    cfg?.minPublisherTracWei ?? net?.minPublisherTracWei,
+    'chain.minPublisherTracWei',
+  );
+  if (minPublisherTracWei !== undefined) merged.minPublisherTracWei = minPublisherTracWei;
   if (cfg?.mockIdentityId !== undefined) merged.mockIdentityId = cfg.mockIdentityId;
   return merged;
 }
@@ -1220,6 +1499,31 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
 
 export function resolveNetworkConfigName(config?: Pick<DkgConfig, 'networkConfig'> | null): string {
   return config?.networkConfig?.trim() || loadProjectConfig().defaultNetwork;
+}
+
+/**
+ * Validate an operator-supplied `--network <name>` value before a setup flow
+ * persists it. Rejects unknown overlay names and pre-deployment networks
+ * (e.g. `mainnet-neuroweb`, whose bundled config is still placeholder-gated)
+ * with a clear, early error — instead of letting the node FATAL at daemon
+ * boot. A blank/undefined value is a no-op (the caller falls back to the
+ * setup default). Shared by the openclaw/hermes/mcp setup actions.
+ */
+export async function assertSelectableNetwork(name: string | undefined | null): Promise<void> {
+  const trimmed = name?.trim();
+  if (!trimmed) return;
+  const network = await loadNetworkConfig(trimmed);
+  if (!network) {
+    throw new Error(
+      `No bundled network config named "${trimmed}". Common options: ${SELECTABLE_SETUP_NETWORKS.join(', ')}.`,
+    );
+  }
+  const readiness = validateNetworkConfigReadiness(network);
+  if (!readiness.ok) {
+    throw new Error(
+      `Network "${trimmed}" is not available yet:\n${readiness.messages.join('\n')}`,
+    );
+  }
 }
 
 export function dkgDir(): string {

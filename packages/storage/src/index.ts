@@ -3,6 +3,8 @@ export {
   type TripleStore,
   type QueryResult,
   type QueryOptions,
+  type StoreWorkPriority,
+  type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
   type AskResult,
@@ -16,6 +18,12 @@ export {
   getSparqlEndpoint,
   type SparqlEndpoint,
 } from './triple-store.js';
+export {
+  StorePriorityScheduler,
+  externalStorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
+  type StorePrioritySchedulerSnapshot,
+} from './store-priority-scheduler.js';
 export {
   EXTERNAL_LITERAL_REF_DATATYPE,
   SHARED_MEMORY_GRAPH_SUFFIX,
@@ -40,7 +48,18 @@ export {
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
 } from './adapters/sparql-http.js';
-export { ContextGraphManager, GraphManager } from './graph-manager.js';
+export {
+  ContextGraphManager,
+  GraphManager,
+  loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
+  resolveSharedMemoryReadGraphs,
+  resolveVerifiableMemoryReadGraphs,
+  type LoadSelectedSharedMemoryQuadsOptions,
+  type LoadSelectedVerifiableMemoryQuadsOptions,
+  type NonEmptyGraphList,
+  type SharedMemoryReadSelection,
+} from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 
 // Side-effect: register built-in adapters

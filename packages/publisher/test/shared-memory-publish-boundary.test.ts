@@ -4,12 +4,18 @@ import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
   TypedEventBus,
+  encodeWorkspacePublishRequest,
   generateEd25519Keypair,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher } from '../src/index.js';
+import {
+  DKGPublisher,
+  SharedMemoryHandler,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+} from '../src/index.js';
 import type { PublishResult } from '../src/publisher.js';
 
 const CONTEXT_GRAPH = 'publish-boundary';
@@ -17,6 +23,8 @@ const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
 const SWM_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory`;
 const SWM_META_GRAPH = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
 const PER_KA_SWM_GRAPH = `${SWM_GRAPH}/0x1111111111111111111111111111111111111111/1`;
+const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
+const ON_CHAIN_ID_PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
 const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -32,14 +40,34 @@ function q(subject: string, predicate = 'http://schema.org/name', object = '"val
   return { subject, predicate, object, graph };
 }
 
-async function makePublisher() {
+function onChainIdQuad(id = '1'): Quad {
+  return { subject: CONTEXT_GRAPH_URI, predicate: ON_CHAIN_ID_PREDICATE, object: `"${id}"`, graph: ONTOLOGY_GRAPH };
+}
+
+function privatePolicyChain(options: { nameHash?: string | null } = {}) {
+  const chain = new NoChainAdapter() as any;
+  Object.defineProperty(chain, 'chainId', { value: 'mock-private' });
+  Object.defineProperty(chain, 'deploymentId', { value: 'mock-private' });
+  chain.getContextGraphAccessPolicy = async () => 1;
+  if ('nameHash' in options) {
+    chain.getContextGraphNameHash = async () => options.nameHash ?? null;
+  }
+  return chain;
+}
+
+async function makeRealPublisher(chain = new NoChainAdapter()) {
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
     store,
-    chain: new NoChainAdapter(),
+    chain,
     eventBus: new TypedEventBus(),
     keypair: await generateEd25519Keypair(),
   });
+  return { publisher, store };
+}
+
+async function makePublisher(chain = new NoChainAdapter()) {
+  const { publisher, store } = await makeRealPublisher(chain);
   const publishResult: PublishResult = {
     kaId: 1n,
     ual: 'did:dkg:0x0000000000000000000000000000000000000001/1',
@@ -70,12 +98,15 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       q('urn:test:root:metadata-only', TRUST_LEVEL_PREDICATE, `"${TrustLevel.SelfAttested}"`),
     ]);
 
-    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      publisherPeerId: 'peer-swm',
+    })).resolves.toMatchObject({
       status: 'tentative',
     });
 
     expect(publishSpy.calls).toHaveLength(1);
     const publishArgs = publishSpy.calls[0][0];
+    expect(publishArgs.publisherPeerId).toBe('peer-swm');
     expect(publishArgs.quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
     ]);
@@ -175,6 +206,158 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     ]);
   });
 
+  it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(privatePolicyChain());
+    const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    await store.insert([
+      onChainIdQuad('1'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', cgDid],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).resolves.toMatchObject({ status: 'tentative' });
+
+    expect(publishSpy.calls).toHaveLength(1);
+    const publishArgs = publishSpy.calls[0][0];
+    expect(publishArgs.trustedNonManifestCatalogTriples).toEqual(
+      generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+    );
+    expect(publishArgs.quads).toEqual(
+      expect.arrayContaining([
+        { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ]),
+    );
+  });
+
+  it('rejects trusted generated catalog floor for public direct publishes', async () => {
+    const { publisher } = await makeRealPublisher();
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        quads: [
+          q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+          ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+        ],
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects trusted generated catalog floor when callers set a non-public KA access policy without private CG proof', async () => {
+    const { publisher } = await makeRealPublisher();
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        publisherPeerId: '12D3KooWPublicBypass',
+        accessPolicy: 'ownerOnly',
+        quads: [
+          q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+          ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+        ],
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects trusted generated catalog floor with a borrowed private on-chain context graph id', async () => {
+    const { publisher, store } = await makeRealPublisher(privatePolicyChain());
+    await store.insert([onChainIdQuad('2')]);
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        publishContextGraphId: '1',
+        quads: [
+          q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+          ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+        ],
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects stale stored on-chain context graph ids when the live name hash no longer matches', async () => {
+    const staleNameHash = `0x${'11'.repeat(32)}`;
+    const { publisher, store } = await makeRealPublisher(privatePolicyChain({ nameHash: staleNameHash }));
+    await store.insert([onChainIdQuad('1')]);
+
+    await expect(
+      publisher.publish({
+        contextGraphId: CONTEXT_GRAPH,
+        publishContextGraphId: '1',
+        quads: [
+          q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+          ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+        ],
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects trusted generated catalog floor on update without private CG proof', async () => {
+    const { publisher } = await makeRealPublisher();
+
+    await expect(
+      publisher.update(1n, {
+        contextGraphId: CONTEXT_GRAPH,
+        publisherPeerId: '12D3KooWPublicBypass',
+        accessPolicy: 'ownerOnly',
+        quads: [
+          q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+          ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+        ],
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('rejects shared-memory trusted floor with a borrowed private on-chain context graph id', async () => {
+    const { publisher, store } = await makeRealPublisher(privatePolicyChain());
+    const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    await store.insert([
+      onChainIdQuad('2'),
+      q('urn:test:root:one'),
+      ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH),
+    ]);
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
+        rootEntities: ['urn:test:root:one', cgDid],
+      }, {
+        onChainContextGraphId: '1',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
+      }),
+    ).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
+  });
+
+  it('treats generated catalog-looking quads as a normal root without the trusted option', async () => {
+    const { publisher } = await makeRealPublisher();
+
+    const result = await publisher.publish({
+      contextGraphId: CONTEXT_GRAPH,
+      quads: [
+        q('urn:test:root:one', 'http://schema.org/name', '"value"', ''),
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+    });
+
+    expect(result.status).toBe('tentative');
+    expect(result.kaManifest.map((m) => m.rootEntity).sort()).toEqual([
+      CONTEXT_GRAPH_URI,
+      'urn:test:root:one',
+    ]);
+  });
+
   it('falls back to direct publish when SWM ACKs fail with NO_DATA_IN_SWM', async () => {
     const { publisher, store } = await makePublisher();
     const fallbackResult: PublishResult = {
@@ -236,6 +419,41 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
+  });
+});
+
+describe('SharedMemoryHandler lifecycle UAL derivation', () => {
+  it('does not block SWM apply when the log-only asset UAL resolver stalls', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: () => new Promise<string>(() => {}),
+    });
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<urn:test:root:one> <http://schema.org/name> "value" <${CONTEXT_GRAPH_URI}> .`,
+      ),
+      manifest: [{ rootEntity: 'urn:test:root:one', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      shareOperationId: 'op-lifecycle-timeout',
+      timestampMs: Date.now(),
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      kaNumber: '7',
+    });
+
+    const outcome = await Promise.race([
+      handler.handle(msg, '12D3KooWPeer'),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+
+    expect(outcome).not.toBe('timed-out');
+    expect(outcome).toMatchObject({
+      applied: true,
+      cgId: CONTEXT_GRAPH,
+      shareOperationId: 'op-lifecycle-timeout',
+      publisherPeerId: '12D3KooWPeer',
+      insertedTriples: 1,
+    });
   });
 });
 

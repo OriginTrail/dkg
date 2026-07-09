@@ -274,7 +274,28 @@ const PINNED_DIGESTS: Record<string, string> = {
   // widened Account tuple, realized-publish credit removed / publishingAllocation rename.
   // Repinned: KC→KA rename of error InvalidConvictionKcEpochs → InvalidConvictionKaEpochs
   // (error selector change; contract bumped to 10.0.5).
-  PublishingConviction:         'a4d44a594509e508091b1f91adfb1d68bec65e38e497f054116493af327ff096',
+  // Repinned (preserve-agents-on-transfer, 10.0.6): added the owner-gated bulk
+  // `clearAgents(uint256)` + event `AgentsCleared(uint256,address,uint256)` +
+  // error `NotAccountOwner(uint256,address)` for the explicit allow-list reset
+  // (transfers now PRESERVE agents).
+  // Repinned (bulk-register-agents, 10.0.7): added owner-gated
+  // `registerAgents(uint256,address[])` (no new event/error — reuses
+  // AgentRegistered). Function surface change → new digest.
+  // Repinned (deterministic emission schedule, 10.0.8): added the Hub-owner
+  // batch `migrateEmissionSchedule(uint256[])` + event
+  // `EmissionScheduled(uint256,uint40,uint40,uint96,uint96)` (`scheduled`
+  // staker-shard net + `treasuryFee` treasury-shard split), the
+  // permissionless `collectTreasuryEmission(uint256,uint256)` + event
+  // `TreasuryEmissionCollected(uint256,uint256,uint96)` + errors
+  // `TreasuryNotSet()` / `InvalidCollectionRange(uint256,uint256,uint256)`,
+  // and the `TREASURY_SHARD_ID` constant getter. The staker-pool
+  // distribution of committedTRAC is now written up front at account
+  // creation (each window's budget forward-spread over the lock length,
+  // split net/fee at schedule time when a treasury is wired), so
+  // `WindowSettled` is no longer emitted (declaration retained — decoding
+  // stays valid) and `settle()` reduces to schedule-if-needed + the
+  // post-expiry topUp tail. Additive surface change → new digest.
+  PublishingConviction:         '6836d907ef63ba140d60051830a89714a143d7e9154ce64e5ee94958d3dff9d7',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',
@@ -304,6 +325,26 @@ describe('ABI pin digest — detects silent contract surface drift [CH-5]', () =
 });
 
 describe('ABI content sanity — required event/error surfaces are present [CH-5 / CH-6]', () => {
+  it('PublishingConviction keeps coverPublishingCost input names ABI-stable', () => {
+    const abi = JSON.parse(
+      readFileSync(join(ABI_DIR, 'PublishingConviction.json'), 'utf8'),
+    ) as AbiEntry[];
+    const fn = abi.find((e) => e.type === 'function' && e.name === 'coverPublishingCost');
+    expect(fn).toBeDefined();
+    expect((fn!.inputs ?? []).map((i) => i.name)).toEqual([
+      'publishingAgent',
+      'baseCost',
+      'kaStartEpoch',
+      'kaEpochs',
+    ]);
+    expect((fn!.inputs ?? []).map((i) => i.type)).toEqual([
+      'address',
+      'uint96',
+      'uint40',
+      'uint40',
+    ]);
+  });
+
   it('KnowledgeCollectionStorage declares KnowledgeAssetCreated with the full spec field set', () => {
     const abi = JSON.parse(
       readFileSync(join(ABI_DIR, 'DKGKnowledgeAssets.json'), 'utf8'),

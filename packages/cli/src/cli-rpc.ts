@@ -1,5 +1,13 @@
 import { ethers } from 'ethers';
-import { resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import {
+  resolveRpcUrls,
+  isRetryableRpcError,
+  isKnownTransactionError,
+  noteRpcFailover,
+  noteRpcExhaustion,
+  ChainRpcTransportError,
+  createRpcTimeoutError,
+} from '@origintrail-official/dkg-chain';
 import { cliSleep, cliErrorMessage } from './cli-helpers.js';
 
 const CLI_RPC_READ_STALL_TIMEOUT_MS = 4_000;
@@ -12,9 +20,7 @@ function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Prom
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      const err = new Error(`${label} timed out after ${ms}ms`);
-      (err as any).code = 'TIMEOUT';
-      reject(err);
+      reject(createRpcTimeoutError(`${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([promise, timeout]).finally(() => {
@@ -22,45 +28,20 @@ function cliWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Prom
   }) as Promise<T>;
 }
 
+/**
+ * Backwards-compatible CLI aliases for the canonical classifiers in
+ * `@origintrail-official/dkg-chain`. ~25 command modules import these names;
+ * they delegate so the CLI write path classifies (and fails over) IDENTICALLY
+ * to the daemon. (The chain `isRetryableRpcError` calls `enrichEvmError`, which
+ * mutates `err.message` — benign here, since CLI errors are thrown, never
+ * reused for control flow.)
+ */
 function isCliKnownTransactionError(err: unknown): boolean {
-  const code = String((err as any)?.code ?? (err as any)?.error?.code ?? '').toUpperCase();
-  const msg = cliErrorMessage(err).toLowerCase();
-  return code === 'NONCE_EXPIRED'
-    || msg.includes('already known')
-    || msg.includes('known transaction')
-    || msg.includes('already imported')
-    || msg.includes('transaction already in mempool')
-    || msg.includes('already exists')
-    || msg.includes('nonce too low')
-    || msg.includes('duplicate transaction');
+  return isKnownTransactionError(err);
 }
 
 function isCliRetryableRpcError(err: unknown): boolean {
-  const code = String((err as any)?.code ?? (err as any)?.error?.code ?? '').toUpperCase();
-  const status =
-    (err as any)?.status ??
-    (err as any)?.statusCode ??
-    (err as any)?.response?.status ??
-    (err as any)?.error?.status;
-  const msg = cliErrorMessage(err).toLowerCase();
-  if (code === 'CALL_EXCEPTION' || code === 'INSUFFICIENT_FUNDS' || code === 'NONCE_EXPIRED'
-    || code === 'RPC_RECEIPT_LOOKUP_FAILED'
-    || code === 'REPLACEMENT_UNDERPRICED' || code === 'ACTION_REJECTED' || code === 'INVALID_ARGUMENT') {
-    return false;
-  }
-  if (msg.includes('execution reverted') || msg.includes('call exception')
-    || msg.includes('insufficient funds') || msg.includes('invalid argument')
-    || msg.includes('nonce too low') || msg.includes('replacement transaction underpriced')) {
-    return false;
-  }
-  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
-  if (code === 'TIMEOUT' || code === 'SERVER_ERROR' || code === 'NETWORK_ERROR'
-    || code === 'ECONNRESET' || code === 'ECONNREFUSED' || code === 'ETIMEDOUT'
-    || code === 'ENOTFOUND' || code === 'EAI_AGAIN' || code === 'UNKNOWN_ERROR') {
-    return true;
-  }
-  return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|rate limit|too many requests|429|503|502|500|gateway|temporarily unavailable|fetch failed|connection/i
-    .test(msg);
+  return isRetryableRpcError(err);
 }
 
 function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
@@ -88,6 +69,7 @@ function createCliEvmProviders(rpcUrl: string, rpcUrls?: string[]): {
 async function getCliReceiptWithFailover(
   providers: ethers.JsonRpcProvider[],
   txHash: string,
+  urls?: string[],
 ): Promise<ethers.TransactionReceipt | null> {
   let lastRetryable: unknown;
   let sawNonErrorResponse = false;
@@ -103,15 +85,18 @@ async function getCliReceiptWithFailover(
     } catch (err) {
       if (!isCliRetryableRpcError(err)) throw err;
       lastRetryable = err;
+      if (urls && i < providers.length - 1) {
+        noteRpcFailover('cli receipt lookup', urls[i], err, urls[i + 1]);
+      }
     }
   }
   if (lastRetryable && !sawNonErrorResponse) {
-    const err = new Error(
+    if (urls) noteRpcExhaustion('cli receipt lookup', urls);
+    throw new ChainRpcTransportError(
+      'RPC_RECEIPT_LOOKUP_FAILED',
       `Receipt lookup for transaction ${txHash} failed on all configured RPC endpoints: ${cliErrorMessage(lastRetryable)}`,
-      { cause: lastRetryable },
+      { cause: lastRetryable, txHash },
     );
-    (err as any).code = 'RPC_RECEIPT_LOOKUP_FAILED';
-    throw err;
   }
   return null;
 }
@@ -128,6 +113,7 @@ async function sendCliRawTransactionWithFailover(
   providers: ethers.JsonRpcProvider[],
   signedTx: string,
   txHash: string,
+  urls?: string[],
 ): Promise<ethers.TransactionReceipt> {
   let lastError: unknown;
   for (let i = 0; i < providers.length; i += 1) {
@@ -146,15 +132,26 @@ async function sendCliRawTransactionWithFailover(
       }
       if (!isCliRetryableRpcError(err)) throw err;
       lastError = err;
+      if (urls && i < providers.length - 1) {
+        noteRpcFailover('cli broadcast', urls[i], err, urls[i + 1]);
+      }
     }
   }
   if (lastError) {
-    throw new Error(`Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`, { cause: lastError });
+    if (urls) noteRpcExhaustion('cli broadcast', urls);
+    // The typed transport error mirrors the chain adapter so CLI callers (and
+    // any daemon-route mapping over CLI flows) can distinguish a transient
+    // all-endpoints-exhausted failure from a deterministic revert.
+    throw new ChainRpcTransportError(
+      'RPC_ENDPOINTS_EXHAUSTED',
+      `Broadcast failed on all configured RPC endpoints: ${cliErrorMessage(lastError)}`,
+      { cause: lastError, ...(urls ? { rpcUrls: urls } : {}) },
+    );
   }
 
   const deadline = Date.now() + CLI_RPC_RECEIPT_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const receipt = await getCliReceiptWithFailover(providers, txHash);
+    const receipt = await getCliReceiptWithFailover(providers, txHash, urls);
     if (receipt) {
       assertCliSuccessfulReceipt(receipt, txHash);
       return receipt;

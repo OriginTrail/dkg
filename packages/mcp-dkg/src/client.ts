@@ -1079,64 +1079,12 @@ export class DkgClient {
     }
   }
 
-  /**
-   * Final canonical-flow step: publish a single root from a context graph's
-   * Shared Working Memory to Verifiable Memory (on-chain). The daemon route
-   * accepts `selection` as either the literal `"all"` or an array of root
-   * entity URIs, but V10 synchronous publish only proceeds when that
-   * selection resolves to exactly one publishable root.
-   *
-   * Default `clearAfter` is `false` for subset publishes (so unpublished
-   * roots aren't dropped from SWM) and `true` for omitted-root publishes.
-   * Omitted roots still map to `"all"` for compatibility, but the daemon
-   * rejects it when SWM contains more than one publishable root.
-   */
-  async publishSharedMemory(args: {
-    contextGraphId: string;
-    rootEntities?: string[];
-    subGraphName?: string;
-    clearAfter?: boolean;
-  }): Promise<Record<string, unknown>> {
-    const hasSubset = Array.isArray(args.rootEntities) && args.rootEntities.length > 0;
-    const clearAfter = args.clearAfter ?? !hasSubset;
-    return this.request('POST', '/api/shared-memory/publish', {
-      contextGraphId: normalizeContextGraphId(args.contextGraphId),
-      selection: args.rootEntities ?? 'all',
-      clearAfter,
-      subGraphName: args.subGraphName,
-    });
-  }
 
   /**
-   * One-shot publish helper with explicit quads. Uses the daemon's direct
-   * publish route so core ACK collection receives the publish payload
-   * inline instead of requiring SWM pre-positioning.
-   *
-   * For step-wise WM/SWM control use the assertion lifecycle and
-   * `shared_memory_publish` tools directly.
-   */
-  async publishQuads(args: {
-    contextGraphId: string;
-    quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>;
-  }): Promise<Record<string, unknown>> {
-    const cgId = normalizeContextGraphId(args.contextGraphId);
-    const wireQuads = args.quads.map((q) => ({
-      subject: q.subject,
-      predicate: q.predicate,
-      object: q.object,
-      graph: q.graph ?? '',
-    }));
-    return this.request<Record<string, unknown>>(
-      'POST',
-      '/api/knowledge-assets/publish',
-      { contextGraphId: cgId, quads: wireQuads },
-    );
-  }
-
-  /**
-   * Register a context graph on-chain. Used in conjunction with
-   * `publishSharedMemory({ ... })` when `register_if_needed: true`.
-   * The CG must exist locally first (via `createContextGraph`).
+   * Register a context graph on-chain. Optional — `vm/publish` auto-registers
+   * an unregistered CG on first publish; call this explicitly only to pre-set a
+   * custom `accessPolicy`/`publishPolicy` before publishing. The CG must exist
+   * locally first (via `createContextGraph`).
    *
    * Idempotent on already-registered: the daemon route returns HTTP 409
    * when the CG is already on-chain; this wrapper catches that 409 and

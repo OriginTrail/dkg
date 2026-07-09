@@ -1,15 +1,9 @@
-import { afterEach, beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir, platform } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:net';
 import TOML from '@iarna/toml';
 import { mcpSetupAction, type McpSetupActionDeps } from '../src/mcp-setup.js';
-import {
-  startLiveDaemon,
-  stopLiveDaemon,
-  type LiveDaemon,
-} from './helpers/live-daemon.js';
 
 /**
  * NO MOCKS. `dkg mcp setup` is a pure CLI ORCHESTRATOR over (a) a real
@@ -25,15 +19,15 @@ import {
  *
  * The two genuinely-external boundaries stay injected doubles, on
  * purpose: `startDaemon` (would spawn a 30s daemon per test) and
- * `requestFaucetFunding` (hits a live testnet faucet CI cannot reach —
- * same class as the hermes/openclaw external adapters left mocked).
+ * `fundWalletsBestEffort` (the shared faucet orchestrator — would hit a
+ * live testnet faucet CI cannot reach; same class as the hermes/openclaw
+ * external adapters left mocked).
  *
- * The ONE piece of real daemon behaviour the action performs itself —
- * the `/api/status` reachability probe gating wallet funding (F14/F26)
- * — is exercised against a REAL edge daemon booted via
- * `startLiveDaemon` (see the funding-gate tests): reachable cases point
- * the probe at the live daemon's port; unreachable cases point it at a
- * closed port for a real ECONNREFUSED. No `fetch` stub anywhere.
+ * Wallet funding delegates to that shared orchestrator (parity with
+ * openclaw/hermes). There is no longer a bespoke `/api/status`
+ * reachability probe gating funding, so the suite needs no live daemon
+ * and performs no `fetch` round-trip — the faucet tests just assert
+ * `fundWalletsBestEffort` is (or isn't) invoked with the right args.
  */
 
 /**
@@ -109,20 +103,6 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   let warnSpy: ReturnType<typeof captureWrites>;
   let errorSpy: ReturnType<typeof captureWrites>;
   let stderrSilencer: ReturnType<typeof captureWrites>;
-
-  // A REAL edge daemon, booted once for this describe. The funding-gate
-  // tests (F14/F26) that need the `/api/status` reachability probe to
-  // return ok point `opts.port` at this daemon's real API port — the
-  // production `fetch(.../api/status)` then does a true round-trip
-  // against it (no fetch stub). `requestFaucetFunding` stays an
-  // injected double (live testnet faucet, unreachable from CI).
-  let liveDaemon: LiveDaemon | undefined;
-  beforeAll(async () => {
-    liveDaemon = await startLiveDaemon({ authEnabled: false });
-  }, 90_000);
-  afterAll(async () => {
-    await stopLiveDaemon(liveDaemon);
-  });
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'mcp-setup-test-'));
@@ -225,12 +205,21 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       defaultNodeRole: 'edge',
       faucet: { url: 'http://faucet.test', mode: 'testnet' },
     }) as any);
-    const readWalletsWithRetry = recorder(async () => ['0xadmin', '0xtest1', '0xtest2', '0xtest3']);
-    const requestFaucetFunding = recorder(async () => ({
-      success: true,
-      fundedWallets: ['0xadmin', '0xtest1', '0xtest2', '0xtest3'],
+    // Eager wallet creation (issue #1306). Idempotent generate-if-absent;
+    // mcpSetupAction ignores the return value (the faucet re-reads from disk),
+    // so a minimal stub suffices. Tests assert it's called on a non-dry-run
+    // setup and skipped under --dry-run.
+    const loadOpWallets = recorder(async () => ({
+      adminWallet: { address: '0xadmin', privateKey: '0x0' },
+      wallets: [{ address: '0xtest1', privateKey: '0x0' }],
     }) as any);
-    const logManualFundingInstructions = recorder(() => {});
+    // Shared faucet orchestrator — the SAME one openclaw/hermes use. Stubbed as
+    // a recorder so tests assert it's invoked with (network, idempotencySeed,
+    // didStartDaemon) on a normal setup and skipped under --no-fund / --dry-run.
+    // Its internal wallet-read + faucet-call + manual-instructions behavior is
+    // covered directly by packages/core/test/faucet-orchestration.test.ts, not
+    // re-asserted here.
+    const fundWalletsBestEffort = recorder(async (_opts: any) => {});
     // Phase-2: detectContext defaults to "installed" by returning null
     // from findDkgMonorepoRoot. Tests that exercise the monorepo path
     // override this dep to return a mock repo root.
@@ -262,9 +251,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       loadNetworkConfig,
       ensureDkgNodeConfig,
       startDaemon,
-      readWalletsWithRetry,
-      requestFaucetFunding,
-      logManualFundingInstructions,
+      loadOpWallets,
+      fundWalletsBestEffort,
       findDkgMonorepoRoot,
       resolveDkgConfigHome,
       ...overrides,
@@ -368,100 +356,57 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((deps.startDaemon as any).calls).toEqual([]);
   });
 
-  it('honours --no-start: skips daemon start; faucet path is gated on daemon reachability (F14)', async () => {
-    // Pre-F14, --no-start was conflated with "skip funding" via the
-    // outer `shouldFund && shouldStart` guard. Post-F14 the funding
-    // decision is decoupled: if the daemon is reachable on
-    // effectivePort, funding proceeds regardless of which invocation
-    // started the daemon. This test pins the daemon-not-reachable
-    // path: --no-start with no running daemon → faucet skipped via
-    // the new explicit "daemon not reachable on port X" log line
-    // (NOT the silent omission that pre-F14 produced).
+  it('funds wallets via the shared fundWalletsBestEffort orchestrator (network, seed, didStartDaemon)', async () => {
+    // Wallet funding delegates to the SAME orchestrator openclaw/hermes use
+    // (no bespoke /api/status probe). On a normal setup it fires with the
+    // loaded network, an idempotency seed (the agent name), and
+    // didStartDaemon=true (the daemon was started this run).
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
 
-    // No fetch stub: the production probe does a real `/api/status`
-    // round-trip. Point it at a GUARANTEED-unused port (bind an ephemeral
-    // port → capture → close) so the connect() ECONNREFUSEs deterministically.
-    // The CLI default 9200 is racy here: under full-suite parallelism a
-    // different test file's daemon can occupy 9200 the instant this probe
-    // runs, making the daemon look "reachable" and firing the faucet. An
-    // ephemeral port (32768+) never collides with test daemons (9200 default
-    // / 21000+ live), so this exercises the genuine "not reachable" path.
-    const closedPort = await new Promise<number>((resolve, reject) => {
-      const srv = createServer();
-      srv.once('error', reject);
-      srv.listen(0, '127.0.0.1', () => {
-        const addr = srv.address();
-        const port = typeof addr === 'object' && addr ? addr.port : 0;
-        srv.close(() => (port ? resolve(port) : reject(new Error('no free port'))));
-      });
-    });
-    await mcpSetupAction({ start: false, verify: false, port: String(closedPort) }, deps);
+    await mcpSetupAction({ verify: false }, deps);
+
+    const calls = (deps.fundWalletsBestEffort as any).calls;
+    expect(calls).toHaveLength(1);
+    const arg = calls[0][0];
+    expect(arg.network?.faucet?.url).toBe('http://faucet.test');
+    expect(arg.didStartDaemon).toBe(true);
+    expect(typeof arg.idempotencySeed).toBe('string');
+    expect(arg.idempotencySeed.length).toBeGreaterThan(0);
+  });
+
+  // Regression for the testnet-faucet bug (#mcp-testnet-faucet): the old code
+  // gated funding on a 2s `/api/status` reachability probe that routinely timed
+  // out on a real testnet node (peers + store make /api/status slow), silently
+  // skipping funding. fundWalletsBestEffort has NO probe — it reads wallets.json
+  // directly — so `--no-start` (daemon not started this run) STILL funds. This
+  // also preserves the F14 "re-run-to-retry-funding" goal: funding depends only
+  // on wallets.json existing, never on a daemon being reachable.
+  it('funds under --no-start (didStartDaemon=false), unconditional on daemon reachability', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps();
+
+    await mcpSetupAction({ start: false, verify: false }, deps);
 
     expect((deps.startDaemon as any).calls).toEqual([]);
-    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
+    const calls = (deps.fundWalletsBestEffort as any).calls;
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0].didStartDaemon).toBe(false);
     // Registration still proceeds — orthogonal axis.
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-    // And the new explicit log line fired (replacing the pre-F14
-    // silent omission).
-    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
-    expect(logged).toMatch(new RegExp(`Skipping wallet funding \\(daemon not reachable on port ${closedPort}\\)`));
   });
 
-  // F14 (qa-review-round-2): the canonical decoupled-flow test.
-  // --no-start with a daemon already running (e.g. user re-runs to
-  // retry funding after the faucet was down on first run) MUST
-  // proceed with funding — pre-F14 it was silently skipped because
-  // the outer guard required `shouldStart === true`.
-  it('F14: --no-start with daemon already reachable → funding proceeds', async () => {
-    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const deps = makeDeps();
-
-    // Point the probe at the REAL live daemon's API port: the
-    // production `fetch(.../api/status)` does a true round-trip and
-    // gets a real 200, so funding proceeds. No fetch stub.
-    await mcpSetupAction({ start: false, verify: false, port: String(liveDaemon!.apiPort) }, deps);
-
-    expect((deps.startDaemon as any).calls).toEqual([]);
-    // Funding MUST proceed — daemon is reachable, --no-fund was not
-    // supplied. This is the bug F14 fixes.
-    expect((deps.requestFaucetFunding as any).calls).toHaveLength(1);
-    expect((deps.requestFaucetFunding as any).calls[0][2])
-      .toEqual(['0xadmin', '0xtest1', '0xtest2', '0xtest3']);
-  });
-
-  it('F14: --no-fund + --no-start → explicit-skip log (not the unreachable log)', async () => {
-    // The --no-fund explicit-skip path takes precedence over the
-    // daemon-reachability probe — no probe should fire when funding
-    // is explicitly opted out, and the existing
-    // "Skipping wallet funding (--no-fund)" log line stays intact.
-    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const deps = makeDeps();
-
-    // No fetch stub: --no-fund returns before the reachability probe is
-    // ever reached, so no `/api/status` request fires at all. The
-    // assertions below prove that path directly — the funding double is
-    // never called and the --no-fund (not the unreachable) line logs.
-    await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
-
-    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
-    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
-    expect(logged).toMatch(/Skipping wallet funding \(--no-fund\)/);
-    // The unreachable-path log line MUST NOT fire when --no-fund
-    // short-circuits the funding step.
-    expect(logged).not.toMatch(/daemon not reachable/);
-  });
-
-  it('honours --no-fund: skips the faucet step but starts daemon + registers', async () => {
+  it('honours --no-fund: skips the faucet orchestrator but starts daemon + registers', async () => {
     mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
     const deps = makeDeps();
 
     await mcpSetupAction({ fund: false, verify: false }, deps);
 
     expect((deps.startDaemon as any).calls).toHaveLength(1);
-    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
+    expect((deps.fundWalletsBestEffort as any).calls).toEqual([]);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
+    const logged = (logSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
+    expect(logged).toMatch(/Skipping wallet funding \(--no-fund\)/);
   });
 
   it('honours --dry-run: no filesystem writes, no daemon start, no faucet call', async () => {
@@ -472,9 +417,40 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
     expect((deps.ensureDkgNodeConfig as any).calls).toEqual([]);
     expect((deps.startDaemon as any).calls).toEqual([]);
-    expect((deps.requestFaucetFunding as any).calls).toEqual([]);
+    expect((deps.fundWalletsBestEffort as any).calls).toEqual([]);
     expect(existsSync(join(tmpHome, '.dkg', 'config.json'))).toBe(false);
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(false);
+  });
+
+  it('#1306: eagerly creates wallets even with --no-fund, and skips under --dry-run', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+
+    // --no-fund must STILL create wallets (mainnet has no faucet but the node
+    // needs wallets for manual funding + publishing). Called with the home dir.
+    const deps = makeDeps();
+    await mcpSetupAction({ fund: false, verify: false }, deps);
+    expect((deps.loadOpWallets as any).calls).toHaveLength(1);
+    expect((deps.loadOpWallets as any).calls[0][0]).toBe(join(tmpHome, '.dkg'));
+
+    // --dry-run must NOT create wallets.
+    const dryDeps = makeDeps();
+    await mcpSetupAction({ dryRun: true }, dryDeps);
+    expect((dryDeps.loadOpWallets as any).calls).toEqual([]);
+  });
+
+  it('#1306: a failing loadOpWallets is best-effort — setup continues', async () => {
+    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
+    const deps = makeDeps({
+      loadOpWallets: recorder(async () => { throw new Error('boom'); }),
+    });
+
+    // A throwing wallet pre-create must NOT abort setup — the daemon still
+    // starts and clients still register.
+    await mcpSetupAction({ fund: false, verify: false }, deps);
+
+    expect((deps.loadOpWallets as any).calls).toHaveLength(1);
+    expect((deps.startDaemon as any).calls).toHaveLength(1);
+    expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
   });
 
   it('honours --print-only: short-circuits before any other step', async () => {
@@ -517,64 +493,13 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((deps.startDaemon as any).calls[0][0]).toBe(9300);
   });
 
-  it('faucet failure logs manual instructions; setup continues to register clients', async () => {
-    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const deps = makeDeps({
-      requestFaucetFunding: recorder(async () => {
-        throw new Error('faucet 503');
-      }),
-    });
-    // F14 + F26: the funding step probes daemon reachability via
-    // `/api/status` before attempting the faucet call. Point the probe
-    // at the REAL live daemon (a true 200 round-trip) so the funding
-    // step proceeds and the throwing-faucet double is actually reached.
-    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
-
-    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
-    // Registration still proceeds.
-    expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-  });
-
-  it('faucet result failures log faucet-provided reasons', async () => {
-    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const deps = makeDeps({
-      requestFaucetFunding: recorder(async () => ({
-        success: false,
-        fundedWallets: [],
-        failedWallets: ['0xadmin', '0xtest1', '0xtest2', '0xtest3'],
-        error: 'Faucet did not fund all wallets: 0xadmin. Faucet reported: cooldown_active: Caller cooldown active until 2026-05-11T19:17:45.000Z',
-      }) as any),
-    });
-    // Reachable probe → real live daemon (true 200), no fetch stub.
-    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
-
-    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
-    const warned = (warnSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
-    expect(warned).toContain('cooldown_active');
-    expect(warned).toContain('2026-05-11T19:17:45.000Z');
-    expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-  });
-
-  it('faucet partial success logs manual instructions for remaining wallets only', async () => {
-    mkdirSync(join(tmpHome, '.cursor'), { recursive: true });
-    const deps = makeDeps({
-      requestFaucetFunding: recorder(async () => ({
-        success: true,
-        fundedWallets: ['0xadmin', '0xtest1'],
-        failedWallets: ['0xtest2', '0xtest3'],
-        error: 'Faucet did not fund all wallets: 0xtest2, 0xtest3',
-      }) as any),
-    });
-    // Reachable probe → real live daemon (true 200), no fetch stub.
-    await mcpSetupAction({ verify: false, port: String(liveDaemon!.apiPort) }, deps);
-
-    expect((deps.logManualFundingInstructions as any).calls).toHaveLength(1);
-    expect((deps.logManualFundingInstructions as any).calls[0][0])
-      .toEqual(['0xtest2', '0xtest3']);
-    const warned = (warnSpy.calls as any[]).map((c) => c.join(' ')).join('\n');
-    expect(warned).toMatch(/Faucet partially completed/);
-    expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
-  });
+  // Faucet failure handling — manual `curl` instructions on a faucet error or
+  // partial success — now lives INSIDE `fundWalletsBestEffort` (the shared
+  // orchestrator) and is covered directly by
+  // packages/core/test/faucet-orchestration.test.ts. The mcp layer only decides
+  // whether to invoke it (asserted above), so the former mcp-level
+  // faucet-failure/partial-success tests were removed with the bespoke inline
+  // faucet path.
 
   // ── Phase-2: monorepo context detection + --installed/--monorepo flags ──
 
@@ -706,9 +631,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const deps = makeDeps({
       findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
-    // No fetch stub: with start+fund+verify all off the action never
-    // reaches a `/api/status` probe — this test is purely about
-    // client-entry reclassification on the real filesystem.
+    // With start+fund+verify all off the action does no network calls —
+    // this test is purely about client-entry reclassification on the real
+    // filesystem.
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
     // Post-write, the config now carries the monorepo-form entry —
@@ -1366,9 +1291,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     const deps = makeDeps({
       findDkgMonorepoRoot: recorder(() => fakeRepoRoot),
     });
-    // No fetch stub: with start+fund+verify all off the action never
-    // reaches a `/api/status` probe — this test is purely about
-    // client-entry reclassification on the real filesystem.
+    // With start+fund+verify all off the action does no network calls —
+    // this test is purely about client-entry reclassification on the real
+    // filesystem.
     await mcpSetupAction({ start: false, fund: false, verify: false }, deps);
 
     const written = JSON.parse(readFileSync(vscodePath, 'utf-8'));

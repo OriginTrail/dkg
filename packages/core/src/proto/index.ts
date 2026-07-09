@@ -97,6 +97,7 @@ export {
   decodeStorageACK,
   isStorageACKDecline,
   isTransientStorageACKDeclineCode,
+  boundedDeclineCodeLabel,
   isSubscriptionSource,
 } from './storage-ack.js';
 

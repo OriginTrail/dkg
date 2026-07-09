@@ -55,7 +55,7 @@ test.describe('Publishing lifecycle (devnet)', () => {
           },
         ],
         finalize: true,
-        promote: false,
+        alsoShareSwm: false,
       }),
     });
     expect(res.ok).toBe(true);

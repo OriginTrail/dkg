@@ -22,6 +22,15 @@
   "chain": {
     "type": "evm",
     "rpcUrl": "https://sepolia.base.org",
+    "rpcUrls": [
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
+    "walletRpcUrls": [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
     "hubAddress": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
     "chainId": "base:84532"
   },

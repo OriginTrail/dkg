@@ -1,9 +1,23 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.0.0",
+  "version": "10.0.5",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./project-ontology": {
+      "types": "./dist/project-ontology.d.ts",
+      "import": "./dist/project-ontology.js",
+      "default": "./dist/project-ontology.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
@@ -30,11 +44,14 @@
     "@multiformats/multiaddr": "^13.0.3",
     "@noble/ed25519": "^3.1.0",
     "@noble/hashes": "^2.2.0",
+    "@opentelemetry/api": "^1.9.1",
+    "js-yaml": "^4.1.1",
     "libp2p": "^3.3.1",
     "protobufjs": "^8.3.0",
     "rdf-canonize": "^5.0.0"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

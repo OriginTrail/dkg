@@ -6,7 +6,7 @@ export const DEFAULT_TIMEOUT_MS = 120_000;
 export const DEFAULT_PAYLOAD_SIZE_BYTES = 1024;
 export const DEFAULT_POLL_INTERVAL_MS = 1000;
 
-export const OPERATIONS = ['syncPublish', 'asyncEnqueue', 'asyncCompletion', 'get'] as const;
+export const OPERATIONS = ['syncPublish', 'asyncPublishRequest', 'asyncCompletion', 'get'] as const;
 export type BenchmarkOperation = (typeof OPERATIONS)[number];
 
 export type OutputFormat = 'json' | 'ndjson';
@@ -79,26 +79,30 @@ export interface BenchmarkResult {
 
 export interface BenchmarkClient {
   status(): Promise<unknown>;
-  sharedMemoryWrite(
+  createKnowledgeAsset(
     contextGraphId: string,
+    name: string,
+    options: {
+      quads: BenchmarkPayload['quads'];
+      finalize: true;
+      alsoShareSwm: true;
+      subGraphName?: string;
+    },
+  ): Promise<Record<string, unknown>>;
+  knowledgeAssetPublishAsync(
+    contextGraphId: string,
+    name: string,
+    options?: {
+      subGraphName?: string;
+      publishEpochs?: number;
+    },
+  ): Promise<{ jobId?: string; status?: string }>;
+  publishAssertion(
+    contextGraphId: string,
+    name: string,
     quads: BenchmarkPayload['quads'],
-  ): Promise<{ shareOperationId?: string }>;
-  publishFromSharedMemory(
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    clearAfter?: boolean,
+    options?: { clearAfter?: boolean },
   ): Promise<{ kaId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
-  publisherEnqueue(request: {
-    contextGraphId: string;
-    shareOperationId: string;
-    roots: string[];
-    namespace: string;
-    scope: string;
-    authorityProofRef: string;
-    swmId?: string;
-    transitionType?: 'CREATE' | 'MUTATE' | 'REVOKE';
-    authorityType?: 'owner' | 'multisig' | 'quorum' | 'capability';
-  }): Promise<{ jobId?: string }>;
   publisherJob(jobId: string): Promise<{ job: { status?: string; error?: string; lastError?: string } | null }>;
   query(
     sparql: string,

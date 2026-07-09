@@ -22,6 +22,7 @@
  *   - `nodeRole`: existing > network.defaultNodeRole
  *   - `contextGraphs`: existing > network defaults
  *   - `auth`: existing > { enabled: true }
+ *   - `logging.kaPublishLifecycleDebug`: existing > false
  *   - `relay`: preserved from existing if present (never pinned new)
  *   - `autoUpdate`: only mirrors `enabled` from network when existing
  *     is absent; never pins repo/branch/checkIntervalMinutes
@@ -30,12 +31,55 @@
  * user-visible output is unchanged from pre-extraction.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import yaml from 'js-yaml';
 import { resolveDkgConfigHome } from './dkg-home.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Read the persisted `networkConfig` selector from a node's home directory,
+ * honoring BOTH `config.json` and `config.yaml`. A present, parseable
+ * `config.json` is authoritative (its `networkConfig`, or `undefined` if
+ * unset — `config.yaml` is not consulted); `config.yaml` is read only when
+ * `config.json` is absent. Returns `undefined` when no config exists or
+ * `networkConfig` is unset/blank.
+ *
+ * NOTE: on a CORRUPT `config.json` this falls through to `config.yaml`
+ * (best-effort), whereas the daemon's `loadConfig` re-throws and refuses to
+ * boot — harmless divergence since a corrupt config.json makes the node
+ * unbootable, so the resolved name is moot.
+ *
+ * Setup flows use this (not a json-only read) so a YAML-only node's network
+ * is correctly identified and not mis-resolved to the legacy testnet fallback
+ * (which would misfire the testnet faucet against a mainnet node).
+ */
+export function readPersistedNetworkConfigName(home: string): string | undefined {
+  const pick = (obj: unknown): string | undefined => {
+    if (obj && typeof obj === 'object') {
+      const nc = (obj as Record<string, unknown>).networkConfig;
+      if (typeof nc === 'string' && nc.trim()) return nc.trim();
+    }
+    return undefined;
+  };
+  const jsonPath = join(home, 'config.json');
+  if (existsSync(jsonPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(jsonPath, 'utf-8'));
+      if (raw && typeof raw === 'object') return pick(raw);
+    } catch { /* corrupt JSON — fall through to YAML */ }
+  }
+  const yamlPath = join(home, 'config.yaml');
+  if (existsSync(yamlPath)) {
+    try {
+      const raw = yaml.load(readFileSync(yamlPath, 'utf-8'));
+      if (raw && typeof raw === 'object') return pick(raw);
+    } catch { /* corrupt YAML */ }
+  }
+  return undefined;
+}
 
 function log(msg: string): void {
   console.log(`[setup] ${msg}`);
@@ -77,6 +121,15 @@ export interface EnsureDkgNodeConfigOptions {
   agentName: string;
   /** Loaded `network/<env>.json` slice. */
   network: DkgNodeNetworkConfig;
+  /**
+   * The network overlay name to persist as `config.networkConfig` (e.g.
+   * `'mainnet-gnosis'`). Callers resolve this via `resolveSetupNetworkName`
+   * and MUST load `network` from the SAME name so the persisted selector and
+   * the network slice agree. Persisting it explicitly is what makes setup
+   * default new nodes onto mainnet without relying on (or mutating) the
+   * `project.json#defaultNetwork` runtime fallback.
+   */
+  networkConfigName: string;
   /** Daemon API port to use when no existing config has one. */
   apiPort: number;
   /**
@@ -102,7 +155,7 @@ export interface EnsureDkgNodeConfigOptions {
  * extraction output).
  */
 export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
-  const { agentName, network, apiPort, existing, overrides } = opts;
+  const { agentName, network, networkConfigName, apiPort, existing, overrides } = opts;
 
   const dir = dkgDir();
   const configPath = join(dir, 'config.json');
@@ -130,10 +183,17 @@ export function ensureDkgNodeConfig(opts: EnsureDkgNodeConfigOptions): void {
   const config: Record<string, any> = {
     ...existing,
     name: overrides?.nameExplicit ? agentName : (existing.name ?? agentName),
+    // Persist the selected network EXPLICITLY. Unlike `chain`/`autoUpdate`
+    // (deliberately left to the runtime resolver above), the network
+    // selector is pinned so a node never silently follows a change to the
+    // `project.json#defaultNetwork` runtime fallback — switching networks is
+    // a deliberate, money-bearing act, not an implicit default drift.
+    networkConfig: networkConfigName,
     apiPort: overrides?.portExplicit ? apiPort : (existing.apiPort ?? apiPort),
     nodeRole: existing.nodeRole ?? (network.defaultNodeRole as 'edge' | 'core'),
     contextGraphs: existing.contextGraphs ?? network.defaultContextGraphs,
     auth: existing.auth ?? { enabled: true },
+    logging: existing.logging ?? { kaPublishLifecycleDebug: false },
   };
 
   // Preserve an existing relay override but never pin a new one — the

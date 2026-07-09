@@ -24,6 +24,7 @@ import type {
 import type {
   OperationContext,
   AuthorAttestationTypedData,
+  DkgNetworkIdentity,
   MessageIdempotencyStore,
   ProtocolOutboxStore,
   SwmSenderKeyPackageAckReasonCode,
@@ -33,8 +34,10 @@ import type {
   LiftTransitionType,
   LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
+  StorageAckTiming,
+  CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
-import type { ApprovalPolicy, ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
 import type { CclFactResolutionMode } from './ccl-fact-resolution.js';
@@ -699,14 +702,48 @@ export interface ContextGraphSubscriptionRehydrationStatus {
 }
 
 export interface ContextGraphWritePreflightProbe {
-  exists: boolean;
-  hasLocalContent: boolean;
+  /**
+   * Explicit, REQUIRED store-availability discriminant. `true` when every
+   * store-backed read the probe issued answered, `false` when at least one
+   * failed (slow-store abort timeout, "the store is closed" after an Oxigraph
+   * worker crash, …). This is the typed boundary consumers MUST check before
+   * trusting any store-derived fact below: with `storeAvailable === false`,
+   * `exists` / `hasLocalContent` / `declarationFound` / `accessPolicy` /
+   * `callerAuthorized` are NOT definitive — a failed read leaves them
+   * `undefined` (UNKNOWN), which must never be misread as a "does not exist"
+   * deny. Making this required (not just the optional `storeUnavailable`
+   * flag) means the type stops a consumer from reading `exists` as a plain
+   * boolean without first establishing the store was up. Logical inverse of
+   * `storeUnavailable` — kept alongside it so the 503-diagnostics path (which
+   * greps `storeUnavailable === true` + `storeErrorMessage`) is unchanged.
+   */
+  storeAvailable: boolean;
+  /**
+   * Store-derived facts are tri-state: `true`/`false` when the local store
+   * answered (`storeAvailable === true`), `undefined` when the backing read
+   * failed. Only trust these when `storeAvailable` is `true`.
+   */
+  exists?: boolean;
+  hasLocalContent?: boolean;
   inMemorySubscription?: Pick<ContextGraphSub, 'subscribed' | 'synced'>;
   persistedSubscription?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'synced'>;
-  declarationFound: boolean;
+  declarationFound?: boolean;
   accessPolicy?: 'public' | 'private';
   curator?: string;
   callerAuthorized?: boolean;
+  /**
+   * True when at least one local-store read failed (slow-store abort
+   * timeout, "the store is closed" after an Oxigraph worker crash, …) —
+   * the inverse of `storeAvailable`. The probe still carries the zero-I/O
+   * in-memory subscription snapshot above, so the daemon's write preflight
+   * can rescue an id it ALREADY tracks instead of 503ing every write until
+   * the store recovers. The store-derived fields whose reads failed are left
+   * `undefined`. Retained for the 503-diagnostics grep alongside
+   * `storeErrorMessage`.
+   */
+  storeUnavailable?: boolean;
+  /** First store-read failure message, retained for 503 diagnostics. */
+  storeErrorMessage?: string;
 }
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
@@ -828,6 +865,8 @@ export interface DKGAgentConfig {
   name: string;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
+  /** Active network identity used to isolate libp2p and app workflow boundaries. */
+  networkIdentity?: DkgNetworkIdentity;
   /**
    * public-projection enable flag. When set, a private CG's confirmed VM
    * publishes emit/refresh a verifiable public projection (the floor: existence,
@@ -860,6 +899,20 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
+  ackCandidatePeerIds?: string[];
+  /**
+   * Peer IDs to rank first among ACK candidates without shrinking the pool
+   * (typically the network-config relays supplied by the bundled daemon).
+   *
+   * The authoritative signer check is chain truth, enforced per collected ACK
+   * (operational-key purpose + active sharding-table membership) and
+   * re-verified on-chain by the publish tx. Hard-gating candidacy on the static
+   * relay list capped the pool at the 4-6 bundled relays and made ACK quorum
+   * arithmetically unreachable when those specific relays were degraded or
+   * mid-upgrade (2026-07-07 Base/Gnosis mainnet incident).
+   */
+  preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
   skills?: Array<{
@@ -879,15 +932,30 @@ export interface DKGAgentConfig {
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
+  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  syncReconcilerEnabled?: boolean;
+  /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
+  syncOnConnectEnabled?: boolean;
+  /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
+  durableSyncEnabled?: boolean;
+  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  syncGlobalMaxInflight?: number;
+  /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
+  storageAckHandlerDeadlineMs?: number;
   /**
    * When false, durable sync skips the large system `agents/_meta` graph while
-   * still syncing `agents` data as the phonebook. Defaults to true for
-   * compatibility; only honored for edge nodes that do not need full KA/KC
-   * lifecycle metadata for the system agents graph. Core nodes always sync it.
+   * still syncing `agents` data as the phonebook. Defaults to false on every
+   * node role (cores included); set true (or `DKG_SYNC_AGENTS_META=1`) to fetch
+   * the full system KA/KC lifecycle metadata for the agents graph.
    */
   syncAgentsMeta?: boolean;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /** Local daemon logging controls forwarded from config.json. */
+  logging?: {
+    /** Emit detailed KA publish lifecycle logs. Default: false. */
+    kaPublishLifecycleDebug?: boolean;
+  };
   /**
    * OT-RFC-43 Option 1 — durable per-author KA-number allocator. When provided,
    * the publisher mints deterministic packed reservedKaIds (and reconciles the
@@ -988,6 +1056,22 @@ export interface DKGAgentConfig {
    * tests to drive the background re-resolution path deterministically.
    */
   storageAckRegistrationRetryMs?: number;
+  /**
+   * Resolved StorageACK timing policy. Prefer this single object over the
+   * legacy loose aliases below so the handler deadline and publisher send
+   * timeout are treated as one invariant.
+   */
+  storageAckTiming?: StorageAckTiming;
+  /**
+   * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
+   * compatibility alias and normalized by `DKGAgent.create`.
+   */
+  ackHandlerDeadlineMs?: number;
+  /**
+   * @deprecated Use `storageAckTiming.sendTimeoutMs`. Kept as a compatibility
+   * alias and normalized by `DKGAgent.create`.
+   */
+  ackSendTimeoutMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
@@ -1011,6 +1095,8 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Public RPC URLs safe for wallet_addEthereumChain. Never use private operator RPC URLs here. */
+    walletRpcUrls?: string[];
     hubAddress: string;
     /** Optional TRAC token contract override. When omitted, the adapter resolves Hub.Token. */
     tokenAddress?: string;
@@ -1026,6 +1112,14 @@ export interface DKGAgentConfig {
     approvalPolicy?: ApprovalPolicy;
     /** Optional ContextGraphNameRegistry `eth_getLogs` block-window tuning. */
     cgRegistryScanPageSize?: number;
+    /**
+     * Funding floors (wei) for funding-aware operational-wallet selection,
+     * threaded straight to `EVMAdapterConfig.minPublisher*Wei`. Both default to
+     * `0n` (only strictly-empty wallets are skipped); a wallet below the floor is
+     * deprioritized, not excluded (best-funded fallback still sends).
+     */
+    minPublisherNativeWei?: bigint;
+    minPublisherTracWei?: bigint;
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
@@ -1098,6 +1192,10 @@ export interface DKGAgentConfig {
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
+  /** Durable lane cursor store for the chain event poller. Defaults to in-memory. */
+  chainEventCursorStore?: ChainEventCursorPersistence;
+  /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
+  contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
@@ -1142,3 +1240,13 @@ export interface DKGAgentConfig {
     outboxStore: ProtocolOutboxStore;
   };
 }
+
+export interface DKGAgentACKTransportOptions {
+  sendTimeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+export type ResolvedDKGAgentConfig =
+  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+    storageAckTiming: StorageAckTiming;
+  };

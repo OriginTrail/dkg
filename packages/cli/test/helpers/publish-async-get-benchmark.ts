@@ -58,12 +58,13 @@ export function trackingFetch(calls: Array<{ url: string; init?: RequestInit }>,
 }
 
 export class MockBenchmarkClient implements BenchmarkClient {
-  readonly publishCalls: Array<{ roots: string[]; clearAfter?: boolean }> = [];
-  readonly enqueueCalls: Array<{ roots: string[] }> = [];
+  readonly publishCalls: Array<{ name: string; roots: string[]; clearAfter?: boolean }> = [];
+  readonly asyncPublishCalls: Array<{ name: string; roots: string[] }> = [];
   private readonly markersByRoot = new Map<string, string>();
+  private readonly assetsByName = new Map<string, string[]>();
 
   constructor(private readonly opts: {
-    enqueueError?: string;
+    asyncPublishError?: string;
     jobStatus?: string;
     jobError?: string;
     queryMarkerOverride?: string;
@@ -75,29 +76,42 @@ export class MockBenchmarkClient implements BenchmarkClient {
     return { ok: true };
   }
 
-  async sharedMemoryWrite(
+  async createKnowledgeAsset(
     _contextGraphId: string,
-    quads: Array<{ subject: string; predicate: string; object: string }>,
+    name: string,
+    options: { quads: Array<{ subject: string; predicate: string; object: string }> },
   ) {
-    const markerQuad = quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
+    const markerQuad = options.quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
     if (markerQuad) this.markersByRoot.set(markerQuad.subject, markerQuad.object);
-    return { shareOperationId: `share-${this.markersByRoot.size}` };
+    const roots = [...new Set(options.quads.map((quad) => quad.subject))];
+    this.assetsByName.set(name, roots);
+    return { assertionUri: `urn:test:${name}`, promotedCount: roots.length, publishReady: true };
   }
 
-  async publishFromSharedMemory(
+  async publishAssertion(
     _contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    clearAfter?: boolean,
+    name: string,
+    quads: Array<{ subject: string; predicate: string; object: string }>,
+    options?: { clearAfter?: boolean },
   ) {
-    const roots = selection === 'all' ? ['all'] : selection.rootEntities;
-    this.publishCalls.push({ roots, clearAfter });
+    // The named-KA composite stages the quads itself, so register the marker
+    // here (the sync leg no longer calls sharedMemoryWrite first), and the `get`
+    // validation looks up the marker by root. The KA `name` is recorded so tests can
+    // assert warmup/measured name uniqueness: KA create is name-idempotent, so a reused
+    // name would silently collide with the warmup KA; the root alone would not catch it.
+    const markerQuad = quads.find((quad) => quad.predicate === 'http://schema.org/identifier');
+    if (markerQuad) this.markersByRoot.set(markerQuad.subject, markerQuad.object);
+    const roots = [...new Set(quads.map((quad) => quad.subject))];
+    this.publishCalls.push({ name, roots, clearAfter: options?.clearAfter });
     return { kaId: `kc-${this.publishCalls.length}`, kas: roots.map((rootEntity) => ({ tokenId: '1', rootEntity })) };
   }
 
-  async publisherEnqueue(request: { roots: string[] }) {
-    if (this.opts.enqueueError) throw new Error(this.opts.enqueueError);
-    this.enqueueCalls.push({ roots: request.roots });
-    return { jobId: `job-${this.enqueueCalls.length}` };
+  async knowledgeAssetPublishAsync(_contextGraphId: string, name: string) {
+    if (this.opts.asyncPublishError) throw new Error(this.opts.asyncPublishError);
+    const roots = this.assetsByName.get(name);
+    if (!roots) throw new Error(`Knowledge asset ${name} was not created`);
+    this.asyncPublishCalls.push({ name, roots });
+    return { jobId: `job-${this.asyncPublishCalls.length}` };
   }
 
   async publisherJob(_jobId: string) {

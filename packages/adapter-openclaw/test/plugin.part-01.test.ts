@@ -33,10 +33,11 @@ describe("DkgNodePlugin", () => {
         on: () => {},
         logger: {},
       });
-      // Most handler tests assume the node identity has resolved (e.g. dkg_share
-      // builds canned-quad subjects from it). Inject a placeholder address so
-      // tests don't have to mock the daemon /api/status probe end-to-end. Pass
-      // `skipNodeIdInjection: true` to exercise the unresolved-identity branch.
+      // Most handler tests assume the node identity has resolved (e.g.
+      // memory_search routes WM reads by the node's agent identity). Inject a
+      // placeholder address so tests don't have to mock the daemon /api/status
+      // probe end-to-end. Pass `skipNodeIdInjection: true` to exercise the
+      // unresolved-identity branch.
       if (!opts.skipNodeIdInjection) {
         (plugin as any).nodePeerId = '12D3KooTestPeerId';
       }
@@ -91,6 +92,136 @@ describe("DkgNodePlugin", () => {
       }
       // Nothing reached the daemon — all rejected at the boundary.
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    // ── [D3] one-shot create→write→seal→share via dkg_knowledge_asset_create ──
+    it('[D3] create with quads (no also_share_swm) seals a WM draft and forwards alsoShareSwm:false EXPLICITLY', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ status: 'wm-sealed', sealed: true, publishReady: false });
+      await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'one-shot',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'hello world' }],
+      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe('http://localhost:9200/api/knowledge-assets');
+      const body = JSON.parse(init.body as string);
+      expect(body.name).toBe('one-shot');
+      expect(body.contextGraphId).toBe('ctx');
+      // Regression guard: the tool MUST forward an explicit alsoShareSwm:false so the
+      // client helper's internal seal-true default can't leak and silently auto-share.
+      expect(body.alsoShareSwm).toBe(false);
+      expect(body).toHaveProperty('alsoShareSwm');
+      // No VM-mint bypass — never forward alsoPublishVm.
+      expect(body).not.toHaveProperty('alsoPublishVm');
+      // Object auto-typed to a literal; per-KA graph pinned to ''.
+      expect(body.quads).toEqual([{ subject: 'urn:s', predicate: 'urn:p', object: '"hello world"', graph: '' }]);
+    });
+
+    it('[D3] create with quads + also_share_swm:true runs the full one-shot to SWM', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ status: 'swm-shared', sealed: true, publishReady: true });
+      await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'one-shot-share',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+        also_share_swm: true,
+      });
+      const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body.alsoShareSwm).toBe(true);
+      expect(body).not.toHaveProperty('alsoPublishVm');
+      // URI object passes through un-quoted; per-KA graph pinned to ''.
+      expect(body.quads).toEqual([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: '' }]);
+    });
+
+    it('[D3] create strips <…> on subject/predicate/object + auto-types objects (parity with MCP/Hermes)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ status: 'wm-sealed', sealed: true });
+      await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'brackets',
+        quads: [
+          { subject: '<urn:s>', predicate: '<urn:p>', object: '<urn:o>' },
+          { subject: 'urn:s2', predicate: 'urn:p2', object: 'HTTP://EXAMPLE.ORG' },
+          { subject: 'urn:s3', predicate: 'urn:p3', object: '_:b0' },
+          { subject: 'urn:s4', predicate: 'urn:p4', object: 'hello world' },
+        ],
+      });
+      const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body.quads).toEqual([
+        // bracketed URI stays a URI (stripped), not a quoted literal
+        { subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: '' },
+        // case-insensitive scheme + blank node pass through as terms (shared core normalizer)
+        { subject: 'urn:s2', predicate: 'urn:p2', object: 'HTTP://EXAMPLE.ORG', graph: '' },
+        { subject: 'urn:s3', predicate: 'urn:p3', object: '_:b0', graph: '' },
+        // bare literal is quoted
+        { subject: 'urn:s4', predicate: 'urn:p4', object: '"hello world"', graph: '' },
+      ]);
+    });
+
+    it('[D3] create with also_share_swm:true surfaces a 207 share failure as an ERROR (not publish-ready)', async () => {
+      // The daemon returns 207 + errors:[{phase:'swm-share'}] when create+seal lands but
+      // the opt-in share fails; the client treats 207 as success, so the tool must judge
+      // from the OUTCOME (parity with MCP) — not the requested flag — or it would send the
+      // agent to publish an asset that never reached SWM.
+      const { byName } = setupPluginWithFetch({
+        status: 'wm-sealed',
+        sealed: true,
+        errors: [{ phase: 'swm-share', error: 'shared memory write rejected' }],
+      });
+      const res = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'share-failed',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }],
+        also_share_swm: true,
+      });
+      expect(res.details?.error).toMatch(/Shared Working Memory share FAILED/);
+      expect(res.details?.error).toContain('shared memory write rejected');
+      expect(res.details?.error).toContain('NOT publish-ready');
+      expect(res.details?.error).toContain('dkg_knowledge_asset_share');
+    });
+
+    it('[D3] create with NO quads stays on the bare create path (no quads/alsoShareSwm in body)', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({ assertionUri: 'urn:x' });
+      await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'draft-only',
+      });
+      const body = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string);
+      expect(body).not.toHaveProperty('quads');
+      expect(body).not.toHaveProperty('alsoShareSwm');
+    });
+
+    it('[D3] create rejects an empty quads array and a non-boolean also_share_swm at the boundary', async () => {
+      const { fetchMock, byName } = setupPluginWithFetch({});
+      const emptyQuads = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'bad',
+        quads: [],
+      });
+      expect(emptyQuads.details?.error).toMatch(/"quads" must be a non-empty array/);
+      const badShare = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'bad',
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: 'x' }],
+        also_share_swm: 'yes',
+      });
+      expect(badShare.details?.error).toMatch(/"also_share_swm" must be a boolean/);
+      // Parity with MCP + Hermes: the also_share_swm shape is validated even on the
+      // bare-create (no quads) path where it is IGNORED.
+      const badShareNoQuads = await byName.get('dkg_knowledge_asset_create')!.execute('tc', {
+        context_graph_id: 'ctx',
+        name: 'bad',
+        also_share_swm: 'yes',
+      });
+      expect(badShareNoQuads.details?.error).toMatch(/"also_share_swm" must be a boolean/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('[D3] create does NOT expose also_share_swm on the bare-create schema as a VM path (no alsoPublishVm/also_publish_vm)', () => {
+      const { byName } = setupPluginWithFetch({});
+      const props = byName.get('dkg_knowledge_asset_create')!.parameters.properties;
+      expect(props).toHaveProperty('quads');
+      expect(props).toHaveProperty('also_share_swm');
+      expect(props).not.toHaveProperty('also_publish_vm');
+      expect(props).not.toHaveProperty('alsoPublishVm');
     });
 
 

@@ -29,6 +29,7 @@ import {
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveStorageAckTiming,
 } from '../src/config.js';
 
 describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
@@ -73,6 +74,50 @@ describe('sharedHomeInitGate (dkg init shared ~/.dkg opt-in — issue #960 round
 
   it('non-interactive, no --yes → refuse (cannot ask; must not silently overwrite)', () => {
     expect(sharedHomeInitGate({ yes: false, isTty: false })).toBe('refuse');
+  });
+});
+
+describe('resolveStorageAckTiming', () => {
+  it('returns the stock 15s handler deadline and 20s send timeout when unset', () => {
+    expect(resolveStorageAckTiming()).toEqual({
+      handlerDeadlineMs: 15_000,
+      sendTimeoutMs: 20_000,
+    });
+  });
+
+  it('normalizes a raised handler-only deadline by preserving the 5s send margin', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 55_000 })).toEqual({
+      handlerDeadlineMs: 55_000,
+      sendTimeoutMs: 60_000,
+    });
+  });
+
+  it('allows handlerDeadlineMs: 0 to disable the handler deadline', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 20_000,
+    });
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 0, sendTimeoutMs: 10_000 })).toEqual({
+      handlerDeadlineMs: 0,
+      sendTimeoutMs: 10_000,
+    });
+  });
+
+  it('rejects explicitly misaligned handler/send pairs', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: 60_000,
+      sendTimeoutMs: 30_000,
+    })).toThrow(/storageAck\.sendTimeoutMs must be at least 5000ms greater/);
+  });
+
+  it('rejects negative handler deadline disables', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: -1,
+    })).toThrow(/storageAck\.handlerDeadlineMs must be a non-negative safe integer/);
+  });
+
+  it('rejects malformed storageAck blocks instead of silently defaulting', () => {
+    expect(() => resolveStorageAckTiming('60000' as any)).toThrow(/storageAck must be an object/);
   });
 });
 
@@ -184,6 +229,9 @@ describe('loadNetworkConfig', () => {
         chainName: 'base',
         chainId: 'base:8453',
         rpcUrl: 'https://mainnet.base.org',
+        // Default multi-RPC backups shipped with the overlay (failover engine).
+        rpcUrls: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'],
+        walletRpcUrls: ['https://mainnet.base.org', 'https://base-rpc.publicnode.com', 'https://base.drpc.org'],
         hubAddress: '0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13',
         // Relays populated + pre-deployment gate lifted (#1292).
         pending: false,
@@ -196,6 +244,9 @@ describe('loadNetworkConfig', () => {
         chainName: 'gnosis',
         chainId: 'gnosis:100',
         rpcUrl: 'https://rpc.gnosischain.com',
+        // Default multi-RPC backups shipped with the overlay (failover engine).
+        rpcUrls: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'],
+        walletRpcUrls: ['https://rpc.gnosischain.com', 'https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'],
         hubAddress: '0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f',
         // Relays populated + pre-deployment gate lifted (#1292).
         pending: false,
@@ -229,11 +280,16 @@ describe('loadNetworkConfig', () => {
       expect(cfg.genesisId).toBe(expected.genesisId);
       expect(cfg.networkId).toBe(expected.networkId);
       expect(await computeNetworkId(expected.genesisId)).toBe(expected.networkId);
+      // Active networks (base/gnosis) ship default rpcUrls backups so the
+      // failover engine is enabled out of the box; the pre-deployment-gated
+      // neuroweb overlay intentionally stays single-RPC (no rpcUrls key).
       expect(cfg.chain).toEqual({
         name: expected.chainName,
         type: 'evm',
         chainId: expected.chainId,
         rpcUrl: expected.rpcUrl,
+        ...(expected.rpcUrls ? { rpcUrls: expected.rpcUrls } : {}),
+        ...(expected.walletRpcUrls ? { walletRpcUrls: expected.walletRpcUrls } : {}),
         hubAddress: expected.hubAddress,
       });
       // Non-relay prep fields are identical across all mainnets regardless of
@@ -513,6 +569,19 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncAgentsMeta).toBe(false);
   });
 
+  it('round-trips logging.kaPublishLifecycleDebug through saveConfig/loadConfig', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      logging: { kaPublishLifecycleDebug: true },
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.logging?.kaPublishLifecycleDebug).toBe(true);
+  });
+
   it('omits relayReservationCount when not set (so DKGNode.start() applies the default)', async () => {
     await saveConfig({
       name: 'test-node',
@@ -625,6 +694,59 @@ describe('resolveChainConfig (field-level merge)', () => {
     });
   });
 
+  it('threads the shipped network rpcUrls defaults through to the failover engine (real overlays)', async () => {
+    const { _resetNetworkConfigCache } = await import('../src/config.js');
+    const overlays = [
+      { name: 'mainnet-base', primary: 'https://mainnet.base.org', backups: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'] },
+      { name: 'mainnet-gnosis', primary: 'https://rpc.gnosischain.com', backups: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'] },
+      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-sepolia.drpc.org'] },
+    ];
+    for (const { name, primary, backups } of overlays) {
+      _resetNetworkConfigCache();
+      const network = await loadNetworkConfig(name);
+      const merged = resolveChainConfig({}, network);
+      // Primary endpoint is unchanged (backwards compatible); backups are
+      // inherited so the adapter builds a multi-RPC FallbackProvider.
+      expect(merged?.rpcUrl).toBe(primary);
+      expect(merged?.rpcUrls).toEqual(backups);
+      expect(merged?.walletRpcUrls).toEqual([primary, ...backups]);
+    }
+  });
+
+  it('keeps wallet-public RPCs separate from operator private RPC overrides', () => {
+    const merged = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'https://private-rpc.example/v2/SECRETKEY',
+          rpcUrls: ['https://private-backup.example/v2/SECRETKEY'],
+        },
+      },
+      {
+        chain: {
+          ...fullNetworkChain,
+          walletRpcUrls: [
+            ' https://wallet-public.example/rpc ',
+            'https://wallet-public.example/rpc',
+          ],
+        },
+      },
+    );
+
+    expect(merged?.rpcUrl).toBe('https://private-rpc.example/v2/SECRETKEY');
+    expect(merged?.rpcUrls).toEqual(['https://private-backup.example/v2/SECRETKEY']);
+    expect(merged?.walletRpcUrls).toEqual(['https://wallet-public.example/rpc']);
+    expect(JSON.stringify(merged?.walletRpcUrls)).not.toContain('SECRETKEY');
+  });
+
+  it('a single-RPC overlay (pre-deployment neuroweb) still resolves with NO rpcUrls (back-compat)', async () => {
+    const { _resetNetworkConfigCache } = await import('../src/config.js');
+    _resetNetworkConfigCache();
+    const network = await loadNetworkConfig('mainnet-neuroweb');
+    const merged = resolveChainConfig({}, network);
+    expect(merged?.rpcUrl).toBe('https://astrosat-parachain-rpc.origin-trail.network');
+    expect(merged?.rpcUrls).toBeUndefined();
+  });
+
   it('keeps raw chain merging side-effect-free for pre-deployment network metadata', () => {
     const merged = resolveChainConfig({}, {
       _status: 'pre-deployment: replace PEER_ID_* relay values before enabling Base mainnet',
@@ -658,6 +780,134 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(merged?.type).toBe('evm');
   });
 
+  it('does NOT inherit public backups behind a LOCAL (loopback) primary — avoids a cross-chain FallbackProvider', () => {
+    // A local Hardhat / devnet primary (loopback) on a real-network overlay
+    // must stay single-RPC: ethers rejects a FallbackProvider that spans chains
+    // (local 31337 + public Base Sepolia 84532). This is the kafka-plugin /
+    // devnet e2e regression the default backups would otherwise cause.
+    for (const localUrl of ['http://127.0.0.1:8545', 'http://localhost:9549', 'http://0.0.0.0:8545', 'http://127.0.0.2:8545']) {
+      const merged = resolveChainConfig({ chain: { rpcUrl: localUrl } }, { chain: fullNetworkChain });
+      expect(merged?.rpcUrl).toBe(localUrl);
+      expect(merged?.rpcUrls ?? []).toEqual([]);
+    }
+  });
+
+  it('does NOT inherit wallet-public RPCs behind a LOCAL or different-chain primary', () => {
+    const networkWithWalletRpcs = {
+      chain: {
+        ...fullNetworkChain,
+        walletRpcUrls: ['https://wallet-public.example/rpc'],
+      },
+    };
+
+    const local = resolveChainConfig(
+      { chain: { rpcUrl: 'http://127.0.0.1:8545' } },
+      networkWithWalletRpcs,
+    );
+    expect(local?.rpcUrl).toBe('http://127.0.0.1:8545');
+    expect(local?.rpcUrls ?? []).toEqual([]);
+    expect(local?.walletRpcUrls).toBeUndefined();
+
+    const differentChain = resolveChainConfig(
+      { chain: { rpcUrl: 'http://hardhat:8545', chainId: 'evm:31337' } },
+      networkWithWalletRpcs,
+    );
+    expect(differentChain?.rpcUrl).toBe('http://hardhat:8545');
+    expect(differentChain?.rpcUrls ?? []).toEqual([]);
+    expect(differentChain?.walletRpcUrls).toBeUndefined();
+
+    const localWithExplicitBackups = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://127.0.0.1:8545',
+          rpcUrls: ['http://127.0.0.1:8546'],
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(localWithExplicitBackups?.rpcUrls).toEqual(['http://127.0.0.1:8546']);
+    expect(localWithExplicitBackups?.walletRpcUrls).toBeUndefined();
+
+    const differentChainWithExplicitBackups = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://hardhat:8545',
+          rpcUrls: ['http://hardhat:8546'],
+          chainId: 'evm:31337',
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(differentChainWithExplicitBackups?.rpcUrls).toEqual(['http://hardhat:8546']);
+    expect(differentChainWithExplicitBackups?.walletRpcUrls).toBeUndefined();
+
+    const explicit = resolveChainConfig(
+      {
+        chain: {
+          rpcUrl: 'http://hardhat:8545',
+          chainId: 'evm:31337',
+          walletRpcUrls: [' http://wallet-rpc.local:8545 '],
+        },
+      },
+      networkWithWalletRpcs,
+    );
+    expect(explicit?.walletRpcUrls).toEqual(['http://wallet-rpc.local:8545']);
+  });
+
+  it('an explicit operator rpcUrls still wins even with a loopback primary', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcUrl: 'http://127.0.0.1:8545', rpcUrls: ['http://127.0.0.1:8546'] } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.rpcUrl).toBe('http://127.0.0.1:8545');
+    expect(merged?.rpcUrls).toEqual(['http://127.0.0.1:8546']);
+  });
+
+  it('does NOT inherit public backups when the operator pins a DIFFERENT chainId — even on a non-loopback host (#1329 review)', () => {
+    // A Docker/LAN devnet primary that overrides chainId to a different chain
+    // (e.g. local 31337 on the testnet base:84532 overlay) is NOT loopback, but
+    // inheriting the public Base-Sepolia backups would still build a cross-chain
+    // FallbackProvider that ethers rejects at init. Suppress on chain-identity
+    // mismatch, not only on loopback URLs.
+    const merged = resolveChainConfig(
+      { chain: { rpcUrl: 'http://hardhat:8545', chainId: 'evm:31337' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.rpcUrl).toBe('http://hardhat:8545');
+    expect(merged?.chainId).toBe('evm:31337');
+    expect(merged?.rpcUrls ?? []).toEqual([]);
+  });
+
+  it('STILL inherits public backups for a non-loopback private RPC on the SAME chain', () => {
+    // The intended operator case: a private/custom RPC on the overlay's own
+    // chain (chainId omitted, or explicitly equal) keeps the public backups for
+    // failover. Only a DIFFERENT chain (loopback or mismatched chainId) suppresses.
+    const omittedChainId = resolveChainConfig(
+      { chain: { rpcUrl: 'https://my-private-rpc.example/abc' } },
+      { chain: fullNetworkChain },
+    );
+    expect(omittedChainId?.rpcUrls).toEqual(fullNetworkChain.rpcUrls);
+
+    const sameChainId = resolveChainConfig(
+      { chain: { rpcUrl: 'https://my-private-rpc.example/abc', chainId: fullNetworkChain.chainId } },
+      { chain: fullNetworkChain },
+    );
+    expect(sameChainId?.rpcUrls).toEqual(fullNetworkChain.rpcUrls);
+  });
+
+  it('STILL inherits backups when only chainId differs and the operator did NOT pin an rpcUrl (#1332 review)', () => {
+    // A chainId override with NO custom rpcUrl leaves the primary as the network
+    // RPC (same chain as the backups) — there is no cross-chain FallbackProvider
+    // to avoid, so suppressing the backups would needlessly drop failover. The
+    // suppression must trigger only when the operator pins their OWN primary.
+    const merged = resolveChainConfig(
+      { chain: { chainId: 'evm:31337' } },
+      { chain: fullNetworkChain },
+    );
+    expect(merged?.rpcUrl).toBe(fullNetworkChain.rpcUrl);
+    expect(merged?.rpcUrls).toEqual(fullNetworkChain.rpcUrls);
+  });
+
   it('overrides hub independently of rpcUrl (multichain forward-compat)', () => {
     const merged = resolveChainConfig(
       { chain: { hubAddress: '0xOPERATORHUB0000000000000000000000000000' } },
@@ -681,6 +931,67 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
     );
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
+  });
+
+  it('merges publisher funding floors with operator precedence', () => {
+    const inherited = resolveChainConfig(
+      {},
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(inherited?.minPublisherNativeWei).toBe(123n);
+    expect(inherited?.minPublisherTracWei).toBe(456n);
+
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: 789n } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          minPublisherNativeWei: 123n,
+          minPublisherTracWei: 456n,
+        },
+      },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+    expect(overridden?.minPublisherTracWei).toBe(456n);
+  });
+
+  it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {
+    // What operators and the network overlay can actually produce: JSON.parse /
+    // yaml.load never yield bigints. Strings must survive above 2^53.
+    const merged = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '2000000000000000000' } },
+      { chain: { ...fullNetworkChain, minPublisherTracWei: 456 } },
+    );
+    expect(merged?.minPublisherNativeWei).toBe(2_000_000_000_000_000_000n);
+    expect(merged?.minPublisherTracWei).toBe(456n);
+
+    // Operator string overrides an overlay number.
+    const overridden = resolveChainConfig(
+      { chain: { minPublisherNativeWei: '789' } },
+      { chain: { ...fullNetworkChain, minPublisherNativeWei: 123 } },
+    );
+    expect(overridden?.minPublisherNativeWei).toBe(789n);
+  });
+
+  it('rejects malformed funding-floor values at startup instead of mis-comparing silently', () => {
+    const withFloor = (chain: Record<string, unknown>) =>
+      resolveChainConfig({ chain: chain as never }, { chain: fullNetworkChain });
+    expect(() => withFloor({ minPublisherNativeWei: '0.002' }))
+      .toThrow(/chain\.minPublisherNativeWei must be a decimal wei bigint string/);
+    expect(() => withFloor({ minPublisherNativeWei: '' }))
+      .toThrow(/empty string/);
+    expect(() => withFloor({ minPublisherTracWei: -5 }))
+      .toThrow(/non-negative/);
+    expect(() => withFloor({ minPublisherNativeWei: 1e18 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
+    expect(() => withFloor({ minPublisherTracWei: 1.5 }))
+      .toThrow(/MAX_SAFE_INTEGER/);
   });
 
   it('dedupes primary + backups while preserving operator priority', () => {

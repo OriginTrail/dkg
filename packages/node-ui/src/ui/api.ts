@@ -1,9 +1,22 @@
-const BASE = '';
+import {
+  BASE,
+  authHeaders,
+  HttpError,
+  fetchWithTimeout,
+  get,
+  getWithTimeout,
+  post,
+  put,
+  del,
+} from './http.js';
+
+// Re-export the shared transport so existing `../api.js` consumers of these
+// keep working (barrel), and the PCA client from its extracted module.
+export { authHeaders, HttpError } from './http.js';
+export * from './pca-api.js';
+
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
-declare global {
-  interface Window { __DKG_TOKEN__?: string; }
-}
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -36,23 +49,6 @@ function assertCreateFinalizeFieldsHaveQuads(args: {
   }
 }
 
-export function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = window.__DKG_TOKEN__;
-  if (!token) return {};
-  return { Authorization: `Bearer ${token}` };
-}
-
-export class HttpError extends Error {
-  status: number;
-  body?: unknown;
-  constructor(status: number, message?: string, body?: unknown) {
-    super(message ?? `HTTP ${status}`);
-    this.status = status;
-    this.body = body;
-  }
-}
-
 export class LocalAgentApiError extends Error {
   status?: number;
   code?: string;
@@ -70,61 +66,6 @@ export class LocalAgentApiError extends Error {
     this.name = 'LocalAgentApiError';
     Object.assign(this, metadata);
   }
-}
-
-async function fetchWithTimeout(input: string, init: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
-  try {
-    return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
-    }
-    throw error;
-  }
-}
-
-async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) throw new HttpError(res.status);
-  return res.json() as Promise<T>;
-}
-
-async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
-  const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new HttpError(res.status, msg, errBody);
-  }
-  return res.json() as Promise<T>;
-}
-
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new HttpError(res.status, msg, errBody);
-  }
-  return res.json() as Promise<T>;
-}
-
-async function put<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-    throw new Error(msg);
-  }
-  return res.json() as Promise<T>;
 }
 
 // ── dRAG answering (OT-RFC-55) ──────────────────────────────────────────────
@@ -226,12 +167,6 @@ export async function answerQuestion(req: DragAnswerRequest): Promise<DragAnswer
   const paid = await rawAnswer(priced, xPayment);
   if (paid.status !== 200) throw new HttpError(paid.status, paid.body?.error ?? `HTTP ${paid.status}`, paid.body);
   return paid.body as DragAnswer;
-}
-
-async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, { method: 'DELETE', headers: authHeaders() });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json() as Promise<T>;
 }
 
 // --- Status ---
@@ -497,14 +432,18 @@ export async function createContextGraph(
  */
 export const registerContextGraph = (
   id: string,
-  opts: { accessPolicy?: number; publishPolicy?: number } = {},
+  opts: { accessPolicy?: number; publishPolicy?: number; pcaAccountId?: string } = {},
 ) =>
-  post<{ registered: string; onChainId: string; hint?: string }>(
+  post<{ registered: string; onChainId: string; txHash?: string; hint?: string }>(
     '/api/context-graph/register',
     {
       id,
       ...(opts.accessPolicy !== undefined ? { accessPolicy: opts.accessPolicy } : {}),
       ...(opts.publishPolicy !== undefined ? { publishPolicy: opts.publishPolicy } : {}),
+      // PCA CG-binding (S3 §5.3 step 6): the daemon's register route accepts an
+      // optional pcaAccountId (curated-only; signer must == PCA owner). No new
+      // route — this is the existing register path with the publish-authority arg.
+      ...(opts.pcaAccountId ? { pcaAccountId: opts.pcaAccountId } : {}),
     },
   );
 
@@ -813,47 +752,12 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
   return map;
 }
 
-// --- Publish (assertion-lifecycle: RFC-001 §9.x sign-at-creation) ---
-//
-// Creates a fresh auto-named assertion, writes the supplied quads,
-// finalizes (computes the merkle root and signs the EIP-712
-// AuthorAttestation stamped into `_meta`), promotes into SWM, and
-// publishes — the publisher forwards the seal verbatim and never
-// re-signs.
-export const publishTriples = async (contextGraphId: string, quads: any[]) => {
-  const assertionName = `ui-publish-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const created = await post<{ assertionUri: string; merkleRoot?: string; promotedCount?: number }>(
-    '/api/knowledge-assets',
-    {
-      contextGraphId,
-      name: assertionName,
-      quads,
-      finalize: true,
-      // rc.17 KA-routes-unification: the SWM-promote flag is `alsoShareSwm`
-      // (the old `promote` is ignored → the asset never reaches SWM and the
-      // follow-up /api/shared-memory/publish finds nothing to publish).
-      alsoShareSwm: true,
-    },
-  );
-  const published = await post<any>('/api/shared-memory/publish', {
-    contextGraphId,
-    assertionName,
-  });
-  // rc.17 create returns `merkleRoot` at top level (not nested `seal`).
-  return { ...published, assertionUri: created.assertionUri, ...(created.merkleRoot ? { merkleRoot: created.merkleRoot } : {}) };
-};
-
-export const writeSharedMemory = (
-  contextGraphId: string,
-  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
-  opts: { subGraphName?: string; localOnly?: boolean } = {},
-) =>
-  post<any>('/api/shared-memory/write', {
-    contextGraphId,
-    quads,
-    ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
-    ...(opts.localOnly !== undefined ? { localOnly: opts.localOnly } : {}),
-  });
+// NOTE: the legacy `publishTriples` (create + `/api/shared-memory/publish`
+// {assertionName}) and `writeSharedMemory` (`/api/shared-memory/write`) helpers
+// were removed in the API-cleanup pass (#1087). Publishing now goes through the
+// canonical per-KA `knowledgeAssetPublish` (`…/vm/publish`); the
+// `/api/shared-memory/write` ROUTE still exists daemon-side but has no node-UI
+// caller.
 
 export const writeProfileQueryCatalog = (
   contextGraphId: string,
@@ -1023,6 +927,11 @@ export const knowledgeAssetFinalize = (
     authorAgentAddress?: string;
     preSignedAuthorAttestation?: PreSignedAuthorAttestationPayload;
     schemeVersion?: number;
+    // #1116 — `layer:"swm"` seals content already shared to SWM (the daemon
+    // reconstructs a transient WM draft from SWM, finalizes, drops the draft);
+    // default ("wm") seals the open Working-Memory draft. Lets a publish path
+    // seal an unsealed-in-SWM asset in place before retrying /vm/publish.
+    layer?: 'wm' | 'swm';
   } = {},
 ) => {
   assertExclusiveAuthorFields(opts);
@@ -1082,6 +991,182 @@ export const knowledgeAssetPublish = (
     },
   );
 };
+
+/**
+ * Thrown by `knowledgeAssetPublishWithSeal` when a SWM asset can't be sealed in
+ * place because only a subset of it was shared (daemon `SWM_SUBSET_NOT_SEALABLE`).
+ * The UI surfaces this as "share the full asset first" — it is NOT retried.
+ */
+export class SwmSubsetNotSealableError extends Error {
+  constructor(message?: string) {
+    super(message ?? 'Share the full asset to Shared Memory before publishing.');
+    this.name = 'SwmSubsetNotSealableError';
+  }
+}
+
+/**
+ * Publish a named SWM assertion to VM, sealing it in place first if the daemon
+ * reports it isn't finalized (the #1116 / §4.4 catch→seal→retry contract).
+ *
+ * Normal path: by the time content reaches SWM it is sealed (seal-on-share is
+ * the default), so the first `/vm/publish` succeeds. This is the robustness
+ * safety net for the rare unsealed-in-SWM case:
+ *   - `PUBLISH_NOT_FULL_SHARE` / `VM_PUBLISH_PRECONDITION` (409) → seal in place
+ *     via `wm/finalize {layer:"swm"}`, then retry publish ONCE.
+ *   - `SWM_SUBSET_NOT_SEALABLE` (409, on the seal) → throw
+ *     `SwmSubsetNotSealableError` (caller tells the user to share the full
+ *     asset); never loops.
+ * `sealed` in the result tells the caller a seal step ran so it can surface
+ * "sealing then publishing" instead of a silent skip.
+ *
+ * A daemon HTTP-207 partial publish (KA minted on-chain but the context-graph
+ * binding failed) comes back as `res.ok`, so it is NOT thrown — the body
+ * carries `contextGraphError`. Callers MUST check that field and surface a
+ * partial/warning state rather than treating it as a clean success.
+ */
+export async function knowledgeAssetPublishWithSeal(
+  contextGraphId: string,
+  name: string,
+  opts: { subGraphName?: string } & KnowledgeAssetFinalizedPublishOptions = {},
+): Promise<Record<string, unknown> & { sealed?: boolean; contextGraphError?: string }> {
+  try {
+    return await knowledgeAssetPublish(contextGraphId, name, opts);
+  } catch (err: unknown) {
+    const code =
+      err instanceof HttpError && err.status === 409
+        ? (err.body as { code?: string } | undefined)?.code
+        : undefined;
+    if (code !== 'PUBLISH_NOT_FULL_SHARE' && code !== 'VM_PUBLISH_PRECONDITION') throw err;
+    // Unsealed in SWM — seal in place, then retry the publish once.
+    try {
+      await knowledgeAssetFinalize(contextGraphId, name, {
+        layer: 'swm',
+        ...(opts.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      });
+    } catch (sealErr: unknown) {
+      if (
+        sealErr instanceof HttpError &&
+        sealErr.status === 409 &&
+        (sealErr.body as { code?: string } | undefined)?.code === 'SWM_SUBSET_NOT_SEALABLE'
+      ) {
+        throw new SwmSubsetNotSealableError(
+          (sealErr.body as { error?: string } | undefined)?.error,
+        );
+      }
+      throw sealErr;
+    }
+    const result = await knowledgeAssetPublish(contextGraphId, name, opts);
+    return { ...result, sealed: true };
+  }
+}
+
+/**
+ * Aggregate result of a batch SWM→VM publish. Shared so every batch-publish CTA reports
+ * the partial/sample/error accounting identically (no per-component drift).
+ */
+export interface BatchPublishResult {
+  published: number;
+  total: number;
+  sealed: number;        // how many needed an in-place seal before publishing
+  partial: number;       // how many minted on-chain but failed the CG binding (207)
+  partialError?: string; // a sample contextGraphError detail (the first 207's reason)
+  // Every per-KA failure (not just the last), so callers can report the count + the
+  // name/reason of each — `failures.length` is the failed count.
+  failures: Array<{ name: string; subGraph?: string; error: string }>;
+  sample: PublishResult | null; // a representative confirmed result for the headline
+  // B8 (#1365 round-3) — the CONFIRMED discount aggregated across the batch, NOT a
+  // property of the headline `sample` (which is picked for cleanliness, not discount).
+  // baseCost/discountedCost are SUMMED over every item that drew on a PCA, so the badge
+  // derives the blended % + the TRUE total saved; absent when no item drew one (→ badge
+  // hidden, #9). accountId/epoch name the first drawing item (single-PCA is the norm).
+  convictionCostCovered?: ConvictionCostCovered;
+}
+
+/**
+ * Publish each named SWM assertion to Verifiable Memory through
+ * `knowledgeAssetPublishWithSeal` (seal-in-SWM retry + 207 partial handling), aggregating
+ * into ONE `BatchPublishResult`. The canonical batch-publish loop reused by every CTA
+ * (MemoryLayerView / entities / layer-widgets) so the partial-detail, sample, and per-KA
+ * error accounting cannot drift between them. Per-KA failures are collected into
+ * the `failures[]` array (never thrown); the caller renders the aggregate.
+ */
+export async function publishAssertionsToVm(
+  contextGraphId: string,
+  items: Array<{ name: string; subGraph?: string }>,
+): Promise<BatchPublishResult> {
+  let published = 0;
+  let sealed = 0;
+  let partial = 0;
+  let firstPartialError: string | undefined;
+  const failures: BatchPublishResult['failures'] = [];
+  let sample: PublishResult | null = null;
+  // B8 (#1365 round-3) — aggregate the CONFIRMED discount across the BATCH (the headline
+  // `sample` is picked for cleanliness, not discount, so a mixed batch could hide a real
+  // draw if the badge read it off `sample`). Sum baseCost/discountedCost over every item
+  // that drew on a PCA → blended % + true total saved; the first drawing item names the
+  // account/epoch.
+  let aggBase = 0n;
+  let aggDiscounted = 0n;
+  let aggDrawnEpoch = 0n;
+  let aggDrawnTopUp = 0n;
+  let firstCovered: ConvictionCostCovered | undefined;
+  let sameCoveredAccount = true;
+  let sameCoveredEpoch = true;
+  for (const a of items) {
+    try {
+      const res = await knowledgeAssetPublishWithSeal(
+        contextGraphId,
+        a.name,
+        a.subGraph ? { subGraphName: a.subGraph } : {},
+      );
+      published += 1;
+      if (res.sealed) sealed += 1;
+      // PR #972 — a 207 partial: minted on-chain but the CG binding failed.
+      if (res.contextGraphError) {
+        partial += 1;
+        if (firstPartialError === undefined) firstPartialError = res.contextGraphError;
+      }
+      const pr = res as unknown as PublishResult;
+      // Prefer a fully-clean sample (confirmed + txHash + no binding error) for the
+      // headline; fall back to the first result otherwise.
+      if (!sample || (pr.status === 'confirmed' && !!pr.txHash && !pr.contextGraphError)) sample = pr;
+      const cc = pr.convictionCostCovered;
+      if (cc) {
+        try {
+          aggBase += BigInt(cc.baseCost);
+          aggDiscounted += BigInt(cc.discountedCost);
+          aggDrawnEpoch += BigInt(cc.drawnFromEpoch);
+          aggDrawnTopUp += BigInt(cc.drawnFromTopUp);
+          if (!firstCovered) {
+            firstCovered = cc;
+          } else {
+            if (cc.accountId !== firstCovered.accountId) sameCoveredAccount = false;
+            if (cc.epoch !== firstCovered.epoch) sameCoveredEpoch = false;
+          }
+        } catch {
+          // skip an un-parseable per-item event; never let it break the batch accounting.
+        }
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof SwmSubsetNotSealableError
+          ? err.message
+          : (err as { message?: string })?.message ?? 'publish failed';
+      failures.push({ name: a.name, ...(a.subGraph ? { subGraph: a.subGraph } : {}), error: message });
+    }
+  }
+  const convictionCostCovered: ConvictionCostCovered | undefined = firstCovered
+    ? {
+        ...(sameCoveredAccount && firstCovered.accountId ? { accountId: firstCovered.accountId } : {}),
+        ...(sameCoveredEpoch && firstCovered.epoch != null ? { epoch: firstCovered.epoch } : {}),
+        baseCost: aggBase.toString(),
+        discountedCost: aggDiscounted.toString(),
+        drawnFromEpoch: aggDrawnEpoch.toString(),
+        drawnFromTopUp: aggDrawnTopUp.toString(),
+      }
+    : undefined;
+  return { published, total: items.length, sealed, partial, partialError: firstPartialError, failures, sample, convictionCostCovered };
+}
 
 // --- Assertions (WM objects) ---
 
@@ -1226,10 +1311,10 @@ export async function listAssertions(
   // for any CG no matter how many assertions actually existed.
   // Downstream that surfaced as:
   //   - `AssertionsList` rendered "no assertions" right after import.
-  //   - `LayerActionsWidget` showed the correct "Promote N to SWM" badge
+  //   - `PromoteWidget` showed the correct "Promote N to SWM" badge
   //     (the count comes from `useMemoryEntities`, which already opts
-  //     into `includeContextGraphPartitions`), but on click its
-  //     `handleAction` loop iterated zero times and hit the no-op
+  //     into `includeContextGraphPartitions`), but on click its promote
+  //     loop iterated zero times and hit the no-op
   //     bulk-promote branch — the exact "0 triples promoted" symptom
   //     the rc.12 issue reported even after the publisher-side
   //     `AssertionNotPersistedError` fix landed.
@@ -1561,56 +1646,21 @@ export function fileUrl(hash: string, contentType?: string): string {
   return `${BASE}/api/file/${encodeURIComponent(normalizedHash)}${params}`;
 }
 
-export interface SwmRootEntity {
-  uri: string;
-  label: string;
-  tripleCount: number;
-}
-
-const SKOLEM_GENID_SEGMENT = '/.well-known/genid/';
-
-function canonicalSwmRootUri(uri: string): string {
-  const trimmed = uri.trim();
-  const unwrapped = trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1) : trimmed;
-  const idx = unwrapped.indexOf(SKOLEM_GENID_SEGMENT);
-  return idx === -1 ? unwrapped : unwrapped.slice(0, idx);
-}
-
-function labelFromUri(uri: string): string {
-  const hash = uri.lastIndexOf('#');
-  const slash = uri.lastIndexOf('/');
-  const cut = Math.max(hash, slash);
-  return cut >= 0 ? uri.slice(cut + 1) : uri;
-}
-
-/** List root entities in SWM with their triple counts. */
-export async function listSwmEntities(contextGraphId: string): Promise<SwmRootEntity[]> {
-  const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
-  const sparql = `SELECT ?s (COUNT(?p) AS ?cnt) WHERE {
-    GRAPH ?g {
-      ?s ?p ?o .
-      FILTER(
-        (STR(?g) = "${swmGraph}" || STRSTARTS(STR(?g), "${swmGraph}/")) &&
-        !STRSTARTS(STR(?g), "${swmGraph}/staging/")
-      )
-      FILTER(?p != <http://dkg.io/ontology/workspaceOwner>)
-    }
-  } GROUP BY ?s ORDER BY DESC(?cnt)`;
-  const data = await post<{ result: any }>('/api/query', { sparql, contextGraphId, view: 'shared-working-memory' });
-  const bindings: any[] = data?.result?.bindings ?? [];
-  const countsByRoot = new Map<string, number>();
-  for (const b of bindings) {
-    const uri = typeof b.s === 'string' ? b.s : b.s?.value ?? '';
-    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value ?? '0';
-    const m = cntRaw.match(/^"?(\d+)/);
-    const tripleCount = m ? parseInt(m[1], 10) : 0;
-    const rootUri = canonicalSwmRootUri(uri);
-    if (!rootUri) continue;
-    countsByRoot.set(rootUri, (countsByRoot.get(rootUri) ?? 0) + tripleCount);
-  }
-  return [...countsByRoot.entries()]
-    .map(([uri, tripleCount]) => ({ uri, label: labelFromUri(uri), tripleCount }))
-    .sort((a, b) => b.tripleCount - a.tripleCount || a.label.localeCompare(b.label));
+/**
+ * The post-publish CostCovered signal (B8) — decoded by the daemon from the on-chain
+ * `CostCovered(accountId, epoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp)`
+ * event and attached to the publish response when the publish drew on a PCA (absent
+ * otherwise → the badge degrades to hidden, #9). Lives at the api boundary so both the
+ * publish response and the `pca_cost_covered` bell meta reuse it. Wei amounts are decimal
+ * strings; `epoch` is a JSON number (uint40, fits safely in Number).
+ */
+export interface ConvictionCostCovered {
+  accountId?: string;
+  epoch?: number;
+  baseCost: string;
+  discountedCost: string;
+  drawnFromEpoch: string;
+  drawnFromTopUp: string;
 }
 
 export interface PublishResult {
@@ -1619,24 +1669,39 @@ export interface PublishResult {
   kas: { tokenId: string; rootEntity: string }[];
   txHash?: string;
   blockNumber?: number;
+  // B8 — the CONFIRMED post-publish discount, attached when this publish drew on a
+  // PCA (absent otherwise → DiscountAppliedBadge renders nothing, #9). Distinct from
+  // S5's pre-spend PREDICTION; the badge derives bps from baseCost/discountedCost.
+  convictionCostCovered?: ConvictionCostCovered;
+  // Set when the daemon returned HTTP 207 (PR #972): the KA minted on-chain
+  // (status "confirmed", txHash present) BUT the context-graph binding failed.
+  // A PARTIAL publish — the asset is permanently on-chain, but it isn't linked
+  // into the context graph, so CG-scoped views may be incomplete. Re-publishing
+  // does NOT repair the binding (the KA is already minted); this is a node-side
+  // condition for the operator. Callers must surface it, not treat the
+  // confirmed/txHash result as a clean success.
+  contextGraphError?: string;
 }
 
 /**
- * Publish one SWM root on-chain (SWM -> VM).
- * Selection-based shared-memory publish is not atomic across independent roots
- * yet, so the UI keeps the single-root guard until the daemon can identify one
- * lifecycle/assertion for a multi-root request.
+ * Short status suffix for a 207 partial publish — appended to a "confirmed"
+ * status so the row reads as a warning, not a clean success.
  */
-export const publishSharedMemory = (contextGraphId: string, rootEntities: string[]) => {
-  if (rootEntities.length !== 1) {
-    throw new Error('Shared-memory publish currently requires exactly one root entity.');
-  }
-  return post<PublishResult>('/api/shared-memory/publish', {
-    contextGraphId,
-    selection: rootEntities,
-    clearAfter: false,
-  });
-};
+export const PARTIAL_PUBLISH_STATUS_SUFFIX = 'binding incomplete';
+
+/**
+ * The single, canonical explanation for a 207 partial publish, shared by every
+ * publish CTA so the copy can't drift. Accurate to the contract: the asset is
+ * already on-chain and re-publishing will NOT repair the context-graph binding
+ * — so this surfaces the condition to the node operator WITHOUT suggesting a
+ * republish. The daemon's `contextGraphError` detail is appended when present.
+ */
+export function partialPublishWarning(contextGraphError?: string): string {
+  const base =
+    'Published on-chain, but linking it into the context graph did not complete, ' +
+    'so context-graph views may be incomplete.';
+  return contextGraphError ? `${base} (${contextGraphError})` : base;
+}
 
 // --- Query history ---
 export const fetchQueryHistory = (limit = 50, offset = 0) =>
@@ -2930,11 +2995,27 @@ export interface AssertionActivityNotif extends NotifWireBase {
   };
 }
 
+/** B8 confirmed-discount bell row (P2) — a server-confirmed on-chain CostCovered
+ *  draw on one of THIS node's publishing wallets (wallet-scoped, mirrors
+ *  join_approved). Informational; counts toward the unread badge. `meta` reuses
+ *  {@link ConvictionCostCovered} plus the publishing wallet. `contextGraphId` is
+ *  optional (the locked wire shape). The P2 source is self-publish capture;
+ *  sponsored/owner-side draws are P3. */
+export interface PcaCostCoveredNotif {
+  type: 'pca_cost_covered';
+  id: number | string;
+  ts: number;
+  read: 0 | 1;
+  contextGraphId?: string;
+  meta: ConvictionCostCovered & { publisherAddress: string; contextGraphName?: string };
+}
+
 export type NotifWire =
   | JoinRequestNotif
   | JoinApprovedNotif
   | JoinRejectedNotif
-  | AssertionActivityNotif;
+  | AssertionActivityNotif
+  | PcaCostCoveredNotif;
 
 export interface NotificationsFeedResponse {
   /** Already scoped, type-allowlisted, activity-collapsed, join_request

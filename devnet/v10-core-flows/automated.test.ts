@@ -70,8 +70,18 @@ const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const CONTEXT_GRAPH = 'devnet-test';
 const FINDINGS_PATH = join(__dirname, 'FINDINGS.local.md');
 
-const NODE1_API = 'http://127.0.0.1:9201';
-const NODE5_API = 'http://127.0.0.1:9205'; // edge
+// Derive node API URLs from each node's devnet config instead of hardcoding
+// the default ports, so the suite honors an API_PORT_BASE-rebased devnet
+// (needed when another local service occupies the 9201.. range).
+function nodeApiUrl(num: number): string {
+  const configPath = join(DEVNET_DIR, `node${num}`, 'config.json');
+  const apiPort = existsSync(configPath)
+    ? (JSON.parse(readFileSync(configPath, 'utf8')).apiPort ?? 9200 + num)
+    : 9200 + num;
+  return `http://127.0.0.1:${apiPort}`;
+}
+const NODE1_API = nodeApiUrl(1);
+const NODE5_API = nodeApiUrl(5); // edge
 
 const HUB_ABI = [
   'function getContractAddress(string) view returns (address)',
@@ -283,7 +293,7 @@ async function fullPublish(api: string, token: string, name: string): Promise<{ 
   expect(r.status, `finalize failed: ${JSON.stringify(r.body)}`).toBe(200);
   r = await postJson(api, `/api/knowledge-assets/${name}/swm/share`, { contextGraphId: cgId }, token);
   expect(r.status, `promote failed: ${JSON.stringify(r.body)}`).toBe(200);
-  r = await postJson(api, '/api/shared-memory/publish', { contextGraphId: cgId, assertionName: name }, token);
+  r = await postJson(api, `/api/knowledge-assets/${name}/vm/publish`, { contextGraphId: cgId }, token);
   expect(r.status, `publish failed: ${JSON.stringify(r.body)}`).toBe(200);
   // Greedy publish-outcome gate: HTTP 200 is NOT proof the publish landed.
   // Pin the status to a known success value and require a positive on-chain
@@ -452,7 +462,7 @@ describe('2. edge publish appears in verifiable-memory iff it confirmed on-chain
     // chain. Pre-RC11 / PR2 the regression we guard is VM leakage, not
     // whether the HTTP status is `failed`. Reject only the silent
     // `tentative` downgrade that used to write into graphs the VM aliases.
-    r = await postJson(NODE5_API, '/api/shared-memory/publish', { contextGraphId: CONTEXT_GRAPH, assertionName }, state.node5Token);
+    r = await postJson(NODE5_API, `/api/knowledge-assets/${assertionName}/vm/publish`, { contextGraphId: CONTEXT_GRAPH }, state.node5Token);
     expect(r.status, `edge publish HTTP: ${JSON.stringify(r.body)}`).toBe(200);
     expect(
       r.body?.status,

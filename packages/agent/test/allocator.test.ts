@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { KaNumberStore } from '@origintrail-official/dkg-core';
-import { KaNumberAllocator } from '../src/allocator.js';
+import {
+  KaNumberAllocator,
+  reconcileAndAllocateKaNumber,
+  readMaxKaNumberWithRetry,
+  isTransientChainError,
+  KaFloorReconcileError,
+} from '../src/allocator.js';
 
 /**
  * OT-RFC-43 Option-1 deterministic KA identity — B2 allocator core.
@@ -313,5 +319,79 @@ describe('KaNumberAllocator — canonical address (codex PR #976 F8)', () => {
     const peeked = alloc.peekKaId(AUTHOR_A);
     const { kaId } = alloc.allocate(AUTHOR_A.toLowerCase());
     expect(peeked).toBe(kaId);
+  });
+});
+
+/**
+ * KA-number-floor reconcile resilience to transient RPC failures.
+ *
+ * Repro: a free public RPC answered the one-time-per-author floor read with
+ * `429 Too Many Requests`, and the reconcile threw a hard error → the daemon
+ * returned HTTP 500 on `POST /api/knowledge-assets` (named-assertion create).
+ * The fix retries transient errors and, if the chain stays unreachable, throws a
+ * typed `KaFloorReconcileError` the HTTP layer maps to a retryable 503.
+ *
+ * `noSleep` is injected so the backoff doesn't actually wait in tests.
+ */
+describe('KA-number-floor reconcile resilience to RPC failures', () => {
+  const noSleep = async () => {};
+
+  it('isTransientChainError: rate-limit/timeout/5xx transient; revert/bad-input not', () => {
+    expect(isTransientChainError(new Error('server response 429 Too Many Requests'))).toBe(true);
+    expect(isTransientChainError(new Error('over rate limit'))).toBe(true);
+    expect(isTransientChainError(new Error('Request timeout on the free tier'))).toBe(true);
+    expect(isTransientChainError(new Error('503 Service Unavailable'))).toBe(true);
+    expect(isTransientChainError(new Error('failed to detect network'))).toBe(true);
+    expect(isTransientChainError(new Error('execution reverted: TooLowBalance'))).toBe(false);
+    expect(isTransientChainError(new Error('KaNumberAllocator: invalid author address'))).toBe(false);
+  });
+
+  it('readMaxKaNumberWithRetry retries a transient error then succeeds', async () => {
+    let calls = 0;
+    const read = async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('server response 429 Too Many Requests');
+      return 41n;
+    };
+    expect(await readMaxKaNumberWithRetry(read, AUTHOR_A, noSleep)).toBe(41n);
+    expect(calls).toBe(3);
+  });
+
+  it('readMaxKaNumberWithRetry does NOT retry a deterministic error', async () => {
+    let calls = 0;
+    const read = async () => { calls += 1; throw new Error('execution reverted'); };
+    await expect(readMaxKaNumberWithRetry(read, AUTHOR_A, noSleep)).rejects.toThrow(/reverted/);
+    expect(calls).toBe(1);
+  });
+
+  it('reconcileAndAllocateKaNumber succeeds after transient retries (no 500 on a 429)', async () => {
+    let calls = 0;
+    const chain = {
+      chainId: 'gnosis:100',
+      getMaxKaNumberForAuthor: async () => {
+        calls += 1;
+        if (calls < 2) throw new Error('over rate limit');
+        return 5n;
+      },
+    };
+    const { number, reservedUal } = await reconcileAndAllocateKaNumber(
+      alloc, chain, new Set<string>(), AUTHOR_A, noSleep,
+    );
+    expect(number).toBe(6n); // floor reconciled to 5 → next allocation is 6
+    expect(reservedUal).toBe(`did:dkg:gnosis:100/${AUTHOR_A.toLowerCase()}/6`);
+  });
+
+  it('reconcileAndAllocateKaNumber throws a typed, retryable KaFloorReconcileError when the chain stays unreachable', async () => {
+    const chain = {
+      chainId: 'gnosis:100',
+      getMaxKaNumberForAuthor: async () => { throw new Error('server response 429 Too Many Requests'); },
+    };
+    const err = await reconcileAndAllocateKaNumber(alloc, chain, new Set<string>(), AUTHOR_A, noSleep)
+      .then(() => null, (e) => e);
+    expect(err).toBeInstanceOf(KaFloorReconcileError);
+    expect(err.code).toBe('KA_FLOOR_RECONCILE_UNAVAILABLE');
+    expect(err.retryable).toBe(true);
+    // keeps the legacy message substring existing matchers rely on
+    expect(String(err.message)).toMatch(/failed to reconcile KA-number floor/);
   });
 });

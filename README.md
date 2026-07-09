@@ -80,6 +80,8 @@ dkg hermes setup
 
 `dkg hermes setup` bootstraps the DKG node config (no separate `dkg init` needed), starts the daemon, optionally funds wallets, and wires the Hermes profile with replace-by-default provider election (use `--preserve-provider` to opt out, `--no-start` / `--no-fund` for advanced flows). See the [adapter guide](packages/adapter-hermes/README.md) for details.
 
+**Network:** setup defaults to **mainnet-gnosis**; pass `--network <mainnet-gnosis | mainnet-base | testnet>` to choose another. Mainnet nodes have no faucet; testnet nodes auto-fund their wallets when the faucet is reachable.
+
 ### OpenClaw adapter
 
 Two commands:
@@ -104,7 +106,9 @@ openclaw gateway restart
 - The right-side chat surface connects to OpenClaw and a sent message round-trips
 - The conversation survives a UI reload (proves DKG-backed chat persistence)
 
-**Flags.** `--no-fund` (skip faucet), `--no-start` (configure only), `--no-verify` (skip verification), `--dry-run` (preview without writing). Faucet funding is best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. See the [Testnet Funding](#testnet-funding) section below for the full request/response shape.
+**Network:** setup defaults to **mainnet-gnosis**; pass `--network <mainnet-gnosis | mainnet-base | testnet>` to choose another. Mainnet nodes have no faucet; testnet nodes auto-fund their wallets when the faucet is reachable.
+
+**Flags.** `--network <name>` (choose network), `--no-fund` (skip faucet), `--no-start` (configure only), `--no-verify` (skip verification), `--dry-run` (preview without writing). Faucet funding is best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. See the [Funding](#funding) section below for the full request/response shape.
 
 The full adapter reference — daemon URL config, channel-port overrides, disconnect/reconnect semantics — lives in [`packages/adapter-openclaw/README.md`](packages/adapter-openclaw/README.md).
 
@@ -126,15 +130,36 @@ dkg mcp setup
 
 `dkg mcp setup` bootstraps the DKG node config (no separate `dkg init` needed), starts the daemon, optionally funds wallets, and registers MCP entries in each detected client (you confirm per client unless `--yes` is passed). See the [MCP integration guide](packages/mcp-dkg/README.md) for client-by-client paths, mode overrides (`--installed` / `--monorepo`), the manual JSON shape, the contributor monorepo dev workflow, and troubleshooting (including the WSL2 caveat for Windows-side MCP clients).
 
+**Network:** setup defaults to **mainnet-gnosis**; pass `--network <mainnet-gnosis | mainnet-base | testnet>` to choose another. Mainnet nodes have no faucet; testnet nodes auto-fund their wallets when the faucet is reachable.
+
 ### Standalone node
 
 Skip the framework wiring — run the daemon directly and use the CLI or HTTP API:
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # creates ~/.dkg/config.yaml (auto-funds wallets on testnet if faucet reachable)
+dkg init      # interactive: prompts for network (default: mainnet-gnosis), node name, role, store, port
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
+
+`dkg init` asks which network to join — **mainnet-gnosis** (default), **mainnet-base**, or **testnet**. Mainnet nodes have no faucet; testnet nodes auto-fund their wallets when the faucet is reachable. Pass `--network <name>` to skip the prompt.
+
+For a Core Node, choose the `core` role during setup or pass it explicitly:
+
+```bash
+dkg init --role core --network mainnet-gnosis
+dkg start
+```
+
+Core Nodes need an on-chain node profile (`identityId`). On startup the daemon checks the primary operational wallet; if it has no profile and `nodeRole` is `core`, it attempts to create the profile, approve TRAC to `StakingV10`, and mint the initial staking conviction. If the node is already running after you fund or repair wallets, trigger the same identity-creation path manually:
+
+```bash
+TOKEN=$(dkg auth show)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:9200/api/identity/ensure
+```
+
+Verify with `GET /api/identity` or `/api/status`: Core registration is complete when `identityId` is non-zero and `hasIdentity` is `true`. The two node roles are `edge` and `core`. See [Daemon Lifecycle](docs/use-dkg/run-node.md#core-node-profile-registration) for the full Core profile checklist.
 
 Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui), or query directly:
 
@@ -154,7 +179,32 @@ dkg update --allow-prerelease   # follow the `next` dist-tag for pre-release bui
 dkg rollback                # revert to the previous version
 ```
 
-Do **not** `git pull` or clone the repository to update — `dkg update` is the canonical verb. If anything looks off (multiple repositories on disk, served UI doesn't match version, version skew between daemon and CLI), run `dkg doctor` for a structured diagnostic of the install state. See [`OT-RFC-41`](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md) for the design rationale.
+NPM/dist-tag updates are the recommended production path. Core operators who
+explicitly need build-from-source updates can opt into the advanced git updater
+by writing this block in `~/.dkg/config.json`:
+
+```json
+{
+  "autoUpdate": {
+    "enabled": true,
+    "source": "git",
+    "repo": "https://github.com/OriginTrail/dkg.git",
+    "branch": "main",
+    "checkIntervalMinutes": 3
+  }
+}
+```
+
+Git mode is daemon-polled and experimental. It builds the watched ref in the
+inactive blue-green slot, swaps slots, then exits through the supervised restart
+flow. Rollback differs from npm/dist-tag mode: it can only flip back to an
+already-built slot, not reinstall an arbitrary package version from npm.
+
+Do **not** manually `git pull` a running node tree. If anything looks off
+(multiple repositories on disk, served UI doesn't match version, version skew
+between daemon and CLI), run `dkg doctor` for a structured diagnostic of the
+install state. See [`OT-RFC-41`](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md)
+for the npm-first design rationale.
 
 ### Contributors / monorepo development
 
@@ -168,6 +218,8 @@ pnpm dkg start             # or `pnpm dkg <any subcommand>`
 ```
 
 Contributor state lives under `~/.dkg-dev/` (separated from `~/.dkg/` so a contributor's dev work doesn't stomp on their own Edge install). `dkg update` is intentionally disabled in monorepo-checkout mode — use `git pull && pnpm install && pnpm build` instead.
+
+Switching between worktrees pinned to different `network/*.json#chainResetMarker` values would otherwise wipe your shared `~/.dkg-dev/store.nq` on each `dkg start`. Set `DKG_SKIP_CHAIN_RESET_WIPE=1` to keep your local context graphs across branch switches; even without it, `store.nq` is backed up to `store.nq.pre-wipe-<marker>-<timestamp>` (newest 3 kept) rather than destroyed, so a stray wipe is recoverable.
 
 The legacy `install.sh` git-checkout installer was removed in rc.12 (OT-RFC-41 §5 PR 6). If you have an existing `install.sh`-style install, run `npm install -g @origintrail-official/dkg` to take over the install; the daemon will detect the legacy `~/.dkg/releases/` tree on first start, record the active slot version into `~/.dkg/previous-version` (rollback target), and resume from the npm-global install. `dkg doctor` flags any leftover cleanable state. See [`docs/archive/MIGRATE_TO_NPM.md`](docs/archive/MIGRATE_TO_NPM.md) for historical context on the pre-rc.12 procedure.
 
@@ -194,10 +246,10 @@ By design, `list` shows only verified and featured tiers and `install` refuses c
 ## CLI commands
 
 ```bash
-dkg init                                 # interactive setup — node name, role, relay
+dkg init                                 # interactive setup — network, node name, role, store (--network to skip the prompt)
 dkg start [-f]                           # start the node daemon (-f for foreground)
 dkg stop                                 # graceful shutdown
-dkg status                               # node health, peer count, identity
+dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
 dkg peers                                # connected peers and transport info
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
@@ -209,7 +261,7 @@ dkg chat <name>                          # interactive chat with a peer
 # Context graphs (projects)
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
-dkg context-graph invite <id> <peer>     # invite a peer to a context graph
+dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist
 dkg context-graph list                   # list subscribed context graphs
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
@@ -218,16 +270,24 @@ dkg context-graph sign-join <id>         # sign a join-request delegation locall
 dkg context-graph approve-join <id>      # approve a pending join request
 dkg context-graph subscribe <id>         # subscribe to a CG without creating it
 
-# Assertions (Working Memory drafts)
-dkg assertion import-file <name> -f <file> -c <cg>   # import a document into WM
-dkg assertion extraction-status <name> -c <cg>       # check document extraction status
-dkg assertion query <name> -c <cg>                   # read assertion quads from WM
-dkg assertion promote <name> -c <cg>                 # WM → SWM
+# Knowledge Assets: create -> write -> finalize -> share -> publish
+dkg ka create <name> -c <cg> --input-file <rdf-file> --share  # one-shot create/write/finalize/share; no VM publish
+dkg ka import-file <name> -c <cg> --input-file <file>         # import a document into WM through extraction
+dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
+dkg ka finalize <name> -c <cg>                                # seal the WM draft
+dkg ka share <name> -c <cg>                                   # share finalized WM to SWM
+dkg ka publish <name> -c <cg>                                 # sync publish from SWM to VM
+dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue VM publish
+dkg ka query <name> -c <cg>                                   # read KA WM quads
+dkg ka history <name> -c <cg>                                 # show lifecycle state/history
+dkg ka pull-from <name> -c <cg> --layer swm                   # seed WM from SWM or VM
+dkg ka discard <name> -c <cg>                                 # discard a WM draft
 
-# Shared memory (team-visible) and publishing
-dkg shared-memory write <cg> ...         # write triples directly to SWM
-dkg shared-memory publish <cg>           # SWM → Verifiable Memory (costs TRAC)
-dkg publish <cg> -f <file>               # one-shot RDF publish to a context graph
+# Compatibility aliases
+dkg assertion import-file <name> -f <file> -c <cg>  # compatibility alias for document import
+dkg assertion promote <name> -c <cg>                # compatibility alias for KA share
+
+# Verification and endorsement
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
 dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
 
@@ -239,9 +299,10 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
-dkg publisher enqueue <cg> ...           # enqueue a publish job
+dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
 dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
+# publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
 dkg index [directory]                    # index a code repo into the dev-coordination CG
@@ -330,13 +391,13 @@ analysis reports are under `bench/results/profiles/`, including
 
 | Guide | Use it when |
 |---|---|
-| [MCP Setup](docs/setup/SETUP_MCP.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
-| [Join the Testnet](docs/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
-| [OpenClaw Setup](docs/setup/SETUP_OPENCLAW.md) | You want OpenClaw to use DKG as memory/tools |
-| [Hermes Setup](docs/setup/SETUP_HERMES.md) | You want Hermes Agent to use DKG as memory/tools |
-| [ElizaOS Setup](docs/setup/SETUP_ELIZAOS.md) | You want ElizaOS integration |
-| [Custom agent Setup](docs/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
-| [Testnet Faucet](docs/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
+| [MCP Setup](packages/mcp-dkg/README.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
+| [Join the Testnet](docs/archive/internal/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
+| [OpenClaw Setup](packages/adapter-openclaw/README.md) | You want OpenClaw to use DKG as memory/tools |
+| [Hermes Setup](packages/adapter-hermes/README.md) | You want Hermes Agent to use DKG as memory/tools |
+| [ElizaOS Setup](packages/adapter-elizaos/README.md) | You want ElizaOS integration |
+| [Custom agent Setup](docs/archive/internal/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
+| [Testnet Faucet](docs/archive/internal/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
 
 ---
 
@@ -433,6 +494,7 @@ For `sparql-http`:
 - **Namespace identity tag**: on first boot the daemon writes a triple into a reserved `<urn:dkg:store-meta>` graph recording its node name. Subsequent boots verify the tag before doing any writes — two DKG nodes pointed at the same Blazegraph namespace can't silently corrupt each other any more. Mismatches print the cleanup recipe (`DELETE WHERE { ... }`).
 - **Backend-aware reset**: chain-reset (and rebooting against a different backend) scopes its `DELETE` to the `did:dkg:context-graph:` prefix, leaving any V6/V8 data on the same Blazegraph instance untouched. Docker-provisioned namespaces (`managedByDkg: true`) use the faster `DROP ALL` path.
 - **Backend-switch guard**: switching backends between boots is treated like a destructive operation. The daemon prints a multi-line warning and refuses to start unless you set `DKG_ACCEPT_STORE_RESET=1`. Reverting `store.backend` in your config recovers the previous backend's data.
+- **Chain-reset wipe — backup + dev opt-out**: when a testnet `chainResetMarker` bump signals a chain redeploy, the daemon wipes chain-derived local state (`store.nq`, publish journal, random-sampling WAL). By default `store.nq` is now *backed up* — renamed to `store.nq.pre-wipe-<marker>-<timestamp>` (newest 3 kept, older rotated out) rather than deleted — so an unexpected wipe is recoverable by moving the file back. Developers sharing one `DKG_HOME` across marker-pinned worktrees can set `DKG_SKIP_CHAIN_RESET_WIPE=1` to skip the wipe entirely; the marker is then not persisted, so unsetting the env var restores normal wipe-on-change on the next boot. Operator nodes with the env var unset still wipe by default — the safety net is unchanged.
 - **Metrics**: `/api/status` exposes `storeUrl` and `storeQuads` (cached for 30 s) instead of the `storeBytes` file size — quad count is what's meaningful when the store isn't a local file.
 - **Required config**: when you enable `largeLiteralStorage` or `sharedMemoryPublicSnapshotStorage` with an external backend, you must set their `directory` explicitly (no local store path to infer from). The daemon fails fast at config-load if either is missing.
 
@@ -443,19 +505,24 @@ For `sparql-http`:
 
 ---
 
-## Testnet Funding
+## Funding
 
-A DKG testnet node needs Base Sepolia ETH (to pay gas for on-chain operations) and test TRAC (for staking and publishing). The Origin Trail testnet faucet hands out both in a single API call, so first-setup paths auto-fund the generated admin wallet plus the three operational wallets when a faucet is configured in the network config.
+Every setup flow persists your chosen network into `config.networkConfig`; the default for a fresh node is **mainnet-gnosis**.
 
-Three entry points cover the common flows:
+Async publisher wallets also need native gas, plus PCA agent registration or TRAC for direct spend.
 
-- **Manual install (`dkg init`)** — on testnet, `dkg init` auto-funds the generated admin and operational wallets when `network.faucet.url` is set (the default for the bundled testnet config).
-- **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (for pre-funded wallets, CI, or offline runs).
-- **Direct API / custom scripts** — the full request/response shape, idempotency semantics, and error codes live in [`docs/setup/TESTNET_FAUCET.md`](docs/setup/TESTNET_FAUCET.md).
+**Mainnet (gnosis / base) — no faucet.** Fund the node's operational wallets yourself with the chain's native gas token (xDAI on Gnosis, ETH on Base) and TRAC before publishing to Verified Memory. An edge node needs no funds just to run and sync; funds are only required to publish on-chain.
 
-Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up. Rate limits and error codes are documented in the [faucet reference](docs/setup/TESTNET_FAUCET.md#rate-limits-and-cooldowns).
+**Testnet — auto-funded.** A testnet node needs Base Sepolia ETH (gas) and test TRAC (staking / publishing). The OriginTrail testnet faucet hands out both in one call, so when you select `testnet` the first-setup paths auto-fund the generated admin wallet plus the three operational wallets. This step fires **only on testnet** — the mainnet network configs ship no faucet, so it is skipped automatically.
 
-If the faucet is unreachable and you need ETH only, [`docs/setup/JOIN_TESTNET.md`](docs/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
+The faucet step applies to all entry points when testnet is selected:
+
+- **Manual install (`dkg init`)** — auto-funds when the selected network defines a faucet (testnet only).
+- **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (pre-funded wallets, CI, offline runs); pass `--network <name>` to choose the network.
+
+Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up.
+
+On testnet, if the faucet is unreachable and you need ETH only, [`docs/archive/internal/setup/JOIN_TESTNET.md`](docs/archive/internal/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
 
 ---
 

@@ -281,7 +281,6 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).toContain('dkg_join_request_approve');
     expect(toolNames).toContain('dkg_join_request_reject');
     expect(toolNames).toContain('dkg_subscribe');
-    expect(toolNames).toContain('dkg_publish');
     expect(toolNames).toContain('dkg_query');
     expect(toolNames).toContain('dkg_find_agents');
     expect(toolNames).toContain('dkg_send_message');
@@ -312,19 +311,25 @@ describe("DkgNodePlugin", () => {
     expect(toolNames).not.toContain('dkg_semantic_enrichment_write');
     expect(toolNames).toContain('dkg_sub_graph_create');
     expect(toolNames).toContain('dkg_sub_graph_list');
-    expect(toolNames).toContain('dkg_shared_memory_publish');
-    // dkg_share — direct SWM convenience helper, parity with Hermes (#382, #408).
-    expect(toolNames).toContain('dkg_share');
+    // The legacy publish-bridge + loose-SWM tools were removed (#1087 cleanup):
+    // dkg_publish (direct-publish bypass), dkg_shared_memory_publish (SWM-bridge),
+    // and dkg_share (loose-SWM write). The canonical per-KA publish survives and the
+    // one-shot lives on the EXTENDED dkg_knowledge_asset_create (quads + also_share_swm) [D3].
+    expect(toolNames).not.toContain('dkg_publish');
+    expect(toolNames).not.toContain('dkg_shared_memory_publish');
+    expect(toolNames).not.toContain('dkg_share');
+    expect(toolNames).toContain('dkg_knowledge_asset_publish');
+    expect(toolNames).toContain('dkg_knowledge_asset_create');
     // Legacy V9 contextGraph aliases are removed as of v10-rc.
     expect(toolNames).not.toContain('dkg_list_contextGraphs');
     expect(toolNames).not.toContain('dkg_contextGraph_create');
     // memory_search added by this feature branch (W2 — agent-callable recall button).
     expect(toolNames).toContain('memory_search');
     // Keep this resilient as main adds new exported tools; this test already
-    // asserts presence of the critical tool set above.
-    // +3 net-new lifecycle verbs (finalize / publish / pull_from) over the
-    // previous floor of 32.
-    expect(registeredTools.length).toBeGreaterThanOrEqual(35);
+    // asserts presence of the critical tool set above. The #1087 cleanup removed
+    // 3 tools (dkg_publish / dkg_shared_memory_publish / dkg_share) and added none
+    // (the one-shot extends dkg_knowledge_asset_create), lowering the floor by 3.
+    expect(registeredTools.length).toBeGreaterThanOrEqual(32);
   });
 
 
@@ -396,12 +401,11 @@ describe("DkgNodePlugin", () => {
     expect(publishKaProps).toHaveProperty('publish_epochs');
     expect(publishKaProps).toHaveProperty('publisher_node_identity_id_override');
     // CONTRACT §D: clear-after is DROPPED from the per-asset publish tool — on
-    // vm/publish it is graph-wide destructive (wipes other agents' SWM). The
-    // CG-wide clear stays on dkg_publish / dkg_shared_memory_publish.
+    // vm/publish it is graph-wide destructive (wipes other agents' SWM).
     expect(publishKaProps).not.toHaveProperty('clear_shared_memory_after');
     expect(publishKaProps).not.toHaveProperty('clear_after');
-    // CONTRACT §G: per-KA publish can register the CG on-chain first (mirrors
-    // dkg_shared_memory_publish) — vm/publish requires a registered CG.
+    // CONTRACT §G: per-KA publish can register the CG on-chain first —
+    // vm/publish requires a registered CG.
     expect(publishKaProps).toHaveProperty('register_if_needed');
     // finalize surfaces the token-resolved author but NOT the raw pre-signed
     // attestation (colocated-agent attribution — CONTRACT §1 Stage3, by design).
@@ -410,7 +414,6 @@ describe("DkgNodePlugin", () => {
     expect(finalizeProps).not.toHaveProperty('pre_signed_author_attestation');
     expectRequired('dkg_sub_graph_create', ['context_graph_id', 'sub_graph_name']);
     expectRequired('dkg_sub_graph_list', ['context_graph_id']);
-    expectRequired('dkg_shared_memory_publish', ['context_graph_id']);
 
     for (const name of [
       'dkg_knowledge_asset_create',
@@ -422,8 +425,6 @@ describe("DkgNodePlugin", () => {
       'dkg_knowledge_asset_discard',
       'dkg_knowledge_asset_import_file',
       'dkg_knowledge_asset_query',
-      'dkg_shared_memory_publish',
-      'dkg_share',
       'dkg_sub_graph_create',
     ]) {
       const description = byName.get(name)!.parameters.properties.context_graph_id.description;
@@ -432,19 +433,6 @@ describe("DkgNodePlugin", () => {
       expect(description).toContain('<curatorAddress>/<slug>');
       expect(description).toContain('Do not guess');
     }
-
-    // dkg_shared_memory_publish must declare `sub_graph_name` so agents that
-    // create/write/promote into a sub-graph can publish the promoted data
-    // through the same sub-graph instead of hitting the root SWM graph.
-    const publishProps = byName.get('dkg_shared_memory_publish')!.parameters.properties;
-    expect(publishProps).toHaveProperty('sub_graph_name');
-    expect(publishProps.sub_graph_name.type).toBe('string');
-    expect(publishProps).toHaveProperty('register_if_needed');
-    expect(publishProps.register_if_needed.type).toBe('boolean');
-    expect(publishProps).toHaveProperty('reveal_on_chain');
-    expect(publishProps.reveal_on_chain.type).toBe('boolean');
-    expect(publishProps).toHaveProperty('access_policy');
-    expect(publishProps.access_policy.type).toBe('number');
 
     // dkg_knowledge_asset_write.quads is an array of {subject,predicate,object}
     // with NO per-quad `graph` (CONTRACT §0 invariant 2).
@@ -501,24 +489,21 @@ describe("DkgNodePlugin", () => {
 
   // FIX X (#1076:2396 / Option A): the explicit-register route registers with the
   // daemon's DEFAULT publishPolicy and does NOT preserve a CG's stored custom
-  // publishPolicy (daemon-side rehydration tracked in dkg#1085). The caveat is on
-  // the two explicit-register-exposed tools and ABSENT on dkg_shared_memory_publish
-  // (which uses the safe rehydrating auto-register path).
-  it('register_if_needed publishPolicy caveat is present on the per-KA/one-shot publish tools, absent on shared-memory', () => {
+  // publishPolicy (daemon-side rehydration tracked in dkg#1085). After the #1087
+  // cleanup the only publish tool with a `register_if_needed` knob is the canonical
+  // per-KA `dkg_knowledge_asset_publish`, so the caveat must live there.
+  it('register_if_needed publishPolicy caveat is present on the canonical per-KA publish tool', () => {
     const plugin = new DkgNodePlugin();
     const registeredTools: OpenClawTool[] = [];
     plugin.register({ config: {}, registerTool: (t) => registeredTools.push(t), registerHook: () => {}, on: () => {}, logger: {} });
     const byName = new Map(registeredTools.map((t) => [t.name, t] as const));
 
-    for (const name of ['dkg_knowledge_asset_publish', 'dkg_publish']) {
-      const desc = byName.get(name)!.parameters.properties.register_if_needed.description as string;
-      expect(desc, name).toContain('DEFAULT publishPolicy');
-      expect(desc, name).toContain('OriginTrail/dkg#1085');
-    }
-    // The safe rehydrating auto-register tool must NOT carry the caveat.
-    const shared = byName.get('dkg_shared_memory_publish')!.parameters.properties.register_if_needed.description as string;
-    expect(shared).not.toContain('DEFAULT publishPolicy');
-    expect(shared).not.toContain('dkg#1085');
+    const desc = byName.get('dkg_knowledge_asset_publish')!.parameters.properties.register_if_needed.description as string;
+    expect(desc).toContain('DEFAULT publishPolicy');
+    expect(desc).toContain('OriginTrail/dkg#1085');
+    // The legacy publish-bridge tools that used to carry / omit this caveat are gone.
+    expect(byName.has('dkg_publish')).toBe(false);
+    expect(byName.has('dkg_shared_memory_publish')).toBe(false);
   });
 
 
@@ -532,7 +517,7 @@ describe("DkgNodePlugin", () => {
   // needs it.
   // ---------------------------------------------------------------------------
 
-  it('dkg_subscribe / dkg_publish / dkg_query do not advertise or honor the v9 contextGraph_id alias', () => {
+  it('dkg_subscribe / dkg_knowledge_asset_publish / dkg_query do not advertise or honor the v9 contextGraph_id alias', () => {
     const plugin = new DkgNodePlugin();
     const tools: OpenClawTool[] = [];
     plugin.register({
@@ -543,7 +528,7 @@ describe("DkgNodePlugin", () => {
       logger: {},
     });
     const byName = new Map(tools.map((t) => [t.name, t] as const));
-    for (const name of ['dkg_subscribe', 'dkg_publish', 'dkg_query'] as const) {
+    for (const name of ['dkg_subscribe', 'dkg_knowledge_asset_publish', 'dkg_query'] as const) {
       const props = byName.get(name)!.parameters.properties;
       expect(props).not.toHaveProperty('contextGraph_id');
     }

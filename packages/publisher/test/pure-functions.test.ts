@@ -11,7 +11,11 @@ import {
   computePrivateRootV10 as computePrivateRoot,
   computeKARootV10 as computeKARoot,
   computeKCRootV10 as computeKCRoot,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+  catalogTripleKey,
   validatePublishRequest,
+  assertTrustedCatalogTriplesAreGeneratedFloor,
 } from '../src/index.js';
 import type { ValidationOptions } from '../src/validation.js';
 
@@ -158,6 +162,59 @@ describe('validatePublishRequest', () => {
     const result = validatePublishRequest(quads, manifest, CONTEXT_GRAPH, new Set());
     expect(result.valid).toBe(false);
     expect(result.errors[0]).toContain('Rule 2');
+  });
+
+  it('Rule 2 allows only exact generated private-CG catalog floor triples outside the manifest', () => {
+    const privateCg = 'private-catalog-cg';
+    const contentRoot = 'urn:test:shipment:1';
+    const contentQuad = q(
+      contentRoot,
+      'http://schema.org/name',
+      '"Shipment 1"',
+      `did:dkg:context-graph:${privateCg}`,
+    );
+    const catalog = generatedPrivateCatalogFloorQuads(privateCg);
+    const manifest = [{ tokenId: 1n, rootEntity: contentRoot }];
+
+    const accepted = validatePublishRequest(
+      [contentQuad, ...catalog],
+      manifest,
+      privateCg,
+      new Set(),
+      { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(privateCg) },
+    );
+    expect(accepted.valid).toBe(true);
+
+    const forged = [
+      contentQuad,
+      ...catalog,
+      {
+        subject: `did:dkg:context-graph:${privateCg}`,
+        predicate: 'urn:test:not-generated',
+        object: '"hidden"',
+        graph: '',
+      },
+    ];
+    const rejected = validatePublishRequest(
+      forged,
+      manifest,
+      privateCg,
+      new Set(),
+      { trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(privateCg) },
+    );
+    expect(rejected.valid).toBe(false);
+    expect(rejected.errors.some((e) => e.includes('Rule 2'))).toBe(true);
+  });
+
+  it('refuses partial generated catalog trust sets', () => {
+    const privateCg = 'private-catalog-cg';
+    const partial = new Set([
+      catalogTripleKey(generatedPrivateCatalogFloorQuads(privateCg)[0]),
+    ]);
+
+    expect(() =>
+      assertTrustedCatalogTriplesAreGeneratedFloor(privateCg, partial),
+    ).toThrow(/must exactly match/);
   });
 
   it('fails Rule 3: manifest root with no public triples and not fully private', () => {

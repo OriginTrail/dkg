@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IDKGPublishingConvictionNFT} from "./interfaces/IDKGPublishingConvictionNFT.sol";
+import {IContextGraphWaiverStorage} from "./interfaces/IContextGraphWaiverStorage.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
@@ -81,6 +82,16 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         uint256 indexed contextGraphId,
         address indexed payer,
         uint96 amount
+    );
+
+    /// @notice OT-RFC-53: emitted when the registration deposit is WAIVED because
+    ///         the CG is backed by a PCA the creator owns or is a registered
+    ///         agent of. The PCA's locked commitment is the anti-spam stake;
+    ///         the CG carries no own escrow and its publishing is funded by the PCA.
+    event ContextGraphRegistrationDepositWaived(
+        uint256 indexed contextGraphId,
+        uint256 indexed accountId,
+        address indexed creator
     );
 
     /// @notice Emitted when an admin sweeps a CG's residual escrow to the pool.
@@ -196,11 +207,51 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         // OT-RFC-53: anti-spam registration deposit, held as the CG's prepaid
         // publishing escrow. Skipped when ParametersStorage is unresolved
         // (deposit feature off) or the param is 0 (dormant default).
+        //
+        // WAIVER (quota-bounded): a CG backed by a PCA the creator owns or is a
+        // registered agent of can skip the deposit — but only up to the PCA's
+        // per-PCA quota (committedTRAC / deposit), enforced in
+        // ContextGraphWaiverStorage. So N deposit-free CGs still cost N×deposit
+        // of LOCKED PCA commitment (paid by the PCA instead of separate liquid
+        // TRAC), a sub-floor or dust PCA gets none, and a single PCA can no
+        // longer mint unlimited free CGs. A waived CG carries no escrow — the
+        // same state a dormant deposit produces — so the consume path is
+        // unchanged (it falls through to the PCA).
         if (address(parametersStorage) != address(0)) {
             uint96 deposit = parametersStorage.contextGraphRegistrationDeposit();
             if (deposit > 0) {
-                _pullRegistrationDeposit(contextGraphId, deposit);
+                if (_tryWaiveRegistrationDeposit(publishAuthorityAccountId, deposit)) {
+                    emit ContextGraphRegistrationDepositWaived(
+                        contextGraphId, publishAuthorityAccountId, msg.sender
+                    );
+                } else {
+                    _pullRegistrationDeposit(contextGraphId, deposit);
+                }
             }
+        }
+    }
+
+    /// @dev OT-RFC-53 deposit waiver. Delegates eligibility + the per-PCA quota
+    ///      to ContextGraphWaiverStorage (co-located with its counter, off this
+    ///      contract's bytecode budget). The storage contract verifies the PCA
+    ///      is active/backed, meets the governance stake floor, that `msg.sender`
+    ///      (the CG creator) owns or is a registered agent of the PCA, and that
+    ///      the PCA's quota isn't exhausted — consuming one quota slot when it
+    ///      returns true. Resolved fresh via the Hub; fails CLOSED (charge the
+    ///      deposit) on any resolution/call failure.
+    function _tryWaiveRegistrationDeposit(uint256 accountId, uint96 deposit) internal returns (bool) {
+        if (accountId == 0) return false;
+        address waiverAddr = address(0);
+        try hub.getContractAddress("ContextGraphWaiverStorage") returns (address addr) {
+            waiverAddr = addr;
+        } catch {
+            return false;
+        }
+        if (waiverAddr == address(0)) return false;
+        try IContextGraphWaiverStorage(waiverAddr).tryConsumeWaiver(accountId, msg.sender, deposit) returns (bool waived) {
+            return waived;
+        } catch {
+            return false;
         }
     }
 
@@ -451,9 +502,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
      *        authorization. Instead we LIVE-RESOLVE the current PCA NFT
      *        owner via `IDKGPublishingConvictionNFT.ownerOf(accountId)` and
      *        accept either (a) that live owner directly or (b) a registered
-     *        agent whose `agentToAccountId(publisher) == accountId`. Both
-     *        mappings on the NFT contract are cleared by the transfer hook,
-     *        so stale agent entries automatically stop authorizing.
+     *        agent whose `agentToAccountId(publisher) == accountId`. The live
+     *        owner check revokes the FORMER owner immediately on transfer. The
+     *        agent allow-list, however, is PRESERVED across transfer (it travels
+     *        with the PCA), so a former owner's registered agents retain publish
+     *        authority until the new owner calls `PublishingConviction.clearAgents`.
      *
      *      Branch order is IMPORTANT. Because the EOA/Safe branch matches on
      *      the stored authority snapshot, it MUST NOT run in PCA mode — an
@@ -534,9 +587,11 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
             return false;
         }
 
-        // Registered agent of the authorized account. `agentToAccountId`
-        // is cleared by the NFT's `_update` transfer hook, so stale agent
-        // entries automatically stop authorizing post-transfer.
+        // Registered agent of the authorized account. The agent allow-list is
+        // PRESERVED across PCA transfer (it travels with the token), so a former
+        // owner's agents keep authorizing here until the new owner explicitly
+        // resets it via `PublishingConviction.clearAgents`. The former OWNER is
+        // still revoked immediately by the live `ownerOf` check above.
         uint256 publisherAccountId = IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(publisher);
         return publisherAccountId != 0 && publisherAccountId == authorityAccountId;
     }

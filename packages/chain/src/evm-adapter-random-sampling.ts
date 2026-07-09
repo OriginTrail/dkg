@@ -71,22 +71,59 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     };
   }
 
+  /**
+   * Send an RS write (createChallenge / submitProof) through a rotation-selected
+   * REGISTERED operational wallet, with a self-heal for STALE eligibility. If
+   * the chosen wallet reverts `ProfileDoesntExist` — its operational key was
+   * removed out-of-band (a second instance sharing the identity, or a direct
+   * admin `removeKey` tx), so this process's `registeredOperationalAddresses`
+   * set is stale and the wallet now resolves to identity 0 on-chain — evict it
+   * from the set, drop its cached identityId, and retry ONCE on the primary
+   * signer (pool[0], the always-registered identity anchor). The revert is a
+   * pre-state-change modifier check (`RandomSampling.sol` `profileExists`), so
+   * the retry is idempotent. Best-effort: if the revert does not decode, this
+   * is a no-op and the original error propagates unchanged — never worse than
+   * the pre-rotation pinning.
+   */
+  protected async sendRandomSamplingTx(
+    contract: ethers.Contract,
+    method: string,
+    args: readonly unknown[],
+    label: string,
+    opts?: { gasLimitBufferBps?: number },
+  ): Promise<ethers.TransactionReceipt> {
+    const signer = await this.nextRandomSamplingSigner();
+    try {
+      return await this.sendContractTransaction(contract, method, args, signer, label, opts);
+    } catch (err) {
+      if (
+        signer.address.toLowerCase() !== this.signer.address.toLowerCase() &&
+        enrichEvmError(err) === 'ProfileDoesntExist'
+      ) {
+        this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
+        this.clearIdentityIdForAddress(signer.address);
+        return this.sendContractTransaction(contract, method, args, this.signer, label, opts);
+      }
+      throw err;
+    }
+  }
+
   async createChallenge(): Promise<CreateChallengeResult> {
     await this.init();
-
-    const identityStorage = await this.getIdentityStorage();
-    const identityId: bigint = await identityStorage.getIdentityId(this.signer.address);
 
     return this.withHubStaleRetry(async () => {
       const { rs, rss } = await this.getRandomSampling();
 
+      // Rotate across registered operational wallets (native-only, prefer idle,
+      // self-healing on a stale-eligibility revert) instead of pinning wallet #0
+      // — the score accrues to the node identity regardless of which registered
+      // wallet signs (getIdentityId(msg.sender)).
       let receipt: ethers.TransactionReceipt;
       try {
-        receipt = await this.sendContractTransaction(
+        receipt = await this.sendRandomSamplingTx(
           rs,
           'createChallenge',
           [],
-          this.signer,
           'create random-sampling challenge',
           // createChallenge's gas depends on per-block randomness (weighted
           // CG draw + `blockhash` entropy in `_deriveChallengeSeed`). The
@@ -106,31 +143,35 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       // off the Challenge struct fetched below, so everything stays
       // consistent if the storage layout shifts.
       let contextGraphId = 0n;
+      let challengeIdentityId: bigint | undefined;
       const rsIface = rs.interface;
       for (const log of receipt.logs) {
         try {
           const parsed = rsIface.parseLog({ topics: [...log.topics], data: log.data });
           if (parsed?.name === 'ChallengeGenerated') {
+            challengeIdentityId = BigInt(parsed.args.identityId ?? parsed.args[0]);
             contextGraphId = BigInt(parsed.args.contextGraphId);
             break;
           }
         } catch { /* not this contract */ }
       }
-      if (contextGraphId === 0n) {
+      if (contextGraphId === 0n || challengeIdentityId == null) {
         // The picker only emits the event when it actually lands on a CG,
         // so a missing event is a bug — fail loud rather than fall back
         // to "lookup by KC" which V10 doesn't support natively.
         throw new Error(
           'createChallenge succeeded on-chain but no ChallengeGenerated event was found in the receipt; ' +
-          'cannot route proof builder without contextGraphId.',
+          'cannot route proof builder without identityId and contextGraphId.',
         );
       }
 
-      const challengeRaw = await rss.getNodeChallenge(identityId);
+      const challengeRaw = await this.readContract(
+        rss, 'rss.getNodeChallenge', 'getNodeChallenge', challengeIdentityId,
+      );
       const challenge = this.toNodeChallenge(challengeRaw);
       if (!challenge) {
         throw new Error(
-          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${identityId}) ` +
+          `createChallenge succeeded but RandomSamplingStorage.getNodeChallenge(${challengeIdentityId}) ` +
           'returned an empty struct. This indicates a state inconsistency between ' +
           'RandomSampling and RandomSamplingStorage.',
         );
@@ -159,13 +200,16 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
     return this.withHubStaleRetry(async () => {
       const { rs } = await this.getRandomSampling();
 
+      // Same identity-scoped rotation as createChallenge (self-healing on a
+      // stale-eligibility revert): submitProof may be signed by a different
+      // registered wallet than the one that created the challenge — the on-chain
+      // challenge slot is keyed by identity, not signer.
       let receipt: ethers.TransactionReceipt;
       try {
-        receipt = await this.sendContractTransaction(
+        receipt = await this.sendRandomSamplingTx(
           rs,
           'submitProof',
           [contentHex, proofHex],
-          this.signer,
           'submit random-sampling proof',
         );
       } catch (err) {
@@ -282,7 +326,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   async getNodeChallenge(identityId: bigint): Promise<NodeChallenge | null> {
     await this.init();
     const { rss } = await this.getRandomSampling();
-    const raw = await rss.getNodeChallenge(identityId);
+    const raw = await this.readContract(
+      rss, 'rss.getNodeChallenge', 'getNodeChallenge', identityId,
+    );
     return this.toNodeChallenge(raw);
   }
 
@@ -293,7 +339,9 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
   ): Promise<bigint> {
     await this.init();
     const { rss } = await this.getRandomSampling();
-    const score: bigint = await rss.getNodeEpochProofPeriodScore(identityId, epoch, periodStartBlock);
+    const score: bigint = await this.readContract(
+      rss, 'rss.getNodeEpochProofPeriodScore', 'getNodeEpochProofPeriodScore', identityId, epoch, periodStartBlock,
+    );
     return BigInt(score);
   }
 }

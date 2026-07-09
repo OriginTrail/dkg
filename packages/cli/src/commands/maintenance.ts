@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -239,14 +239,12 @@ program
       return;
     }
 
-    // --- Git-based update path: hard refusal under OT-RFC-41 §4.2 / §5 PR 5 ---
+    // --- Manual git update path: hard refusal. Git source updates are daemon-only. ---
     //
-    // Bundle A shipped this branch with a deprecation warning;
-    // Bundle B converts it to a hard refusal. The npm path above
-    // is the canonical update mechanism for both Edge (`npm
-    // install -g`) and Core (`npm install` into a slot). The
-    // git-pull + build-from-source path is no longer reachable
-    // from any user-facing CLI entry point.
+    // The npm path above is the canonical manual update mechanism for both Edge
+    // (`npm install -g`) and Core (`npm install` into a slot). Core nodes that
+    // opt into `autoUpdate.source = "git"` run the build-from-source updater
+    // only from daemon polling, so the supervised restart flow owns activation.
     //
     // For monorepo contributors: the canonical "update" is
     // `git pull && pnpm install && pnpm build` from the repo
@@ -255,16 +253,13 @@ program
     // `npm install -g @origintrail-official/dkg` and let the
     // first-start migration record `~/.dkg/previous-version`.
     //
-    // The dead `_performUpdateInner` / `performUpdate` /
-    // `checkForUpdate` / `checkForNewCommit*` symbols stay in
-    // `daemon/auto-update.ts` for one release so a rollback to
-    // rc.11 still type-checks; a follow-up cleanup PR deletes
-    // them once Bundle B has soaked on devnet.
     console.error(
       '\n' +
-      '[dkg update] ERROR: git-based update is no longer supported.\n' +
+      '[dkg update] ERROR: manual git-based update is not supported.\n' +
       '\n' +
-      '  Per OT-RFC-41, all DKG node updates now flow through the npm registry.\n' +
+      '  Manual `dkg update` flows through the npm registry.\n' +
+      '  Advanced Core nodes may opt into daemon-polled git updates with\n' +
+      '  autoUpdate.source = "git", repo, and branch/ref in config.json.\n' +
       '\n' +
       '  - Monorepo contributors: use `git pull && pnpm install && pnpm build`\n' +
       '    from the repo root. `dkg update` is for npm-installed nodes only.\n' +

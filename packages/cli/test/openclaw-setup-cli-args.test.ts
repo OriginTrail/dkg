@@ -87,4 +87,17 @@ describe('openclawSetupAction — --no-fund/--fund flag threading', () => {
       openclawSetupAction({ dryRun: true }, makeCommand('default'), { runSetup: runSetup as any }),
     ).rejects.toThrow('adapter blew up');
   });
+
+  it('#1306: injects a loadOpWallets hook into runSetup (eager wallet creation)', async () => {
+    const runSetupArgs: any[] = [];
+    const runSetup = async (...args: any[]) => { runSetupArgs.push(args); };
+
+    await openclawSetupAction({ dryRun: true }, makeCommand('default'), { runSetup: runSetup as any });
+
+    expect(runSetupArgs).toHaveLength(1);
+    // The 2nd arg is the injected runtime deps; loadOpWallets must be wired so
+    // the adapter can eagerly create wallets before the daemon starts.
+    const [, runDeps] = runSetupArgs[0];
+    expect(typeof runDeps?.loadOpWallets).toBe('function');
+  });
 });

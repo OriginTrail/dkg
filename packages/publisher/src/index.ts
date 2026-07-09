@@ -3,10 +3,29 @@ export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } fro
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export { skolemizeByEntity, autoPartition } from './auto-partition.js';
 export {
+  ASSERTION_NAMED_GRAPH_PREFIX,
+  assertionOriginalGraph,
+  assertionScopedGraphUri,
+  listAssertionScopedGraphUris,
+  listGraphsByPrefix,
+  type AssertionScopedGraphRootMode,
+} from './assertion-scoped-graphs.js';
+export {
   canonicalPublishPayload,
   type CanonicalPublishPayload,
   type CanonicalManifestEntry,
+  type CanonicalPublishPayloadOptions,
 } from './canonical-publish-payload.js';
+export {
+  assertTrustedCatalogTriplesAreGeneratedFloor,
+  catalogTripleKey,
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+  splitTrustedGeneratedCatalogRootMap,
+  trustedCatalogTripleKeySet,
+  type TrustedCatalogTripleKeys,
+  type TrustedCatalogRootSplit,
+} from './catalog-trust.js';
 export { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 export {
   computeTripleHash,
@@ -26,6 +45,7 @@ export {
 } from './merkle.js';
 export { validatePublishRequest, type ValidationResult, type ValidationOptions } from './validation.js';
 export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export {
   DKGPublisher,
   StaleWriteError,
@@ -52,9 +72,21 @@ export {
   ACKCollector,
   DEFAULT_REQUIRED_ACKS,
   type ACKCollectorDeps,
+  type ACKCollectorParams,
   type CollectedACK,
   type ACKCollectionResult,
 } from './ack-collector.js';
+export {
+  type ACKTransport,
+  type ACKTransportFactory,
+} from './ack-transport.js';
+export {
+  selectACKCandidatePeers,
+  selectACKCandidatePeersWithDiagnostics,
+  type ACKCandidatePeerSelectionInput,
+  type ACKCandidatePeerDiagnostic,
+  type ACKCandidatePeerSelectionResult,
+} from './ack-peer-selection.js';
 export {
   ACKProviderError,
   RpcPreconditionError,
@@ -66,7 +98,31 @@ export {
   type PeerOutcome,
   type UnwrapRpcOptions,
 } from './ack-errors.js';
-export { StorageACKHandler, type StorageACKHandlerConfig } from './storage-ack-handler.js';
+export {
+  StorageACKHandler,
+  ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
+  DEFAULT_ACK_HANDLER_DEADLINE_MS,
+  type StorageAckDecision,
+  type StorageAckDecisionObserver,
+  type StorageACKHandlerConfig,
+} from './storage-ack-handler.js';
+export {
+  createStorageAckLifecycleObserver,
+  type StorageAckLifecycleObserverOptions,
+} from './storage-ack-lifecycle-observer.js';
+export {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
+  type StorageAckTimingInput,
+} from './storage-ack-timing.js';
+export {
+  withSignerRegistrationCache,
+  SIGNER_REGISTRATION_CACHE_TTL_MS,
+  SIGNER_REGISTRATION_STALE_WINDOW_MS,
+} from './signer-registration-cache.js';
 export {
   VerifyCollector,
   type VerifyCollectorDeps,
@@ -107,9 +163,12 @@ export {
   type LiftJobChainRecoverableState,
   type LiftJobHex,
   type LiftJobBigInt,
+  type KnowledgeAssetVmPublishRequest,
   type LiftJobTimeoutMetadata,
   type LiftJobFailurePolicy,
   type LiftAuthorityProof,
+  type LiftPublishRequestMetadata,
+  type LiftPublishSnapshotRequest,
   type LiftRequest,
   type LiftRequestAuthorSeal,
   type LiftJobTimestamps,
@@ -155,9 +214,13 @@ export {
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
 export {
+  AsyncLiftJobConflictError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncKnowledgeAssetVmPublishPreflightInput,
+  type AsyncKnowledgeAssetVmPublishPreflightResult,
   type AsyncLiftPublishExecutionInput,
   type AsyncLiftPublisherRecoveryResult,
   type AsyncLiftPublisherRecoveryResolver,
@@ -212,6 +275,10 @@ export {
   type AsyncLiftPublishSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
+export {
+  createKnowledgeAssetVmPublishSnapshotMetadata,
+  createKnowledgeAssetVmPublishSnapshotRequest,
+} from './async-lift-publisher-utils.js';
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,
@@ -222,7 +289,7 @@ export {
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
 export { UpdateHandler } from './update-handler.js';
-export { ChainEventPoller, type ChainEventPollerConfig, type OnContextGraphCreated } from './chain-event-poller.js';
+export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';

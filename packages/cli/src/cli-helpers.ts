@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from './config.js';
 import { ApiClient } from './api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from './publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from './cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from './store-wizard.js';
 import { runConfiguredSourceWorker } from './source-worker-runner.js';
 import { batchEntityQuads } from './batching.js';

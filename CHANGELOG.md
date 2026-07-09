@@ -1,14 +1,132 @@
 # Changelog
 
-All notable changes to the DKG V9 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [10.0.5] - 2026-07-08
+
+Node stability and sync hardening on top of 10.0.4, plus contract updates and post-canary mainnet-readiness fixes. Ends the oversize-literal retry loop that could pin sync CPU, keeps the `agents/_meta` graph off the sync plane (reduces sync fan-out load), gates node-UI metric store-scans on consumer presence, and repairs the 10.0.4 npm tarball, which shipped without its `network/*.json` overlays and `project.json` (npm-installed nodes were falling back to built-in defaults). Also ships updated PublishingConviction 10.0.8 contracts (sources + ABIs); the on-chain deploy is a separate, coordinated activity (see **Deployment**). The stable cut extends the `10.0.5-canary.1` testnet build with ACK-path hardening, RPC failover fixes, graph-indexed hot-path store reads, active-network peer isolation, git auto-update opt-in, and KA publish lifecycle observability.
+
+### Added
+
+- **PublishingConviction 10.0.8 contract updates** — updated contract sources and regenerated ABIs (#1524). The runtime contract surface (`packages/evm-module/abi/*.json`) is updated; nodes resolve `PublishingConviction` from the Hub per call and hot-swap the new logic with no restart, so 10.0.4 and 10.0.5 nodes both interoperate with either the 10.0.7 or 10.0.8 contract.
+- **KA publish lifecycle logs by Asset UAL** — publish lifecycle logs now carry the Asset UAL so operators can follow individual Knowledge Assets through the publish path (#1531).
+- **Git auto-update opt-in** — node operators can enable the Git-based auto-update path explicitly instead of relying only on package-manager based update flows (#1545).
+
+### Fixed
+
+- **Oversize-literal retry loop fixed** (#1529, #1530, #1532; OT-RFC-56 Fixes 2 & 3): an ingest-side guard rejects oversized literals and tombstones the offending assertion instead of re-fetching it repeatedly, a boot-time sweep clears graphs affected before the guard existed, and producer-side guards stop a node from emitting oversized literals in the first place.
+- **`agents/_meta` kept off the sync plane** (#1526, follow-up #1533): the per-agent `_meta` graph is no longer carried on the sync/catch-up path (reduces sync fan-out load), with retention behaviour corrected in the post-merge review follow-up.
+- **Node-UI metric store-scans gated on consumer presence** (#1525): the dashboard metric collector no longer issues store `COUNT` scans when nothing is consuming them, removing idle store load.
+- **npm tarball now ships runtime assets** (#1523): `network/*.json` overlays and `project.json` are guaranteed to be packed into the `@origintrail-official/dkg` tarball. The 10.0.4 tarball omitted them (a turbo-cache prepack regression), so npm-installed nodes silently fell back to built-in network defaults.
+- **Context-graph registration reads use RPC failover** — the CG-register deposit read path now routes through RPC failover instead of binding to a single endpoint (#1535).
+- **RPC failover endpoint stickiness** — read-after-write probes avoid immediately returning to recently failed RPC endpoints, reducing repeated `eth_call`/`eth_getLogs` failures during provider degradation (#1544).
+- **Publisher first-attempt public-CG quads** — public context-graph quads are inlined on the first publish attempt instead of relying on retry-side recovery (#1538).
+- **`agents/_meta` retention hardened** — retention and serve-wiring now include concurrency and drift guards so metadata cleanup does not race active agent state (#1534).
+- **Active-network peer isolation** — peers from other DKG networks are filtered out of active-network state and selection paths (#1546).
+- **Storage ACK priority lane hardening** — ACK timeout, fallback, and scheduler-pressure paths now preserve normal-lane capacity and retain fallback candidates under pressure (#1528).
+
+### Changed
+
+- **Devnet harness hygiene** (#1521): core-peers restore and the RS-rotation window fixes carried over from the 10.0.4 test run (test infrastructure only).
+- **Operator-tunable ACK deadlines** — StorageACK deadline and publisher send timeout are configurable so operators can tune publish behaviour for slower environments (#1540).
+- **Graph-indexed hot-path store reads** — GraphSetIndexStore rebuilds are deferred and SWM/VM reads bind to the named-graph index instead of falling back to broad store scans (#1541, #1542).
+
+### Deployment
+
+- **Contract sources/ABIs change in this release** (PublishingConviction 10.0.8, #1524) — this is **not** a "no contract changes" release.
+- **Testnet (Base Sepolia): deployed.** PublishingConviction 10.0.8 at `0x99341dEb6cdfACA94F359591ED3fD20da1901DAf` (deployment block 43880924); the updated deployment registry ships with this release.
+- **Mainnet (Base + Gnosis): pending.** Both chains remain on PublishingConviction 10.0.7 at release-cut time; the 10.0.8 deploy and PCA emission-schedule migration are a separate, coordinated on-chain activity. No node action is required for that deploy — nodes hot-swap the new logic from the Hub.
+
+## [10.0.4] - 2026-07-08
+
+2026-07-07 mainnet-incident hardening + transaction-dispatcher release. Publisher-side: ACK candidacy ranks-not-gates, empty-reply retry, responder ACK deadlines, SWM merkle-filter parity. Network-side: relay-watchdog churn fix and sync-storm calming (bounded catch-up fan-out, superseded-resume loop kill). Chain-side: the universal per-wallet transaction dispatcher lands end-to-end — every node write serialized per wallet, funding-aware generalized signer selection, and Random Sampling rotating across registered operational wallets instead of pinning wallet #0. Plus the codified manual release flow with signed-tag gates. **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.3).
+
+### Added
+
+- **Universal transaction dispatcher (Phases 0-4)**: every node write funnels through the per-operational-wallet serializer, closing the cross-type nonce race (#1503); funding floors (`minPublisherNativeWei`/`minPublisherTracWei`) plumbed config→adapter with fail-fast parsing of persisted string/number values, and the generalized `selectSigner(spec)` seam with typed funding modes (#1504 via #1516); **Random Sampling rotates `createChallenge`/`submitProof` across registered operational wallets** — fail-closed registered-set eligibility, per-metric funding cache so RS probes never poison publish TRAC reads, `ProfileDoesntExist` self-heal (#1506 via #1516), and on-chain identity revalidation of the chosen wallet at selection, evicting out-of-band re-registrations (#1519).
+- **Manual release promotion tooling and docs**: `release:verify-versions` / `verify-tag` (annotated+signed structure, tag-on-origin, main ancestry) / `build-info` / `promote` / `verify-published`, with the staged canary→testnet→mainnet promotion flow documented as the release process (#1498; signed-tag canary docs #1518).
+- **Devnet coverage for the incident class**: N-version harness + mixed-version interop suite with strictly-older `prev` resolution (#1513), storage-ACK store-outage suite — a real store paused mid-publish must yield a typed decline, quorum via healthy cores, and clean recovery (#1517), and an RS wallet-rotation suite (#1516).
+
+### Changed
+
+- **Release CI** now validates the manual release flow and keeps release automation focused on signed release gates instead of the removed disabled npm-publish workflow (#1498).
+- **Catch-up sync fan-out is bounded** (default 4 concurrent peers, `DKG_CATCHUP_MAX_CONCURRENT_PEERS`) on both the agent-internal paths and the daemon subscribe worker — the registry-wide unbounded fan-out was the 2026-07-07 sync-storm engine (#1511).
+
+### Fixed
+
+- **ACK peer selection** now uses the bundled relay list only for preference ordering, never eligibility: any connected, chain-valid core can complete quorum (the 2026-07-07 outage cap), while `ackCandidatePeerIds` remains a true allowlist for SDK callers that set it (#1501).
+- **Zero-length ACK replies** are treated as retryable transport failures instead of terminal `INVALID_SIGNATURE`, so a store hiccup or connection churn no longer permanently deselects a healthy peer (#1507).
+- **ACK handlers answer within a deadline** (send-timeout minus a safety margin, publish and update paths): a saturated store now produces a typed `CORE_TEMPORARILY_UNAVAILABLE` decline that rides the transient-retry ladder instead of dead-air the publisher mislabels (#1510).
+- **SWM merkle-root exclusion filter unified** publisher⇄responder via one shared helper, closing the `MERKLE_MISMATCH_IN_SWM` class for bookkeeping quads resident in the data graph (#1509; responder-boundary regression pinned in #1520).
+- **Public relay watchdog** no longer churns sibling-core connections on publicly-reachable nodes chasing a circuit reservation it can never obtain (#1508); a `/dnsaddr`-only announce no longer counts as direct reachability, so NAT'd nodes keep maintaining their reservations (#1518).
+- **Superseded-resume sync loop killed**: an aborted resumed round drops the remembered responder session and checkpoint, so the retry restarts fresh at offset 0 and makes progress instead of blind-retrying a doomed resume for the session TTL (#1512).
+
+### Deployment
+
+- **No new contract deployment.** No Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.3; existing v10 registries remain the deploy targets (re-verified across the full 10.0.4 merge set).
+
+## [10.0.3] - 2026-07-07
+
+Stability and node-operator UX release: Node UI PublishingConviction (PCA) owner-access hardening, folded-private ACK anchoring, reduced node RPC load, the WM→SWM promote fix, and a full repair of the devnet regression lane. **No smart-contract changes — no deployment required** (no Solidity source or ABI changes since 10.0.2).
+
+### Added
+
+- **RPC usage metrics** (#1409) and **reduced DKG node RPC load** across startup and steady-state polling (#1440).
+
+### Changed
+
+- **Node UI — PublishingConviction (PCA) owner-access model** refactor: a centralized owner-access + signer-planning model, an approve reducer/runner, and `ConvictionDetailView` decomposition (#1446, #1453, #1468, #1472; from the #1348 / #1350 / #1375 series).
+
+### Fixed
+
+- **Folded-private ACK anchoring** gated on storage-ack v2, with legacy V10 ACK-provider fallbacks (#1369, #1371).
+- **WM→SWM promote migration** isolated on a dedicated context graph (#1464, #1483).
+- **Base mainnet ACK candidate filtering** by active network relays (#1482).
+- **Devnet UI solc / config** (#1403) and **testnet store preflight resilience** (#1408).
+- **Devnet regression lane repaired** against the #1410 KA-publish CLI unification — a shared `runKaPublishLifecycle` helper, the rpc-quiet-window budget, the `daemon.log` double-write, and 3 flaky/blind spots (#1496).
+
+### Deployment
+
+- **No new contract deployment.** No Solidity source or ABI changes since 10.0.2; existing Base / Gnosis / Base-Sepolia registries recorded via #1405 remain the deploy targets.
 
 ### Fixed — `dkg init` on monorepo checkouts + oxigraph-server default for adapter/MCP setups (#960)
 
 - **V10 publish/update allowance recovery now translates raw ethers custom-error data before `TooLowAllowance` classification** (`packages/chain/src/evm-adapter.ts`): the shared populate-and-sign recovery gate decodes raw provider revert data first, so a fresh node can force one re-approval and retry when RPC allowance reads lag behind a mined TRAC approval.
 - **`dkg init` runs from a monorepo / checkout clone again** (`packages/cli/src/cli.ts`). PR #753 (RFC-41 Bundle B1c) hard-refused `dkg init` from a monorepo checkout; that was over-strict — the CLI's home resolver (`dkgDir()` → `resolveDkgConfigHome`) already routes a clone to `~/.dkg-dev` (kept separate from an npm install's `~/.dkg`), the same home the local dev daemon resolves, so there was no real risk of divergence. The hard refusal (and its non-functional `DKG_HOME` escape) is replaced by a one-line notice showing which home is being written. Restores the pre-#753 dev workflow: a clone runs `dkg init` exactly like an npm install, differing only in the home directory.
 - **OpenClaw / Hermes / MCP setups now seed the `oxigraph-server` default on a fresh node** (`packages/core/src/ensure-dkg-node-config.ts`). The rc.15 `oxigraph-server` default previously reached only nodes set up via the `dkg init` store-wizard; the shared `ensureDkgNodeConfig` helper (used by `dkg openclaw/hermes/mcp setup`) left `store` unset, so those nodes fell back to `oxigraph-worker`. It now adopts `oxigraph-server` on a **fresh** install (no existing config) with no explicit store — matching the wizard default — while never rewriting an existing node's backend (which would force a store reset) and preserving any explicit `store` block.
+
+## [10.0.2] - 2026-07-01
+
+**Google Open Knowledge Format (OKF) support.** The DKG can now turn a portable **Google Open Knowledge Format** bundle — Markdown + YAML frontmatter + untyped cross-links — into owned, cryptographically-provenanced RDF Knowledge Assets, and serialise a Context Graph cleanly back out to a conformant bundle. Alongside it: PCA agent- and operational-wallet management, a Context-Graph registration deposit waiver, sub-graph Random Sampling fixes, and backend-independent leaf canonicalization so a node can run on any SPARQL 1.1 store.
+
+### Added — Google OKF → DKG integration (#1388)
+
+- **`dkg okf import ./bundle`** maps a Google Open Knowledge Format bundle to owned, verifiable Knowledge Assets — **deterministic and offline** (no LLM, no network): the same bundle always yields identical triples and IRIs. OKF standardises *how* knowledge is written and exchanged but ships no verification, provenance or ownership layer; `@origintrail-official/dkg-okf` is the bridge that adds them, reconstructing the bundle's cross-concept link graph as RDF. The same portable Markdown, now provenanced, owned and shareable across agents.
+- **`--share`** finalizes the import into Shared Working Memory (free, team-visible); **`dkg okf verify`** gates the shared Context Graph against the source bundle per-predicate; **`dkg okf export <graph> ./out`** is a clean inverse that serialises a Context Graph back into a conformant OKF bundle. Ships as a new published package, `@origintrail-official/dkg-okf`.
+
+### Added — PCA agent & operational-wallet management (#1387, #1384, #1370)
+
+- **Bulk `registerAgents(uint256, address[])`** (#1387) — add many PCA agents in a single transaction instead of one-by-one.
+- **Agents are preserved when a PCA is transferred** (#1384) — a PublishingConviction account keeps its registered agents across ownership transfer.
+- **Node UI Admin page** (#1370) — manage operational wallets, PCAs and agent encryption keys from the Node UI via wallet-connect, gated to node-admin callers.
+
+### Added — Context-Graph registration deposit waiver (#1366)
+
+- An anti-spam Context-Graph registration deposit with a **waiver** for accounts holding a sufficient **active PublishingConviction commitment** (quota + minimum-commitment floor), pinned in the mainnet parameters.
+
+### Fixed — backend-independent V10 leaf canonicalization (#1386, #1399)
+
+- V10 merkle leaves are now computed from a **backend-independent value canon**, so nodes running **any SPARQL 1.1 store** (Oxigraph, Blazegraph, …) produce identical leaves for the same triple — Random Sampling no longer depends on which store backend a node runs. Validated against a live cross-backend oracle and a mixed-backend devnet. Spec: OT-RFC-57.
+
+### Fixed — sub-graph Random Sampling extraction (#1385)
+
+- The Random Sampling extractor now resolves a sub-graph Knowledge Asset's content across its data homes, so a KA published into a named sub-graph is extractable and provable (no `KCDataMissingError` stall).
+
+### Changed — Node UI (#1391)
+
+- Hide the Admin page entry point (icon + `/admin` route) by default.
 
 ## [10.0.0-rc.15] - 2026-06-03
 

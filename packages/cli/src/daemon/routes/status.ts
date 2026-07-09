@@ -55,7 +55,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter, resolveRpcUrls } from '@origintrail-official/dkg-chain';
+import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
@@ -197,8 +197,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
@@ -225,6 +223,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondIfChainRpcTransportError,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -623,6 +622,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const rpcEndpointCount = chainConf?.rpcUrl
       ? resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls).length
       : 0;
+    // Process-wide multi-RPC write-failover counters (host-only; no URLs).
+    // Reflects WRITE failover/exhaustion across all chain adapters in this
+    // daemon process; read-path failover is internal to the FallbackProvider.
+    const rpcFailoverStats = getRpcFailoverStats();
     const blockExplorerUrl =
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
@@ -728,6 +731,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
             configured: Boolean(chainConf.rpcUrl && chainConf.hubAddress),
             rpcEndpointCount,
             hubConfigured: Boolean(chainConf.hubAddress),
+            // Multi-RPC failover observability (counts only — no RPC URLs).
+            rpcFailovers: rpcFailoverStats.failovers,
+            rpcExhaustions: rpcFailoverStats.exhaustions,
+            rpcFailoversByClass: rpcFailoverStats.byErrorClass,
+            // Endpoint-stickiness: times the client stuck to a backup after a
+            // failover (a rising count = a configured primary is degraded).
+            rpcPreferredEstablishments: rpcFailoverStats.preferredEstablishments,
           }
         : null,
       updateAvailable:
@@ -1042,6 +1052,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         hasIdentity: identityId > 0n,
       });
     } catch (err: any) {
+      // A transient chain-RPC transport failure during on-chain identity
+      // creation is retryable (503/504), not a hard 500. The extra body fields
+      // preserve the route's identity contract on the retryable response.
+      if (respondIfChainRpcTransportError(res, err, { identityId: "0", hasIdentity: false })) return;
       return jsonResponse(res, 500, {
         error: err.message,
         identityId: "0",

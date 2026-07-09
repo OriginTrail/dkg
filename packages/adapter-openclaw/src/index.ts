@@ -20,9 +20,6 @@ export type {
   LocalWorkspaceDiscardRequest,
   LocalWorkspacePromoteRequest,
   LocalWorkspaceWriteRequest,
-  SharedMemoryPublishRequest,
-  SharedMemoryWriteRequest,
-  VerifiableMemoryPublishRequest,
 } from '@origintrail-official/dkg-core';
 export { DkgChannelPlugin, CHANNEL_NAME } from './DkgChannelPlugin.js';
 export {

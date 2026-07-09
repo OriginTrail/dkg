@@ -41,6 +41,8 @@ hermes gateway run --replace -v
 
 `dkg hermes setup` bootstraps the DKG node config (no separate `dkg init` needed), starts the daemon, optionally funds wallets, and wires the Hermes profile with replace-by-default provider election (use `--preserve-provider` to opt out, `--no-start` / `--no-fund` for advanced flows).&#x20;
 
+By default this sets up the node on **Gnosis mainnet** (`mainnet-gnosis`). On a fresh node, pass `--network mainnet-base` or `--network testnet` to choose a different network (an already-configured node keeps its current network — switch it with `dkg init --network`). Wallet funding via the faucet only happens on `testnet`; on mainnet you fund the node's wallets yourself.
+
 See the [adapter guide](https://github.com/OriginTrail/dkg/blob/main/packages/adapter-hermes/README.md) for details.
 
 ## OpenClaw&#x20;
@@ -60,6 +62,8 @@ openclaw gateway restart
 
 Use `--no-start`, `--no-fund`, and `--no-verify` only when the user or environment requires it.
 
+By default this sets up the node on **Gnosis mainnet** (`mainnet-gnosis`). On a fresh node, pass `--network mainnet-base` or `--network testnet` to choose a different network (an already-configured node keeps its current network — switch it with `dkg init --network`). Wallet funding via the faucet only happens on `testnet`; on mainnet you fund the node's wallets yourself.
+
 ## MCP
 
 Two commands wire DKG V10 into MCP-aware clients (Cursor, Claude Code, Claude Desktop, Windsurf, VSCode + GitHub Copilot Chat, Cline, Codex CLI):
@@ -73,6 +77,8 @@ Restart the client and inspect DKG tools.
 
 `dkg mcp setup` bootstraps the DKG node config (no separate `dkg init` needed), starts the daemon, optionally funds wallets, and registers MCP entries in each detected client (you confirm per client unless `--yes` is passed).&#x20;
 
+By default this sets up the node on **Gnosis mainnet** (`mainnet-gnosis`). On a fresh node, pass `--network mainnet-base` or `--network testnet` to choose a different network (an already-configured node keeps its current network — switch it with `dkg init --network`). Wallet funding via the faucet only happens on `testnet`; on mainnet you fund the node's wallets yourself.
+
 See the [MCP integration guide](https://github.com/OriginTrail/dkg/blob/main/packages/mcp-dkg/README.md) for client-by-client paths, mode overrides (`--installed` / `--monorepo`), the manual JSON shape, the contributor monorepo dev workflow, and troubleshooting (including the WSL2 caveat for Windows-side MCP clients).
 
 ## Standalone node
@@ -81,9 +87,20 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # interactive: prompts for node name, role, triple-store backend (default: oxigraph-server), relay, API port; auto-funds wallets on testnet if faucet reachable
+dkg init      # interactive: prompts for network, node name, role, triple-store backend (default: oxigraph-server), relay, API port
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
+
+`dkg init` asks which network to join — **Gnosis mainnet** (`mainnet-gnosis`, the default), `mainnet-base`, or `testnet` — at the prompt, or pass `--network <name>` to skip it. Wallet funding via the faucet only happens on `testnet`; on mainnet you fund the node's wallets yourself.
+
+For Core Node operation, initialize with the Core role:
+
+```bash
+dkg init --role core --network mainnet-gnosis
+dkg start
+```
+
+Core Nodes are registered on-chain with a node profile (`identityId`). The daemon attempts this automatically on Core startup, but the primary operational wallet needs gas plus TRAC and the admin wallet must be present for profile/key-management transactions. If you fund or fix wallets after the daemon is already running, call `POST /api/identity/ensure` as described in [Daemon Lifecycle](../use-dkg/run-node.md#core-node-profile-registration).
 
 Once running, open the dashboard at [http://127.0.0.1:9200/ui](http://127.0.0.1:9200/ui), or query directly:
 

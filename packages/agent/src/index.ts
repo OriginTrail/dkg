@@ -36,6 +36,14 @@ export {
 } from './auth/agent-delegation.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
+export {
+  NetworkAdmissionService,
+  peerIdsFromMultiaddr,
+  peerIdsFromMultiaddrs,
+  targetPeerIdFromMultiaddr,
+  type NetworkAdmissionOptions,
+  type NetworkAdmissionSnapshot,
+} from './p2p/network-admission.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
@@ -73,13 +81,24 @@ export {
 export { DKGAgent } from './dkg-agent.js';
 export type { EntityRetriever, RetrievedAnchor } from './drag/retriever.js';
 export type { DragFact, DragAnswerResult, DragNetworkAnswerResult, DragPerNode } from './dkg-agent-drag.js';
+export type { PcaConfirmationOutcome } from './dkg-agent-pca-confirmation.js';
 export {
   verifyBatch,
   buildBatchRejectionRecord,
+  batchRejectionAssertionName,
+  batchRejectionRecordToQuads,
   type VerifyBatchInput,
   type VerifyBatchResult,
   type BatchRejectionRecord,
 } from './swm/verify-batch.js';
+export {
+  reportBatchRejectionWithLifecycle,
+  type BatchRejectionReporterAgent,
+  type BatchRejectionAgentLaneOptions,
+  type BatchRejectionAuthorLaneOptions,
+  type ReportBatchRejectionInput,
+  type ReportBatchRejectionResult,
+} from './swm/batch-rejection-reporter.js';
 export { createCGHostEnumerator, type CGHostEnumerator, type CGHostEnumeratorDeps } from './swm/enumerate-cg-hosts.js';
 export {
   createSwmCatchupPeerSelector,
@@ -109,6 +128,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type PublishOpts,
   type PublishAsyncContent,
@@ -202,3 +222,17 @@ export {
   buildPublicProjection,
   type PublicProjectionInput,
 } from './context-graph-public-projection.js';
+// 2026-07-07 sync-storm mitigation (C-1) — the bounded catch-up fan-out mapper
+// and its shared cap (DKG_CATCHUP_MAX_CONCURRENT_PEERS, default 4). Exported on
+// the public surface because the CLI daemon's Worker-based catch-up runner
+// (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
+// registry-scale per-peer fan-out and must be bounded by the SAME knob, without
+// deep-importing the compiled `dist/` module.
+export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+// 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
+// fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
+// it identically to the in-agent lifecycle, without deep-importing `dist/`.
+// `parseBooleanEnv` is part of the shipped public surface (#1526) — keep it
+// exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
+// internal; only the in-agent lifecycle (at its env boundary) + tests use it.
+export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';

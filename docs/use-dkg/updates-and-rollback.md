@@ -7,13 +7,8 @@ doc_type: how-to
 
 # Updates and Rollback
 
-> **⚠️ Upgrading from rc.16 (or earlier) to rc.17?** rc.17 is an *off-chain*
-> breaking change (new per-KA store layout) with **no automatic wipe** — a plain
-> `dkg update` leaves the node running rc.17 over old-layout data, which causes a
-> sluggish / CPU-bound node and publish failures. Do the **one-time store wipe**
-> as part of the update: follow [**Upgrading to rc.17 — land it clean**](../UPGRADE_TO_RC17.md).
-> Also point the node at a **reliable chain RPC** — public endpoints rate-limit
-> and silently stall publishing.
+> **Tip:** point the node at a **reliable chain RPC** before updating — public
+> endpoints rate-limit and can silently stall publishing.
 
 Use the CLI update path for packaged installs:
 

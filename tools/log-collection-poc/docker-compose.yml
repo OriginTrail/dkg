@@ -1,0 +1,43 @@
+# Local reference log-collection stack for DKG V10 core nodes.
+#
+#   node  --OTLP/HTTP-->  OTel Collector  --OTLP-->  Loki  <--query--  Grafana
+#
+# This is the recommended self-host backend from the "Enable log collection on
+# core nodes" design: an OpenTelemetry Collector (the engine Grafana Alloy
+# wraps) in front of Loki, viewed in Grafana. Bring it up with:
+#
+#   docker compose up -d
+#
+# Then point a node at it (see README.md) or run `node send-sample-logs.mjs`.
+services:
+  loki:
+    image: grafana/loki:3.3.2
+    command: -config.file=/etc/loki/loki-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/loki-config.yaml:ro
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.117.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4318:4318" # OTLP/HTTP — point the node here
+      - "4317:4317" # OTLP/gRPC
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/ds.yaml:ro
+    depends_on:
+      - loki

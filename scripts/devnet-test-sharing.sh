@@ -737,8 +737,8 @@ c -X POST "http://127.0.0.1:9201/api/knowledge-assets/wm-secret/wm/write" \
 ok "WM data written to join-flow project"
 
 echo "--- 13c: Promote some data to SWM on Node 1 ---"
-c -X POST "http://127.0.0.1:9201/api/shared-memory/write" \
-  -d "{\"contextGraphId\":\"$CG2_ID\",\"quads\":[
+c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+  -d "{\"contextGraphId\":\"$CG2_ID\",\"name\":\"swm-shared\",\"finalize\":true,\"alsoShareSwm\":true,\"quads\":[
     $(ql 'urn:join-flow:shared1' 'http://schema.org/name' 'Shared Data'),
     $(q 'urn:join-flow:shared1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
   ]}" > /dev/null
@@ -987,26 +987,20 @@ else
 fi
 sleep 3
 
-echo "--- 15a: Publish SWM data to VM on Node 1 (promote-test project) ---"
-PUBLISH=$(devnet_publish_swm_all_roots 1 "$CG3_ID" false)
-PUB_STATUS=$(json_get "$PUBLISH" status)
-PUB_KCID=$(json_get "$PUBLISH" kaId)
-PUB_KAS=$(echo "$PUBLISH" | python3 -c '
-import sys,json
-try:
-  d=json.load(sys.stdin)
-  kas=d.get("kas",[])
-  print(len(kas))
-except: print("ERR")
-' 2>/dev/null)
-PUB_TX=$(json_get "$PUBLISH" txHash)
-echo "  Publish result: status=$PUB_STATUS kaId=$PUB_KCID kas=$PUB_KAS txHash=${PUB_TX:0:20}..."
-if [[ "$PUB_STATUS" == "published" || "$PUB_STATUS" == "created" || "$PUB_STATUS" == "mined" ]]; then
-  ok "SWM published to VM (status=$PUB_STATUS, $PUB_KAS knowledge asset(s))"
-elif [[ "$PUB_KCID" != "__NONE__" && "$PUB_KCID" != "__ERR__" ]]; then
-  ok "SWM publish completed (kaId=$PUB_KCID, status=$PUB_STATUS)"
+echo "--- 15a: Publish named KAs to VM on Node 1 (promote-test project) ---"
+PUBLISH_DOC=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/promo-doc/vm/publish" \
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":false}}")
+PUBLISH_API=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/api-draft/vm/publish" \
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":false}}")
+PUB_STATUS=$(json_get "$PUBLISH_API" status)
+PUB_KCID=$(json_get "$PUBLISH_API" kaId)
+PUB_TX=$(json_get "$PUBLISH_API" txHash)
+DOC_STATUS=$(json_get "$PUBLISH_DOC" status)
+echo "  promo-doc status=$DOC_STATUS; api-draft status=$PUB_STATUS kaId=$PUB_KCID txHash=${PUB_TX:0:20}..."
+if [[ ( "$DOC_STATUS" == "confirmed" || "$DOC_STATUS" == "finalized" ) && ( "$PUB_STATUS" == "confirmed" || "$PUB_STATUS" == "finalized" ) ]]; then
+  ok "Named KAs published to VM (promo-doc + api-draft)"
 else
-  fail "SWM publish failed: $(echo "$PUBLISH" | head -c 300)"
+  fail "Named KA publish failed: promo-doc=${PUBLISH_DOC:0:180} api-draft=${PUBLISH_API:0:180}"
 fi
 
 echo "--- 15b: Verify VM data on Node 1 ---"
@@ -1081,25 +1075,20 @@ else
 fi
 sleep 3
 
-echo "--- 16a: Publish CG1 SWM → VM on Node 1 ---"
-PUB_CG1=$(devnet_publish_swm_all_roots 1 "$CG_ID" false)
-PUB_CG1_STATUS=$(json_get "$PUB_CG1" status)
-PUB_CG1_KAS=$(echo "$PUB_CG1" | python3 -c '
-import sys,json
-try: print(len(json.load(sys.stdin).get("kas",[])))
-except: print("ERR")
-' 2>/dev/null)
-if [[ "$PUB_CG1_STATUS" == "published" || "$PUB_CG1_STATUS" == "created" || "$PUB_CG1_STATUS" == "mined" ]]; then
-  ok "CG1 SWM published to VM ($PUB_CG1_KAS KAs, status=$PUB_CG1_STATUS)"
+echo "--- 16a: Publish CG1 named KAs to VM on Node 1 ---"
+PUB_CG1_BETA=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/draft-beta/vm/publish" \
+  -d "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"clearAfter\":false}}")
+PUB_CG1_DOC=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/doc-alpha/vm/publish" \
+  -d "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"clearAfter\":false}}")
+PUB_CG1_STATUS=$(json_get "$PUB_CG1_BETA" status)
+PUB_CG1_DOC_STATUS=$(json_get "$PUB_CG1_DOC" status)
+if [[ ( "$PUB_CG1_STATUS" == "confirmed" || "$PUB_CG1_STATUS" == "finalized" ) && ( "$PUB_CG1_DOC_STATUS" == "confirmed" || "$PUB_CG1_DOC_STATUS" == "finalized" ) ]]; then
+  ok "CG1 named KAs published to VM (draft-beta + doc-alpha)"
 else
-  PUB_CG1_KCID=$(json_get "$PUB_CG1" kaId)
-  if [[ "$PUB_CG1_KCID" != "__NONE__" && "$PUB_CG1_KCID" != "__ERR__" ]]; then
-    ok "CG1 SWM publish completed (kaId=$PUB_CG1_KCID, status=$PUB_CG1_STATUS)"
-  else
-    fail "CG1 SWM publish failed: $(echo "$PUB_CG1" | head -c 300)"
-  fi
+  fail "CG1 named KA publish failed: draft-beta=${PUB_CG1_BETA:0:180} doc-alpha=${PUB_CG1_DOC:0:180}"
 fi
 
+echo "--- 16b: Verify VM data on Node 1 for private CG ---"
 echo "--- 16b: Node 2 (participant) sees VM data ---"
 N2_CG1_VM_OK=false
 for i in $(seq 1 20); do
@@ -1156,7 +1145,13 @@ for port_label in "9202:Node2" "9204:Node4" "9203:Node3"; do
 done
 
 echo "--- 16f: Publish with clearAfter=true, then verify SWM is empty ---"
-PUB_CLEAR=$(devnet_publish_swm_all_roots 1 "$CG3_ID" true)
+CLEAR_NAME="clear-after-smoke"
+c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"name\":\"$CLEAR_NAME\",\"quads\":[
+    $(ql 'urn:promote-test:clear-after' 'http://schema.org/name' 'Clear After Smoke')
+  ],\"finalize\":true,\"alsoShareSwm\":true}" > /dev/null
+PUB_CLEAR=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/$CLEAR_NAME/vm/publish" \
+  -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":true}}")
 PUB_CLEAR_STATUS=$(json_get "$PUB_CLEAR" status)
 sleep 2
 N1_SWM_CLEARED=$(c -X POST "http://127.0.0.1:9201/api/query" \

@@ -127,7 +127,9 @@
             "shardingTableSizeLimit": "500",
             "askUpperBoundFactor": "1467000000000000000",
             "askLowerBoundFactor": "533000000000000000",
-            "v81ReleaseEpoch": "6"
+            "v81ReleaseEpoch": "6",
+            "contextGraphRegistrationDeposit": "100000000000000000000",
+            "minPcaCommitmentForCgWaiver": "25000000000000000000000"
         },
         "Chronos": {
             "startTime": "1736812800",

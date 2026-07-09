@@ -18,10 +18,12 @@ import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString, peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { ConnectionTransport, DKGNodeConfig } from './types.js';
-import { DHT_PROTOCOL, DKG_GOSSIP_MAX_RPC_BYTES } from './constants.js';
+import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
-import { RelayFlapGuard, parseCircuitRelayPeerIds, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
+import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
+import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
+import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -479,6 +481,29 @@ export function isPublicLikeAddress(addr: string): boolean {
   return false;
 }
 
+/**
+ * True when the node advertises at least one DIRECT (non-circuit) public
+ * self-address — i.e. peers can dial it without a relay hop. Such a node does
+ * not need client-side circuit reservations, so the relay watchdog must not
+ * `close()` + redial relay-target connections trying to force one it will
+ * never obtain (the 2026-07-07 Gnosis mainnet ACK-stream churn). A `/p2p-circuit`
+ * self-address is proof of the OPPOSITE — reachability THROUGH a relay — so it
+ * is explicitly excluded here.
+ */
+export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolean {
+  return selfAddrs.some(
+    (a) =>
+      !a.includes('/p2p-circuit') &&
+      // A /dnsaddr is a POINTER, not a transport: its TXT records may resolve
+      // to circuit-only or private addresses, so announcing one is no proof of
+      // direct dialability — treating it as direct would let a NAT'd node skip
+      // reservation recovery and silently lose relay reachability. Concrete
+      // transports (/ip4, /ip6, /dns4, /dns6 + port) remain valid evidence.
+      !a.startsWith('/dnsaddr/') &&
+      isPublicLikeAddress(a),
+  );
+}
+
 export class DKGNode {
   private node: Libp2p<DKGServices> | null = null;
   private readonly config: DKGNodeConfig;
@@ -848,6 +873,15 @@ export class DKGNode {
       );
     }
 
+    const activeNetworkRelayPeerIds = this.config.networkIdentity
+      ? new Set(usableRelayCandidates.map(({ peerId }) => peerId.toString()))
+      : undefined;
+    const activeRelayNetworkPolicy = buildActiveRelayNetworkPolicy(
+      activeNetworkRelayPeerIds,
+      (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+    );
+    const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
+
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
     const transports: any[] = [
@@ -871,12 +905,16 @@ export class DKGNode {
           ? {
               maxInboundStopStreams: relayCaps.maxInboundStopStreams,
               maxOutboundStopStreams: relayCaps.maxOutboundStopStreams,
+              ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
               ...(isEdgeWithRelays
                 ? { reservationConcurrency: relayReservationCount }
                 : {}),
             }
           : isEdgeWithRelays
-            ? { reservationConcurrency: relayReservationCount }
+            ? {
+                reservationConcurrency: relayReservationCount,
+                ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
+              }
             : undefined,
       ),
     ];
@@ -898,7 +936,13 @@ export class DKGNode {
     const services: Record<string, any> = {
       identify: identify(),
       ping: ping(),
-      dht: kadDHT(buildKadDHTOptions(this.config, DHT_PROTOCOL)),
+      dht: kadDHT(buildKadDHTOptions(
+        this.config,
+        dhtProtocolForNetwork(
+          this.config.networkIdentity?.networkId,
+          this.config.networkIdentity?.chainId,
+        ),
+      )),
       pubsub: gossipsub({
         emitSelf: false,
         allowPublishToZeroTopicPeers: true,
@@ -1073,7 +1117,7 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayFlapConnectionGater(),
+      connectionGater: this.createRelayConnectionGater(activeRelayNetworkPolicy?.connectionGater),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1189,6 +1233,24 @@ export class DKGNode {
     // hint stays accurate within a single iteration.
     let circuitSelfAddrs = node.getMultiaddrs().map(ma => ma.toString()).filter(a => a.includes('/p2p-circuit'));
     let haveAnyReservation = circuitSelfAddrs.length > 0;
+    // A publicly-reachable node — one advertising a direct, non-circuit
+    // public self-address (e.g. a Core Node on a public IP) — does not need
+    // client-side circuit reservations at all: peers dial it directly. On
+    // such a node libp2p never forms a `/p2p-circuit` self-addr, so
+    // `haveAnyReservation` stays false forever and the reservation-recovery
+    // branch below would `close()` + redial every relay-target connection on
+    // each grace-window expiry — permanent churn against the very sibling
+    // cores that StorageACK streams run over. (2026-07-07 Gnosis mainnet: the
+    // watchdog dropping 61u7AUrG/Xw8orCA1 aborted in-flight ACK streams →
+    // empty replies the publisher mislabeled as INVALID_SIGNATURE.) When the
+    // node is publicly reachable we treat every relay's reservation gate as
+    // satisfied and skip the forced drop+redial; the benign
+    // reconnect-on-disconnect path below still keeps relay connections alive
+    // for NAT'd peers that reach us over a hop. Snapshotted once per tick —
+    // a node's public-ness doesn't change mid-tick.
+    const nodeIsPubliclyReachable = nodeHasDirectPublicAddress(
+      node.getMultiaddrs().map((ma) => ma.toString()),
+    );
     // Distinct count of CONFIGURED relays that currently hold a
     // reservation. This is the "do we have enough reservations?"
     // signal — not "does every peer hold one?". Recomputed alongside
@@ -1257,6 +1319,7 @@ export class DKGNode {
       // target > current is still detected and recovered) without
       // demanding 100% coverage when target < relayPeers.length.
       const reservationGateSatisfied =
+        nodeIsPubliclyReachable ||
         thisRelayHasReservation ||
         reservedRelayCount >= this.relayReservationCountTarget;
       if (transportUp && reservationGateSatisfied) {
@@ -1415,15 +1478,23 @@ export class DKGNode {
     }
   }
 
-  private createRelayFlapConnectionGater(): ConnectionGater {
+  private createRelayConnectionGater(activeRelayGater?: RelayedConnectionGater): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
     // regression fails a test instead of silently leaving the guard inert.
-    return buildRelayFlapConnectionGater(
+    const flapGater = buildRelayFlapConnectionGater(
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
-    ) as ConnectionGater;
+    );
+    return {
+      denyInboundRelayedConnection: (relay, remotePeer) =>
+        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
+        flapGater.denyInboundRelayedConnection(relay, remotePeer),
+      denyDialMultiaddr: (multiaddr) =>
+        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
+        flapGater.denyDialMultiaddr(multiaddr),
+    } as ConnectionGater;
   }
 
   /**

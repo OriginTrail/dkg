@@ -14,10 +14,11 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   decodeStorageACK,
+  decryptV10PublishPayload,
   encodePublishIntent,
   isStorageACKDecline,
 } from '@origintrail-official/dkg-core';
-import { StorageACKHandler } from '@origintrail-official/dkg-publisher';
+import { StorageACKHandler, type KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
@@ -91,6 +92,7 @@ async function resolveEncryptInlinePayload(
   agentLike: any,
   contextGraphId: string,
   publishContextGraphId?: string,
+  options?: { aeadBindingContextGraphId?: string },
 ) {
   // RFC-39 / LU-11 refactor extracted the access-policy probe + curated
   // bootstrap into the private helper `_resolveCuratedChainKeyContext`,
@@ -111,6 +113,25 @@ async function resolveEncryptInlinePayload(
     undefined,
     undefined,
     publishContextGraphId,
+    options,
+  );
+}
+
+async function resolveEncryptInlineChunked(
+  agentLike: any,
+  contextGraphId: string,
+  publishContextGraphId?: string,
+  options?: { aeadBindingContextGraphId?: string },
+) {
+  agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)
+    ._resolveCuratedChainKeyContext;
+  return (DKGAgent.prototype as any)._resolveEncryptInlineChunked.call(
+    agentLike,
+    contextGraphId,
+    undefined,
+    undefined,
+    publishContextGraphId,
+    options,
   );
 }
 
@@ -164,12 +185,95 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     expect(agentLike.chain.getContextGraphAccessPolicy.calls).toEqual([]);
   });
 
+  it('keeps an internally derived same-CG numeric binding id out of LU-5 policy lookup (#1309)', async () => {
+    const agentLike = makeAgentLike();
+    agentLike.resolveOnChainAccessPolicyState = recorder(async (cgId: string) => {
+      if (cgId !== 'sports') {
+        throw new Error(`unexpected policy lookup for ${cgId}`);
+      }
+      return 0;
+    });
+    agentLike.readLiveOnChainAccessPolicy = recorder(async (id: string) => {
+      throw new Error(`raw target probe should not run for derived binding id ${id}`);
+    });
+
+    await expect(
+      resolveEncryptInlinePayload(agentLike, 'sports', undefined, {
+        aeadBindingContextGraphId: '1',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(agentLike.resolveOnChainAccessPolicyState.calls[0][0]).toBe('sports');
+    expect(agentLike.readLiveOnChainAccessPolicy.calls).toEqual([]);
+  });
+
+  it('keeps an internally derived same-CG numeric binding id out of LU-11 policy lookup (#1309)', async () => {
+    const agentLike = makeAgentLike();
+    agentLike.resolveOnChainAccessPolicyState = recorder(async (cgId: string) => {
+      if (cgId !== 'sports') {
+        throw new Error(`unexpected policy lookup for ${cgId}`);
+      }
+      return 0;
+    });
+    agentLike.readLiveOnChainAccessPolicy = recorder(async (id: string) => {
+      throw new Error(`raw target probe should not run for derived binding id ${id}`);
+    });
+
+    await expect(
+      resolveEncryptInlineChunked(agentLike, 'sports', undefined, {
+        aeadBindingContextGraphId: '1',
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(agentLike.resolveOnChainAccessPolicyState.calls[0][0]).toBe('sports');
+    expect(agentLike.readLiveOnChainAccessPolicy.calls).toEqual([]);
+  });
+
+  it('uses source policy for same-CG private derived bindings before sender-key bootstrap (#1309)', async () => {
+    const agentLike = makeAgentLike();
+    agentLike.resolveOnChainAccessPolicyState = recorder(async (cgId: string) => {
+      if (cgId !== 'private-cg') {
+        throw new Error(`unexpected policy lookup for ${cgId}`);
+      }
+      return 1;
+    });
+    agentLike.readLiveOnChainAccessPolicy = recorder(async (id: string) => {
+      throw new Error(`raw target probe should not run for derived binding id ${id}`);
+    });
+    agentLike.loadSwmSenderKeyState = recorder(async () => undefined);
+    agentLike.getLocalSigningAgentForAddress = recorder(() => null);
+    agentLike.defaultAgentAddress = ethers.Wallet.createRandom().address;
+    agentLike.peerId = 'peer-1';
+
+    await expect(
+      resolveEncryptInlinePayload(agentLike, 'private-cg', undefined, {
+        aeadBindingContextGraphId: '2',
+      }),
+    ).rejects.toThrow(/cannot bootstrap swm-sender-key/);
+
+    expect(agentLike.resolveOnChainAccessPolicyState.calls[0][0]).toBe('private-cg');
+    expect(agentLike.readLiveOnChainAccessPolicy.calls).toEqual([]);
+  });
+
   it('fails closed when a remap target numeric CG policy cannot be resolved', async () => {
     const agentLike = makeAgentLike({
       accessPolicyError: new Error('rpc unavailable'),
     });
 
     await expect(resolveEncryptInlinePayload(agentLike, 'local-public-cg', '42')).rejects.toThrow(
+      /target CG "42" curated=unknown/,
+    );
+  });
+
+  it('LU-11 fails closed when a remap target numeric CG policy cannot be resolved', async () => {
+    const agentLike = makeAgentLike({
+      accessPolicyError: new Error('rpc unavailable'),
+    });
+
+    await expect(resolveEncryptInlineChunked(agentLike, 'local-public-cg', '42')).rejects.toThrow(
+      /LU-11: publish access-policy is unknown/,
+    );
+    await expect(resolveEncryptInlineChunked(agentLike, 'local-public-cg', '42')).rejects.toThrow(
       /target CG "42" curated=unknown/,
     );
   });
@@ -188,6 +292,73 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
     await expect(resolveEncryptInlinePayload(agentLike, 'local-public-cg', '42')).resolves.toBeUndefined();
     expect(agentLike.chain.getContextGraphAccessPolicy.calls.at(-1)).toEqual([42n]);
     expect(contextGraphExists.calls).not.toContainEqual(['42']);
+  });
+
+  it('rejects explicit remap when source is curated and numeric target is public', async () => {
+    const agentLike = makeAgentLike({ accessPolicy: 0 });
+    agentLike.resolveOnChainAccessPolicyState = recorder(async (cgId: string) => {
+      if (cgId === 'private-source') return 1;
+      throw new Error(`unexpected source lookup for ${cgId}`);
+    });
+
+    await expect(resolveEncryptInlinePayload(agentLike, 'private-source', '42')).rejects.toThrow(
+      /remap publish source\/target access-policy mismatch/,
+    );
+  });
+
+  it('rejects explicit remap when source is public and numeric target is curated', async () => {
+    const agentLike = makeAgentLike({ accessPolicy: 1 });
+    agentLike.resolveOnChainAccessPolicyState = recorder(async (cgId: string) => {
+      if (cgId === 'public-source') return 0;
+      throw new Error(`unexpected source lookup for ${cgId}`);
+    });
+
+    await expect(resolveEncryptInlinePayload(agentLike, 'public-source', '42')).rejects.toThrow(
+      /remap publish source\/target access-policy mismatch/,
+    );
+  });
+
+  it('binds LU-5 AEAD to the resolver-returned binding id, not the local source id', async () => {
+    const chainKey = new Uint8Array(32).fill(9);
+    const plaintext = new TextEncoder().encode('<urn:s> <urn:p> "o" <urn:g> .');
+    const agentLike = {
+      _resolveCuratedChainKeyContext: recorder(async () => ({
+        chainKey,
+        aeadCgId: '1',
+        senderAddress: ethers.Wallet.createRandom().address,
+      })),
+    } as any;
+
+    const encryptInlinePayload = await (DKGAgent.prototype as any)._resolveEncryptInlinePayload.call(
+      agentLike,
+      'sports',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '1' },
+    );
+    expect(encryptInlinePayload).toBeDefined();
+
+    const encrypted = await encryptInlinePayload(plaintext);
+    const recovered = decryptV10PublishPayload({
+      chainKey,
+      contextGraphId: '1',
+      encryptedPayload: encrypted,
+    });
+    expect(Buffer.from(recovered).equals(Buffer.from(plaintext))).toBe(true);
+    expect(() => decryptV10PublishPayload({
+      chainKey,
+      contextGraphId: 'sports',
+      encryptedPayload: encrypted,
+    })).toThrow();
+    expect(agentLike._resolveCuratedChainKeyContext.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      undefined,
+      'LU-5',
+      { aeadBindingContextGraphId: '1' },
+    ]);
   });
 });
 
@@ -239,13 +410,15 @@ describe('DKGAgent._publish inline encryption routing', () => {
       'local-cg',
       'sg-a',
       undefined,
-      '42',
+      undefined,
+      { aeadBindingContextGraphId: '42' },
     ]);
     expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
       'local-cg',
       'sg-a',
       undefined,
-      '42',
+      undefined,
+      { aeadBindingContextGraphId: '42' },
     ]);
     expect(publisherPublish.calls.at(-1)).toEqual([expect.objectContaining({
       accessPolicy: 'public',
@@ -253,6 +426,541 @@ describe('DKGAgent._publish inline encryption routing', () => {
       encryptInlinePayload,
       encryptInlineChunked,
     })]);
+  });
+
+  it('routes direct encrypted private publishes to the publisher without an implicit catalog floor', async () => {
+    const encryptInlinePayload = recorder(async (plaintext: Uint8Array) => plaintext);
+    const encryptInlineChunked = recorder(() => undefined);
+    const publisherError = new Error(
+      'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model.',
+    );
+    const publisherPublish = recorder(async () => {
+      throw publisherError;
+    });
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['private-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '42'),
+      chain: {},
+      peerId: 'peer-1',
+      publisher: {
+        publish: publisherPublish,
+      },
+      broadcastPublish: recorder(async () => undefined),
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => encryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
+    } as any;
+
+    await expect((DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'private-cg',
+      [{ subject: 's', predicate: 'p', object: '"public"', graph: 'g' }],
+      [{ subject: 's', predicate: 'secret', object: '"private"', graph: 'g' }],
+      {
+        subGraphName: 'sg-private',
+        publisherNodeIdentityIdOverride: 0n,
+      },
+    )).rejects.toBe(publisherError);
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'private-cg',
+      'sg-private',
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    const publishArgs = publisherPublish.calls.at(-1)?.[0];
+    expect(publishArgs).toEqual(expect.objectContaining({
+      contextGraphId: 'private-cg',
+      privateQuads: [{ subject: 's', predicate: 'secret', object: '"private"', graph: 'g' }],
+      publishContextGraphId: '42',
+      encryptInlinePayload,
+      encryptInlineChunked,
+    }));
+    expect(publishArgs).not.toHaveProperty('trustedNonManifestCatalogTriples');
+  });
+
+  it('keeps caller-supplied mismatched onChainContextGraphId as an explicit policy target', async () => {
+    const publisherPublish = recorder(async () => ({
+      status: 'confirmed',
+      kaId: '1',
+    }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['local-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '42'),
+      chain: {},
+      peerId: 'peer-1',
+      publisher: {
+        publish: publisherPublish,
+      },
+      broadcastPublish: recorder(async () => undefined),
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+    } as any;
+
+    await (DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'local-cg',
+      [{ subject: 's', predicate: 'p', object: 'o', graph: 'g' }],
+      undefined,
+      {
+        onChainContextGraphId: '99',
+      },
+    );
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'local-cg',
+      undefined,
+      undefined,
+      '99',
+      { aeadBindingContextGraphId: '99' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'local-cg',
+      undefined,
+      undefined,
+      '99',
+      { aeadBindingContextGraphId: '99' },
+    ]);
+    expect(publisherPublish.calls.at(-1)).toEqual([expect.objectContaining({
+      publishContextGraphId: '99',
+    })]);
+  });
+});
+
+describe('DKGAgent.update inline encryption routing', () => {
+  it('passes derived update on-chain id as binding-only while preserving publisher target', async () => {
+    const updateEncryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
+    const updateEncryptInlineChunked = async () => ({
+      ciphertextChunksRoot: new Uint8Array(32),
+      ciphertextChunkCount: 0,
+      totalCiphertextBytes: 0,
+      ciphertextChunks: [],
+    });
+    const publisherUpdate = recorder(async () => ({
+      status: 'confirmed',
+    }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      getContextGraphOnChainId: recorder(async () => '42'),
+      createV10UpdateACKProvider: recorder(() => undefined),
+      node: { peerId: { toString: () => 'peer-1' } },
+      publisher: {
+        update: publisherUpdate,
+      },
+      _resolveEncryptInlinePayload: recorder(async () => updateEncryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => updateEncryptInlineChunked),
+    } as any;
+
+    await (DKGAgent.prototype as any).update.call(
+      agentLike,
+      123n,
+      'private-cg',
+      [{ subject: 's', predicate: 'p', object: '"o"', graph: 'g' }],
+    );
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'private-cg',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'private-cg',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    expect(publisherUpdate.calls.at(-1)).toEqual([
+      123n,
+      expect.objectContaining({
+        publishContextGraphId: '42',
+        encryptInlinePayload: updateEncryptInlinePayload,
+        encryptInlineChunked: updateEncryptInlineChunked,
+      }),
+    ]);
+  });
+});
+
+describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
+  function makeSwmPublishAgentLike(onChainId = '1') {
+    const publisherPublishFromSharedMemory = recorder(async () => ({
+      status: 'tentative',
+      kaId: '1',
+    }));
+    return {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      getContextGraphOnChainId: recorder(async () => onChainId),
+      createV10ACKProvider: recorder(() => undefined),
+      isPrivateContextGraph: recorder(async () => false),
+      chain: {},
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      publisher: {
+        publishFromSharedMemory: publisherPublishFromSharedMemory,
+      },
+    } as any;
+  }
+
+  it('passes derived same-CG on-chain id as binding-only and publisher chain target', async () => {
+    const agentLike = makeSwmPublishAgentLike('1');
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(agentLike, 'sports', 'all');
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '1' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '1' },
+    ]);
+    expect(agentLike.publisher.publishFromSharedMemory.calls.at(-1)).toEqual([
+      'sports',
+      'all',
+      expect.objectContaining({
+        publishContextGraphId: undefined,
+        onChainContextGraphId: '1',
+      }),
+    ]);
+  });
+
+  it('passes explicit sub-CG remap id as policy target and binding id', async () => {
+    const agentLike = makeSwmPublishAgentLike('should-not-be-used');
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      'sports',
+      'all',
+      { subContextGraphId: '1' },
+    );
+
+    expect(agentLike.getContextGraphOnChainId.calls).toEqual([]);
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      '1',
+      { aeadBindingContextGraphId: '1' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      '1',
+      { aeadBindingContextGraphId: '1' },
+    ]);
+    expect(agentLike.publisher.publishFromSharedMemory.calls.at(-1)).toEqual([
+      'sports',
+      'all',
+      expect.objectContaining({
+        publishContextGraphId: '1',
+        onChainContextGraphId: '1',
+      }),
+    ]);
+  });
+});
+
+describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
+  it('lets resolved real encryption callbacks override queued fail-closed placeholders', async () => {
+    const realInline = recorder(async (plaintext: Uint8Array) => new Uint8Array([...plaintext, 0xaa]));
+    const realChunked = recorder(async () => ({
+      ciphertextChunksRoot: ethers.getBytes(ethers.id('queued-real-chunk-root')),
+      ciphertextChunkCount: 1,
+      totalCiphertextBytes: 1,
+    }));
+    const failClosedInline = recorder(async () => {
+      throw new Error('fail-closed placeholder should not be used');
+    });
+    const failClosedChunked = recorder(async () => {
+      throw new Error('fail-closed chunk placeholder should not be used');
+    });
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/queued-encryption',
+    }));
+    const store = {
+      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+      insert: recorder(async () => undefined),
+      deleteByPattern: recorder(async () => undefined),
+    };
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-encryption',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {},
+      store,
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => realInline),
+      _resolveEncryptInlineChunked: recorder(async () => realChunked),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'private-cg',
+      name: 'queued-private-ka',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:test:queued-private'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'ab'.repeat(32)}`,
+    };
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+      contextGraphId: request.contextGraphId,
+      quads: [{
+        subject: 'urn:test:queued-private',
+        predicate: 'http://schema.org/name',
+        object: '"Queued Private"',
+        graph: '',
+      }],
+      encryptInlinePayload: failClosedInline,
+      encryptInlineChunked: failClosedChunked,
+    });
+
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'private-cg',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'private-cg',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(publisherPublish.calls.at(-1)?.[0]).toMatchObject({
+      encryptInlinePayload: realInline,
+      encryptInlineChunked: realChunked,
+    });
+    expect(publisherPublish.calls.at(-1)?.[0].encryptInlinePayload).not.toBe(failClosedInline);
+    expect(publisherPublish.calls.at(-1)?.[0].encryptInlineChunked).not.toBe(failClosedChunked);
+  });
+
+  it('uses queued resolved on-chain CG id as binding-only metadata for same-CG publishes', async () => {
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/queued-binding',
+    }));
+    const store = {
+      query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+      insert: recorder(async () => undefined),
+      deleteByPattern: recorder(async () => undefined),
+    };
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-binding',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+      },
+      getContextGraphOnChainId: recorder(async () => null),
+      store,
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'memory-layers-e2e',
+      name: 'queued-binding-ka',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:test:queued-binding'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: '1' as `${bigint}`,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    };
+
+    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+      contextGraphId: request.contextGraphId,
+      quads: [{
+        subject: 'urn:test:queued-binding',
+        predicate: 'http://schema.org/name',
+        object: '"Queued Binding"',
+        graph: '',
+      }],
+      publishContextGraphId: '42',
+    });
+
+    expect(agentLike.getContextGraphOnChainId.calls).toEqual([
+      ['memory-layers-e2e'],
+    ]);
+    expect(agentLike._resolveEncryptInlinePayload.calls.at(-1)).toEqual([
+      'memory-layers-e2e',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    expect(agentLike._resolveEncryptInlineChunked.calls.at(-1)).toEqual([
+      'memory-layers-e2e',
+      undefined,
+      undefined,
+      undefined,
+      { aeadBindingContextGraphId: '42' },
+    ]);
+    const publishCall = publisherPublish.calls.at(-1)?.[0];
+    expect(publishCall).toMatchObject({
+      contextGraphId: 'memory-layers-e2e',
+      onChainContextGraphId: '42',
+      subGraphName: undefined,
+    });
+    expect(publishCall).not.toHaveProperty('publishContextGraphId');
+  });
+
+  it('fails queued same-CG publishes before publisher execution when the CG is not on chain', async () => {
+    const publisherPublish = recorder(async (_opts: any) => ({
+      status: 'tentative',
+      ual: 'did:dkg:local/should-not-publish',
+    }));
+    const agentLike = {
+      peerId: 'did:dkg:agent:queued-unregistered',
+      defaultAgentAddress: '0x1111111111111111111111111111111111111111',
+      chain: {
+        getEvmChainId: recorder(async () => 31337n),
+        getKnowledgeAssetsLifecycleAddress: recorder(async () => '0x2222222222222222222222222222222222222222'),
+      },
+      getContextGraphOnChainId: recorder(async () => null),
+      store: {
+        query: recorder(async () => ({ type: 'bindings', bindings: [] })),
+        insert: recorder(async () => undefined),
+        deleteByPattern: recorder(async () => undefined),
+      },
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      publisher: {
+        publish: publisherPublish,
+        clearSwmShareComplete: recorder(async () => undefined),
+      },
+      createV10ACKProvider: recorder(() => undefined),
+      _resolveEncryptInlinePayload: recorder(async () => undefined),
+      _resolveEncryptInlineChunked: recorder(async () => undefined),
+      _stampPointer: recorder(async () => undefined),
+    } as any;
+    const request: KnowledgeAssetVmPublishRequest = {
+      contextGraphId: 'unregistered-product-cg',
+      name: 'queued-unregistered-ka',
+      shareOperationId: 'share-op-1',
+      roots: ['urn:test:queued-unregistered'],
+      seal: {
+        merkleRoot: `0x${'12'.repeat(32)}`,
+        authorAddress: '0x1111111111111111111111111111111111111111',
+        signature: {
+          r: `0x${'34'.repeat(32)}`,
+          vs: `0x${'56'.repeat(32)}`,
+        },
+        schemeVersion: 1,
+        reservedKaId: '1' as `${bigint}`,
+      },
+      sealChainId: '31337',
+      sealKav10Address: '0x2222222222222222222222222222222222222222',
+      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+      sealMerkleRoot: `0x${'12'.repeat(32)}`,
+      intentKey: `sha256:${'de'.repeat(32)}`,
+    };
+
+    let thrown: any;
+    try {
+      await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(agentLike, request, {
+        contextGraphId: request.contextGraphId,
+        quads: [{
+          subject: 'urn:test:queued-unregistered',
+          predicate: 'http://schema.org/name',
+          object: '"Queued Unregistered"',
+          graph: '',
+        }],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeTruthy();
+    expect(thrown.code).toBe('CG_NOT_REGISTERED');
+    expect(String(thrown.message)).toMatch(/not registered on-chain/i);
+    expect(publisherPublish.calls).toEqual([]);
   });
 });
 
@@ -285,8 +993,23 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
     } as any;
 
     const encryptInlineChunked = await (DKGAgent.prototype as any)
-      ._resolveEncryptInlineChunked.call(agentLike, '42');
+      ._resolveEncryptInlineChunked.call(
+        agentLike,
+        'sports',
+        undefined,
+        undefined,
+        undefined,
+        { aeadBindingContextGraphId: '42' },
+      );
     expect(encryptInlineChunked).toBeDefined();
+    expect(agentLike._resolveCuratedChainKeyContext.calls.at(-1)).toEqual([
+      'sports',
+      undefined,
+      undefined,
+      undefined,
+      'LU-11',
+      { aeadBindingContextGraphId: '42' },
+    ]);
 
     const batchId = ethers.getBytes(ethers.id('same-merkle-root'));
     const plaintextNquads = new TextEncoder().encode(

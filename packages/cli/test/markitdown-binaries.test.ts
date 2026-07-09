@@ -21,7 +21,7 @@ import {
 } from '../scripts/bundle-markitdown-binaries.mjs';
 
 describe('bundle-markitdown-binaries helpers', () => {
-  const CLI_VERSION = '9.0.0-rc.3';
+  const CLI_VERSION = '10.0.0-canary.3';
   const RELEASE_METADATA_TEXT = `${JSON.stringify({ source: 'release', cliVersion: CLI_VERSION }, null, 2)}\n`;
   let tmpPaths: string[] = [];
 
@@ -33,16 +33,16 @@ describe('bundle-markitdown-binaries helpers', () => {
   it('reads the CLI version from package.json', async () => {
     const pkgDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-pkg-'));
     tmpPaths.push(pkgDir);
-    await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ version: '9.0.0-rc.2' }, null, 2));
+    await writeFile(join(pkgDir, 'package.json'), JSON.stringify({ version: '10.0.0-canary.2' }, null, 2));
 
-    expect(readCliVersion(pkgDir)).toBe('9.0.0-rc.2');
+    expect(readCliVersion(pkgDir)).toBe('10.0.0-canary.2');
   });
 
   it('parses standard sha256 files', () => {
     expect(parseSha256File('abc123  markitdown-linux-x64\n')).toBe('abc123');
-    expect(releaseTagForVersion('9.0.0-rc.2')).toBe('v9.0.0-rc.2');
-    expect(releaseBaseUrl('9.0.0-rc.2')).toBe(
-      'https://github.com/OriginTrail/dkg/releases/download/v9.0.0-rc.2',
+    expect(releaseTagForVersion('10.0.0-canary.2')).toBe('v10.0.0-canary.2');
+    expect(releaseBaseUrl('10.0.0-canary.2')).toBe(
+      'https://github.com/OriginTrail/dkg/releases/download/v10.0.0-canary.2',
     );
     expect(releaseAssetUrl('https://example.invalid/release', 'markitdown-linux-x64')).toBe(
       'https://example.invalid/release/markitdown-linux-x64',
@@ -185,7 +185,7 @@ describe('bundle-markitdown-binaries helpers', () => {
     const staleHash = sha256Hex(staleBytes);
     await writeFile(binaryPath, staleBytes);
     await writeFile(checksumPathFor(binaryPath), `${staleHash}  ${assetName}\n`, 'utf-8');
-    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: '9.0.0-rc.2' }, null, 2)}\n`, 'utf-8');
+    await writeFile(metadataPathFor(binaryPath), `${JSON.stringify({ source: 'release', cliVersion: '10.0.0-canary.2' }, null, 2)}\n`, 'utf-8');
 
     const refreshedBytes = Buffer.from('# refreshed markdown\n', 'utf-8');
     const refreshedHash = sha256Hex(refreshedBytes);
@@ -346,7 +346,7 @@ describe('bundle-markitdown-binaries helpers', () => {
       }
       if (req.url === `/release/${assetName}.meta.json`) {
         res.writeHead(200, { 'content-type': 'application/json' });
-        res.end(`${JSON.stringify({ source: 'release', cliVersion: '9.0.0-rc.2' }, null, 2)}\n`);
+        res.end(`${JSON.stringify({ source: 'release', cliVersion: '10.0.0-canary.2' }, null, 2)}\n`);
         return;
       }
       res.writeHead(404);
@@ -436,19 +436,18 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(pkg.files).toContain('scripts');
   });
 
-  it('keeps MarkItDown target metadata in a shared JSON file that the release workflow reads', async () => {
+  it('keeps MarkItDown target metadata packaged for manual releases', async () => {
     const targetsRaw = await readFile(new URL('../markitdown-targets.json', import.meta.url), 'utf-8');
     const targets = JSON.parse(targetsRaw) as Array<{ assetName: string; runner: string }>;
     expect(targets.map((target) => target.assetName)).toEqual(SUPPORTED_TARGETS.map((target) => target.assetName));
 
-    const workflowRaw = await readFile(new URL('../../../.github/workflows/release.yml', import.meta.url), 'utf-8');
-    expect(workflowRaw).toContain("import { SUPPORTED_TARGETS } from './packages/cli/scripts/bundle-markitdown-binaries.mjs'");
-    expect(workflowRaw).toContain('fromJSON(needs.markitdown-target-matrix.outputs.matrix)');
-    expect(workflowRaw).toContain('Smoke test bundled MarkItDown binary');
-    expect(workflowRaw).toContain('markitdown-smoke.html');
-    expect(workflowRaw).toContain('markitdown-smoke.docx');
-    expect(workflowRaw).toContain('Hello from MarkItDown smoke test.');
-    expect(workflowRaw).toContain('Hello from DOCX smoke test.');
-    expect(workflowRaw).toContain('.meta.json');
+    const pkgRaw = await readFile(new URL('../package.json', import.meta.url), 'utf-8');
+    const pkg = JSON.parse(pkgRaw) as { files?: string[] };
+    expect(pkg.files).toContain('markitdown-build-info.json');
+    expect(pkg.files).toContain('markitdown-targets.json');
+
+    const releaseProcess = await readFile(new URL('../../../RELEASE_PROCESS.md', import.meta.url), 'utf-8');
+    expect(releaseProcess).toContain('MarkItDown binaries are not attached by this manual process');
+    expect(releaseProcess).toContain('postinstall downloads them best-effort');
   });
 });

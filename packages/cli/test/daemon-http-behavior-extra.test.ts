@@ -44,6 +44,7 @@
  */
 
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -800,14 +801,25 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
     }
   });
 
+  // NOTE: a direct-publish-route exhaustion is NOT exercised here. A
+  // local-only CG (created above) skips the on-chain publish entirely ("No
+  // positive on-chain context graph id resolved — skipping on-chain publish"),
+  // so a real 429-RPC daemon never reaches the mint, and a registered CG can't
+  // be created while the RPCs are rate-limited. The direct-publish 503 mapping
+  // is covered route-level by the shared-helper unit test + the PCA route
+  // transport tests (same classifyChainRpcTransportStatus), and the register
+  // route above proves the helper end-to-end through a real chain write.
+
   it('returns 504 when context graph register reports a bounded chain timeout', async () => {
     const contextGraphId = 'timeout-register-' + Math.random().toString(36).slice(2, 8);
     const txHash = '0x' + '77'.repeat(32);
-    const timeoutError = new Error(
+    // The adapter throws a ChainRpcTransportError instance for a receipt-wait
+    // timeout; the guard recognises TIMEOUT via the instance, not a bare code.
+    const timeoutError = new ChainRpcTransportError(
+      'RPC_TIMEOUT',
       `register context graph tx ${txHash} timed out waiting for a receipt after 180000ms`,
+      { txHash },
     );
-    (timeoutError as Error & { code?: string; txHash?: string }).code = 'TIMEOUT';
-    (timeoutError as Error & { code?: string; txHash?: string }).txHash = txHash;
 
     let routeServer: Server | null = null;
     try {
@@ -1176,8 +1188,8 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
   });
 });
 
-describe('context graph write-target validation', () => {
-  it('POST /api/shared-memory/write rejects unknown context graphs instead of creating them lazily', async () => {
+describe('removed shared-memory write route', () => {
+  it('legacy shared-memory write and raw publisher enqueue routes are no longer served', async () => {
     const d = daemon!;
     const contextGraphId = 'lazy-swm-http-' + Math.random().toString(36).slice(2, 8);
     const write = await fetch(urlFor(d, '/api/shared-memory/write'), {
@@ -1195,10 +1207,29 @@ describe('context graph write-target validation', () => {
         ],
       }),
     });
-    expect(write.status).toBe(400);
-    const writeBody = await write.json() as { code?: string; error?: string };
-    expect(writeBody.code).toBe('CONTEXT_GRAPH_NOT_FOUND');
-    expect(writeBody.error).toMatch(/Unknown contextGraphId/);
+    expect(write.status).toBe(404);
+
+    const conditionalWrite = await fetch(urlFor(d, '/api/shared-memory/conditional-write'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ contextGraphId, quads: [], conditions: [] }),
+    });
+    expect(conditionalWrite.status).toBe(404);
+
+    const enqueue = await fetch(urlFor(d, '/api/publisher/enqueue'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        contextGraphId,
+        shareOperationId: 'legacy-op',
+        roots: ['urn:legacy-root'],
+        namespace: 'legacy',
+        scope: 'legacy',
+        transitionType: 'CREATE',
+        authority: { type: 'owner', proofRef: 'proof:legacy' },
+      }),
+    });
+    expect(enqueue.status).toBe(404);
 
     const list = await fetch(urlFor(d, '/api/context-graph/list'), {
       headers: authHeaders(d),
@@ -1207,6 +1238,53 @@ describe('context graph write-target validation', () => {
     const body = await list.json() as { contextGraphs?: Array<Record<string, unknown>> };
     const entry = body.contextGraphs?.find((row) => row.id === contextGraphId);
     expect(entry).toBeUndefined();
+  }, 30_000);
+
+  it('batch rejection reports use the named KA lifecycle route, not the old shared-memory URL', async () => {
+    const d = daemon!;
+    const contextGraphId = 'batch-rejection-' + Math.random().toString(36).slice(2, 8);
+
+    const created = await fetch(urlFor(d, '/api/context-graph/create'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ id: contextGraphId, name: contextGraphId }),
+    });
+    expect(created.status).toBeLessThan(300);
+
+    const oldRoute = await fetch(urlFor(d, '/api/shared-memory/report-batch-rejection'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({ contextGraphId, verifyResult: { ok: false } }),
+    });
+    expect(oldRoute.status).toBe(404);
+
+    const report = await fetch(urlFor(d, '/api/knowledge-assets/batch-rejections/report'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
+      body: JSON.stringify({
+        contextGraphId,
+        batchId: 'batch-1',
+        verifyResult: {
+          ok: false,
+          expectedRoot: `0x${'11'.repeat(32)}`,
+          actualRoot: `0x${'22'.repeat(32)}`,
+          leafCount: 1,
+          reason: 'test mismatch',
+        },
+      }),
+    });
+    expect(report.status).toBe(200);
+    const body = await report.json() as {
+      gossiped?: boolean;
+      assertionName?: string;
+      shareOperationId?: string;
+      record?: { digest?: string };
+      gossipError?: string;
+    };
+    expect(body.gossiped, JSON.stringify(body)).toBe(true);
+    expect(body.assertionName).toMatch(/^batch-rejection-/);
+    expect(body.shareOperationId).toMatch(/\S/);
+    expect(body.record?.digest).toBeTruthy();
   }, 30_000);
 });
 

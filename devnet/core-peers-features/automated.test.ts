@@ -46,6 +46,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -108,29 +109,51 @@ function devnetPortEnv(): Record<string, string> {
   };
 }
 
+const NODE_PID_FILES = ['daemon.pid', 'devnet.pid'] as const;
+
+interface NodePidEntry {
+  file: string;
+  pid: number;
+}
+
 /** Every pid that belongs to a node. `devnet.pid` is just the `cli.js start`
  *  launcher, which double-forks the real worker (`daemon.pid`, reparented to
  *  init) and then EXITS — so killing only `devnet.pid` leaves the API serving.
  *  Return both (daemon first) so the caller can take the node truly offline. */
-function readNodePids(num: number): number[] {
-  const pids: number[] = [];
-  for (const f of ['daemon.pid', 'devnet.pid']) {
+function readNodePidEntries(num: number): NodePidEntry[] {
+  const entries: NodePidEntry[] = [];
+  for (const f of NODE_PID_FILES) {
     const pidf = join(DEVNET_DIR, `node${num}`, f);
     if (!existsSync(pidf)) continue;
     const pid = parseInt(readFileSync(pidf, 'utf8').trim(), 10);
-    if (Number.isFinite(pid) && !pids.includes(pid)) pids.push(pid);
+    if (Number.isFinite(pid)) entries.push({ file: f, pid });
   }
-  return pids;
+  return entries;
 }
 
-/** Remove a node's pid files. After a manual SIGKILL the files still hold the
- *  now-dead PIDs; `devnet.sh restart-node` trusts them and could signal an
- *  unrelated process if the OS recycled a PID before the restart. Clear them
- *  so the restart starts from a clean slate. */
-function clearNodePidFiles(num: number): void {
-  for (const f of ['daemon.pid', 'devnet.pid']) {
-    const pidf = join(DEVNET_DIR, `node${num}`, f);
-    try { if (existsSync(pidf)) rmSync(pidf); } catch { /* best-effort */ }
+function readNodePids(num: number): number[] {
+  return [...new Set(readNodePidEntries(num).map((entry) => entry.pid))];
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove only pid files whose PIDs are known dead. If a live but unhealthy
+ *  daemon still owns a pid file, preserve ownership until we explicitly stop
+ *  it; deleting first lets `restart-node` launch a duplicate process. */
+function clearDeadNodePidFiles(num: number): void {
+  for (const entry of readNodePidEntries(num)) {
+    if (pidAlive(entry.pid)) continue;
+    const pidf = join(DEVNET_DIR, `node${num}`, entry.file);
+    try {
+      if (existsSync(pidf)) rmSync(pidf);
+    } catch { /* best-effort */ }
   }
 }
 
@@ -218,6 +241,54 @@ async function waitFor<T>(
   throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
 }
 
+async function waitForPidsGone(label: string, pids: number[], timeoutMs: number): Promise<boolean> {
+  try {
+    await waitFor(label, timeoutMs, 500, async () =>
+      pids.every((pid) => !pidAlive(pid)) ? true : null,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function stopNodeProcesses(num: number): Promise<void> {
+  const pids = readNodePids(num).filter(pidAlive);
+  if (pids.length === 0) {
+    clearDeadNodePidFiles(num);
+    return;
+  }
+
+  for (const pid of pids) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* may already be gone */ }
+  }
+  const stopped = await waitForPidsGone(`node${num} processes stopped`, pids, 10_000);
+  if (!stopped) {
+    for (const pid of pids.filter(pidAlive)) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* may already be gone */ }
+    }
+    await waitForPidsGone(`node${num} processes killed`, pids, 10_000);
+  }
+  clearDeadNodePidFiles(num);
+}
+
+async function restartNodeAndWait(num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> {
+  execFileSync('bash', [DEVNET_SH, 'restart-node', String(num)], {
+    cwd: REPO_ROOT,
+    stdio: 'inherit',
+    env: { ...process.env, ...devnetPortEnv() },
+  });
+  await waitFor(label, timeoutMs, 2_000, async () =>
+    (await nodeReachable(node)) ? true : null,
+  );
+}
+
+async function restoreNodeIfDown(num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> {
+  if (await nodeReachable(node)) return;
+  await stopNodeProcesses(num);
+  await restartNodeAndWait(num, node, label, timeoutMs);
+}
+
 // ───────────────────────────── publish helpers ───────────────────────────
 function runDkgCli(node: DevnetNode, args: string[], timeoutMs = 120_000): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolveResult, rejectResult) => {
@@ -261,25 +332,33 @@ function makeWitnessFile(name: string): { path: string; subject: string; literal
   return { path, subject, literal };
 }
 
+let publishSeq = 0;
+
 async function publishFromCore(node: DevnetNode, name: string): Promise<{ subject: string; literal: string; kaId?: string; status: string }> {
   const witness = makeWitnessFile(name);
-  const result = await runDkgCli(node, ['publish', CONTEXT_GRAPH, '--file', witness.path]);
-  if (result.code !== 0) {
-    throw new Error(`publish failed (exit ${result.code}) stdout=${result.stdout} stderr=${result.stderr}`);
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1]?.toLowerCase() ?? 'unknown';
-  const kaId = /KC ID:\s*(\d+)/i.exec(result.stdout)?.[1];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the KA
+  // lifecycle CLI (`ka create --share` then `ka publish`) — argument arrays +
+  // Status:/KA ID: stdout parsing live in the shared runKaPublishLifecycle
+  // (../_bootstrap/harness), which returns status lowercased; this suite keeps
+  // its own CLI spawn (120s timeout).
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `cpf-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: CONTEXT_GRAPH,
+    inputFile: witness.path,
+  });
+  const status = result.status;
+  const kaId = result.kaId !== undefined ? String(result.kaId) : undefined;
   // Greedy publish-outcome gate: exit 0 is not proof of a real publish. Pin a
   // known success status and a positive kaId so a failed/'unknown' status or a
-  // missing "KC ID:" line fails here instead of passing as a green publish.
+  // missing "KA ID:" line fails here instead of passing as a green publish.
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
+    `publish status="${status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
   ).toContain(status);
   expect(
     BigInt(kaId ?? '0'),
-    `publish surfaced no positive "KC ID:" (kaId="${kaId}")\n${result.stdout}`,
+    `publish surfaced no positive "KA ID:" (kaId="${kaId}")\n${result.raw}`,
   ).toBeGreaterThan(0n);
   return { subject: witness.subject, literal: witness.literal, kaId, status };
 }
@@ -485,65 +564,75 @@ describe('Phase D — Cores host public CGs and fill their own gaps', () => {
     await waitFor(`node${victim} offline`, 45_000, 1_000, async () =>
       (await nodeReachable(victimNode)) ? null : true,
     );
-    // Stale pid files now hold dead PIDs — clear them so `restart-node` can't
-    // signal a recycled PID.
-    clearNodePidFiles(victim);
+    const killedPidsGone = await waitForPidsGone(`node${victim} killed worker pids exited`, pids, 15_000);
+    expect(killedPidsGone, `node${victim} pids still alive after SIGKILL: ${pids.filter(pidAlive).join(',')}`).toBe(true);
+    // Stale pid files now hold dead PIDs — clear only those verified-dead
+    // entries so `restart-node` can't signal a recycled PID.
+    clearDeadNodePidFiles(victim);
 
-    // 2. Publish a fresh KA to the CG from node1 while the victim is down.
-    const pub = await publishFromCore(nodes[1]!, 'gap');
-    expect(pub.status).toBe('confirmed');
+    // HYGIENE (found in the 10.0.4 battle-test): wrap the rest so the victim
+    // core is ALWAYS restored. On a minSig devnet, taking one core offline can
+    // drop the publish below ACK quorum → the step-2 assertion throws → the
+    // restart is skipped → the victim stays dead → EVERY subsequent devnet
+    // suite fails for lack of quorum. The finally below closes that.
+    try {
+      // 2. Publish a fresh KA to the CG from node1 while the victim is down.
+      const pub = await publishFromCore(nodes[1]!, 'gap');
+      expect(pub.status).toBe('confirmed');
 
-    // 3. Bring the victim back online.
-    execFileSync('bash', [DEVNET_SH, 'restart-node', String(victim)], {
-      cwd: REPO_ROOT,
-      stdio: 'inherit',
-      env: { ...process.env, ...devnetPortEnv() },
-    });
-    await waitFor(`node${victim} back online`, 90_000, 2_000, async () =>
-      (await nodeReachable(victimNode)) ? true : null,
-    );
+      // 3. Bring the victim back online.
+      await restartNodeAndWait(victim, victimNode, `node${victim} back online`, 90_000);
 
-    // 4. The victim must fill its gap FROM CHAIN after restart. Because it was
-    //    made pure host-only (subscribed=0, core_hosted=1) above, the missed KA
-    //    can ONLY reach its verifiable-memory via the Phase D host-fill path — a
-    //    subscriber reconcile could not have produced it. We require BOTH:
-    //      (i)  the missed triple is in the victim's verifiable-memory, AND
-    //      (ii) chain-path evidence that the reconciler delivered THIS specific
-    //           KA after restart — a `fetch`/`promote`/`core-fill` replication
-    //           event for this ka id, or a `chain-promote action=…` daemon.log
-    //           line naming it. This rules out a coincidental non-chain path.
-    //    `already` is NOT accepted (it means the KA was present pre-restart).
-    expect(pub.kaId, 'gap publish did not report a KC ID — cannot pin chain-path evidence').toBeTruthy();
-    const kaId = pub.kaId!;
-    const chainActions = new Set(['fetch', 'promote', 'core-fill']);
-    const filled = await waitFor(
-      `node${victim} fills the gap from chain (VM witness + chain-path evidence for ka=${kaId})`,
-      240_000,
-      5_000,
-      async () => {
-        const vm = await postJson(victimNode, '/api/query', {
-          sparql: `ASK { <${pub.subject}> <https://schema.org/name> ?o }`,
-          contextGraphId: CONTEXT_GRAPH,
-          view: 'verifiable-memory',
-        });
-        if (!(vm.status === 200 && askIsTrue(vm.body))) return null; // headline proof first
+      // 4. The victim must fill its gap FROM CHAIN after restart. Because it was
+      //    made pure host-only (subscribed=0, core_hosted=1) above, the missed KA
+      //    can ONLY reach its verifiable-memory via the Phase D host-fill path — a
+      //    subscriber reconcile could not have produced it. We require BOTH:
+      //      (i)  the missed triple is in the victim's verifiable-memory, AND
+      //      (ii) chain-path evidence that the reconciler delivered THIS specific
+      //           KA after restart — a `fetch`/`promote`/`core-fill` replication
+      //           event for this ka id, or a `chain-promote action=…` daemon.log
+      //           line naming it. This rules out a coincidental non-chain path.
+      //    `already` is NOT accepted (it means the KA was present pre-restart).
+      expect(pub.kaId, 'gap publish did not report a KA ID — cannot pin chain-path evidence').toBeTruthy();
+      const kaId = pub.kaId!;
+      const chainActions = new Set(['fetch', 'promote', 'core-fill']);
+      const filled = await waitFor(
+        `node${victim} fills the gap from chain (VM witness + chain-path evidence for ka=${kaId})`,
+        240_000,
+        5_000,
+        async () => {
+          const vm = await postJson(victimNode, '/api/query', {
+            sparql: `ASK { <${pub.subject}> <https://schema.org/name> ?o }`,
+            contextGraphId: CONTEXT_GRAPH,
+            view: 'verifiable-memory',
+          });
+          if (!(vm.status === 200 && askIsTrue(vm.body))) return null; // headline proof first
 
-        // Chain-path evidence pinned to THIS ka id.
-        const events = await getJson(victimNode, `/api/replication/events?cg=${encodeURIComponent(CONTEXT_GRAPH)}&limit=200`);
-        if (events.status === 200) {
-          const hit = (events.body.events as any[]).find(
-            (e) => chainActions.has(e.action) && typeof e.ual === 'string' && e.ual.endsWith(`/${kaId}`),
-          );
-          if (hit) return { via: 'chain-fill', evidence: `event:${hit.action} ${hit.ual}` };
-        }
-        const log = daemonLogTail(victim);
-        const m = new RegExp(`chain-promote action=(promote|fetch|core-fill)[^\\n]*\\bka=${kaId}\\b`).exec(log);
-        if (m) return { via: 'chain-fill', evidence: `log:${m[0]}` };
-        return null;
-      },
-    );
-    expect(filled, `node${victim} VM witness landed but no chain-path evidence for ka=${kaId}`).toBeTruthy();
-    console.log(`Phase D fill-the-gap PASS via ${(filled as any).via} — ${(filled as any).evidence}`);
+          // Chain-path evidence pinned to THIS ka id.
+          const events = await getJson(victimNode, `/api/replication/events?cg=${encodeURIComponent(CONTEXT_GRAPH)}&limit=200`);
+          if (events.status === 200) {
+            const hit = (events.body.events as any[]).find(
+              (e) => chainActions.has(e.action) && typeof e.ual === 'string' && e.ual.endsWith(`/${kaId}`),
+            );
+            if (hit) return { via: 'chain-fill', evidence: `event:${hit.action} ${hit.ual}` };
+          }
+          const log = daemonLogTail(victim);
+          const m = new RegExp(`chain-promote action=(promote|fetch|core-fill)[^\\n]*\\bka=${kaId}\\b`).exec(log);
+          if (m) return { via: 'chain-fill', evidence: `log:${m[0]}` };
+          return null;
+        },
+      );
+      expect(filled, `node${victim} VM witness landed but no chain-path evidence for ka=${kaId}`).toBeTruthy();
+      console.log(`Phase D fill-the-gap PASS via ${(filled as any).via} — ${(filled as any).evidence}`);
+    } finally {
+      // Always bring the victim back, even if the publish or gap-fill threw.
+      // Idempotent: no-op when the in-test restart above already succeeded.
+      try {
+        await restoreNodeIfDown(victim, victimNode, `node${victim} restored (cleanup)`, 120_000);
+      } catch (cleanupErr) {
+        console.warn(`Phase D cleanup: failed to restore node${victim}: ${(cleanupErr as Error).message}`);
+      }
+    }
   }, 600_000);
 });
 

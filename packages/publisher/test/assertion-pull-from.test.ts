@@ -9,7 +9,7 @@ import {
   assertionLifecycleUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { DKGPublisher } from '../src/index.js';
+import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
 
 // OT-RFC-43 §10.5.3 — `wm/pull-from` seeds a fresh WM draft from the file's
 // current SWM/VM state. These are store-backed (real OxigraphStore) so the
@@ -145,6 +145,62 @@ describe('assertionPullFrom (OT-RFC-43 §10.5.3 wm/pull-from)', () => {
     const subjects = new Set(draft.map((d) => d.subject));
     expect(subjects.has(ENTITY_2)).toBe(true);   // the SWM content
     expect(subjects.has(ENTITY_1)).toBe(false);  // the stale local edit is gone
+  });
+
+  it('rejects named-graph-only dirty drafts with WM_DRAFT_CONFLICT', async () => {
+    const { publisher, store } = await makePublisher();
+    const localGraph = 'urn:test:graph:pull-from-local-only';
+    const wmGraph = contextGraphAssertionUri(CG, AGENT, NAME);
+    const scopedLocalGraph = assertionScopedGraphUri(wmGraph, localGraph);
+    await store.insert([
+      q(ENTITY_2, SCHEMA, '"Bob from SWM"', SWM_GRAPH),
+      q(assertionLifecycleUri(CG, AGENT, NAME), `${DKG}rootEntity`, ENTITY_2, contextGraphMetaUri(CG)),
+    ]);
+    await publisher.markSwmShareComplete(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [{
+      subject: ENTITY_1,
+      predicate: SCHEMA,
+      object: '"local named edit"',
+      graph: localGraph,
+    }]);
+
+    const err = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm').catch((e) => e);
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as any).code).toBe('WM_DRAFT_CONFLICT');
+    expect(await store.listGraphs()).toContain(scopedLocalGraph);
+    expect(await publisher.assertionQuery(CG, NAME, AGENT)).toEqual([
+      expect.objectContaining({ subject: ENTITY_1, graph: localGraph }),
+    ]);
+  });
+
+  it('onConflict:"replace" removes named-graph-only dirty draft children', async () => {
+    const { publisher, store } = await makePublisher();
+    const localGraph = 'urn:test:graph:pull-from-stale-child';
+    const wmGraph = contextGraphAssertionUri(CG, AGENT, NAME);
+    const scopedLocalGraph = assertionScopedGraphUri(wmGraph, localGraph);
+    await store.insert([
+      q(ENTITY_2, SCHEMA, '"Bob from SWM"', SWM_GRAPH),
+      q(assertionLifecycleUri(CG, AGENT, NAME), `${DKG}rootEntity`, ENTITY_2, contextGraphMetaUri(CG)),
+    ]);
+    await publisher.markSwmShareComplete(CG, NAME, AGENT);
+    await publisher.assertionWrite(CG, NAME, AGENT, [{
+      subject: ENTITY_1,
+      predicate: SCHEMA,
+      object: '"stale named local"',
+      graph: localGraph,
+    }]);
+    expect(await store.listGraphs()).toContain(scopedLocalGraph);
+
+    const result = await publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', { onConflict: 'replace' });
+
+    expect(result.fromLayer).toBe('swm');
+    expect(await store.listGraphs()).not.toContain(scopedLocalGraph);
+    const draft = await publisher.assertionQuery(CG, NAME, AGENT);
+    expect(draft).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subject: ENTITY_2, object: '"Bob from SWM"', graph: '' }),
+    ]));
+    expect(draft.some((quad) => quad.subject === ENTITY_1 || quad.graph === localGraph)).toBe(false);
   });
 
   it('validates the source BEFORE dropping — an empty-source replace pull preserves the dirty draft (PR #972/335e8d8)', async () => {

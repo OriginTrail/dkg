@@ -23,8 +23,14 @@ import type {
   CreateChallengeResult,
   OperationalWalletRegistrationResult,
   V10PublishingConvictionAccountInfo,
+  NodePublishingConvictionAccount,
+  PcaAccountRelation,
+  ShardingTableNode,
+  PcaContracts,
+  PcaRpcMethod,
   VerifyACKIdentityResult,
 } from './chain-adapter.js';
+import type { RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -122,6 +128,11 @@ export class MockChainAdapter implements ChainAdapter {
 
   getRpcUrls(): string[] {
     return [];
+  }
+
+  /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
+  drainRpcUsage(): RpcUsageWindow {
+    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
@@ -470,6 +481,12 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
+  async *scanContextGraphRegistryPages(
+    _options: import('./chain-adapter.js').ContextGraphRegistryScanOptions,
+  ): AsyncIterable<import('./chain-adapter.js').ContextGraphRegistryScanPage> {
+    return;
+  }
+
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     return false;
   }
@@ -486,6 +503,8 @@ export class MockChainAdapter implements ChainAdapter {
     discountBps: number;
     /** Monotonic mock epoch captured at creation (no chronos in mock). */
     createdAtEpoch: number;
+    /** OT-RFC-51 designated node identityId this PCA funds (0n = none). */
+    primaryNode: bigint;
     agents: Set<string>;
   }>();
   private agentToConvictionAccount = new Map<string, bigint>();
@@ -528,6 +547,7 @@ export class MockChainAdapter implements ChainAdapter {
       lockDurationEpochs: MockChainAdapter.MOCK_LOCK_DURATION_EPOCHS,
       discountBps: MockChainAdapter.convictionDiscountBps(0n),
       createdAtEpoch: this.mockConvictionEpoch++,
+      primaryNode: 0n,
       agents: new Set<string>(),
     });
     return accountId;
@@ -542,9 +562,10 @@ export class MockChainAdapter implements ChainAdapter {
     }
   }
 
-  // `primaryNode` (RFC-51) is accepted for interface parity but not modeled:
-  // the mock tracks account budget only, not per-node publishing allocation.
-  async createPublishingConvictionAccount(committedTRAC: bigint, _primaryNode: bigint = 0n): Promise<{ accountId: bigint } & TxResult> {
+  // `primaryNode` (RFC-51) is recorded so the node-association reads
+  // (getConvictionPrimaryNode / listNodePublishingConvictionAccounts) have
+  // parity; per-node publishing-allocation accrual is still out of mock scope.
+  async createPublishingConvictionAccount(committedTRAC: bigint, primaryNode: bigint = 0n): Promise<{ accountId: bigint } & TxResult> {
     this.requireValidConvictionAmount(committedTRAC);
     const accountId = this.nextConvictionAccountId++;
     this.convictionAccounts.set(accountId, {
@@ -555,18 +576,23 @@ export class MockChainAdapter implements ChainAdapter {
       // Tier fixed at creation, identical formula to the contract.
       discountBps: MockChainAdapter.convictionDiscountBps(committedTRAC),
       createdAtEpoch: this.mockConvictionEpoch++,
+      primaryNode,
       agents: new Set<string>(),
     });
     return { accountId, ...this.txResult(true) };
   }
 
-  async getPublishingConvictionAccountInfo(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null> {
+  async getPublishingConvictionAccountInfo(
+    accountId: bigint,
+    opts?: { extended?: boolean },
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return null;
-    return {
+    const baseEpochAllowance = acct.committedTRAC / BigInt(acct.lockDurationEpochs);
+    const info: V10PublishingConvictionAccountInfo = {
       owner: acct.owner,
       committedTRAC: acct.committedTRAC,
-      baseEpochAllowance: acct.committedTRAC / BigInt(acct.lockDurationEpochs),
+      baseEpochAllowance,
       createdAtEpoch: acct.createdAtEpoch,
       // Mock models boundary-aligned creation only; the contract's mid-epoch
       // round-up (epochAtTimestamp(expiresAtTimestamp-1)+1) is not modeled.
@@ -582,6 +608,16 @@ export class MockChainAdapter implements ChainAdapter {
       lastSettledWindow: 0,
       fullySwept: false,
     };
+    if (opts?.extended) {
+      // GAP-4/5 stubs — mock doesn't model RFC-51 per-node allocation
+      // (primaryNode 0n) or per-epoch decay; current-epoch headroom is the
+      // nominal base allowance + top-up buffer.
+      info.primaryNode = 0n;
+      info.lastPrimaryNodeChangeEpoch = 0;
+      info.currentEpoch = acct.createdAtEpoch;
+      info.remainingAllowance = baseEpochAllowance + acct.topUpBuffer;
+    }
+    return info;
   }
 
   private requireConvictionAccount(accountId: bigint) {
@@ -646,11 +682,117 @@ export class MockChainAdapter implements ChainAdapter {
     return this.txResult(true);
   }
 
+  // Owner-gated bulk reset. Mirrors PublishingConviction.clearAgents: clears the
+  // whole allow-list (preserved across transfer; this is the explicit reset).
+  async clearPublishingConvictionAgents(accountId: bigint): Promise<TxResult> {
+    const acct = this.requireConvictionOwner(accountId);
+    for (const key of acct.agents) {
+      this.agentToConvictionAccount.delete(key);
+    }
+    acct.agents.clear();
+    return this.txResult(true);
+  }
+
+  // Owner-gated bulk add. Mirrors PublishingConviction.registerAgents: validates
+  // the WHOLE batch (zero / duplicate / cap) before any mutation — all-or-nothing.
+  async registerPublishingConvictionAgents(accountId: bigint, agents: string[]): Promise<TxResult> {
+    const acct = this.requireConvictionOwner(accountId);
+    const cap = MockChainAdapter.MOCK_MAX_AGENTS_PER_ACCOUNT;
+    const toAdd: string[] = [];
+    for (const agent of agents) {
+      if (agent === ethers.ZeroAddress) {
+        throw new Error('Mock: ZeroAgentAddress()');
+      }
+      const key = ethers.getAddress(agent).toLowerCase();
+      if (this.agentToConvictionAccount.has(key) || toAdd.includes(key)) {
+        throw new Error(`Mock: AgentAlreadyRegistered(${agent})`);
+      }
+      if (acct.agents.size + toAdd.length >= cap) {
+        throw new Error(`Mock: AgentCapReached(${accountId}, ${cap})`);
+      }
+      toAdd.push(key);
+    }
+    for (const key of toAdd) {
+      acct.agents.add(key);
+      this.agentToConvictionAccount.set(key, accountId);
+    }
+    return this.txResult(true);
+  }
+
   async isPublishingConvictionAgent(accountId: bigint, agent: string): Promise<boolean> {
     if (!ethers.isAddress(agent)) return false;
     const acct = this.convictionAccounts.get(accountId);
     if (!acct) return false;
     return acct.agents.has(ethers.getAddress(agent).toLowerCase());
+  }
+
+  /** Mirrors `getRegisteredAgents`. Keys are stored lowercased, so
+   *  checksum-normalize on the way out to match the on-chain view. */
+  async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
+    const acct = this.convictionAccounts.get(accountId);
+    if (!acct) return [];
+    return [...acct.agents].map((k) => ethers.getAddress(k));
+  }
+
+  async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
+    const owned = new Set<bigint>();
+    const agent = new Set<bigint>();
+
+    for (const wallet of wallets) {
+      if (!ethers.isAddress(wallet)) continue;
+      const key = ethers.getAddress(wallet).toLowerCase();
+      for (const [id, acct] of this.convictionAccounts) {
+        if (acct.owner.toLowerCase() === key) owned.add(id);
+      }
+      const accountId = this.agentToConvictionAccount.get(key);
+      if (accountId != null && accountId > 0n) agent.add(accountId);
+    }
+
+    const ids = [...new Set<bigint>([...owned, ...agent])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return ids.map((accountId) => {
+      const isOwned = owned.has(accountId);
+      const isAgent = agent.has(accountId);
+      return { accountId, relation: isOwned && isAgent ? 'both' : isOwned ? 'owned' : 'agent' };
+    });
+  }
+
+  async listDesignatableNodes(_opts?: { fresh?: boolean }): Promise<ShardingTableNode[]> {
+    return [
+      { nodeId: '0x6e6f64652d31', identityId: 42n, ask: 1_000_000_000_000_000_000n, stake: 250_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d32', identityId: 57n, ask: 2_000_000_000_000_000_000n, stake: 180_000n * 10n ** 18n },
+      { nodeId: '0x6e6f64652d33', identityId: 61n, ask: 1_500_000_000_000_000_000n, stake: 500_000n * 10n ** 18n },
+    ];
+  }
+
+  /** Browser-bootstrap parity (sub-PR #2) — fixed checksummed addresses + the
+   *  mock chainId. Browser RPC transport is daemon-owned, so the mock does not
+   *  expose adapter/private RPC endpoints here. */
+  async getPublishingConvictionContracts(): Promise<PcaContracts> {
+    return {
+      nft: ethers.getAddress('0x' + '11'.repeat(20)),
+      token: ethers.getAddress('0x' + '22'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+    switch (method) {
+      case 'eth_chainId': {
+        const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
+        return `0x${Number(tail).toString(16)}`;
+      }
+      case 'eth_blockNumber':
+        return `0x${this.nextBlock.toString(16)}`;
+      case 'eth_call':
+        return '0x' + '0'.repeat(64);
+      case 'eth_getBlockByNumber':
+        return { number: `0x${this.nextBlock.toString(16)}` };
+      case 'eth_getTransactionReceipt':
+      case 'eth_getTransactionByHash':
+        return null;
+    }
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK
@@ -695,6 +837,48 @@ export class MockChainAdapter implements ChainAdapter {
       throw new Error(`Mock: PCA account ${accountId} does not exist`);
     }
     return acct.owner;
+  }
+
+  async getConvictionPrimaryNode(accountId: bigint): Promise<bigint> {
+    return this.convictionAccounts.get(accountId)?.primaryNode ?? 0n;
+  }
+
+  async getPcaContractContext(): Promise<{ chainId: number; hubAddress: string; nftAddress: string; tokenAddress: string; publishingConvictionAddress: string; clearAgentsSupported: boolean }> {
+    // Mock has no real contracts; return deterministic placeholders so the
+    // wallet-connect endpoint stays shaped-correctly on a no-chain node.
+    return {
+      chainId: 31337,
+      hubAddress: '0x' + '0'.repeat(40),
+      nftAddress: '0x' + '0'.repeat(40),
+      tokenAddress: '0x' + '0'.repeat(40),
+      publishingConvictionAddress: '0x' + '0'.repeat(40),
+      clearAgentsSupported: true,
+    };
+  }
+
+  async listNodePublishingConvictionAccounts(): Promise<NodePublishingConvictionAccount[]> {
+    const owner = ethers.getAddress(this.signerAddress);
+    const myIdentity = await this.getIdentityId();
+    const out: NodePublishingConvictionAccount[] = [];
+    for (const [accountId, acct] of this.convictionAccounts) {
+      if (acct.owner.toLowerCase() !== owner.toLowerCase()) continue;
+      const info = await this.getPublishingConvictionAccountInfo(accountId);
+      if (!info) continue;
+      out.push({
+        accountId,
+        primaryNode: acct.primaryNode,
+        fundsThisNode: myIdentity !== 0n && acct.primaryNode === myIdentity,
+        info,
+      });
+    }
+    out.sort((a, b) => Number(b.fundsThisNode) - Number(a.fundsThisNode));
+    return out;
+  }
+
+  async setPublishingConvictionPrimaryNode(accountId: bigint, primaryNode: bigint): Promise<TxResult> {
+    const acct = this.requireConvictionOwner(accountId);
+    acct.primaryNode = primaryNode;
+    return this.txResult(true);
   }
 
   // --- On-Chain Context Graphs (ContextGraphs contract) ---
@@ -949,6 +1133,33 @@ export class MockChainAdapter implements ChainAdapter {
     }
 
     return result;
+  }
+
+  async addOperationalWallet(address: string, options?: { identityId?: bigint }): Promise<TxResult> {
+    if (!ethers.isAddress(address)) throw new Error(`Mock: invalid address ${address}`);
+    const wallet = ethers.getAddress(address);
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    if (identityId === 0n) throw new Error('Mock: node has no on-chain profile');
+    const existing = [...this.identities.entries()].find(([addr]) => addr.toLowerCase() === wallet.toLowerCase());
+    if (existing && existing[1] !== identityId) {
+      throw new Error(`Mock: OperationalKeyTaken(${wallet})`);
+    }
+    this.identities.set(wallet, identityId);
+    return this.txResult(true);
+  }
+
+  async removeOperationalWallet(address: string, options?: { identityId?: bigint }): Promise<TxResult> {
+    if (!ethers.isAddress(address)) throw new Error(`Mock: invalid address ${address}`);
+    const wallet = ethers.getAddress(address);
+    if (wallet.toLowerCase() === ethers.getAddress(this.signerAddress).toLowerCase()) {
+      throw new Error(`Mock: refusing to remove the primary operational wallet ${wallet}`);
+    }
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    if (identityId === 0n) throw new Error('Mock: node has no on-chain profile');
+    const match = [...this.identities.entries()].find(([addr]) => addr.toLowerCase() === wallet.toLowerCase());
+    if (!match) throw new Error(`Mock: KeyNotAttached(${wallet})`);
+    this.identities.delete(match[0]);
+    return this.txResult(true);
   }
 
   async verifySyncIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {

@@ -10,6 +10,7 @@
     { "path": "../core" },
     { "path": "../agent" },
     { "path": "../epcis" },
+    { "path": "../okf" },
     { "path": "../node-ui" },
     { "path": "../adapter-openclaw" },
     { "path": "../mcp-dkg" }

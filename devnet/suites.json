@@ -1,0 +1,41 @@
+{
+  "_comment": "Single source of truth for the devnet suite set. `prCoverage` = the 10.0.2 PR-coverage suites the coverage sweep runs; `all` = every devnet/<dir> that has a vitest.config.ts (excluding _bootstrap). scripts/devnet-1002-coverage-sweep.sh reads prCoverage; devnet/_bootstrap/suite-manifest.test.ts guards this file against package.json / pnpm-workspace.yaml / on-disk drift.",
+  "prCoverage": [
+    "pr1386-term-canon",
+    "pr1385-subgraph-rs",
+    "pr1388-okf-integration",
+    "ka-lifecycle-cli",
+    "pr1366-pca-deposit-waiver",
+    "pr1369-folded-private-ack",
+    "pr1387-bulk-register-agents",
+    "pr1384-preserve-agents-on-transfer",
+    "pr1370-admin-op-wallet"
+  ],
+  "all": [
+    "ack-candidate-isolation",
+    "agent-provenance",
+    "conviction-emission-bell",
+    "core-peers-features",
+    "edge-update-flow",
+    "greenfield-10min",
+    "mixed-version",
+    "pr1366-pca-deposit-waiver",
+    "pr1369-folded-private-ack",
+    "pr1370-admin-op-wallet",
+    "pr1384-preserve-agents-on-transfer",
+    "pr1385-subgraph-rs",
+    "pr1386-term-canon",
+    "pr1387-bulk-register-agents",
+    "pr1388-okf-integration",
+    "ka-lifecycle-cli",
+    "rfc51-publishing-allocation",
+    "rich-scenario",
+    "rpc-quiet-window",
+    "storage-ack-store-outage",
+    "v10-core-flows",
+    "v10-end-to-end",
+    "v10-rs-prune",
+    "v10-rs-wallet-rotation",
+    "v10-stress"
+  ]
+}

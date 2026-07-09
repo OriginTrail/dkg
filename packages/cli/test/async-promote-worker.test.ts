@@ -87,6 +87,24 @@ describe('classifyPromoteError', () => {
     });
   });
 
+  // #1464 — the publisher tags a promote error's message with a "[promote:<step>] " prefix so the
+  // failing step is NAMED. The step LABEL must never change the retry classification: the classifier
+  // strips the tag before substring-matching. Regression for the gate-caught collision where the
+  // step label "encodeWorkspaceGossipPayload" injected the "gossip" trigger token, flipping a
+  // transient error to non-retryable cap_exceeded. Fails without the tag-strip.
+  it('#1464 — strips the [promote:<step>] tag before classifying (label tokens do not change the verdict)', () => {
+    // A transient error tagged at the gossip-encode step (label contains "gossip") stays retryable.
+    expect(classifyPromoteError(new Error('[promote:encodeWorkspaceGossipPayload] rate limit exceeded — request timed out')))
+      .toEqual({ classification: 'transient', retryable: true });
+    // Identical to the same error untagged.
+    expect(classifyPromoteError(new Error('rate limit exceeded — request timed out')))
+      .toEqual({ classification: 'transient', retryable: true });
+    // A GENUINE gossip-cap error (token in the ORIGINAL message) still classifies cap_exceeded even
+    // when tagged — stripping removes only the injected prefix, never real tokens.
+    expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 10 MB)')))
+      .toEqual({ classification: 'cap_exceeded', retryable: false });
+  });
+
   it('classifies timeout errors as transient', () => {
     expect(classifyPromoteError(new Error('Operation timed out'))).toEqual({
       classification: 'transient',
@@ -386,20 +404,26 @@ describe('createPromoteWorkerSupervisor', () => {
   let queue: AsyncPromoteQueue;
   let logs: string[];
 
-  function makeRequest(name: string): PromoteRequest {
-    return { contextGraphId: 'cg', assertionName: name, entities: 'all' };
+  function makeRequest(name: string, overrides: Partial<PromoteRequest> = {}): PromoteRequest {
+    return { contextGraphId: 'cg', assertionName: name, entities: 'all', ...overrides };
   }
 
   function makeAgentStub(promote: (req: PromoteRequest) => Promise<{ promotedCount: number }>) {
     return {
       promoteQueue: queue,
       assertion: {
-        async promote(cgId: string, name: string, opts: { entities?: any; subGraphName?: string }) {
+        async promote(
+          cgId: string,
+          name: string,
+          opts: { entities?: any; subGraphName?: string; agentAddress?: string; authorAgentAddress?: string },
+        ) {
           return promote({
             contextGraphId: cgId,
             assertionName: name,
             entities: opts.entities ?? 'all',
             subGraphName: opts.subGraphName,
+            ...(opts.agentAddress ? { agentAddress: opts.agentAddress } : {}),
+            ...(opts.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
           });
         },
       },
@@ -449,6 +473,36 @@ describe('createPromoteWorkerSupervisor', () => {
     await sup.stop();
 
     expect((await queue.getStats()).succeeded).toBe(3);
+  });
+
+  it('passes the stored enqueue storage lane and author into agent.promote', async () => {
+    const agentAddress = '0x2222222222222222222222222222222222222222';
+    const authorAgentAddress = '0x1111111111111111111111111111111111111111';
+    await queue.enqueue(makeRequest('agent-a-share', { agentAddress, authorAgentAddress }));
+    const seen: PromoteRequest[] = [];
+
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(async (req) => {
+        seen.push(req);
+        return { promotedCount: 1 };
+      }),
+      workerConcurrency: 1,
+      pollIntervalMs: 1_000_000,
+      heartbeatIntervalMs: 0,
+      log: (m) => logs.push(m),
+      workerIdPrefix: 'test',
+    });
+
+    await sup.start();
+    expect(await sup.tickOnce()).toBe(1);
+    await sup.stop();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      assertionName: 'agent-a-share',
+      agentAddress,
+      authorAgentAddress,
+    });
   });
 
   it('a tick on an empty queue picks up zero jobs and does not throw', async () => {

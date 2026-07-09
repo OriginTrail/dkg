@@ -70,7 +70,7 @@ describe('async SWM-share queue daemon routes', () => {
     daemonState.promoteWorkerUnavailableReason = null;
   });
 
-  function makeAgent() {
+  function makeAgent(tokenToAddress: Record<string, string> = {}) {
     return {
       async listContextGraphs() {
         return ['cg', 'cg-1', 'cg-2', 'graphify', 'team-graph'].map((id) => ({
@@ -84,19 +84,26 @@ describe('async SWM-share queue daemon routes', () => {
       async contextGraphExists(contextGraphId: string) {
         return ['cg', 'cg-1', 'cg-2', 'graphify', 'team-graph'].includes(contextGraphId);
       },
-      resolveAgentByToken: () => undefined,
+      resolveAgentByToken: (token?: string) => (token ? tokenToAddress[token] : undefined),
       assertion: {
         async promoteAsync(
           contextGraphId: string,
           name: string,
-          opts?: { entities?: readonly string[] | 'all'; subGraphName?: string },
+          opts?: {
+            entities?: readonly string[] | 'all';
+            subGraphName?: string;
+            agentAddress?: string;
+            authorAgentAddress?: string;
+          },
         ): Promise<{ jobId: string }> {
           const jobId = await queue.enqueue({
             contextGraphId,
             assertionName: name,
             subGraphName: opts?.subGraphName,
             entities: opts?.entities ?? 'all',
-          });
+            ...(opts?.agentAddress ? { agentAddress: opts.agentAddress } : {}),
+            ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
+          } as any);
           return { jobId };
         },
         async getPromoteAsyncStatus(jobId: string): Promise<PromoteJob | null> {
@@ -118,6 +125,8 @@ describe('async SWM-share queue daemon routes', () => {
   async function startRoutes(agent: ReturnType<typeof makeAgent>) {
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const auth = req.headers.authorization;
+      const requestToken = typeof auth === 'string' ? auth.replace(/^Bearer\s+/i, '') : undefined;
       try {
         await handleKnowledgeAssetsRoutes({
           req,
@@ -147,8 +156,8 @@ describe('async SWM-share queue daemon routes', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
-          requestAgentAddress: 'did:dkg:agent:test',
+          requestToken,
+          requestAgentAddress: agent.resolveAgentByToken(requestToken) ?? 'did:dkg:agent:test',
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
         } as any);
@@ -168,10 +177,16 @@ describe('async SWM-share queue daemon routes', () => {
     baseUrl = `http://127.0.0.1:${addr.port}`;
   }
 
-  async function post(path: string, body?: Record<string, unknown>) {
+  async function post(
+    path: string,
+    body?: Record<string, unknown>,
+    opts: { bearer?: string } = {},
+  ) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (opts.bearer) headers.Authorization = `Bearer ${opts.bearer}`;
     const res = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const json = await res.json().catch(() => null);
@@ -252,6 +267,23 @@ describe('async SWM-share queue daemon routes', () => {
     expect(r.body.jobId).toBe('job-1');
     expect(r.body.state).toBe('queued');
     expect(r.body.enqueuedAt).toBeUndefined();
+  });
+
+  it('POST /:name/swm/share-async stores the agent-token author in the internal job request', async () => {
+    const agentAddress = `0x${'ab'.repeat(20)}`;
+    await startRoutes(makeAgent({ 'agent-a-token': agentAddress }));
+    const r = await post(
+      '/api/knowledge-assets/my-assertion/swm/share-async',
+      {
+        contextGraphId: 'graphify',
+        entities: 'all',
+      },
+      { bearer: 'agent-a-token' },
+    );
+    expect(r.status).toBe(200);
+    const job = await queue.getStatus(r.body.jobId);
+    expect((job?.request as Record<string, unknown>).agentAddress).toBe(agentAddress);
+    expect((job?.request as Record<string, unknown>).authorAgentAddress).toBe(agentAddress);
   });
 
   it('POST /:name/swm/share-async returns 503 when the worker is unavailable', async () => {

@@ -3,14 +3,18 @@ import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { createTripleStore } from '@origintrail-official/dkg-storage';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
-import { DKGPublisher } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, type PublishOptions } from '@origintrail-official/dkg-publisher';
+import { createKnowledgeAssetVmPublishExecutor } from '../src/daemon/lifecycle.js';
 import { addPublisherWallet, loadPublisherWallets, publisherWalletsPath, removePublisherWallet } from '../src/publisher-wallets.js';
-import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/publisher-runner.js';
+import { createPublisherInspector, createPublisherInspectorFromStore, createPublisherRuntime, createPublisherRuntimeFromAgent, startPublisherRuntimeIfEnabled } from '../src/publisher-runner.js';
+import { parseOptionalPositiveInteger, parsePositiveIntegerOption, parsePositiveMsOption } from '../src/cli-option-parsers.js';
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -242,6 +246,238 @@ describe('publisher wallets', () => {
     await store.close();
   });
 
+  it('bootstraps publisher runtime with an identityless publisher wallet on a reachable chain', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+    await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
+
+    try {
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+      });
+
+      expect(runtime.walletIds).toEqual([wallet.address]);
+      expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
+  it('processes a queued KA VM publish with an identityless publisher wallet', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+    let agent: DKGAgent | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+    await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
+
+    const writer = new DKGPublisher({
+      store,
+      chain: new NoChainAdapter(),
+      eventBus: new TypedEventBus(),
+      keypair,
+      publisherPrivateKey: wallet.privateKey,
+    });
+    const share = await writer.share('music-social', [
+      { subject: 'urn:local:/identityless-runtime', predicate: 'http://schema.org/name', object: '"Identityless Runtime"', graph: '' },
+    ], { publisherPeerId: 'peer-identityless' });
+
+    const agentChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const sealChainId = await agentChain.getEvmChainId();
+    const sealKav10Address = await agentChain.getKnowledgeAssetsLifecycleAddress();
+    agent = await DKGAgent.create({
+      name: 'IdentitylessQueuedPublishAgent',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store,
+      chainAdapter: agentChain,
+    });
+
+    try {
+      const publishCalls: PublishOptions[] = [];
+      const realExecutor = createKnowledgeAssetVmPublishExecutor(agent);
+      type KnowledgeAssetVmPublishExecutorInput = Parameters<typeof realExecutor>[0];
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+        knowledgeAssetVmPublishExecutor: async (input: KnowledgeAssetVmPublishExecutorInput) => {
+          const publisher = input.publisher;
+          if (!publisher) {
+            throw new Error('identityless queued publish test expected a publisher override');
+          }
+          const originalPublish = publisher.publish.bind(publisher);
+          publisher.publish = async (opts: PublishOptions) => {
+            const publisherAddress = await publisher.publisherFallbackAuthorAddress();
+            expect(publisherAddress?.toLowerCase()).toBe(wallet.address.toLowerCase());
+            expect(publisher.getIdentityId()).toBe(0n);
+            publishCalls.push(opts);
+            return {
+              status: 'tentative' as const,
+              ual: 'did:dkg:test/identityless-runtime',
+              merkleRoot: ethers.getBytes(opts.precomputedAttestation?.expectedMerkleRoot ?? `0x${'12'.repeat(32)}`),
+              kaManifest: [],
+            };
+          };
+          try {
+            return await realExecutor({
+              ...input,
+              publishOptions: {
+                ...input.publishOptions,
+                publisherPeerId: 'peer-identityless-runtime',
+                publishContextGraphId: '1',
+              },
+            });
+          } finally {
+            publisher.publish = originalPublish;
+          }
+        },
+      });
+
+      expect(runtime.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
+
+      const intent = {
+        contextGraphId: 'music-social',
+        name: 'identityless-runtime',
+        agentAddress: '0x00000000000000000000000000000000000000b2',
+        shareOperationId: share.shareOperationId,
+        roots: ['urn:local:/identityless-runtime'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+          authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
+          signature: {
+            r: `0x${'34'.repeat(32)}` as `0x${string}`,
+            vs: `0x${'56'.repeat(32)}` as `0x${string}`,
+          },
+          schemeVersion: 1,
+          reservedKaId: '0',
+        },
+        sealChainId: sealChainId.toString() as `${bigint}`,
+        sealKav10Address: sealKav10Address as `0x${string}`,
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
+        publisherNodeIdentityIdOverride: '0',
+        intentKey: `sha256:${'cd'.repeat(32)}`,
+      };
+
+      const jobId = await runtime.publisher.enqueueKnowledgeAssetVmPublish(intent);
+      const processed = await runtime.publisher.processNext(wallet.address);
+
+      expect(processed?.jobId).toBe(jobId);
+      expect(publishCalls, JSON.stringify((processed as { failure?: unknown } | null)?.failure)).toHaveLength(1);
+      expect(processed?.status, JSON.stringify((processed as { failure?: unknown } | null)?.failure)).toBe('finalized');
+      expect(publishCalls[0]).toMatchObject({
+        contextGraphId: 'music-social',
+        publisherPeerId: 'peer-identityless-runtime',
+        skipContextGraphEnsure: true,
+      });
+      expect(publishCalls[0]?.precomputedAttestation?.reservedKaId).toBe(0n);
+      expect(publishCalls[0]?.quads).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            subject: 'urn:local:/identityless-runtime',
+            graph: '',
+          }),
+        ]),
+      );
+    } finally {
+      await runtime?.stop();
+      await agent?.stop().catch(() => {});
+      await store.close();
+    }
+  });
+
+  it('does not skip identityless wallets in a mixed publisher wallet pool', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const identityfulWallet = new ethers.Wallet(HARDHAT_KEYS.CORE_OP);
+    const identitylessWallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
+
+    await addPublisherWallet(dataDir, identityfulWallet.privateKey);
+    await addPublisherWallet(dataDir, identitylessWallet.privateKey);
+
+    try {
+      runtime = await createPublisherRuntimeFromAgent({
+        dataDir,
+        store,
+        keypair,
+        chainBase: { rpcUrl, hubAddress },
+        pollIntervalMs: 10,
+        errorBackoffMs: 10,
+      });
+
+      expect(new Set(runtime.walletIds)).toEqual(new Set([identityfulWallet.address, identitylessWallet.address]));
+      expect(runtime.wallets).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ address: identityfulWallet.address, identityId: BigInt(getSharedContext().coreProfileId) }),
+          expect.objectContaining({ address: identitylessWallet.address, identityId: 0n }),
+        ]),
+      );
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
+  it('reports publisher wallet attribution through the daemon startup logger', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
+    const wallet = ethers.Wallet.createRandom();
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const keypair = await generateEd25519Keypair();
+    const logs: string[] = [];
+    let runtime: Awaited<ReturnType<typeof startPublisherRuntimeIfEnabled>> | undefined;
+
+    await addPublisherWallet(dataDir, wallet.privateKey);
+
+    try {
+      runtime = await startPublisherRuntimeIfEnabled({
+        dataDir,
+        config: {
+          name: 'test-node',
+          apiPort: 9200,
+          listenPort: 0,
+          nodeRole: 'edge',
+          contextGraphs: [],
+          publisher: { enabled: true },
+        },
+        store,
+        keypair,
+        chainBase: undefined,
+        log: (message) => logs.push(message),
+      });
+
+      expect(runtime?.wallets).toMatchObject([{ address: wallet.address, identityId: 0n }]);
+      expect(logs.join('\n')).toContain('no-attribution mode');
+      expect(logs.join('\n')).toContain(wallet.address);
+    } finally {
+      await runtime?.stop();
+      await store.close();
+    }
+  });
+
   it('skips daemon-integrated publisher startup with a warning when no wallets exist', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const store = await createTripleStore({ backend: 'oxigraph' });
@@ -270,7 +506,7 @@ describe('publisher wallets', () => {
     await store.close();
   });
 
-  it('fails fast when a publisher wallet has no on-chain identity (requires live chain)', async () => {
+  it('keeps chain RPC failures hard during publisher wallet identity resolution', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-publisher-runtime-'));
     const wallet = ethers.Wallet.createRandom();
     const store = await createTripleStore({ backend: 'oxigraph' });
@@ -295,7 +531,14 @@ describe('publisher wallets', () => {
 
   it('validates positive millisecond CLI options', () => {
     expect(parsePositiveMsOption('1000', '--poll-interval')).toBe(1000);
+    expect(parsePositiveMsOption(' 1000 ', '--poll-interval')).toBe(1000);
     expect(() => parsePositiveMsOption('0', '--poll-interval')).toThrow(
+      '--poll-interval must be a positive integer in milliseconds',
+    );
+    expect(() => parsePositiveMsOption('10ms', '--poll-interval')).toThrow(
+      '--poll-interval must be a positive integer in milliseconds',
+    );
+    expect(() => parsePositiveMsOption('9007199254740992', '--poll-interval')).toThrow(
       '--poll-interval must be a positive integer in milliseconds',
     );
     expect(() => parsePositiveMsOption('nan', '--error-backoff')).toThrow(
@@ -305,8 +548,26 @@ describe('publisher wallets', () => {
 
   it('validates positive integer CLI options', () => {
     expect(parsePositiveIntegerOption('10', '--max-retries')).toBe(10);
+    expect(parsePositiveIntegerOption(' 10 ', '--max-retries')).toBe(10);
     expect(() => parsePositiveIntegerOption('0', '--max-retries')).toThrow(
       '--max-retries must be a positive integer',
+    );
+    expect(() => parsePositiveIntegerOption('1.5', '--max-retries')).toThrow(
+      '--max-retries must be a positive integer',
+    );
+    expect(() => parsePositiveIntegerOption('9007199254740992', '--max-retries')).toThrow(
+      '--max-retries must be a positive integer',
+    );
+  });
+
+  it('validates optional positive integer CLI options', () => {
+    expect(parseOptionalPositiveInteger(undefined, '--limit')).toBeUndefined();
+    expect(parseOptionalPositiveInteger(' 25 ', '--limit')).toBe(25);
+    expect(() => parseOptionalPositiveInteger('10items', '--limit')).toThrow(
+      '--limit must be a positive integer',
+    );
+    expect(() => parseOptionalPositiveInteger('9007199254740992', '--limit')).toThrow(
+      '--limit must be a positive integer',
     );
   });
 

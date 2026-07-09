@@ -10,7 +10,7 @@
  * Conventions mirror chain-lifecycle-extra.test.ts: real EVMChainAdapter
  * over the shared Hardhat node, one snapshot per test for isolation.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -86,6 +86,236 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     expect(dereg.success).toBe(true);
     expect(await owner.isPublishingConvictionAgent(accountId, agent)).toBe(false);
     expect(await owner.getConvictionAgentAccountId(agent)).toBe(0n);
+  });
+
+  it('clearPublishingConvictionAgents bulk-removes every agent (owner-gated, via the logic contract)', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+
+    const agent1 = ethers.Wallet.createRandom().address;
+    const agent2 = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(accountId, agent1);
+    await owner.registerPublishingConvictionAgent(accountId, agent2);
+    expect((await owner.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(2);
+
+    const cleared = await owner.clearPublishingConvictionAgents(accountId);
+    expect(cleared.success).toBe(true);
+
+    expect(await owner.isPublishingConvictionAgent(accountId, agent1)).toBe(false);
+    expect(await owner.isPublishingConvictionAgent(accountId, agent2)).toBe(false);
+    expect(await owner.getConvictionAgentAccountId(agent1)).toBe(0n);
+    expect((await owner.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(0);
+  });
+
+  it('registerPublishingConvictionAgents bulk-adds multiple agents in one tx (owner-gated, via the logic contract)', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+
+    const agent1 = ethers.Wallet.createRandom().address;
+    const agent2 = ethers.Wallet.createRandom().address;
+    const agent3 = ethers.Wallet.createRandom().address;
+
+    const res = await owner.registerPublishingConvictionAgents(accountId, [agent1, agent2, agent3]);
+    expect(res.success).toBe(true);
+
+    expect(await owner.isPublishingConvictionAgent(accountId, agent1)).toBe(true);
+    expect(await owner.isPublishingConvictionAgent(accountId, agent2)).toBe(true);
+    expect(await owner.isPublishingConvictionAgent(accountId, agent3)).toBe(true);
+    expect(await owner.getConvictionAgentAccountId(agent2)).toBe(accountId);
+    expect((await owner.getPublishingConvictionAccountInfo(accountId))!.agentCount).toBe(3);
+  });
+
+  it('getConvictionAgentAccountId strict mode: healthy reads resolve normally; undeployed NFT surfaces (PcaUnavailableError) instead of fail-safe 0n', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(accountId, wallet);
+
+    // Healthy read: strict returns the same on-chain truth as the fail-safe path.
+    expect(await owner.getConvictionAgentAccountId(wallet, { strict: true })).toBe(accountId);
+    expect(await owner.getConvictionAgentAccountId(ethers.Wallet.createRandom().address, { strict: true })).toBe(0n);
+
+    // Undeployed NFT: the discovery (strict) path SURFACES it so the daemon can
+    // answer 503 — never a 0n a UI would read as "registered nowhere". init() is
+    // idempotent (`if (this.initialized) return`), so clearing the cached
+    // binding after init holds for the next call.
+    (owner as any).contracts.dkgPublishingConvictionNFT = undefined;
+    await expect(owner.getConvictionAgentAccountId(wallet, { strict: true }))
+      .rejects.toMatchObject({ code: 'PCA_UNAVAILABLE' });
+    // The funded-wallet-selector fail-safe path still returns 0n for the same state.
+    expect(await owner.getConvictionAgentAccountId(wallet)).toBe(0n);
+  });
+
+  it('getPublishingConvictionAccountInfo extended returns primaryNode + current-epoch allowance from chain; default omits', async () => {
+    const owner = await fundedOwner();
+    // A non-zero primaryNode proves the adapter reads accounts() index [9] (not
+    // a neighbouring slot). coreProfileId is a registered sharding-table node.
+    const primaryNode = BigInt(getSharedContext().coreProfileId);
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED, primaryNode);
+
+    const base = (await owner.getPublishingConvictionAccountInfo(accountId))!;
+    expect(base.primaryNode).toBeUndefined();
+    expect(base.remainingAllowance).toBeUndefined();
+    expect(base.currentEpoch).toBeUndefined();
+
+    const ext = (await owner.getPublishingConvictionAccountInfo(accountId, { extended: true }))!;
+    expect(ext.primaryNode).toBe(primaryNode);
+    expect(typeof ext.lastPrimaryNodeChangeEpoch).toBe('number');
+    expect(typeof ext.currentEpoch).toBe('number');
+    expect(ext.currentEpoch!).toBeGreaterThan(0);
+    expect(ext.remainingAllowance!).toBeGreaterThan(0n);
+  });
+
+  it('getPublishingConvictionAccountInfo extended is FAIL-SOFT: an extended-read throw leaves the core account intact', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+
+    // Force the extended enrichment reads (accounts / Chronos / remaining
+    // allowance) to throw, while getAccountInfo (the core read) still succeeds.
+    const realRead = (owner as any).readContract.bind(owner);
+    (owner as any).readContract = async (contract: unknown, label: string, method: string, ...args: unknown[]) => {
+      if (method === 'accounts' || method === 'getCurrentEpoch' || method === 'getRemainingAllowance') {
+        const e: any = new Error('simulated extended-read failure');
+        e.code = 'CALL_EXCEPTION';
+        throw e;
+      }
+      return realRead(contract, label, method, ...args);
+    };
+
+    const info = await owner.getPublishingConvictionAccountInfo(accountId, { extended: true });
+    // Core account is returned intact (NOT nulled) — the extended block is a
+    // nested try that swallows the throw and leaves the extended fields unset.
+    expect(info).not.toBeNull();
+    expect(info!.committedTRAC).toBe(COMMITTED);
+    expect(info!.owner.toLowerCase()).toBe(owner.getSignerAddress().toLowerCase());
+    expect(info!.primaryNode).toBeUndefined();
+    expect(info!.lastPrimaryNodeChangeEpoch).toBeUndefined();
+    expect(info!.currentEpoch).toBeUndefined();
+    expect(info!.remainingAllowance).toBeUndefined();
+  });
+
+  it('listPublishingConvictionAccountsForWallets enumerates owned / agent / both, deduped and sorted', async () => {
+    const owner = await fundedOwner();
+    const ownerAddr = owner.getSignerAddress();
+    const { accountId: a1 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const { accountId: a2 } = await owner.createPublishingConvictionAccount(COMMITTED);
+    const wallet = ethers.Wallet.createRandom().address;
+    await owner.registerPublishingConvictionAgent(a1, wallet);
+
+    const ownedList = await owner.listPublishingConvictionAccountsForWallets([ownerAddr]);
+    const owned = new Map(ownedList.map((entry) => [entry.accountId, entry.relation]));
+    expect(owned.get(a1)).toBe('owned');
+    expect(owned.get(a2)).toBe('owned');
+    expect(ownedList).toHaveLength(2);
+
+    expect(await owner.listPublishingConvictionAccountsForWallets([wallet]))
+      .toEqual([{ accountId: a1, relation: 'agent' }]);
+
+    const combined = await owner.listPublishingConvictionAccountsForWallets([ownerAddr, wallet]);
+    const relations = new Map(combined.map((entry) => [entry.accountId, entry.relation]));
+    expect(relations.get(a1)).toBe('both');
+    expect(relations.get(a2)).toBe('owned');
+    expect(combined).toHaveLength(2);
+    expect(combined.map((entry) => entry.accountId)).toEqual([a1, a2].sort((x, y) => (x < y ? -1 : 1)));
+    expect(await owner.listPublishingConvictionAccountsForWallets([ethers.Wallet.createRandom().address])).toEqual([]);
+  });
+
+  it('listDesignatableNodes reads the staked sharding table and maps NodeInfo', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { receiverIds } = getSharedContext();
+
+    const nodes = await reader.listDesignatableNodes();
+    expect(nodes.length).toBeGreaterThanOrEqual(receiverIds.length);
+
+    const byId = new Map(nodes.map((node) => [node.identityId, node]));
+    for (const receiverId of receiverIds) {
+      const node = byId.get(BigInt(receiverId));
+      expect(node, `receiver ${receiverId} should be in the sharding table`).toBeDefined();
+      expect(node!.nodeId).toMatch(/^0x[0-9a-fA-F]+$/);
+      expect(node!.stake).toBeGreaterThan(0n);
+      expect(node!.ask).toBeGreaterThan(0n);
+    }
+    expect(nodes.every((node) => node.identityId > 0n)).toBe(true);
+  });
+
+  it('listDesignatableNodes caches, fresh repopulates, and throws do not poison the last good cache', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const good = await reader.listDesignatableNodes();
+
+    const hitSpy = vi.spyOn(reader as any, 'readContractWith');
+    expect(await reader.listDesignatableNodes()).toEqual(good);
+    expect(hitSpy).not.toHaveBeenCalled();
+    hitSpy.mockRestore();
+
+    const refreshed = [{ nodeId: '0xfeed', identityId: 99999n, ask: 7n, stake: 8n }];
+    const rawRefreshed = refreshed.map((node) => [node.nodeId, node.identityId, node.ask, node.stake]);
+    const freshSpy = vi.spyOn(reader as any, 'readContractWith').mockResolvedValueOnce(rawRefreshed);
+    expect(await reader.listDesignatableNodes({ fresh: true })).toEqual(refreshed);
+    expect(freshSpy).toHaveBeenCalledTimes(1);
+    freshSpy.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed);
+
+    const boom = vi.spyOn(reader as any, 'readContractWith')
+      .mockRejectedValueOnce(Object.assign(new Error('blip'), { code: 'CALL_EXCEPTION' }));
+    await expect(reader.listDesignatableNodes({ fresh: true })).rejects.toThrow();
+    boom.mockRestore();
+    expect(await reader.listDesignatableNodes()).toEqual(refreshed);
+  });
+
+  it('listDesignatableNodes re-resolves ShardingTable per fresh read', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveSpy = vi.spyOn(reader as any, 'resolveContract');
+    await reader.listDesignatableNodes({ fresh: true });
+    await reader.listDesignatableNodes({ fresh: true });
+    const shardingTableResolves = resolveSpy.mock.calls.filter((call: any[]) => call[0] === 'ShardingTable').length;
+    expect(shardingTableResolves).toBe(2);
+    resolveSpy.mockRestore();
+  });
+
+  it('getPublishingConvictionContracts returns the deployed nft/token (EIP-55) + chainId + rpcUrls (sub-PR #2 bootstrap)', async () => {
+    const reader = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { hubAddress } = getSharedContext();
+    const hub = new ethers.Contract(
+      hubAddress,
+      ['function getContractAddress(string) view returns (address)'],
+      createProvider(),
+    );
+    const expectedNft = ethers.getAddress(await hub.getContractAddress('DKGPublishingConvictionNFT'));
+    const expectedToken = ethers.getAddress(await hub.getContractAddress('Token'));
+
+    const c = await reader.getPublishingConvictionContracts();
+    expect(c.nft).toBe(expectedNft);     // the deployed wrapper, EIP-55 checksummed
+    expect(c.token).toBe(expectedToken); // the deployed TRAC, EIP-55 checksummed
+    expect(c.nft).not.toBe(c.token);
+    expect(c.chainId).toBe(reader.chainId);       // AS-IS, the adapter's configured chainId
+    expect(c.rpcUrls).toEqual([]);                // raw operator RPC URLs stay daemon-internal
+    expect(c.walletRpcUrls).toEqual([]);
+  });
+
+  it('getPublishingConvictionAgents enumerates registered agents (checksummed) and reflects deregistration', async () => {
+    const owner = await fundedOwner();
+    const { accountId } = await owner.createPublishingConvictionAccount(COMMITTED);
+    expect(await owner.getPublishingConvictionAgents(accountId)).toEqual([]);
+
+    const a1 = ethers.Wallet.createRandom().address;
+    const a2 = ethers.Wallet.createRandom().address;
+    // Register a1 in lowercased form to prove normalization is input-agnostic.
+    await owner.registerPublishingConvictionAgent(accountId, a1.toLowerCase());
+    await owner.registerPublishingConvictionAgent(accountId, a2);
+
+    const agents = await owner.getPublishingConvictionAgents(accountId);
+    expect(agents).toHaveLength(2);
+    expect(agents).toEqual(expect.arrayContaining([ethers.getAddress(a1), ethers.getAddress(a2)]));
+    // EIP-55 checksummed (the on-chain address[] view), regardless of input case.
+    for (const a of agents) expect(a).toBe(ethers.getAddress(a));
+
+    await owner.deregisterPublishingConvictionAgent(accountId, a1);
+    expect(await owner.getPublishingConvictionAgents(accountId)).toEqual([ethers.getAddress(a2)]);
+  });
+
+  it('getPublishingConvictionAgents returns [] for a nonexistent account', async () => {
+    const owner = await fundedOwner();
+    expect(await owner.getPublishingConvictionAgents(999999n)).toEqual([]);
   });
 
   it('owner topUpPublishingConvictionAccount + settlePublishingConvictionAccount succeed and topUpBuffer updates', async () => {

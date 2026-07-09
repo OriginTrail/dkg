@@ -193,7 +193,7 @@ PRIV_SUBJ="urn:rfc49:secret:${STAMP}/alice"
 ASSERTION_NAME="secret-${STAMP}"
 # Use the KA-lifecycle product path (create → wm/write → wm/finalize → swm/share
 # → vm/publish). FINALIZE is the step that injects the public `_catalog`
-# projection; the raw /api/shared-memory/write + publish shortcut bypasses it,
+# projection; the retired raw SWM shortcut used to bypass it,
 # so post-strip cores would have no catalog to ACK (NO_DATA_IN_SWM).
 api_call "$EDGE_CURATOR" POST /api/knowledge-assets \
   "{\"contextGraphId\":\"${CG_ID}\",\"name\":\"${ASSERTION_NAME}\"}" >/dev/null
@@ -475,54 +475,6 @@ done
 pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
 
 # ---------------------------------------------------------------------------
-# 10. FROM-SWM SHORTCUT (OT-RFC-49 catalog auto-injection): a curated publish via
-#     the RAW /api/shared-memory/write + /api/shared-memory/publish path (NO
-#     assertion finalize) must ALSO get the `_catalog` injected → confirmed ACK +
-#     on-chain catalog commitment + cores hold it. Sections 1-9 above (KA-lifecycle
-#     finalize path) double as the REGRESSION baseline: their catalogLeafCount=4
-#     proves the idempotency guard left the finalize path intact.
-# ---------------------------------------------------------------------------
-log "── FROM-SWM SHORTCUT path (raw write+publish, no finalize) ──"
-SC_CG="rfc49-shortcut-${STAMP}"
-SC_URI="did:dkg:context-graph:${SC_CG}"
-SC_SUBJ="urn:rfc49:secret-shortcut:${STAMP}/carol"
-SC_CREATE=$(api_call "$EDGE_CURATOR" POST /api/context-graph/create "{\"id\":\"${SC_CG}\",\"name\":\"RFC-49 from-SWM shortcut ${STAMP}\",\"accessPolicy\":1,\"publishPolicy\":0,\"allowedAgents\":[\"${CURATOR_AGENT}\",\"${MEMBER_AGENT}\"],\"register\":true}")
-SC_OID=$(printf '%s' "$SC_CREATE" | jq_field ".onChainId")
-[ -n "$SC_OID" ] || fail "shortcut CG create did not return onChainId: $SC_CREATE"
-log "shortcut CG on-chain id = $SC_OID"
-sleep 4
-# mirror the main flow: a subscribed member establishes the curated sender-key
-# recipient set so the curator's SWM write lands + is reloadable by the publish.
-api_call "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${SC_CG}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
-sleep 4
-SC_WRITE=$(api_call "$EDGE_CURATOR" POST /api/shared-memory/write "{\"contextGraphId\":\"${SC_URI}\",\"quads\":[{\"subject\":\"${SC_SUBJ}\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"Carol via the raw from-SWM shortcut ${STAMP}, padded to exercise the encrypted member payload end-to-end\\\"\",\"graph\":\"\"},{\"subject\":\"${SC_SUBJ}\",\"predicate\":\"http://schema.org/email\",\"object\":\"\\\"carol-${STAMP}@example.org\\\"\",\"graph\":\"\"}]}")
-log "raw SWM write: $SC_WRITE"
-log "publishing via /api/shared-memory/publish (no finalize)…"
-sleep 5
-SC_PUB=$(devnet_publish_swm_all_roots "$EDGE_CURATOR" "${SC_URI}" false)
-SC_STATUS=$(printf '%s' "$SC_PUB" | jq_field ".status")
-SC_KA=$(printf '%s' "$SC_PUB" | jq_field ".kaId"); [ -z "$SC_KA" ] && SC_KA=$(printf '%s' "$SC_PUB" | jq_field ".knowledgeAssetId")
-[ "$SC_STATUS" = "confirmed" ] || fail "FROM-SWM shortcut publish status=$SC_STATUS (catalog auto-injection did NOT unblock the curated ACK): $SC_PUB"
-[ -n "$SC_KA" ] && [ "$SC_KA" != "0" ] || fail "FROM-SWM shortcut: no kaId: $SC_PUB"
-pass "FROM-SWM shortcut publish confirmed (kaId=$SC_KA) — catalog auto-injection unblocked the curated ACK"
-# on-chain catalog commitment for the shortcut KA
-SC_CHAIN=$(cd "$REPO_ROOT/packages/evm-module" && RPC_URL="http://127.0.0.1:$HARDHAT_PORT" CONTRACTS_JSON="$CONTRACTS_JSON" ABI_DIR="$ABI_DIR" KA_ID="$SC_KA" node -e '
-const {ethers}=require("ethers");const fs=require("fs");const path=require("path");
-(async()=>{const p=new ethers.JsonRpcProvider(process.env.RPC_URL);const c=JSON.parse(fs.readFileSync(process.env.CONTRACTS_JSON,"utf8")).contracts;const a=c.DKGKnowledgeAssets?.evmAddress||c.DKGKnowledgeAssets?.address;const abi=JSON.parse(fs.readFileSync(path.join(process.env.ABI_DIR,"DKGKnowledgeAssets.json"),"utf8"));const k=new ethers.Contract(a,abi,p);console.log(JSON.stringify({root:await k.getCatalogRoot(BigInt(process.env.KA_ID)),count:(await k.getCatalogLeafCount(BigInt(process.env.KA_ID))).toString()}))})().catch(e=>{console.error(e?.message||e);process.exit(1)});') || fail "shortcut on-chain catalog read failed"
-SC_ROOT=$(printf '%s' "$SC_CHAIN" | jq_field ".root"); SC_COUNT=$(printf '%s' "$SC_CHAIN" | jq_field ".count")
-[ "$SC_ROOT" != "$ZERO" ] || fail "FROM-SWM shortcut: on-chain catalogRoot is ZERO — injection produced no catalog"
-[ "${SC_COUNT:-0}" -ge 1 ] 2>/dev/null || fail "FROM-SWM shortcut: catalogLeafCount < 1"
-pass "FROM-SWM shortcut: on-chain catalog commitment set (root non-zero, leafCount=$SC_COUNT) — same as the finalize path"
-# a core holds the injected catalog
-ONCHAIN_ID="$SC_OID"
-SC_HELD=0
-for i in $(seq 1 60); do
-  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && { SC_HELD=1; break; }; done
-  [ "$SC_HELD" -eq 1 ] && break; sleep 3
-done
-[ "$SC_HELD" -eq 1 ] || fail "FROM-SWM shortcut: no stripped core holds the injected _catalog"
-pass "FROM-SWM shortcut: stripped cores hold the injected public _catalog"
-
 echo ""
 log "============================================================"
 pass "RFC-49 CATALOG-SAMPLING STRIP — DEVNET VALIDATION PASSED"
@@ -531,5 +483,4 @@ log "  • stripped cores ${STRIPPED_CORES[*]}: ZERO private ciphertext, hold th
 log "  • ${BASELINE_SUMMARY:-baseline core: (not evaluated)}"
 log "  • a core proved the public _catalog in random sampling"
 log "  • curated UPDATE (POST /api/update): re-committed the stable catalog floor (root==baseline, leaves=${UPD_COUNT:-?}), cores re-host it, a core proved the updated catalog"
-log "  • FROM-SWM shortcut (raw write+publish, no finalize): catalog auto-injected (leafCount=$SC_COUNT), cores hold it — and the finalize path above stayed intact (leafCount=$CAT_COUNT)"
 log "============================================================"

@@ -1,4 +1,56 @@
 import type { ethers } from 'ethers';
+import type { RpcUsageWindow } from './rpc-usage.js';
+
+/**
+ * The Publishing-Conviction-Account read methods the funded-wallet selector
+ * needs from the conviction mixin. Declared as a shared interface so a rename or
+ * signature change in `ConvictionMethods` (which `implements ConvictionReader`)
+ * is caught at compile time, rather than only at runtime through the base-class
+ * structural cast in `isConvictionFundedAgent`.
+ */
+export interface ConvictionReader {
+  getConvictionAgentAccountId(agent: string): Promise<bigint>;
+  convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean>;
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
+}
+
+/** A PCA the node relates to (GAP-1): `owned` (a node wallet holds the NFT),
+ *  `agent` (a node op wallet is its registered publishing agent), or `both`. */
+export type PcaRelation = 'owned' | 'agent' | 'both';
+export interface PcaAccountRelation {
+  accountId: bigint;
+  relation: PcaRelation;
+}
+
+/** A node from the on-chain sharding table, eligible to be designated as a
+ *  PCA `primaryNode`. `nodeId` is a display-only self-reported id; `identityId`
+ *  is the value passed as `primaryNode`. `ask`/`stake` are wei. */
+export interface ShardingTableNode {
+  nodeId: string;
+  identityId: bigint;
+  ask: bigint;
+  stake: bigint;
+}
+
+/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA actions. */
+export interface PcaContracts {
+  nft: string;
+  token: string;
+  chainId: string;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
+
+export type PcaRpcMethod =
+  | 'eth_chainId'
+  | 'eth_call'
+  | 'eth_getTransactionReceipt'
+  | 'eth_getTransactionByHash'
+  | 'eth_blockNumber'
+  | 'eth_getBlockByNumber';
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -133,6 +185,22 @@ export interface OnChainPublishResult {
   effectiveGasPrice?: bigint;
   gasCostWei?: bigint;
   tokenAmount?: bigint;
+  /**
+   * B8 — present only when this publish drew on a Publishing Conviction
+   * Account (the `CostCovered` event was emitted). The cost fields are bigint
+   * (serialized as decimal strings via the daemon's bigint→string JSON replacer);
+   * `epoch` is a small int (number). The UI derives the discount bps from
+   * `baseCost`/`discountedCost`. Absent for a normal (non-PCA) publish → the
+   * confirmed-discount badge degrades hidden.
+   */
+  convictionCostCovered?: {
+    accountId: bigint;
+    epoch: number;
+    baseCost: bigint;
+    discountedCost: bigint;
+    drawnFromEpoch: bigint;
+    drawnFromTopUp: bigint;
+  };
 }
 
 export interface UpdateKAParams {
@@ -290,19 +358,66 @@ export function isContextGraphChainScanPartialError(
   );
 }
 
-export interface ContextGraphChainScanOptions {
-  /**
-   * When true and `fromBlock` is omitted, adapters may resume from an
-   * in-memory watermark with a reorg buffer. The default preserves public
-   * list-all semantics for SDK callers.
-   */
-  incremental?: boolean;
-  /**
-   * When true on a successful full scan, adapters may seed the in-memory
-   * incremental watermark for later daemon background scans. This is opt-in so
-   * public SDK list-all calls remain side-effect free by default.
-   */
-  seedIncrementalWatermark?: boolean;
+/**
+ * Public ContextGraphNameRegistry list options.
+ *
+ * Default calls use `listAll` semantics and never mutate daemon watermarks.
+ * The two boolean shapes are retained as legacy compatibility wrappers around
+ * the paged cursor scanner. Optional and false values remain accepted for
+ * source compatibility; only an explicit `true` enables legacy cursor-backed
+ * behavior. New cursor-backed daemon scans should use
+ * `scanContextGraphRegistryPages`, where callers explicitly acknowledge a page
+ * after local apply succeeds.
+ */
+export type ContextGraphChainListOptions = { mode?: 'listAll' };
+export type ContextGraphLegacyIncrementalScanOptions =
+  | {
+      mode?: never;
+      incremental?: boolean;
+      pageBudget?: number;
+    }
+  | {
+      mode?: never;
+      seedIncrementalWatermark?: boolean;
+      resumeFromCursor?: boolean;
+      pageBudget?: number;
+    };
+export type ContextGraphChainScanOptions =
+  | ContextGraphChainListOptions
+  | ContextGraphLegacyIncrementalScanOptions;
+
+/** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
+export type ContextGraphRegistryScanOptions =
+  | {
+      mode: 'incremental';
+      pageBudget?: number;
+    }
+  | {
+      mode: 'seedFull';
+    }
+  | {
+      mode: 'seedFromCursor';
+      pageBudget?: number;
+    };
+
+export interface ContextGraphRegistryScanPage {
+  contextGraphs: ContextGraphOnChain[];
+  ack(): Promise<void>;
+}
+
+export function buildEvmDeploymentId(input: { chainId: string; hubAddress: string }): string {
+  return `${input.chainId}:hub=${input.hubAddress.toLowerCase()}`;
+}
+
+export interface ContextGraphRegistryScanCursorKey {
+  chainId: string;
+  deploymentId: string;
+  registryAddress: string;
+}
+
+export interface ContextGraphRegistryScanCursorStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
+  save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -403,6 +518,29 @@ export interface V10PublishingConvictionAccountInfo {
   agentCount: number;
   lastSettledWindow: number;
   fullySwept: boolean;
+  // GAP-4/5 — populated ONLY when getInfo is called with `{ extended: true }`
+  // (the S3 budget widget; the publish hot path omits them → zero extra reads),
+  // and best-effort within that (an extended-read error leaves them undefined so
+  // the UI shows "unknown", distinct from `primaryNode === 0n` = "no node").
+  // primaryNode / lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51);
+  // remainingAllowance + currentEpoch are this epoch's spend headroom + index.
+  primaryNode?: bigint;
+  lastPrimaryNodeChangeEpoch?: number;
+  remainingAllowance?: bigint;
+  currentEpoch?: number;
+}
+
+/**
+ * A PCA owned by the bound node's operational wallet, annotated with its
+ * OT-RFC-51 node association. `primaryNode` is the node identityId whose
+ * publishing allocation this account's committed TRAC funds (0 = none);
+ * `fundsThisNode` is true when that equals the bound node's own identity.
+ */
+export interface NodePublishingConvictionAccount {
+  accountId: bigint;
+  primaryNode: bigint;
+  fundsThisNode: boolean;
+  info: V10PublishingConvictionAccountInfo;
 }
 
 // ----- V10 publish types -----
@@ -772,6 +910,16 @@ export interface ChainAdapter {
    */
   deploymentId: string;
 
+  /**
+   * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts
+   * accumulated since the previous drain (a DELTA window — summing drains over
+   * time yields exact request totals, the provider-billing unit). The EVM
+   * adapter counts at its HTTP transport; the mock adapter returns an
+   * always-empty window (it has no RPC transport). Consumed by the daemon's
+   * minutely `rpc_usage` telemetry log line.
+   */
+  drainRpcUsage?(): RpcUsageWindow;
+
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
   getIdentityId(): Promise<bigint>;
@@ -826,13 +974,19 @@ export interface ChainAdapter {
 
   // Context Graphs (name-hash commitment via ContextGraphNameRegistry)
   createContextGraph(params: CreateContextGraphParams): Promise<TxResult>;
-  submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
-  /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
-  revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
-  /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
-  listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
-  /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
-  hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    submitToContextGraph(kaId: string, contextGraphId: string): Promise<TxResult>;
+    /** Reveal cleartext name+description on-chain for a context graph you created. Optional. */
+    revealContextGraphMetadata?(contextGraphId: string, name: string, description: string): Promise<TxResult>;
+    /** List context graphs from chain via `NameClaimed` events. Optional; not supported on no-chain/mock. */
+    listContextGraphsFromChain?(fromBlock?: number, options?: ContextGraphChainScanOptions): Promise<ContextGraphOnChain[]>;
+    /**
+     * Daemon cursor-backed ContextGraphNameRegistry scan. Each yielded page must
+     * be acknowledged after the caller has applied it locally; only then may the
+     * adapter advance durable scan progress.
+     */
+    scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
+    /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
+    hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
@@ -859,8 +1013,35 @@ export interface ChainAdapter {
    * Optional on the adapter surface so mock-chain unit tests that
    * don't model PCA registration can omit the implementation. The
    * publisher gracefully treats `undefined` as "no PCA path active".
+  */
+  getConvictionAgentAccountId?(agent: string, opts?: { strict?: boolean }): Promise<bigint>;
+
+  /**
+   * GAP-1 — enumerate every PCA the given wallets relate to: `owned` (the wallet
+   * holds the NFT) and/or `agent` (the wallet is a registered publishing agent).
+   * Deduped, relation-tagged, sorted asc.
    */
-  getConvictionAgentAccountId?(agent: string): Promise<bigint>;
+  listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
+
+  /**
+   * B-staked-nodes — the full on-chain sharding table of nodes designatable as a
+   * PCA `primaryNode`. `opts.fresh` bypasses adapter-side cache.
+   */
+  listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+
+  /**
+   * Browser-bootstrap contract addresses + chain params for the HW signing
+   * layer. The browser needs the PCA NFT address, TRAC token address, chain id,
+   * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
+  */
+  getPublishingConvictionContracts?(): Promise<PcaContracts>;
+
+  /**
+   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
+   * route owns the allowlist; adapters forward allowed reads without exposing
+   * endpoint URLs.
+   */
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
@@ -899,9 +1080,56 @@ export interface ChainAdapter {
   topUpPublishingConvictionAccount?(accountId: bigint, amount: bigint): Promise<TxResult>;
   registerPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<TxResult>;
   deregisterPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<TxResult>;
+  clearPublishingConvictionAgents?(accountId: bigint): Promise<TxResult>;
+  registerPublishingConvictionAgents?(accountId: bigint, agents: string[]): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
+
+  /**
+   * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.
+   * The node identityId whose publishing allocation this account's committed TRAC
+   * funds. Returns `0n` when unset, the account is missing, or the NFT is undeployed.
+   */
+  getConvictionPrimaryNode?(accountId: bigint): Promise<bigint>;
+
+  /**
+   * Addresses + numeric chain id for the browser wallet-connect path (so a PCA
+   * owner can sign owner-gated txs client-side). Excludes the node RPC URL by
+   * design — the browser uses its own wallet provider for reads + signing.
+   */
+  getPcaContractContext?(): Promise<{
+    chainId: number;
+    hubAddress: string;
+    nftAddress: string;
+    tokenAddress: string;
+    publishingConvictionAddress: string;
+    clearAgentsSupported: boolean;
+  }>;
+
+  /**
+   * Enumerate the PCAs owned by the bound operational wallet (ERC721Enumerable
+   * `balanceOf` + `tokenOfOwnerByIndex`), each annotated with its OT-RFC-51
+   * `primaryNode` association and whether it funds this node's own identity.
+   * These are exactly the accounts the bound wallet can manage (owner-gated
+   * writes). Throws {@link PcaUnavailableError} (→ 503) when the NFT is undeployed.
+   */
+  listNodePublishingConvictionAccounts?(): Promise<NodePublishingConvictionAccount[]>;
+
+  /**
+   * OT-RFC-51 owner-gated re-designation of a PCA's primary node (moves FUTURE
+   * epochs' publishing allocation to `primaryNode`). Owner revert MUST surface
+   * (→ 403); the on-chain rate-limit (once per epoch) surfaces as a revert too.
+   */
+  setPublishingConvictionPrimaryNode?(accountId: bigint, primaryNode: bigint): Promise<TxResult>;
+
+  /**
+   * Enumerate the operational wallets registered as publishing agents on
+   * `accountId` (mirrors `getRegisteredAgents`). Checksummed addresses;
+   * `[]` when the account has none or the NFT is undeployed. Optional —
+   * adapters that omit it surface as "no agent enumeration" (daemon → 503).
+   */
+  getPublishingConvictionAgents?(accountId: bigint): Promise<string[]>;
 
   /**
    * Sign an arbitrary message hash using the node's primary operational key.
@@ -1057,6 +1285,27 @@ export interface ChainAdapter {
     identityId?: bigint;
     additionalAddresses?: string[];
   }): Promise<OperationalWalletRegistrationResult>;
+
+  /**
+   * Add a single operational wallet to the node identity via
+   * `Profile.addOperationalWallets(identityId, [address])`. Signed by the
+   * configured admin key (the on-chain `onlyAdmin` gate). Throws when no admin
+   * key is configured, the configured admin is not an on-chain ADMIN_KEY for
+   * the identity, or the identity has no profile. `identityId` defaults to the
+   * bound node's own identity.
+   */
+  addOperationalWallet?(address: string, options?: { identityId?: bigint }): Promise<TxResult>;
+
+  /**
+   * Remove a single operational wallet from the node identity via
+   * `Identity.removeKey(identityId, keccak(address))` (Profile has no remove
+   * path). Signed by the configured admin key. REFUSES to remove the bound
+   * primary operational wallet (the one that resolves the node's identityId) —
+   * the contract's only guard is `CannotDeleteOnlyOperationalKey`, which would
+   * not stop orphaning the node's own identity resolution while other keys
+   * remain. `identityId` defaults to the bound node's own identity.
+   */
+  removeOperationalWallet?(address: string, options?: { identityId?: bigint }): Promise<TxResult>;
 
   // ----- Network State Registry (RFC 04 v0.3 / Issue #461) -----
   //

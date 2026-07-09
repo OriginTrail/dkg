@@ -17,7 +17,7 @@
  *    how many additional triples each target layer needs.
  * 3. Pick entities to move up using a deterministic lexicographic sort
  *    (so reruns bucket identically) and a greedy fill:
- *        - VM first  → publish via /api/shared-memory/publish
+ *        - VM first  → publish (loose selection-publish, RETIRED #1087 → #1260)
  *        - SWM next  → promote via /api/knowledge-assets/:name/swm/share
  *        - remainder stays WM
  * 4. Batch promotes/publishes (default 40 entities per call) so we stay
@@ -258,7 +258,7 @@ async function promoteBatches(sg, ents, tag) {
 
 // IMPORTANT ordering for disjoint layers:
 //
-// `POST /api/shared-memory/publish` with `clearAfter: true` wipes the
+// The retired loose selection-publish with `clearAfter: true` wiped the
 // ENTIRE SWM partition for the sub-graph, not just the selected entities
 // (see `publishFromSharedMemory` in packages/publisher/src/dkg-publisher.ts).
 // That means we cannot interleave publishes with other things in SWM —
@@ -274,88 +274,27 @@ async function promoteBatches(sg, ents, tag) {
 // Net result: VM holds VM-bound, SWM holds only SWM-bound, WM holds the
 // rest — a clean WM/SWM/VM partition.
 
+// NEUTERED (#1087, pending #1260): the SWM→VM publish leg below is disabled
+// (loose publish-by-selection was removed). The default mode promotes the
+// VM-bound cohort into SWM expecting to drain it to VM — without that drain it
+// would leave a mixed SWM partition (VM-bound + SWM-bound). So bail BEFORE any
+// SWM mutation unless --skip-vm is set (promote-to-SWM-only, which is coherent).
+if (!SKIP_VM) {
+  console.error('\n[redist] SWM→VM publish leg is disabled pending the #1260 named-KA rework.');
+  console.error('[redist] Without it, this default redistribution can only half-complete (VM-bound would sit in SWM).');
+  console.error('[redist] Re-run with --skip-vm to only redistribute into SWM, or wait for #1260.');
+  process.exit(1);
+}
+
 console.log('\n──── promote WM → SWM (VM-bound first) ────');
 for (const sg of SUB_GRAPHS) {
   const vmPlan = vmBySg[sg] ?? [];
   if (vmPlan.length) await promoteBatches(sg, vmPlan, 'promote-vm');
 }
 
-if (SKIP_VM) {
-  console.log('\n[redist] --skip-vm set; skipping publish + SWM promote.');
-  process.exit(0);
-}
-
-// ── 4. Publish VM-bound entities on-chain. We issue per-sub-graph
-//       batches of 40; each call triggers an anchor TX on the local
-//       devnet chain, which is ~1–2 s per batch. `clearAfter` is only
-//       true on the LAST batch of each sub-graph (see note above).
-async function publishBatches(sg, ents) {
-  if (ents.length === 0) return;
-  const totalBatches = Math.ceil(ents.length / BATCH);
-  for (let i = 0; i < ents.length; i += BATCH) {
-    const slice = ents.slice(i, i + BATCH).map(e => e.uri);
-    const batchN = Math.floor(i / BATCH) + 1;
-    const isLast = batchN === totalBatches;
-    try {
-      const r = await client.request('POST', '/api/shared-memory/publish', {
-        contextGraphId: cgId,
-        subGraphName: sg,
-        selection: slice,
-        clearAfter: isLast,
-      });
-      const drain = isLast ? ' [drain SWM]' : '';
-      console.log(`  · ${sg} publish ${batchN}/${totalBatches}: kaId=${r?.kaId} tx=${r?.txHash?.slice(0, 10) ?? '—'}${drain}`);
-    } catch (err) {
-      console.warn(`  ! ${sg} publish ${batchN}/${totalBatches} failed: ${err.message.split('\n')[0]}`);
-    }
-  }
-}
-
-console.log('\n──── publish SWM → VM ────');
-// Best-effort on-chain registration before publish (409 = already done).
-try {
-  await client.request('POST', '/api/context-graph/register', {
-    id: cgId,
-    revealOnChain: true,
-    accessPolicy: 0,
-  });
-  console.log('  + on-chain registration OK');
-} catch (err) {
-  if (err.status === 409) console.log('  · project already registered on-chain');
-  else console.warn(`  ! register failed: ${err.message.split('\n')[0]}`);
-}
-
-for (const sg of SUB_GRAPHS) {
-  // Publish anything targeted at VM — both freshly-promoted and already-
-  // promoted SWM stragglers. The daemon is idempotent for repeat calls
-  // since the publish flow just copies SWM quads into the VM graph.
-  const ents = [...(vmBySg[sg] ?? []), ...(vmFromSwmBySg[sg] ?? [])];
-  if (ents.length === 0) continue;
-  console.log(`[${sg}] publishing ${ents.length} entities…`);
-  await publishBatches(sg, ents);
-}
-
-console.log('\n──── promote WM → SWM (SWM-bound) ────');
-// SWM is empty (drained by the last publish per sub-graph), so the
-// remaining promotes land cleanly into SWM without mixing with VM-bound
-// entities.
-for (const sg of SUB_GRAPHS) {
-  const swmPlan = swmBySg[sg] ?? [];
-  if (swmPlan.length) await promoteBatches(sg, swmPlan, 'promote-swm');
-}
-
-// ── 5. Verify final distribution.
-const wmAfter  = await countLayer('CONTAINS(STR(?g), "/assertion/")');
-const swmAfter = await countLayer('STRENDS(STR(?g), "/_shared_memory")');
-const vmAfter  = await countLayer(
-  '!CONTAINS(STR(?g), "/assertion/") && !CONTAINS(STR(?g), "_shared_memory") ' +
-  '&& !CONTAINS(STR(?g), "_verifiable_memory") && !CONTAINS(STR(?g), "/_meta") ' +
-  '&& !CONTAINS(STR(?g), "/_private") && !CONTAINS(STR(?g), "/_rules")',
-);
-const totAfter = wmAfter + swmAfter + vmAfter;
-const pct = (n) => totAfter ? ((n * 100) / totAfter).toFixed(1) + '%' : '—';
-console.log('\n──── final distribution ────');
-console.log(`[redist] WM  ${wmAfter}  (${pct(wmAfter)})`);
-console.log(`[redist] SWM ${swmAfter} (${pct(swmAfter)})`);
-console.log(`[redist] VM  ${vmAfter}  (${pct(vmAfter)})`);
-console.log(`[redist] total ${totAfter}`);
+// The default (VM) mode exits above, so we always reach here under --skip-vm:
+// the VM-bound cohort has been promoted into SWM. The SWM→VM publish leg (loose
+// publish-by-selection) was removed in #1087; the named-KA rework is tracked in
+// #1260, so there is no on-chain publish or SWM-bound promote step here.
+console.log('\n[redist] --skip-vm: VM-bound cohort redistributed into SWM. SWM→VM publish leg disabled pending #1260.');
+process.exit(0);

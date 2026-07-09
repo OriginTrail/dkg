@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { computeUpdateACKDigest } from '@origintrail-official/dkg-core';
+import { connectable } from './connectable.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const ADMIN_PK = '0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a';
@@ -46,16 +47,27 @@ function makeStubbedAdapter(opts: {
 }) {
   const a = new EVMChainAdapter(minimalConfig());
   (a as any).initialized = true;
-  (a as any).provider = {
+  // R1/#1336: getEvmChainId reads chainId via readProvider (this.rpcFailover.read)
+  // over this.providers[0] (=== this.provider in prod). Set the mock on BOTH so the
+  // digest's chainId read resolves to the stub instead of dialling the placeholder RPC.
+  const provider = {
     getNetwork: async () => ({ chainId: TEST_CHAIN_ID }),
+    send: async (method: string) => {
+      if (method === 'eth_chainId') return `0x${TEST_CHAIN_ID.toString(16)}`;
+      throw new Error(`unexpected RPC method ${method}`);
+    },
   };
-  (a as any).contracts.knowledgeAssetsLifecycle = {
+  (a as any).provider = provider;
+  (a as any).providers = [provider];
+  // The contract view reads go through readContract (this.rpcFailover.readContract)
+  // → rebindContract (contract.connect(p)), so the contract stubs must be .connect-able.
+  (a as any).contracts.knowledgeAssetsLifecycle = connectable({
     getAddress: async () => KAV10_ADDRESS,
-  };
-  (a as any).contracts.contextGraphStorage = {
+  });
+  (a as any).contracts.contextGraphStorage = connectable({
     kaToContextGraph: async () => opts.contextGraphId,
-  };
-  (a as any).contracts.knowledgeAssetStorage = {
+  });
+  (a as any).contracts.knowledgeAssetStorage = connectable({
     getMerkleRoots: async () => new Array(Number(opts.preUpdateMerkleRootCount)).fill('0x00'),
     getTokenAmount: async () => opts.currentTokenAmount,
     // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
@@ -68,7 +80,7 @@ function makeStubbedAdapter(opts: {
       false,
       0n,
     ],
-  };
+  });
   return a;
 }
 
@@ -130,6 +142,35 @@ describe('V10 UPDATE ACK digest parity (off-chain == adapter)', () => {
 
     expect(Buffer.from(offChainDigest).equals(Buffer.from(adapterDigest))).toBe(true);
     expect(offChainDigest.length).toBe(32);
+  });
+
+  it('validates live chain id before computing an update ACK digest on static-network providers', async () => {
+    const a = makeStubbedAdapter({
+      contextGraphId,
+      preUpdateMerkleRootCount,
+      currentTokenAmount,
+      currentByteSize: newByteSize,
+    });
+    const wrongLiveProvider = {
+      // Static-network getNetwork would return the configured id; the digest
+      // path must still validate the live endpoint via eth_chainId.
+      getNetwork: async () => ({ chainId: TEST_CHAIN_ID }),
+      send: async (method: string) => {
+        if (method === 'eth_chainId') return '0x14a34';
+        throw new Error(`unexpected RPC method ${method}`);
+      },
+    };
+    (a as any).provider = wrongLiveProvider;
+    (a as any).providers = [wrongLiveProvider];
+
+    await expect(a.computeV10UpdateAckDigest({
+      kaId,
+      newMerkleRoot,
+      newByteSize,
+      newMerkleLeafCount,
+      mintAmount,
+      burnTokenIds,
+    })).rejects.toThrow(/Configured chainId 31337 does not match RPC chainId 84532/);
   });
 
   it('with explicit user newTokenAmount: bound value flows into both digest paths', async () => {

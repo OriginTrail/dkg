@@ -2,6 +2,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
   SelectResult,
@@ -10,6 +11,8 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
+import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
 
 /**
  * BlazegraphStore — TripleStore adapter backed by a remote Blazegraph
@@ -28,37 +31,68 @@ export class BlazegraphStore implements TripleStore {
     this.url = url.replace(/\/$/, '');
   }
 
+  private runStoreWork<T>(
+    operation: string,
+    options: QueryOptions | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return externalStorePriorityScheduler.run(
+      options?.priority,
+      options?.source ?? `blazegraph.${operation}`,
+      work,
+      options?.signal,
+    );
+  }
+
+  getPressureSnapshot(): StorePressureSnapshot {
+    return externalStorePriorityScheduler.snapshot;
+  }
+
   // -------------------------------------------------------------------
   // Mutations
   // -------------------------------------------------------------------
 
-  async insert(quads: DKGQuad[]): Promise<void> {
+  async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
-    const safe = rejectOversizedLiterals(quads, BLAZEGRAPH_MUTF8_LIMIT);
-    const nquads = safe.map(quadToNQuad).join('\n') + '\n';
-    const res = await fetch(this.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/x-nquads' },
-      body: nquads,
+    assertQuadLiteralsMutf8Safe(quads, {
+      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+      label: 'BlazegraphStore.insert',
     });
+    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    const res = await this.runStoreWork('insert', {
+      ...options,
+      source: options?.source ?? 'blazegraph.insert',
+    }, async () => fetch(this.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/x-nquads' },
+        body: nquads,
+        signal: options?.signal,
+      }),
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Blazegraph insert failed (${res.status}): ${text.slice(0, 200)}`);
     }
   }
 
-  async delete(quads: DKGQuad[]): Promise<void> {
+  async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
     // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
     // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
     // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
-    await this.sparqlUpdate(update);
+    await this.sparqlUpdate(update, {
+      ...options,
+      source: options?.source ?? 'blazegraph.delete',
+    }, 'delete');
   }
 
-  async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
-    const before = await this.countQuads(pattern.graph);
+  async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
+    const before = await this.countQuads(pattern.graph, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteByPattern.countBefore',
+    });
     const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
     const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
     const o = pattern.object ? formatTerm(pattern.object) : '?o';
@@ -66,25 +100,58 @@ export class BlazegraphStore implements TripleStore {
     if (pattern.graph) {
       await this.sparqlUpdate(
         `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
+        { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
+        'deleteByPattern',
       );
     } else {
       // `DELETE { ?g_ctx { … } }` is a syntax error — the template needs the
       // `GRAPH` keyword. Rejected with HTTP 400 by a spec-compliant endpoint.
       await this.sparqlUpdate(
         `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
+        { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
+        'deleteByPattern',
       );
     }
-    const after = await this.countQuads(pattern.graph);
+    const after = await this.countQuads(pattern.graph, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteByPattern.countAfter',
+    });
     return Math.max(0, before - after);
   }
 
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    const before = await this.countQuads(graphUri);
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
+    const before = await this.countQuads(graphUri, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
+    });
     await this.sparqlUpdate(
       `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
+      { ...options, source: options?.source ?? 'blazegraph.deleteBySubjectPrefix' },
+      'deleteBySubjectPrefix',
     );
-    const after = await this.countQuads(graphUri);
+    const after = await this.countQuads(graphUri, {
+      ...options,
+      source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countAfter',
+    });
     return Math.max(0, before - after);
+  }
+
+  /**
+   * Server-side SPARQL UPDATE — POSTs the update verbatim to the endpoint so a
+   * `DELETE { … } WHERE { … }` (or `INSERT … WHERE`) runs entirely inside
+   * Blazegraph with NO client-side COUNT scans. Uniform with the
+   * oxigraph/sparql-http `update()` (`See {@link TripleStore.update}`) so callers
+   * can issue one count-free UPDATE instead of a per-pattern
+   * `deleteByPattern`/`deleteBySubjectPrefix` loop — each of those brackets its
+   * delete with two full-graph `countQuads` scans (see above), which is
+   * prohibitive on a CPU-pegged core.
+   */
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
+    await this.sparqlUpdate(
+      sparql,
+      { ...options, source: options?.source ?? 'blazegraph.update' },
+      'update',
+    );
   }
 
   // -------------------------------------------------------------------
@@ -92,57 +159,59 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    if (options?.signal?.aborted) {
-      const reason = options.signal.reason;
-      throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
-    }
-    const trimmed = sparql.trim();
-    const upper = trimmed.toUpperCase();
-    const isAsk = upper.startsWith('ASK');
-    const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
-
-    if (isConstruct) {
-      return this.queryConstruct(trimmed, options);
-    }
-
-    // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
-    // request body with `application/sparql-query` rather than URL-encoded
-    // form data. Form-encoded bodies (`query=...`) are parsed by Jetty's
-    // form handler, which caps at `maxFormContentSize` (~200 KB by default
-    // on stock Blazegraph) and rejects larger payloads with HTTP 400
-    // "Unable to parse form content". The direct-POST body is not form
-    // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
-    const res = await fetch(this.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/sparql-query',
-        Accept: 'application/sparql-results+json',
-      },
-      body: trimmed,
-      signal: options?.signal,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Blazegraph query failed (${res.status}): ${text.slice(0, 300)}`);
-    }
-
-    const json = (await res.json()) as BlazeSelectResponse | BlazeAskResponse;
-
-    if (isAsk || 'boolean' in json) {
-      return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
-    }
-
-    const sr = json as BlazeSelectResponse;
-    const vars = sr.head?.vars ?? [];
-    const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
-      const obj: Record<string, string> = {};
-      for (const v of vars) {
-        const cell = row[v];
-        if (cell) obj[v] = blazeTermToString(cell);
+    return this.runStoreWork('query', options, async () => {
+      if (options?.signal?.aborted) {
+        const reason = options.signal.reason;
+        throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
       }
-      return obj;
+      const trimmed = sparql.trim();
+      const upper = trimmed.toUpperCase();
+      const isAsk = upper.startsWith('ASK');
+      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+
+      if (isConstruct) {
+        return this.queryConstruct(trimmed, options);
+      }
+
+      // Direct POST (W3C SPARQL 1.1 Protocol): send the query as the raw
+      // request body with `application/sparql-query` rather than URL-encoded
+      // form data. Form-encoded bodies (`query=...`) are parsed by Jetty's
+      // form handler, which caps at `maxFormContentSize` (~200 KB by default
+      // on stock Blazegraph) and rejects larger payloads with HTTP 400
+      // "Unable to parse form content". The direct-POST body is not form
+      // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
+      const res = await fetch(this.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/sparql-query',
+          Accept: 'application/sparql-results+json',
+        },
+        body: trimmed,
+        signal: options?.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Blazegraph query failed (${res.status}): ${text.slice(0, 300)}`);
+      }
+
+      const json = (await res.json()) as BlazeSelectResponse | BlazeAskResponse;
+
+      if (isAsk || 'boolean' in json) {
+        return { type: 'boolean', value: (json as BlazeAskResponse).boolean } satisfies AskResult;
+      }
+
+      const sr = json as BlazeSelectResponse;
+      const vars = sr.head?.vars ?? [];
+      const bindings: Array<Record<string, string>> = (sr.results?.bindings ?? []).map((row) => {
+        const obj: Record<string, string> = {};
+        for (const v of vars) {
+          const cell = row[v];
+          if (cell) obj[v] = blazeTermToString(cell);
+        }
+        return obj;
+      });
+      return { type: 'bindings', bindings } satisfies SelectResult;
     });
-    return { type: 'bindings', bindings } satisfies SelectResult;
   }
 
   private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
@@ -168,9 +237,10 @@ export class BlazegraphStore implements TripleStore {
   // Graph management
   // -------------------------------------------------------------------
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     const r = await this.query(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
+      { ...options, source: options?.source ?? 'blazegraph.hasGraph' },
     );
     return r.type === 'boolean' && r.value;
   }
@@ -179,8 +249,12 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph creates graphs implicitly on insert.
   }
 
-  async dropGraph(graphUri: string): Promise<void> {
-    await this.sparqlUpdate(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
+  async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
+    await this.sparqlUpdate(
+      `DROP SILENT GRAPH <${escapeUri(graphUri)}>`,
+      { ...options, source: options?.source ?? 'blazegraph.dropGraph' },
+      'dropGraph',
+    );
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
@@ -196,11 +270,14 @@ export class BlazegraphStore implements TripleStore {
   // Counts
   // -------------------------------------------------------------------
 
-  async countQuads(graphUri?: string): Promise<number> {
+  async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
     const sparql = graphUri
       ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
       : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.query(sparql);
+    const r = await this.query(sparql, {
+      ...options,
+      source: options?.source ?? 'blazegraph.countQuads',
+    });
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const cell = r.bindings[0].c ?? '';
       const digits = cell.match(/\d+/)?.[0];
@@ -221,7 +298,11 @@ export class BlazegraphStore implements TripleStore {
   // Internal helpers
   // -------------------------------------------------------------------
 
-  private async sparqlUpdate(update: string): Promise<void> {
+  private async sparqlUpdate(
+    update: string,
+    options?: QueryOptions,
+    operation = 'update',
+  ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol): send the update as the raw
     // request body with `application/sparql-update` rather than URL-encoded
     // form data (`update=...`). Form-encoded bodies hit Jetty's
@@ -229,11 +310,13 @@ export class BlazegraphStore implements TripleStore {
     // HTTP 400 "Unable to parse form content" — which broke large publishes
     // (a publish issues a DELETE DATA / INSERT over the full quad set). The
     // raw body is not form parsed, so large updates succeed.
-    const res = await fetch(this.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/sparql-update' },
-      body: update,
-    });
+    const res = await this.runStoreWork(operation, options, async () => fetch(this.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sparql-update' },
+        body: update,
+        signal: options?.signal,
+      }),
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);

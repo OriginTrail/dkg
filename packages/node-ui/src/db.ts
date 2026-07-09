@@ -10,7 +10,12 @@ import {
   type ProtocolOutboxStore,
 } from '@origintrail-official/dkg-core';
 
-const SCHEMA_VERSION = 21;
+export {
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
+} from './chain-cursor-stores.js';
+
+const SCHEMA_VERSION = 22;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -790,6 +795,23 @@ export class DashboardDB {
         );
         CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
           ON sync_checkpoints(expires_at);
+      `);
+    }
+
+    if (version < 22) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS runtime_cursors (
+          namespace TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          key TEXT NOT NULL,
+          value INTEGER NOT NULL CHECK (value > 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (namespace, scope, key)
+        );
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_runtime_cursors_namespace_scope
+          ON runtime_cursors(namespace, scope);
       `);
     }
 
@@ -2266,6 +2288,30 @@ export class DashboardDB {
         WHERE type IN (${placeholders})
         ORDER BY ts DESC LIMIT ?`,
     ).all(...types, limit) as NotificationRow[];
+  }
+
+  /**
+   * The caller's OWN confirmed-discount rows (`pca_cost_covered`, B8). Wallet-
+   * scoped, NOT CG-membership-scoped (the publishing wallet may not be a member
+   * of the CG it published to — a sponsored edge). Kept on a DEDICATED fetch
+   * (filtered in SQL by type + lowercased `meta.publisherAddress`) rather than
+   * the shared join-confirmation `getNotificationsOfTypes` window: discount rows
+   * are higher-volume (one per discounted publish vs rare join events), so
+   * cap-sharing would let a busy node's join/other volume age a publisher's older
+   * discount rows out of the window → hidden + unmarkable (#1365 round-2). The
+   * SQL pulls ONLY the caller's own rows under its own bound. The type literal
+   * mirrors `PCA_COST_COVERED_TYPE` (kept inline to avoid a notifications-scope
+   * import cycle into the DB layer).
+   */
+  getPcaCostCoveredRowsForWallet(walletAddress: string, limit = 200): NotificationRow[] {
+    const wallet = walletAddress.trim().toLowerCase();
+    if (!wallet) return [];
+    return this.db.prepare(
+      `SELECT * FROM notifications
+        WHERE type = 'pca_cost_covered'
+          AND lower(json_extract(meta, '$.publisherAddress')) = ?
+        ORDER BY ts DESC LIMIT ?`,
+    ).all(wallet, limit) as NotificationRow[];
   }
 
   markNotificationsRead(ids?: number[]): number {

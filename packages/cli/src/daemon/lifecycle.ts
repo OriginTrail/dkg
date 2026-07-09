@@ -24,6 +24,7 @@ import {
   parseRdfInt,
   shadowContextGraphIdsFromMetricSubscriptionCandidates,
 } from "./metrics-queries.js";
+import { createMetricsPresence } from "./metrics-presence.js";
 import {
   appendFile,
   chmod,
@@ -64,14 +65,22 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
-  enrichEvmError,
+  buildEvmDeploymentId,
   MockChainAdapter,
+  mergeRpcUsageWindows,
   type ApprovalPolicy,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator } from '@origintrail-official/dkg-agent';
+import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
-import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled } from '@origintrail-official/dkg-core';
+import {
+  DEFAULT_REQUIRED_ACKS,
+  findReservedSubjectPrefix,
+  isSkolemizedUri,
+  selectACKCandidatePeers,
+  type AsyncKnowledgeAssetVmPublishExecutionInput,
+  type AsyncLiftPublisherConfig,
+} from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -79,10 +88,15 @@ import {
   handleNodeUIRequest,
   ChatMemoryManager,
   LogPushWorker,
+  OtlpLogWorker,
+  initTelemetry,
+  shutdownTelemetry,
   LlmClient,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChainEventCursorStore,
+  SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -111,8 +125,10 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveNetworkDefaultContextGraphs,
+  resolveNetworkConfigName,
   resolveApprovalPolicy,
   resolveSharedMemoryTtlMs,
+  resolveStorageAckTiming,
   repoDir,
   releasesDir,
   activeSlot,
@@ -127,6 +143,9 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
+import { resolveOtelSignals, resolveLogExporterMode, isUnknownLogExporter } from '../telemetry-config.js';
+import { createDaemonLogSink } from './log-sink.js';
+import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../catchup-runner.js';
 import { loadTokens, httpAuthGuard } from '../auth.js';
@@ -172,6 +191,7 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 import {
   daemonState,
   resolveStandaloneInstall,
+  resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -219,8 +239,6 @@ import {
 } from './shutdown.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
-  parsePublishRequestBody,
   jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
@@ -233,8 +251,6 @@ import {
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
-  isPayloadTooLargeError,
-  payloadTooLargeResponseBody,
   unregisteredSubGraphError,
   readBody,
   readBodyBuffer,
@@ -254,6 +270,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondWithDaemonError,
 } from './http-utils.js';
 import {
   normalizeRepo,
@@ -278,10 +295,18 @@ import {
   type UpdateStatus,
   acquireUpdateLock,
   releaseUpdateLock,
+  resolveAutoUpdateGitRef,
+  checkForNewCommitWithStatus,
+  performUpdateWithStatus,
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
-import { chainResetWipe, detectBackendSwitch } from './chain-reset-wipe.js';
+import {
+  chainResetWipe,
+  detectBackendSwitch,
+  detectNetworkSwitch,
+  skipChainResetWipe,
+} from './chain-reset-wipe.js';
 import {
   checkExternalStoreReachable,
   checkOrSetStoreIdentity,
@@ -592,24 +617,125 @@ export function mergePreferredRelays(input: {
   };
 }
 
-export function shouldUseIncrementalChainDiscoveryScan(input: {
-  run: number;
-  watermarkSeeded: boolean;
-  fullScanEvery: number;
-}): boolean {
-  return (
-    input.watermarkSeeded &&
-    input.run !== 0 &&
-    input.run % input.fullScanEvery !== 0
-  );
+export function extractPeerIdFromMultiaddr(raw: string): string | null {
+  const parts = raw.split('/').filter((part) => part.length > 0);
+  const idx = parts.indexOf('p2p');
+  if (idx < 0) return null;
+  return parts[idx + 1]?.trim() || null;
 }
 
-export function chainDiscoveryScanOptions(incremental: boolean):
-  | { incremental: true }
-  | { seedIncrementalWatermark: true; throwOnChainScanFailure: true } {
-  return incremental
-    ? { incremental: true }
-    : { seedIncrementalWatermark: true, throwOnChainScanFailure: true };
+export function extractPeerIdsFromMultiaddrs(addrs: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of addrs ?? []) {
+    const peerId = extractPeerIdFromMultiaddr(raw);
+    if (!peerId || seen.has(peerId)) continue;
+    seen.add(peerId);
+    out.push(peerId);
+  }
+  return out;
+}
+
+export function resolveACKCandidatePeerIds(input: {
+  usingNetworkRelays: boolean;
+  networkRelays: readonly string[] | undefined;
+}): string[] {
+  if (!input.usingNetworkRelays) return [];
+  return extractPeerIdsFromMultiaddrs(input.networkRelays);
+}
+
+export function orderACKCandidatePeerIds(input: {
+  connectedPeerIds: readonly string[];
+  selfPeerId: string;
+  knownCorePeerIds?: ReadonlySet<string>;
+  preferredACKPeerIds?: readonly string[];
+  verifiedSameNetworkPeerIds?: ReadonlySet<string>;
+}): string[] {
+  return selectACKCandidatePeers({
+    connectedPeers: input.connectedPeerIds,
+    selfPeerId: input.selfPeerId,
+    knownCorePeerIds: input.knownCorePeerIds,
+    preferredACKPeerIds: input.preferredACKPeerIds,
+    verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
+    requiredACKs: Number.MAX_SAFE_INTEGER,
+  });
+}
+
+export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
+
+export function chainDiscoveryScanOptions(input: {
+  watermarkSeeded: boolean;
+  run?: number;
+  fullScanEvery?: number;
+  pageBudget?: number;
+}):
+  | { mode: 'incremental'; pageBudget: number }
+  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number }
+  | { mode: 'seedFull'; throwOnChainScanFailure: true } {
+  const configuredFullScanEvery = input.fullScanEvery;
+  let fullScanEvery = CHAIN_FULL_SCAN_EVERY;
+  if (
+    typeof configuredFullScanEvery === 'number' &&
+    Number.isFinite(configuredFullScanEvery) &&
+    configuredFullScanEvery >= 1
+  ) {
+    fullScanEvery = Math.floor(configuredFullScanEvery);
+  }
+  const configuredPageBudget = input.pageBudget;
+  const pageBudget = (
+    typeof configuredPageBudget === 'number' &&
+    Number.isFinite(configuredPageBudget) &&
+    configuredPageBudget >= 1
+  )
+    ? Math.floor(configuredPageBudget)
+    : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
+  const run = input.run ?? 0;
+  const startupRecoveryScan = input.watermarkSeeded && run === 0;
+  const periodicFullResync = input.watermarkSeeded && run > 0 && run % fullScanEvery === 0;
+  if (startupRecoveryScan || periodicFullResync) {
+    return { mode: 'seedFull', throwOnChainScanFailure: true };
+  }
+  return input.watermarkSeeded && !periodicFullResync
+    ? { mode: 'incremental', pageBudget }
+    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+}
+
+export function createChainDiscoveryScanRunner(input: {
+  agent: {
+    hasContextGraphRegistryScanWatermark(): Promise<boolean>;
+    discoverContextGraphsFromChain(
+      options: ReturnType<typeof chainDiscoveryScanOptions>,
+    ): Promise<number>;
+  };
+  log: (msg: string) => void;
+  pageBudget?: number;
+  fullScanEvery?: number;
+}): () => Promise<void> {
+  let runs = 0;
+  let inFlight = false;
+  return async () => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      const run = runs++;
+      const found = await input.agent.discoverContextGraphsFromChain(
+        chainDiscoveryScanOptions({
+          run,
+          watermarkSeeded: await input.agent.hasContextGraphRegistryScanWatermark(),
+          pageBudget: input.pageBudget,
+          fullScanEvery: input.fullScanEvery,
+        }),
+      );
+      if (found > 0) {
+        input.log(`Chain scan: discovered ${found} new context graph(s)`);
+      }
+    } catch {
+      /* non-critical */
+    } finally {
+      inFlight = false;
+    }
+  };
 }
 
 export interface PromoteWorkerDaemonLifecycle {
@@ -739,6 +865,49 @@ type StartupGenesisValidation =
 
 type StartupGenesisValidationInput = Partial<Pick<NetworkConfig, '_status' | 'genesisId' | 'networkId' | 'networkName' | 'relays'>>;
 
+type KnowledgeAssetVmPublishExecutor = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor']>;
+type KnowledgeAssetVmPublishPreflight = NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight']>;
+type QueuedKnowledgeAssetVmPublishOptions = Parameters<DKGAgent['publishQueuedKnowledgeAssetVmPublish']>[2];
+
+export function createKnowledgeAssetVmPublishExecutor(agent: DKGAgent): KnowledgeAssetVmPublishExecutor {
+  return async ({ request, publishOptions, publisher }: AsyncKnowledgeAssetVmPublishExecutionInput) => {
+    const publishOpts: QueuedKnowledgeAssetVmPublishOptions = {
+      ...(publisher ? { publisherOverride: publisher } : {}),
+    };
+    try {
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    } catch (firstErr: any) {
+      if (
+        firstErr?.code !== "CG_NOT_REGISTERED" &&
+        !/not registered on-chain/i.test(firstErr?.message ?? String(firstErr))
+      ) {
+        throw firstErr;
+      }
+      const defaultAgentAddress = request.agentAddress ?? agent.getDefaultAgentAddress();
+      await agent.ensureRegisteredForPublish(request.contextGraphId, {
+        ...(defaultAgentAddress ? { callerAgentAddress: defaultAgentAddress } : {}),
+      });
+      return await agent.publishQueuedKnowledgeAssetVmPublish(
+        request,
+        publishOptions,
+        publishOpts,
+      );
+    }
+  };
+}
+
+export function createKnowledgeAssetVmPublishPreflight(agent: DKGAgent): KnowledgeAssetVmPublishPreflight {
+  return async ({ request, publisher }) =>
+    agent.preflightQueuedKnowledgeAssetVmPublishExecution(
+      request,
+      publisher ? { publisherOverride: publisher } : undefined,
+    );
+}
+
 export async function validateStartupGenesis(
   network: StartupGenesisValidationInput | null | undefined,
 ): Promise<StartupGenesisValidation> {
@@ -760,6 +929,7 @@ export async function validateStartupGenesis(
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const config = await loadConfig();
+  configureKaPublishLifecycleDebugLogging(config);
   const startedAt = Date.now();
 
   // Write PID early so the CLI detects the process is alive while
@@ -774,11 +944,60 @@ export async function runDaemon(foreground: boolean): Promise<void> {
   }
 }
 
+function configureKaPublishLifecycleDebugLogging(config: Pick<DkgConfig, 'logging'>): void {
+  const configured = config.logging?.kaPublishLifecycleDebug;
+  if (typeof configured === 'boolean') {
+    setKaPublishLifecycleDebugLoggingEnabled(configured);
+    return;
+  }
+  setKaPublishLifecycleDebugLoggingEnabled(undefined);
+  setKaPublishLifecycleDebugLoggingEnabled(isKaPublishLifecycleDebugLoggingEnabled());
+}
+
+export async function resolveDaemonPublishEncryption(
+  agent: DKGAgent,
+  publishOptions: {
+    contextGraphId: string;
+    subGraphName?: string;
+    publishContextGraphId?: string;
+  },
+): Promise<{
+  encryptInlinePayload: Awaited<ReturnType<DKGAgent['_resolveEncryptInlinePayload']>>;
+  encryptInlineChunked: Awaited<ReturnType<DKGAgent['_resolveEncryptInlineChunked']>>;
+}> {
+  const requestedTarget = publishOptions.publishContextGraphId?.trim();
+  // Async lift resolves this from the source workspace slice before it reaches
+  // generic PublishOptions. Treat it as binding-only; future explicit async
+  // remaps need a separate provenance field.
+  const bindingOptions = requestedTarget
+    ? { aeadBindingContextGraphId: requestedTarget }
+    : undefined;
+  const encryptInlinePayload = await agent._resolveEncryptInlinePayload(
+    publishOptions.contextGraphId,
+    publishOptions.subGraphName,
+    undefined,
+    undefined,
+    bindingOptions,
+  );
+  const encryptInlineChunked = await agent._resolveEncryptInlineChunked(
+    publishOptions.contextGraphId,
+    publishOptions.subGraphName,
+    undefined,
+    undefined,
+    bindingOptions,
+  );
+  return {
+    encryptInlinePayload,
+    encryptInlineChunked,
+  };
+}
+
 export async function runDaemonInner(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  configureKaPublishLifecycleDebugLogging(config);
   const logFile = logPath();
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
@@ -898,6 +1117,7 @@ export async function runDaemonInner(
     log(`[dkg-build-info] WARNING: failed to emit startup telemetry: ${String(err)}`);
   }
 
+  const storageAckTiming = resolveStorageAckTiming(config.storageAck);
   const selectedNetworkConfig = config.networkConfig?.trim();
   const network = await loadNetworkConfig(selectedNetworkConfig);
   if (selectedNetworkConfig && !network) {
@@ -924,7 +1144,7 @@ export async function runDaemonInner(
   // reset commit, daemon auto-update brings it within ≤ 5 min, this hook
   // detects the change and wipes the now-orphaned chain state.
   // Operator's keystore + dashboard DB + uploaded files are preserved.
-  // See docs/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
+  // See docs/archive/internal/TESTNET_RESET.md and packages/cli/src/daemon/chain-reset-wipe.ts.
   // Detect backend switch first. If the operator hand-edited
   // store.backend between boots, refuse to start unless they opt in
   // via DKG_ACCEPT_STORE_RESET=1. The new backend is fresh — any data
@@ -937,6 +1157,23 @@ export async function runDaemonInner(
     log,
   });
   if (backendSwitch.aborted) {
+    process.exit(1);
+  }
+
+  // Detect a network switch (config.networkConfig repointed at a different
+  // network on an existing data dir). The store still holds the previous
+  // network's chain-derived state, which is meaningless on the new chain —
+  // and chainResetWipe won't catch it (mainnet overlays ship no
+  // chainResetMarker). Abort unless DKG_ACCEPT_NETWORK_SWITCH=1. Compare the
+  // RESOLVED name so a legacy config (no networkConfig) is treated as its
+  // 'testnet' fallback and never spuriously trips on a normal restart.
+  const networkSwitch = detectNetworkSwitch({
+    dataDir: dkgDir(),
+    currentNetworkConfig: resolveNetworkConfigName(config),
+    acceptNetworkSwitch: process.env.DKG_ACCEPT_NETWORK_SWITCH === '1',
+    log,
+  });
+  if (networkSwitch.aborted) {
     process.exit(1);
   }
 
@@ -1054,6 +1291,10 @@ export async function runDaemonInner(
   const wipeResult = await chainResetWipe({
     dataDir: dkgDir(),
     currentMarker: network?.chainResetMarker,
+    // Dev-loop opt-out: when set, bypass the wipe entirely and don't persist
+    // the marker (unsetting it re-triggers the wipe). Operator nodes leave it
+    // unset and keep wiping by default on a marker change. See issue #679.
+    skip: skipChainResetWipe(),
     // Honour operator's `randomSampling.walPath` override; the prover
     // writes its WAL there, so a fresh chain reset must wipe that file
     // (not the default ~/.dkg/random-sampling.wal which would be empty).
@@ -1067,7 +1308,8 @@ export async function runDaemonInner(
   });
   if (wipeResult.wiped) {
     log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed ` +
+      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
+      `${wipeResult.backedUpFiles.length} backed up ` +
       `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
     );
     // A DKG-managed external wipe uses DROP ALL, which also removes the
@@ -1144,6 +1386,7 @@ export async function runDaemonInner(
   // "none" disables relay entirely (used by devnet relay nodes to prevent
   // cross-network leakage into testnet).
   let relayPeers: string[] | undefined;
+  let usingNetworkRelays = false;
   if (config.relay === "none") {
     relayPeers = undefined;
     log(
@@ -1153,7 +1396,17 @@ export async function runDaemonInner(
     relayPeers = [config.relay];
   } else if (network?.relays?.length) {
     relayPeers = network.relays;
+    usingNetworkRelays = true;
     log(`Using relay(s) from network config (${network.networkName})`);
+  }
+  const preferredACKPeerIds = resolveACKCandidatePeerIds({
+    usingNetworkRelays,
+    networkRelays: network?.relays,
+  });
+  if (preferredACKPeerIds.length > 0) {
+    log(
+      `ACK candidate peer preference: ${preferredACKPeerIds.length} relay peer(s) from network config (${network?.networkName ?? "unknown"}) ranked first; candidacy is not restricted — all connected peers stay eligible`,
+    );
   }
 
   // rc.9 PR-7 — operator-preferred relays. See `mergePreferredRelays`
@@ -1198,6 +1451,16 @@ export async function runDaemonInner(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  const chainCursorScope = chainBase?.type === 'mock'
+    ? (chainBase.chainId ?? 'mock:31337')
+    : chainBase?.hubAddress
+      ? buildEvmDeploymentId({
+          chainId: chainBase.chainId ?? 'evm:31337',
+          hubAddress: chainBase.hubAddress,
+        })
+      : chainBase?.chainId
+        ? `${chainBase.chainId}:hub=none`
+        : 'none:hub=none';
 
   if (role === 'core' && config.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())
@@ -1247,6 +1510,8 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
+  const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1267,15 +1532,23 @@ export async function runDaemonInner(
     kaNumberAllocator,
     name: config.name,
     genesisId: network?.genesisId,
+    networkIdentity: {
+      genesisId: network?.genesisId,
+      networkId,
+      chainId: chainBase?.chainId,
+      networkConfigName: resolveNetworkConfigName(config),
+    },
     framework: "DKG",
     listenPort: config.listenPort,
     dataDir: dkgDir(),
     bootstrapPeers: config.bootstrapPeers,
     relayPeers,
+    preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
+    logging: config.logging,
     // `dkg/<semver>` convention: broadcast our release on every libp2p
     // identify exchange so remote operators can answer "which DKG
     // release is each peer running?" via /api/peer-info instead of
@@ -1300,8 +1573,13 @@ export async function runDaemonInner(
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
+    syncReconcilerEnabled: config.syncReconcilerEnabled,
+    syncOnConnectEnabled: config.syncOnConnectEnabled,
+    durableSyncEnabled: config.durableSyncEnabled,
+    syncGlobalMaxInflight: config.syncGlobalMaxInflight,
+    storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
-    syncAgentsMeta: role === 'core' ? true : config.syncAgentsMeta,
+    syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.
@@ -1310,6 +1588,7 @@ export async function runDaemonInner(
     chainConfig: chainBase?.rpcUrl && chainBase?.hubAddress ? {
       rpcUrl: chainBase.rpcUrl,
       rpcUrls: chainBase.rpcUrls,
+      walletRpcUrls: chainBase.walletRpcUrls,
       hubAddress: chainBase.hubAddress,
       tokenAddress: chainBase.tokenAddress,
       ...(opWallets.adminWallet
@@ -1319,6 +1598,8 @@ export async function runDaemonInner(
       chainId: chainBase.chainId,
       approvalPolicy: resolveApprovalPolicy(chainBase.approvalPolicy) as ApprovalPolicy | undefined,
       cgRegistryScanPageSize: chainBase.cgRegistryScanPageSize,
+      minPublisherNativeWei: chainBase.minPublisherNativeWei,
+      minPublisherTracWei: chainBase.minPublisherTracWei,
     } : undefined,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
@@ -1326,7 +1607,10 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    storageAckTiming,
     syncCheckpointStore,
+    chainEventCursorStore,
+    contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -1685,75 +1969,13 @@ export async function runDaemonInner(
             store: agent.store,
             keypair: agent.wallet.keypair,
             chainBase: publisherChainBase,
-            ackTransportFactory: () => ({
-              publisherPeerId: agent.peerId,
-              gossipPublish: async (topic: string, data: Uint8Array) => {
-                await agent.gossip.publish(topic, data);
-              },
-              // Route storage-ack + verify-proposal outbound sends through
-              // the Messenger rather than directly through ProtocolRouter
-              // (rc.9 PR-2 wiring). Today this is semantically identical
-              // to the prior `agent.router.send` path — `/dkg/10.0.0/*`
-              // protocols travel `Messenger.sendToPeer` (legacy pass-
-              // through) → `ProtocolRouter.send`. The wiring matters at
-              // Milestone C PR-11 when `/storage-ack` + `/verify-proposal`
-              // migrate to `/dkg/10.0.1/*` and start using
-              // `messenger.sendReliable`, picking up the substrate's
-              // durable outbox + sender-side idempotency without
-              // touching this factory again.
-              //
-              // HIGH RISK gate (rc.9 plan): Milestone C migration of
-              // these protocols MUST include an explicit publishing-flow
-              // integration test covering ACK quorum collection + the
-              // ackTransportFactory hot path before the prefix bump
-              // lands.
-              // rc.9 PR-11: /storage-ack + /verify-proposal migrated to
-              // /dkg/10.0.1/* and now route through messenger.sendReliable
-              // (envelope wrap + sender-side idempotency + durable
-              // outbox). queued surfaces as a thrown transport error so
-              // ACKCollector's MAX_RETRIES loop + per-peer skip semantics
-              // kick in unchanged.
-              sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-                const sendResult = await agent.messenger.sendReliable(peerId, protocol, data);
-                if (!sendResult.delivered) {
-                  throw new Error(`substrate queued (transport): ${sendResult.error}`);
-                }
-                return sendResult.response;
-              },
-              getConnectedCorePeers: () => {
-                const allPeers = agent.node.libp2p
-                  .getPeers()
-                  .map((p) => p.toString())
-                  .filter((id) => id !== agent.peerId);
-                const knownCorePeerIds = (agent as any).knownCorePeerIds as
-                  | Set<string>
-                  | undefined;
-                if (knownCorePeerIds && knownCorePeerIds.size > 0) {
-                  const filtered = allPeers.filter((id) => knownCorePeerIds.has(id));
-                  if (filtered.length > 0) return filtered;
-                }
-                return allPeers;
-              },
+            ackTransportFactory: agent.createACKTransportFactory({
+              sendTimeoutMs: storageAckTiming.sendTimeoutMs,
               log,
             }),
-            publishEncryptionFactory: async (publishOptions) => {
-              const encryptInlinePayload = await agent._resolveEncryptInlinePayload(
-                publishOptions.contextGraphId,
-                publishOptions.subGraphName,
-                undefined,
-                publishOptions.publishContextGraphId,
-              );
-              const encryptInlineChunked = await agent._resolveEncryptInlineChunked(
-                publishOptions.contextGraphId,
-                publishOptions.subGraphName,
-                undefined,
-                publishOptions.publishContextGraphId,
-              );
-              return {
-                encryptInlinePayload,
-                encryptInlineChunked,
-              };
-            },
+            publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
+            knowledgeAssetVmPublishExecutor: createKnowledgeAssetVmPublishExecutor(agent),
+            knowledgeAssetVmPublishPreflight: createKnowledgeAssetVmPublishPreflight(agent),
             log,
           });
           publisherRuntime = runtime;
@@ -1832,25 +2054,11 @@ export async function runDaemonInner(
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
   const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
-  const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
-  let chainScanRuns = 0;
-  const runChainDiscoveryScan = async () => {
-    try {
-      const run = chainScanRuns++;
-      const incremental = shouldUseIncrementalChainDiscoveryScan({
-        run,
-        watermarkSeeded: await agent.hasContextGraphRegistryScanWatermark(),
-        fullScanEvery: CHAIN_FULL_SCAN_EVERY,
-      });
-      const found = await agent.discoverContextGraphsFromChain(
-        chainDiscoveryScanOptions(incremental),
-      );
-      if (found > 0)
-        log(`Chain scan: discovered ${found} new context graph(s)`);
-    } catch {
-      /* non-critical */
-    }
-  };
+  const runChainDiscoveryScan = createChainDiscoveryScanRunner({
+    agent,
+    log,
+    pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+  });
   setTimeout(runChainDiscoveryScan, 15_000);
   const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
   if (chainScanTimer.unref) chainScanTimer.unref();
@@ -1880,14 +2088,73 @@ export async function runDaemonInner(
   // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
   const au = resolveAutoUpdateConfig(config, network);
-  // OT-RFC-41 §4.2 / §5 PR 5: auto-update polling is npm-only.
-  // `resolveStandaloneInstall` still seeds `daemonState.standaloneCache`
-  // for `/api/status` consumers; monorepo dev daemons (standalone=false)
-  // skip the polling loop entirely — contributors update via
-  // `git pull && pnpm install && pnpm build`.
-  const standalone = resolveStandaloneInstall(au?.source ?? resolveAutoUpdateSource(config, network));
+  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
+  const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
+  const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
 
-  if (standalone) {
+  if (pollingMode === "git" && au) {
+    const checkIntervalMs = au.checkIntervalMinutes * 60_000;
+    let watchedRef = "";
+    let watchedRepo = "";
+    try {
+      watchedRef = resolveAutoUpdateGitRef(au);
+      watchedRepo = repoToFetchUrl(au.repo);
+    } catch (err: any) {
+      log(
+        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
+          "Git polling disabled until config is fixed and the daemon is restarted.",
+      );
+    }
+
+    if (watchedRef && watchedRepo) {
+      log(
+        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
+          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
+      );
+
+      const runCheck = async () => {
+        const gitStatus = await checkForNewCommitWithStatus(au, log);
+        if (gitStatus.status === "error") {
+          log("Auto-update (git): update check failed.");
+          return;
+        }
+
+        daemonState.lastUpdateCheck.checkedAt = Date.now();
+        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
+        daemonState.lastUpdateCheck.channelTargetMissing = false;
+        daemonState.lastUpdateCheck.latestVersion = "";
+        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
+
+        if (gitStatus.status !== "available" || !gitStatus.commit) return;
+
+        daemonState.isUpdating = true;
+        let updateStatus: UpdateStatus = "failed";
+        try {
+          updateStatus = await performUpdateWithStatus(au, log, {
+            expectedCommit: gitStatus.commit,
+          });
+        } finally {
+          daemonState.isUpdating = false;
+        }
+
+        if (updateStatus === "updated") {
+          log("Auto-update (git): update activated; exiting for supervised restart.");
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+          return;
+        }
+        if (updateStatus === "up-to-date") {
+          log("Auto-update (git): update skipped — node caught up before apply.");
+          return;
+        }
+        log("Auto-update (git): update failed.");
+      };
+
+      setTimeout(runCheck, 15_000);
+      updateInterval = setInterval(runCheck, checkIntervalMs);
+    }
+  } else if (pollingMode === "git") {
+    log("Auto-update (git): disabled — autoUpdate.enabled is false.");
+  } else if (pollingMode === "npm") {
     const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
     // Even in version-check-only mode (au is null because auto-apply is
     // disabled) the policy used for the check must reflect the operator's
@@ -1950,21 +2217,22 @@ export async function runDaemonInner(
   chatDb = dashDb;
   log("Dashboard DB initialized at " + join(dkgDir(), "node-ui.db"));
 
-  Logger.setSink((entry) => {
-    try {
-      dashDb.insertLog({
-        ts: Date.now(),
-        level: entry.level,
-        operation_name: entry.operationName,
-        operation_id: entry.operationId,
-        module: entry.module,
-        message: entry.message,
-      });
-    } catch {
-      /* DB write must never break the node */
-    }
-    logPusher?.push(entry);
-  });
+  // Redactor for the copy of each record that LEAVES the node. The local
+  // dashboard DB keeps full-fidelity records (it's the operator's own machine);
+  // redaction only protects data crossing the trust boundary to a collector.
+  const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
+
+  // Local DB gets the FULL record; remote shippers get a single REDACTED copy.
+  // `remoteShippers` is evaluated per record so runtime enable/disable of the
+  // syslog/OTLP workers is reflected without re-wiring. Logic lives in
+  // createDaemonLogSink so this trust boundary is unit-tested (log-sink.test.ts).
+  Logger.setSink(
+    createDaemonLogSink({
+      insertLog: (rec) => dashDb.insertLog(rec),
+      redact: redactForRemote,
+      remoteShippers: () => [logPusher, otlpExporter],
+    }),
+  );
 
   // Extract the plain value from an RDF typed literal like "6"^^<xsd:integer>
   const metricsSource: MetricsSource = {
@@ -2119,10 +2387,26 @@ export async function runDaemonInner(
     },
   };
 
+  // Connected node-UI SSE dashboard clients. Declared here (before the metrics
+  // collector) so the presence gate below can consult it; the /api/events
+  // handler further down populates it.
+  const sseClients = new Set<ServerResponse>();
+
+  // Metrics presence gate (#1066 Item 1): the metric COUNT getters are
+  // full-store scans, so the collector skips them when nothing is consuming
+  // metrics — no open dashboard SSE stream and no recent /api/metrics[/history]
+  // read. Bounds those scans to <=1 per tick under load (instead of one per
+  // request) and to zero when idle. Override with DKG_METRICS_ALWAYS_COLLECT=1.
+  const metricsPresence = createMetricsPresence({
+    sseClientCount: () => sseClients.size,
+    alwaysCollect: process.env.DKG_METRICS_ALWAYS_COLLECT === "1",
+  });
+
   const metricsCollector = new MetricsCollector(
     dashDb,
     metricsSource,
     dkgDir(),
+    () => metricsPresence.hasRecentConsumer(),
   );
   metricsCollector.start();
   log("Metrics collector started (30s interval)");
@@ -2133,6 +2417,7 @@ export async function runDaemonInner(
     : "mainnet";
   const syslogEndpoint = TELEMETRY_ENDPOINTS[networkKey]?.syslog;
   let logPusher: LogPushWorker | null = null;
+  let otlpExporter: OtlpLogWorker | null = null;
 
   function startLogPusher(): { ok: boolean; error?: string } {
     if (logPusher) return { ok: true };
@@ -2174,11 +2459,144 @@ export async function runDaemonInner(
     log("Telemetry: log streaming disabled");
   }
 
+  function startOtlpExporter(): { ok: boolean; error?: string } {
+    if (otlpExporter) return { ok: true };
+    // Resolve env-first, matching the traces/metrics precedence (resolveOtelSignals):
+    // the standard OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, then OTEL_EXPORTER_OTLP_ENDPOINT
+    // + /v1/logs, then config. NO hardcoded per-network fallback — logs must never
+    // ship to a placeholder/TBD URL the operator never set.
+    const envBase = process.env.OTEL_EXPORTER_OTLP_ENDPOINT?.replace(/\/$/, "");
+    const endpoint =
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
+      (envBase ? `${envBase}/v1/logs` : undefined) ||
+      config.telemetry?.logs?.endpoint;
+    if (!endpoint) {
+      return {
+        ok: false,
+        error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
+      };
+    }
+    const minLevel = config.telemetry?.logs?.level ?? "info";
+    otlpExporter = new OtlpLogWorker({
+      endpoint,
+      token: config.telemetry?.logs?.token,
+      network: networkKey,
+      peerId: agent.peerId,
+      nodeName: config.name,
+      version: nodeVersion,
+      commit: nodeCommit,
+      role: config.nodeRole ?? "edge",
+      chainId: config.chain?.chainId,
+      minLevel,
+      bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
+      onError: (m) => log(`Telemetry(OTLP): ${m}`),
+    });
+    otlpExporter.start();
+    log(`Telemetry: OTLP log export enabled → ${endpoint} (level ≥ ${minLevel})`);
+    return { ok: true };
+  }
+
+  async function stopOtlpExporter(): Promise<void> {
+    if (!otlpExporter) return;
+    // Await the final flush so disable/shutdown can't return while logs are
+    // still in flight or stranded in the buffer.
+    await otlpExporter.shutdown();
+    otlpExporter = null;
+    log("Telemetry: OTLP log export disabled");
+  }
+
+  // OTel traces + metrics SDK (independent of the log-exporter path below).
+  // Endpoints resolve env-first (standard OTEL_EXPORTER_OTLP_* names) then
+  // config; a signal registers ONLY when its endpoint resolves — never a
+  // guessed prod default. Idempotent (initTelemetry no-ops once configured), so
+  // it is safe to call both at boot AND from the runtime enable toggle.
+  async function startOtelSdk(): Promise<void> {
+    const { tracesEndpoint, metricsEndpoint, tracesOn, metricsOn } = resolveOtelSignals(
+      config.telemetry,
+    );
+    if (!tracesOn && !metricsOn) return;
+    try {
+      await initTelemetry({
+        enabled: true,
+        resource: {
+          serviceName: "dkg-node",
+          serviceVersion: nodeVersion,
+          serviceInstanceId: config.name,
+          network: networkKey,
+          peerId: agent.peerId,
+          nodeName: config.name,
+          nodeRole: config.nodeRole ?? "edge",
+          commit: nodeCommit,
+          chainId: config.chain?.chainId,
+        },
+        traces: tracesOn
+          ? {
+              endpoint: tracesEndpoint,
+              token: config.telemetry?.traces?.token,
+              sampleRatio: config.telemetry?.traces?.sampleRatio,
+            }
+          : undefined,
+        metrics: metricsOn
+          ? {
+              endpoint: metricsEndpoint,
+              token: config.telemetry?.metrics?.token,
+              exportIntervalMs: config.telemetry?.metrics?.exportIntervalMs,
+            }
+          : undefined,
+      });
+      log(
+        `Telemetry: OTel SDK registered (traces=${tracesOn ? tracesEndpoint : "off"}, metrics=${metricsOn ? metricsEndpoint : "off"})`,
+      );
+    } catch (err) {
+      // Telemetry must never block startup.
+      log(`Telemetry: OTel init failed (non-fatal): ${String(err)}`);
+    }
+  }
+
+  // Start ALL telemetry signals under the master gate: OTel traces/metrics
+  // (SDK) AND the configured log exporter. Used at boot and from the runtime
+  // enable toggle so both behave identically (the bug fixed here: enabling from
+  // a boot-disabled state previously started only logs, never traces/metrics).
+  // The log-exporter result is returned separately — a failed log shipper must
+  // NOT tear down or disable the independent traces/metrics signals.
+  // Await the SDK init first (it is dynamically imported) so traces/metrics are
+  // fully registered before the log exporter result is returned — that ordering
+  // lets the runtime-enable path roll the SDK back if the log exporter fails.
+  async function startTelemetry(): Promise<{ ok: boolean; error?: string }> {
+    await startOtelSdk();
+    // Dispatch to the configured log exporter. 'syslog' is the default when
+    // unset (preserves prior behaviour); 'otlp' is the recommended path; 'none'
+    // keeps logs local-only even while telemetry is enabled. An UNKNOWN/typo'd
+    // value fails closed to 'none' (never silently syslog → off-node).
+    if (isUnknownLogExporter(config.telemetry)) {
+      log(
+        `Telemetry: unknown logs.exporter "${config.telemetry?.logs?.exporter}" — ` +
+          `keeping logs local-only (no off-node forwarding). Use 'otlp', 'syslog', or 'none'.`,
+      );
+    }
+    const mode = resolveLogExporterMode(config.telemetry);
+    if (mode === "none") return { ok: true };
+    if (mode === "otlp") return startOtlpExporter();
+    return startLogPusher();
+  }
+
+  // Stop ALL telemetry signals: log exporters AND the OTel SDK (flush + shut
+  // down + clear the API globals). Async so a runtime disable actually stops
+  // traces/metrics — not just logs — and callers can await an orderly teardown.
+  async function stopTelemetry(): Promise<void> {
+    stopLogPusher();
+    await stopOtlpExporter();
+    await shutdownTelemetry().catch(() => {});
+  }
+
   if (config.telemetry?.enabled) {
-    const r = startLogPusher();
+    const r = await startTelemetry();
     if (!r.ok) {
-      log(`Telemetry: ${r.error}`);
-      config.telemetry.enabled = false;
+      // Log forwarding failed to start (e.g. mainnet syslog port 0). Disable
+      // ONLY the log signal — leave the master gate and any registered
+      // traces/metrics intact; they are independent signals. (Boot path:
+      // best-effort per signal; the runtime toggle below rolls back instead.)
+      log(`Telemetry: log exporter not started — ${r.error} (traces/metrics unaffected)`);
     }
   }
 
@@ -2206,6 +2624,27 @@ export async function runDaemonInner(
     }
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
+
+  // RPC usage telemetry — the "RPC credit burn" signal (incident: a node spent
+  // ~$200 of RPC credits in a day with nothing measuring it). The whole
+  // Wiring only (scheduling/format live in rpc-usage-log.ts, unit-tested).
+  // The composite source merges EVERY drainable this process owns: the agent
+  // (its chain adapter) plus the async-publisher runtime's per-wallet
+  // adapters — `publisherRuntime` is late-bound, so read the live variable at
+  // each drain. chainId is the EFFECTIVE one (chainBase resolves field-level
+  // inheritance; config.chain?.chainId alone is undefined for configs that
+  // override only rpcUrl).
+  const rpcUsageLogger = new Logger("chain-rpc");
+  const rpcUsageTelemetry = startRpcUsageTelemetry({
+    source: {
+      drainRpcUsage: () => mergeRpcUsageWindows(
+        agent.drainRpcUsage(),
+        publisherRuntime?.drainRpcUsage(),
+      ),
+    },
+    emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
+    chainId: chainBase?.chainId ?? config.chain?.chainId,
+  });
 
   const tracker = new OperationTracker(dashDb);
 
@@ -2297,8 +2736,9 @@ export async function runDaemonInner(
     } catch { /* never crash */ }
   });
 
-  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients
-  const sseClients = new Set<ServerResponse>();
+  // SSE (Server-Sent Events) broadcast: real-time push to connected UI clients.
+  // `sseClients` is declared earlier (by the metrics collector) so the metrics
+  // presence gate can consult it.
   function sseBroadcast(event: string, payload: Record<string, unknown>) {
     const data = JSON.stringify(payload);
     const msg = `event: ${event}\ndata: ${data}\n\n`;
@@ -2472,21 +2912,6 @@ export async function runDaemonInner(
         subGraphName?: string;
       },
     ) => agent.query(sparql, opts),
-    share: (
-      contextGraphId: string,
-      quads: any[],
-      opts?: { localOnly?: boolean; subGraphName?: string },
-    ) => agent.share(contextGraphId, quads, opts).then((result: any) => {
-      emitMemoryGraphChanged({
-        contextGraphId,
-        layers: ["swm"],
-        subGraphName: opts?.subGraphName,
-        operation: "shared_memory_written",
-        source: opts?.localOnly ? "agent_tool_local" : "agent_tool",
-        counts: { triples: quads.length },
-      });
-      return result;
-    }),
     createAssertion: async (
       contextGraphId: string,
       name: string,
@@ -2527,40 +2952,6 @@ export async function runDaemonInner(
         counts: { triples: quads.length },
       });
       return { written: quads.length };
-    },
-    publishFromSharedMemory: (
-      contextGraphId: string,
-      selection: "all" | { rootEntities: string[] },
-      opts?: { clearSharedMemoryAfter?: boolean; subGraphName?: string },
-    ) => {
-      const publishOpts = {
-        ...opts,
-        clearSharedMemoryAfter: opts?.clearSharedMemoryAfter ?? false,
-      };
-      return agent.publishFromSharedMemory(contextGraphId, selection, publishOpts).then((result: any) => {
-        const clearAfter = publishOpts.clearSharedMemoryAfter;
-        const publishedSwmCleaned = result?.status === "confirmed";
-        const rootCount = Array.isArray(result?.kaManifest)
-          ? result.kaManifest.length
-          : undefined;
-        const publicTripleCount = Array.isArray(result?.publicQuads)
-          ? result.publicQuads.length
-          : undefined;
-        emitMemoryGraphChanged({
-          contextGraphId,
-          layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
-          subGraphName: opts?.subGraphName,
-          operation: "shared_memory_published",
-          source: "agent_tool",
-          clearSharedMemoryAfter: clearAfter,
-          status: typeof result?.status === "string" ? result.status : undefined,
-          counts: {
-            roots: rootCount,
-            triples: publicTripleCount,
-          },
-        });
-        return result;
-      });
     },
     createContextGraph: (opts: {
       id: string;
@@ -2607,10 +2998,17 @@ export async function runDaemonInner(
       enabled: boolean,
     ): Promise<{ ok: boolean; error?: string }> => {
       if (enabled) {
-        const r = startLogPusher();
-        if (!r.ok) return r;
+        const r = await startTelemetry();
+        if (!r.ok) {
+          // The OTel SDK may have started before the log exporter failed. Roll
+          // it back so we never leave traces/metrics exporting while we report
+          // failure and persist nothing — the API/UI state stays consistent
+          // (telemetry remains off) with what is actually running.
+          await stopTelemetry();
+          return r;
+        }
       } else {
-        stopLogPusher();
+        await stopTelemetry();
       }
       config.telemetry = { ...config.telemetry, enabled };
       await saveConfig(config);
@@ -2968,7 +3366,13 @@ export async function runDaemonInner(
       // only path the daemon uses. So role-based gating here matches
       // the actual runtime behaviour.
       const relayStatsProvider = role === 'core' ? () => agent.node.getRelayStats() : undefined;
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider);
+      // Metrics presence (#1066 Item 1): a served read of /api/metrics[/history]
+      // marks a consumer, keeping the collector's store scans warm for Grafana /
+      // health probes as well as the dashboard. Marking happens INSIDE the route
+      // handler (below) so it only fires after rate-limit, admission, and auth
+      // have accepted the request — a rejected/unauthenticated request cannot
+      // open the store-metrics gate.
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
       await handleRequest(
@@ -3003,25 +3407,12 @@ export async function runDaemonInner(
         emitNotification,
       );
     } catch (err: any) {
-      if (res.headersSent || res.writableEnded) return;
-      if (isPayloadTooLargeError(err)) {
-        jsonResponse(res, 413, payloadTooLargeResponseBody(err));
-      } else if (err instanceof SyntaxError) {
-        jsonResponse(res, 400, { error: err.message });
-      } else if (
-        // Round 9 Bug 25: user-authored quads with reserved URN prefixes
-        // map to 400 at the top-level catch so share/publish/conditionalShare
-        // routes (which rethrow for the top-level handler) get the correct
-        // status without each route having to match on the error shape.
-        err?.name === "ReservedNamespaceError" ||
-        (typeof err?.message === "string" &&
-          err.message.includes("reserved namespace"))
-      ) {
-        jsonResponse(res, 400, { error: err.message });
-      } else {
-        enrichEvmError(err);
-        jsonResponse(res, 500, { error: err.message });
-      }
+      // Single top-level error→HTTP mapping (in http-utils.ts
+      // respondWithDaemonError): 413 payload-too-large; 400 SyntaxError /
+      // reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503/504 for a transient
+      // chain-RPC transport exhaustion (so rethrowing lifecycle publish routes
+      // get the retryable status); else 500.
+      respondWithDaemonError(res, err);
     }
     // Note: the admission slot is released on the response's `close` event
     // (registered above), not in a finally here — see the comment at acquire.
@@ -3108,8 +3499,14 @@ export async function runDaemonInner(
         clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        // Clears the timer AND performs the final best-effort drain (BEFORE
+        // telemetry stops), so a partial window still reaches Loki — keeps
+        // log-derived request totals exact across process lifecycles.
+        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector.stop();
+        // Stops log exporters AND flushes + shuts down the OTel SDK.
+        await stopTelemetry();
         natStatusWatcherStop?.();
         resetNatStatus();
         await publisherRuntime

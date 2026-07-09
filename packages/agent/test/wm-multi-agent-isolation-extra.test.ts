@@ -212,6 +212,109 @@ describe('A-1: WM is per-agent — two agents co-hosted on one node', () => {
     expect(own.bindings.length).toBe(1);
   });
 
+  it('assertion.query reads the explicitly selected non-default agent lane', async () => {
+    const cgId = freshCgId('wm-assertion-query-b');
+    await node!.createContextGraph({ id: cgId, name: 'WM assertion query B', description: '' });
+
+    await node!.assertion.create(cgId, 'b-lane-query', { agentAddress: agentB.agentAddress });
+    await node!.assertion.write(cgId, 'b-lane-query', [
+      {
+        subject: 'urn:wm:bob:query',
+        predicate: 'http://schema.org/description',
+        object: '"B lane query"',
+        graph: '',
+      },
+    ], { agentAddress: agentB.agentAddress });
+
+    const quads = await node!.assertion.query(cgId, 'b-lane-query', { agentAddress: agentB.agentAddress });
+
+    expect(quads).toHaveLength(1);
+    expect(quads[0].subject).toBe('urn:wm:bob:query');
+  });
+
+  it('assertion.discard discards the explicitly selected non-default agent lane', async () => {
+    const cgId = freshCgId('wm-assertion-discard-b');
+    await node!.createContextGraph({ id: cgId, name: 'WM assertion discard B', description: '' });
+
+    await node!.assertion.create(cgId, 'b-lane-discard', { agentAddress: agentB.agentAddress });
+    await node!.assertion.write(cgId, 'b-lane-discard', [
+      {
+        subject: 'urn:wm:bob:discard',
+        predicate: 'http://schema.org/description',
+        object: '"B lane discard"',
+        graph: '',
+      },
+    ], { agentAddress: agentB.agentAddress });
+
+    await node!.assertion.discard(cgId, 'b-lane-discard', { agentAddress: agentB.agentAddress });
+
+    const remaining = await node!.publisher.assertionQuery(cgId, 'b-lane-discard', agentB.agentAddress);
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('assertion.pullFrom reopens SWM content in the explicitly selected non-default agent lane', async () => {
+    const cgId = freshCgId('wm-assertion-pull-b');
+    await node!.createContextGraph({ id: cgId, name: 'WM assertion pull B', description: '' });
+
+    await node!.assertion.create(cgId, 'b-lane-pull', { agentAddress: agentB.agentAddress });
+    await node!.assertion.write(cgId, 'b-lane-pull', [
+      {
+        subject: 'urn:wm:bob:pull',
+        predicate: 'http://schema.org/description',
+        object: '"B lane pull"',
+        graph: '',
+      },
+    ], { agentAddress: agentB.agentAddress });
+    await node!.assertion.promote(cgId, 'b-lane-pull', {
+      agentAddress: agentB.agentAddress,
+      authorAgentAddress: agentB.agentAddress,
+      skipSeal: true,
+    });
+
+    const pulled = await node!.assertion.pullFrom(cgId, 'b-lane-pull', 'swm', {
+      agentAddress: agentB.agentAddress,
+      onConflict: 'replace',
+    });
+
+    expect(pulled.seeded).toBeGreaterThan(0);
+    const wm = await node!.publisher.assertionQuery(cgId, 'b-lane-pull', agentB.agentAddress);
+    expect(wm.some((q) => q.subject === 'urn:wm:bob:pull')).toBe(true);
+  });
+
+  it('assertion.finalize(layer:swm) seals the explicitly selected non-default agent lane', async () => {
+    const cgId = freshCgId('wm-assertion-swm-finalize-b');
+    const assertionName = 'b-lane-swm-finalize';
+    await node!.createContextGraph({ id: cgId, name: 'WM assertion SWM finalize B', description: '' });
+
+    await node!.assertion.create(cgId, assertionName, { agentAddress: agentB.agentAddress });
+    await node!.assertion.write(cgId, assertionName, [
+      {
+        subject: 'urn:wm:bob:swm-finalize',
+        predicate: 'http://schema.org/description',
+        object: '"B lane SWM finalize"',
+        graph: '',
+      },
+    ], { agentAddress: agentB.agentAddress });
+    await node!.assertion.promote(cgId, assertionName, {
+      agentAddress: agentB.agentAddress,
+      authorAgentAddress: agentB.agentAddress,
+      skipSeal: true,
+    });
+
+    const seal = await node!.assertion.finalize(cgId, assertionName, {
+      layer: 'swm',
+      agentAddress: agentB.agentAddress,
+      authorAgentAddress: agentB.agentAddress,
+    });
+
+    expect(seal.assertionUri).toBe(contextGraphAssertionUri(cgId, agentB.agentAddress, assertionName));
+    const bHistory = await node!.assertion.history(cgId, assertionName, { agentAddress: agentB.agentAddress });
+    expect(bHistory?.swmCurrentAssertion).toBe(ethers.hexlify(seal.merkleRoot).slice(2));
+    await expect(node!.assertion.finalize(cgId, assertionName, { layer: 'swm' })).rejects.toMatchObject({
+      code: 'SWM_SUBSET_NOT_SEALABLE',
+    });
+  });
+
   it(
     'A-1 (Codex PR #242 iter-8): omitted agentAddress on an authenticated WM read defaults ' +
       'to callerAgentAddress — an agent-bound caller cannot escape isolation by just not ' +

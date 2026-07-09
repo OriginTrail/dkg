@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.0",
+  "version": "10.0.5",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
@@ -15,8 +15,9 @@
     }
   },
   "scripts": {
-    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-adapter-hermes run build && pnpm --filter @origintrail-official/dkg-mcp run build",
-    "build": "tsc && node -e \"const fs=require('fs');const p=require('path');fs.mkdirSync('network',{recursive:true});for(const f of fs.readdirSync('../../network')){if(f.endsWith('.json'))fs.copyFileSync(p.join('../../network',f),p.join('network',f))};fs.copyFileSync('../../project.json','project.json')\"",
+    "prebuild": "pnpm --filter @origintrail-official/dkg-adapter-openclaw run build && pnpm --filter @origintrail-official/dkg-adapter-hermes run build && pnpm --filter @origintrail-official/dkg-mcp run build && pnpm --filter @origintrail-official/dkg-okf run build",
+    "build": "tsc && node ../../scripts/copy-cli-runtime-assets.mjs",
+    "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
@@ -38,11 +39,13 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-epcis": "workspace:*",
+    "@iarna/toml": "^2.2.5",
     "@origintrail-official/dkg-mcp": "workspace:*",
     "@origintrail-official/dkg-node-ui": "workspace:*",
+    "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
-    "better-sqlite3": "^11",
+    "better-sqlite3": "12.11.1",
     "commander": "^13",
     "ethers": "^6",
     "js-yaml": "^4.1.1",

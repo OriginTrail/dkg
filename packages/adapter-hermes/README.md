@@ -24,7 +24,7 @@ This package contains:
 - installs the DKG memory provider plugin into a selected Hermes profile
 - elects DKG as Hermes' external memory provider
 - exposes the DKG tool surface listed in `packages/cli/skills/dkg-node/SKILL.md`
-  plus Hermes-native helpers such as `dkg_memory` and `dkg_share`
+  plus the Hermes-native `dkg_memory` helper
 - stores provider memory facts in the `memory` assertion of the `agent-context`
   context graph by default
 - syncs completed Hermes turns into DKG Working Memory with stable turn IDs and
@@ -87,8 +87,9 @@ is set, setup uses that exact profile home.
 | `--bridge-health-url <url>` | derived from transport | Optional health URL override. Must belong to the configured bridge/gateway base. |
 | `--port <port>` | `9200` | Shortcut for `--daemon-url http://127.0.0.1:<port>`. |
 | `--memory-mode <mode>` | `primary` | `primary` elects DKG as the Hermes memory provider; `tools-only` skips provider election. |
+| `--network <name>` | `mainnet-gnosis` (fresh node) | Network to set up on (`mainnet-gnosis` \| `mainnet-base` \| `testnet`), persisted as `config.networkConfig`. Applies to a FRESH node only; an existing node keeps its current network (switch with `dkg init --network`). |
 | `--no-start` | off (daemon starts) | Skip starting the DKG daemon. Best-effort daemon registration still fires against an already-running daemon. |
-| `--no-fund` / `--fund` | `--fund` | Fund the node's generated admin and operational wallets through the testnet faucet. `--no-fund` skips. Faucet failures are non-fatal. |
+| `--no-fund` / `--fund` | `--fund` | Fund the node's generated admin and operational wallets through the testnet faucet (testnet only — mainnet has none). `--no-fund` skips. Faucet failures are non-fatal. |
 | `--preserve-provider` | off (replace) | Refuse to replace an existing non-DKG `memory.provider`. Restores the pre-#386 throw-on-conflict behavior. Aliased as `--no-replace-provider`. |
 | `--no-verify` | off | Skip the post-setup verification pass. |
 | `--dry-run` | off | Preview planned changes without writing files, starting the daemon, calling the faucet, or taking a config backup. |
@@ -148,7 +149,7 @@ with ownership metadata and leaves a non-managed file untouched.
 | `context_graph` | `agent-context` | Default context graph for provider memory facts. Env `DKG_CONTEXT_GRAPH` overrides at runtime. |
 | `memory_assertion` | `memory` | Working Memory assertion used by `dkg_memory`. Env `DKG_MEMORY_ASSERTION` overrides at runtime. |
 | `memory_mode` | `provider` | Stored setup mode for status/reconnect/uninstall. |
-| `publish_tool` / `allow_direct_publish` | direct / `true` | Controls exposure of direct publish tools. Env `DKG_ALLOW_DIRECT_PUBLISH=false` hides them. |
+| `publish_tool` / `allow_direct_publish` | direct / `true` | Controls exposure of the `dkg_knowledge_asset_publish` Verifiable Memory publish tool. Env `DKG_ALLOW_DIRECT_PUBLISH=false` hides it. |
 | `allow_context_graph_admin_tools` | `true` | Controls mutating project-admin tools. Env `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=false` hides them. |
 | `import_roots` | `[]` | Optional safe roots for `dkg_knowledge_asset_import_file`; env import-root settings also apply. |
 
@@ -191,10 +192,11 @@ the integration stays disconnected and the restore error surfaces as a
 warning on the Node UI row.
 
 Once DKG is the active provider, Hermes receives DKG-backed memory recall,
-`dkg_memory`, `memory_search`, `dkg_query`, `dkg_share`, the
+`dkg_memory`, `memory_search`, `dkg_query`, the
 `dkg_knowledge_asset_*` lifecycle tools (create -> write -> finalize -> share ->
-publish, plus pull_from / query / history / discard / import_file),
-sub-graph helpers, and status/wallet/network helpers.
+publish — a full share seals by default and `create` can write quads and
+optionally share them in one call; plus pull_from / query / history / discard /
+import_file), sub-graph helpers, and status/wallet/network helpers.
 
 ## Node UI Connect, Refresh, And Disconnect
 
@@ -260,9 +262,10 @@ provenance before forwarding them to Hermes.
   not enabled in the DKG local-agent registry. `persist-turn` remains
   daemon-authenticated so the active Hermes provider can persist completed
   turns even when UI chat registration is unavailable.
-- Direct publish tools are model-callable by default to match the node skill
-  surface. Publishing Verifiable Memory is permanent and may cost TRAC; operators
-  can hide direct publish exposure with `DKG_ALLOW_DIRECT_PUBLISH=false`.
+- The `dkg_knowledge_asset_publish` Verifiable Memory publish tool is
+  model-callable by default to match the node skill surface. Publishing
+  Verifiable Memory is permanent and may cost TRAC; operators can hide publish
+  exposure with `DKG_ALLOW_DIRECT_PUBLISH=false`.
 - Context-graph admin mutation tools are enabled by default for collaboration;
   operators can hide them with `DKG_ALLOW_CONTEXT_GRAPH_ADMIN_TOOLS=false`.
 - `dkg_knowledge_asset_import_file` requires an operator-approved import root. Use
@@ -391,7 +394,7 @@ python -m py_compile packages/adapter-hermes/hermes-plugin/__init__.py packages/
 
 ## More Setup Detail
 
-See [Hermes setup](../../docs/setup/SETUP_HERMES.md).
+See [Hermes setup](../../docs/archive/internal/setup/SETUP_HERMES.md).
 
 ## License
 

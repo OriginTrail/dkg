@@ -34,6 +34,7 @@ export type LiftJobFailureResolution = (typeof LIFT_JOB_FAILURE_RESOLUTIONS)[num
 export const LIFT_JOB_FAILURE_CODES = [
   'workspace_unavailable',
   'workspace_slice_not_found',
+  'publish_intent_stale',
   'canonicalization_failed',
   'authority_unavailable',
   'authority_forbidden',
@@ -44,7 +45,6 @@ export const LIFT_JOB_FAILURE_CODES = [
   'tx_submit_timeout',
   'tx_reverted',
   'insufficient_funds',
-  'private_unanchorable',
   'nonce_conflict',
   'inclusion_timeout',
   'finality_timeout',
@@ -90,6 +90,7 @@ export interface LiftJobFailureMetadata {
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailurePolicy> = {
   workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
@@ -100,11 +101,6 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  // GH #1013/#1121: a private payload that cannot reach Verifiable Memory (no
-  // collectable storage ACKs — peers can't see private data) is DETERMINISTIC,
-  // not a transient RPC blip. Terminal/fail_job so the queue stops retrying a
-  // job that can never finalize until encrypted private async publish (#1121).
-  private_unanchorable: { code: 'private_unanchorable', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
@@ -118,6 +114,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
 const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJobActiveState[]> = {
   workspace_unavailable: ['accepted', 'claimed', 'validated'],
   workspace_slice_not_found: ['accepted', 'claimed', 'validated'],
+  publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
   authority_forbidden: ['claimed', 'validated'],
@@ -128,7 +125,6 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   tx_submit_timeout: ['broadcast'],
   tx_reverted: ['broadcast'],
   insufficient_funds: ['broadcast'],
-  private_unanchorable: ['broadcast'],
   nonce_conflict: ['broadcast'],
   inclusion_timeout: ['broadcast', 'included'],
   finality_timeout: ['included'],

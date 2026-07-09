@@ -10,6 +10,10 @@ import {
   computePrivateRootV10,
 } from '../src/merkle.js';
 import { autoPartition } from '../src/auto-partition.js';
+import {
+  generatedPrivateCatalogFloorQuads,
+  generatedPrivateCatalogTripleKeys,
+} from '../src/catalog-trust.js';
 
 const q = (s: string, p: string, o: string) => ({
   subject: s,
@@ -101,5 +105,75 @@ describe('canonicalPublishPayload — shared canonicalization for agent ↔ publ
 
     expect(result.privateRoots).toEqual([]);
     expect(result.manifestEntries[0].privateMerkleRoot).toBeUndefined();
+  });
+
+  it('hashes generated private-CG catalog floor but excludes it from manifest roots', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const content = [
+      q('urn:example:shipment:1', 'http://schema.org/name', '"Shipment 1"'),
+    ];
+    const catalog = generatedPrivateCatalogFloorQuads(contextGraphId);
+    const all = [...content, ...catalog];
+
+    const result = canonicalPublishPayload(all, [], {
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId),
+    });
+    const skolemized = [...autoPartition(all).values()].flat();
+    const expectedMerkle = computeFlatKCRootV10(skolemized, []);
+
+    expect(ethers.hexlify(result.kcMerkleRoot)).toBe(ethers.hexlify(expectedMerkle));
+    expect(result.manifestEntries.map((m) => m.rootEntity)).toEqual(['urn:example:shipment:1']);
+    expect(result.generatedCatalogRootEntities).toEqual([
+      'did:dkg:context-graph:private-catalog-cg',
+    ]);
+    expect(result.skolemizedPublicQuads).toHaveLength(skolemized.length);
+  });
+
+  it('keeps generated catalog-looking quads manifest-visible without the trusted floor option', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const content = [
+      q('urn:example:shipment:1', 'http://schema.org/name', '"Shipment 1"'),
+    ];
+    const catalog = generatedPrivateCatalogFloorQuads(contextGraphId);
+
+    const result = canonicalPublishPayload([...content, ...catalog]);
+
+    expect(result.manifestEntries.map((m) => m.rootEntity).sort()).toEqual([
+      'did:dkg:context-graph:private-catalog-cg',
+      'urn:example:shipment:1',
+    ]);
+    expect(result.generatedCatalogRootEntities).toEqual([]);
+  });
+
+  it('refuses to hide a generated catalog subject that also carries non-catalog triples', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const cgDid = `did:dkg:context-graph:${contextGraphId}`;
+    const catalog = generatedPrivateCatalogFloorQuads(contextGraphId);
+    const mixed = [
+      q('urn:example:shipment:1', 'http://schema.org/name', '"Shipment 1"'),
+      ...catalog,
+      q(cgDid, 'urn:example:secret', '"must stay manifest-visible"'),
+    ];
+
+    expect(() =>
+      canonicalPublishPayload(mixed, [], {
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId),
+      }),
+    ).toThrow(/mixes trusted catalog triples/);
+  });
+
+  it('refuses to hide an incomplete generated catalog floor', () => {
+    const contextGraphId = 'private-catalog-cg';
+    const partialCatalog = generatedPrivateCatalogFloorQuads(contextGraphId).slice(0, 1);
+    const mixed = [
+      q('urn:example:shipment:1', 'http://schema.org/name', '"Shipment 1"'),
+      ...partialCatalog,
+    ];
+
+    expect(() =>
+      canonicalPublishPayload(mixed, [], {
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(contextGraphId),
+      }),
+    ).toThrow(/mixes trusted catalog triples/);
   });
 });

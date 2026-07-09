@@ -47,6 +47,8 @@ export interface HermesSetupOptions {
   contextGraph?: string;
   agentName?: string;
   memoryMode?: HermesMemoryMode;
+  /** Network overlay to set up on; persisted as config.networkConfig. */
+  network?: string;
   dryRun?: boolean;
   /**
    * Refuse to replace an existing non-DKG `memory.provider` in the
@@ -69,6 +71,8 @@ export interface HermesCliOptions {
   bridgeHealthUrl?: string;
   port?: string | number;
   memoryMode?: HermesMemoryMode | 'primary';
+  /** Network overlay to set up on; persisted as config.networkConfig. */
+  network?: string;
   dryRun?: boolean;
   verify?: boolean;
   start?: boolean;
@@ -652,7 +656,25 @@ function rewriteActiveProviderLine(raw: string, newProvider: string): string | n
  * (`setup-entrypoint-contract.md` §9 sketch) doesn't change between
  * S2 → S3 → S4.
  */
-export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSetupResult> {
+/**
+ * Injected runtime deps for Hermes setup. Separate from the user-facing
+ * request so the adapter stays free of a `@origintrail-official/dkg-agent`
+ * dependency: the cli layer (which has dkg-agent) provides `loadOpWallets`.
+ */
+export interface RunHermesSetupDeps {
+  /**
+   * Eagerly create the node's operational wallets (generate-if-absent) after
+   * the config bootstrap and before the daemon starts, so faucet funding and
+   * manual mainnet funding have wallets even if the daemon never fully boots
+   * (issue #1306). Best-effort; omitted in unit tests / when not provided.
+   */
+  loadOpWallets?: (dir: string) => Promise<unknown>;
+}
+
+export async function runHermesSetup(
+  req: HermesSetupRequest,
+  deps: RunHermesSetupDeps = {},
+): Promise<HermesSetupResult> {
   const cliOptions = setupRequestToCliOptions(req);
   const setupOptions = toSetupOptions(cliOptions);
   const profile = resolveHermesProfile(setupOptions);
@@ -685,9 +707,40 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
   const dkgConfigExists =
     existsSync(join(dkgConfigHome, 'config.json')) ||
     existsSync(join(dkgConfigHome, 'config.yaml'));
+
+  // Resolve the target network ONCE and reuse for bootstrap (Step 2) and
+  // faucet (Step 4) so they agree. `--network` wins; else an existing node
+  // keeps its persisted networkConfig; a fresh node defaults to
+  // mainnet-gnosis; a legacy config without a network stays testnet. Loading
+  // the same name we persist keeps the faucet gate honest (mainnet has none).
+  const { resolveSetupNetworkName, readPersistedNetworkConfigName } = await import('@origintrail-official/dkg-core');
+  const existingNetworkConfig = readPersistedNetworkConfigName(dkgConfigHome);
+  // `--network` is honored only for a FRESH node (existing nodes keep their
+  // current network; switch via `dkg init --network`). Dropping it on an
+  // existing node keeps the faucet decision aligned with the booted network.
+  const explicitNetwork = dkgConfigExists ? undefined : setupOptions.network;
+  const networkConfigName = resolveSetupNetworkName({
+    explicit: explicitNetwork,
+    existingNetworkConfig,
+    configExisted: dkgConfigExists,
+  });
+  const requestedNetwork = setupOptions.network?.trim();
+  if (dkgConfigExists && requestedNetwork && requestedNetwork !== networkConfigName) {
+    // Informational only — emit via console.warn (NOT the status-bearing
+    // `warnings` array) so a deliberately-ignored flag does not flip an
+    // otherwise-clean setup to `degraded`. Matches openclaw/mcp.
+    const current = existingNetworkConfig
+      ? `is already configured for "${networkConfigName}"`
+      : `has no explicit network (defaults to "${networkConfigName}")`;
+    console.warn(
+      `[hermes-setup] --network ${requestedNetwork} ignored: this node ${current}. ` +
+      'Use `dkg init --network` to switch an existing node.',
+    );
+  }
+
   if (!dryRun && !dkgConfigExists) {
     try {
-      await bootstrapDkgNodeConfig(profile, setupOptions, warnings);
+      await bootstrapDkgNodeConfig(profile, setupOptions, warnings, networkConfigName);
     } catch (err: any) {
       // Non-fatal — operator can run `dkg init` and re-run setup. We
       // surface a warning so the result.status flips to 'degraded'.
@@ -695,6 +748,26 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
     }
   } else if (dryRun) {
     console.log('[hermes-setup] [dry-run] Would bootstrap ~/.dkg/config.json if missing');
+  }
+
+  // Eagerly ensure the node's wallets exist BEFORE the daemon starts (issue
+  // #1306) — matching `dkg init` — so faucet funding (testnet) and manual
+  // mainnet funding have wallets even if the daemon never fully boots. Runs
+  // regardless of `--no-fund` and of `dkgConfigExists` (an existing-config node
+  // may still lack wallets). Best-effort; the daemon's boot-time loadOpWallets
+  // is an idempotent fallback. `loadOpWallets` is injected by the cli layer so
+  // the adapter stays dkg-agent-free.
+  if (!dryRun && deps.loadOpWallets) {
+    try {
+      await deps.loadOpWallets(dkgConfigHome);
+    } catch (err: any) {
+      // Informational only — emit via console.warn (NOT the status-bearing
+      // `warnings` array) so a best-effort, daemon-recoverable wallet
+      // pre-creation failure does not flip an otherwise-clean setup to
+      // `degraded`. Matches openclaw (`warn()`)/mcp and the `--network ignored`
+      // precedent above.
+      console.warn(`[hermes-setup] Could not pre-create wallets (${err?.message ?? String(err)}); the daemon will generate them on first start.`);
+    }
   }
 
   // Step 3: start daemon.
@@ -720,7 +793,7 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
   // network config to read `faucet.url` / `faucet.mode` from. Mirrors
   // OpenClaw's "skip when no faucet configured" path.
   if (shouldFund) {
-    const network = loadHermesNetworkConfig(warnings);
+    const network = loadHermesNetworkConfig(warnings, networkConfigName);
     if (network) {
       try {
         await fundWalletsBestEffort({
@@ -801,8 +874,11 @@ export async function runHermesSetup(req: HermesSetupRequest): Promise<HermesSet
  * unchanged; on `result.ok === false` we throw so existing tests that
  * `await expect(runSetup(...)).rejects.toThrow(...)` still pass.
  */
-export async function runSetup(options: HermesCliOptions = {}): Promise<void> {
-  const result = await runHermesSetup(cliOptionsToSetupRequest(options));
+export async function runSetup(
+  options: HermesCliOptions = {},
+  deps: RunHermesSetupDeps = {},
+): Promise<void> {
+  const result = await runHermesSetup(cliOptionsToSetupRequest(options), deps);
   if (!result.ok) {
     throw new Error(result.errors.join('\n'));
   }
@@ -941,6 +1017,7 @@ function toSetupOptions(options: HermesCliOptions): HermesSetupOptions {
     publishGuard: existingState?.publishGuard,
     nodeSkillContent: options.nodeSkillContent,
     memoryMode,
+    network: trimmed(options.network),
     preserveProvider: options.preserveProvider === true,
     dryRun: options.dryRun === true,
   };
@@ -1730,6 +1807,7 @@ function setupRequestToCliOptions(req: HermesSetupRequest): HermesCliOptions {
     bridgeHealthUrl: req.bridgeHealthUrl,
     port: req.port,
     memoryMode: req.memoryMode,
+    network: req.network,
     dryRun: req.dryRun,
     verify: req.verify,
     start: req.start,
@@ -1756,6 +1834,7 @@ function cliOptionsToSetupRequest(options: HermesCliOptions): HermesSetupRequest
     bridgeHealthUrl: options.bridgeHealthUrl,
     port: options.port,
     memoryMode: options.memoryMode,
+    network: options.network,
     dryRun: options.dryRun,
     verify: options.verify,
     start: options.start,
@@ -1782,8 +1861,9 @@ async function bootstrapDkgNodeConfig(
   profile: HermesProfileMetadata,
   setupOptions: HermesSetupOptions,
   warnings: string[],
+  networkConfigName: string,
 ): Promise<void> {
-  const network = loadHermesNetworkConfig(warnings);
+  const network = loadHermesNetworkConfig(warnings, networkConfigName);
   if (!network) return;
   const apiPort = setupOptions.daemonUrl
     ? new URL(setupOptions.daemonUrl).port
@@ -1797,6 +1877,7 @@ async function bootstrapDkgNodeConfig(
   ensureDkgNodeConfig({
     agentName,
     network,
+    networkConfigName,
     apiPort,
     existing: {},
   });
@@ -1812,7 +1893,7 @@ async function bootstrapDkgNodeConfig(
  * located; absent network config is non-fatal — bootstrap and faucet
  * steps simply skip.
  */
-function loadHermesNetworkConfig(warnings: string[]): FundWalletsNetworkConfig & {
+function loadHermesNetworkConfig(warnings: string[], networkName = 'testnet'): FundWalletsNetworkConfig & {
   networkName: string;
   defaultNodeRole: string;
   defaultContextGraphs?: string[];
@@ -1829,13 +1910,15 @@ function loadHermesNetworkConfig(warnings: string[]): FundWalletsNetworkConfig &
   } catch {
     cliDir = null;
   }
-  // testnet.json is the default network — operators with a custom env can
-  // pre-write `~/.dkg/config.json` (or `config.yaml`) and `runHermesSetup`
-  // will skip bootstrap.
+  // `networkName` is the resolved selection (default mainnet-gnosis for a
+  // fresh node) — operators with a custom env can pre-write
+  // `~/.dkg/config.json` (or `config.yaml`) and `runHermesSetup` will skip
+  // bootstrap.
+  const file = `${networkName}.json`;
   const candidates: string[] = [];
-  if (cliDir) candidates.push(join(cliDir, 'network', 'testnet.json'));
-  candidates.push(resolve(__dirname, '..', '..', '..', 'network', 'testnet.json'));
-  candidates.push(resolve(__dirname, '..', '..', '..', '..', 'network', 'testnet.json'));
+  if (cliDir) candidates.push(join(cliDir, 'network', file));
+  candidates.push(resolve(__dirname, '..', '..', '..', 'network', file));
+  candidates.push(resolve(__dirname, '..', '..', '..', '..', 'network', file));
   for (const candidate of candidates) {
     if (existsSync(candidate)) {
       try {
@@ -1846,7 +1929,7 @@ function loadHermesNetworkConfig(warnings: string[]): FundWalletsNetworkConfig &
       }
     }
   }
-  warnings.push('Could not locate network/testnet.json (network bootstrap + faucet steps skipped)');
+  warnings.push(`Could not locate network/${file} (network bootstrap + faucet steps skipped)`);
   return null;
 }
 

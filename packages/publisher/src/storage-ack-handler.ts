@@ -1,17 +1,40 @@
-import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
+  loadSelectedSharedMemoryQuads,
+  type SharedMemoryReadSelection,
+  type TripleStore,
+  type Quad,
+  type QueryOptions,
+  type StorePressureSnapshot,
+} from '@origintrail-official/dkg-storage';
+import type {
+  EventBus,
+  PublishIntentMsg,
+  StorageACKDeclineCode,
+  StorageACKMsg,
+  SubscriptionSource,
+} from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  createOperationContext,
   decodePublishIntent,
   decodeUpdateIntent,
   encodeStorageACK,
+  decodeStorageACK,
+  isStorageACKDecline,
+  withSpan,
+  getMetrics,
   computePublishACKDigest,
   computeUpdateACKDigest,
   assertSafeIri,
+  assertSafeRdfTerm,
   STORAGE_ACK_DECLINE_CODES,
+  DEFAULT_SEND_TIMEOUT_MS,
+  boundedDeclineCodeLabel,
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
-  sharedMemoryReadBothFilter,
+  isSwmMerkleExcludedQuad,
+  STORAGE_ACK_MAX_STAGING_BYTES,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -22,9 +45,47 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
+export interface StorageAckDecision {
+  encoded: Uint8Array;
+  ack: StorageACKMsg;
+  intent?: PublishIntentMsg;
+  peerId: string;
+}
+
+export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void | Promise<void>;
+
+/**
+ * Validate that every term of a parsed quad is well-formed BEFORE it enters the
+ * store-op wrapper. A malformed term is a bad request (the publisher committed
+ * garbage into its merkle root), not a peer-local store outage — so it must
+ * throw here (→ malformed-request stream reset) rather than surface from
+ * `store.insert` and be mislabeled as a transient CORE_TEMPORARILY_UNAVAILABLE
+ * decline that the publisher then retries against its transient budget.
+ *
+ * Mirrors `parseSimpleNQuads`' own literal-vs-IRI split: subject/predicate are
+ * IRIs or blank nodes (angle brackets already stripped); the object is a full
+ * SPARQL literal (kept with its quotes) OR a stripped IRI/blank node. `graph`
+ * is set by the caller to an already-`assertSafeIri`'d URI. `assertSafeIri`
+ * only rejects the SPARQL-breaking character set (`<>"{}|\^`, controls,
+ * whitespace), which is a strict subset of what the store itself rejects — so
+ * this never turns a store-acceptable term into a false malformed-request.
+ */
+function assertPersistQuadTermsSafe(quads: Quad[]): void {
+  for (const q of quads) {
+    assertSafeIri(q.subject);
+    assertSafeIri(q.predicate);
+    if (q.object.startsWith('"')) {
+      assertSafeRdfTerm(q.object);
+    } else {
+      assertSafeIri(q.object);
+    }
+  }
+}
+
 const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
-
+const MAX_DECLINE_LOG_CG_ID_CHARS = 160;
+const MAX_DECLINE_LOG_MESSAGE_CHARS = 240;
 function compactDeclineText(value: string, maxChars: number): string {
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (compacted.length <= maxChars) return compacted;
@@ -42,6 +103,21 @@ function catalogRootForAckDigest(root: Uint8Array | undefined): Uint8Array {
   return root;
 }
 
+function normalizePrivateMerkleRoots(
+  roots: readonly Uint8Array[] | undefined,
+): Uint8Array[] {
+  if (!roots || roots.length === 0) return [];
+  return roots.map((root, idx) => {
+    const bytes = root instanceof Uint8Array ? root : new Uint8Array(root);
+    if (bytes.length !== 32) {
+      throw new Error(
+        `StorageACK: privateMerkleRoots[${idx}] must be 32 bytes, got ${bytes.length}`,
+      );
+    }
+    return bytes;
+  });
+}
+
 function summarizeDeclineEntities(entities: readonly string[]): string {
   if (entities.length === 0) return '(none)';
   const visible = entities
@@ -51,6 +127,86 @@ function summarizeDeclineEntities(entities: readonly string[]): string {
   return remaining > 0
     ? `${visible.join(', ')} (+${remaining} more)`
     : visible.join(', ');
+}
+
+/**
+ * Module-private marker for "a triple-store operation failed mid-ACK".
+ * `loadSWMQuads` raises this ONLY around the storage loader's store/index reads so the
+ * handler's catch sites can tell a peer-local store outage (→ transient
+ * `CORE_TEMPORARILY_UNAVAILABLE` decline) apart from the
+ * `assertSafeIri` malformed-request throws inside the same function,
+ * which MUST keep resetting the stream per the decline-vocabulary
+ * contract in `packages/core/src/proto/storage-ack.ts` ("malformed-
+ * request errors are NOT declines"). A blanket try/catch around the
+ * whole `loadSWMQuads` call would demote an IRI-injection attempt into
+ * a retryable decline and hand the publisher 6 pointless retries.
+ */
+class StoreUnavailableError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'StoreUnavailableError';
+    this.cause = cause;
+    if (cause instanceof Error && cause.stack) this.stack = cause.stack;
+  }
+}
+
+class ACKHandlerDeadlineAbortError extends Error {
+  constructor(deadlineMs: number, storePressure: string) {
+    super(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated; ${storePressure})`);
+    this.name = 'ACKHandlerDeadlineAbortError';
+  }
+}
+
+function isACKHandlerDeadlineAbort(err: unknown): boolean {
+  if (err instanceof ACKHandlerDeadlineAbortError) return true;
+  if (err instanceof StoreUnavailableError) return isACKHandlerDeadlineAbort(err.cause);
+  return false;
+}
+
+function isACKHandlerDeadlineAbortSignal(signal: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted && isACKHandlerDeadlineAbort(signal.reason));
+}
+
+async function runWithDeadline<T>(
+  work: Promise<T>,
+  deadlineMs: number,
+  onDeadline: () => T,
+): Promise<T> {
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let settled = false;
+  const trackedWork = work.finally(() => {
+    settled = true;
+  });
+  const deadline = new Promise<T>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      resolve(onDeadline());
+    }, deadlineMs);
+    if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+  });
+
+  try {
+    const result = await Promise.race([trackedWork, deadline]);
+    if (timedOut) void work.catch(() => undefined);
+    return result;
+  } finally {
+    settled = true;
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+}
+
+function ackStoreOptions(source: string, signal?: AbortSignal): QueryOptions {
+  return { priority: 'ack', source, ...(signal ? { signal } : {}) };
+}
+
+function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined): string {
+  if (!snapshot) return 'storePressure=unavailable';
+  return `ackInflight=${snapshot.ackInflight} ackQueued=${snapshot.ackQueued} ` +
+    `normalQueued=${snapshot.normalQueued} backgroundQueued=${snapshot.backgroundQueued}`;
 }
 
 export interface StorageACKHandlerConfig {
@@ -92,6 +248,18 @@ export interface StorageACKHandlerConfig {
    * registered on-chain at signing time.
    */
   onSignerRegistrationLookupFailed?: (err: unknown) => void | Promise<void>;
+  /**
+   * Called whenever the handler returns a typed StorageACK decline. The hook
+   * receives bounded, log-safe text; the wire decline message is encoded
+   * unchanged below so publisher-visible behavior stays stable.
+   */
+  onDecline?: (details: {
+    code: StorageACKDeclineCode;
+    contextGraphId: string;
+    message: string;
+  }) => void | Promise<void>;
+  /** Optional observer for log/telemetry work after the protocol decision exists. */
+  onStorageAckDecision?: StorageAckDecisionObserver;
   /**
    * Codex PR #608: independent curation oracle. The handler MUST verify a
    * publisher's `isEncryptedPayload=true` claim against the CG's real
@@ -216,7 +384,48 @@ export interface StorageACKHandlerConfig {
     maxRetries: number;
     delayMs: number;
   };
+  /**
+   * Wall-clock deadline for a single ACK-handler invocation. If the handler's
+   * store work has not produced a reply within this budget, the handler
+   * returns a `CORE_TEMPORARILY_UNAVAILABLE` decline instead of dead-airing
+   * the stream. The publisher's per-send timeout is 20s
+   * (`DEFAULT_SEND_TIMEOUT_MS`), so the default here is deliberately BELOW it
+   * (15s) — a slow store (e.g. under a sync storm) then hands the publisher an
+   * actionable transient decline that engages its retry-with-backoff ladder,
+   * rather than a timeout the publisher can only read as a dead peer
+   * (2026-07-07 Gnosis mainnet: cores whose Blazegraph was saturated dead-aired
+   * past 20s and every round burned as TRANSPORT_ERROR / mislabeled
+   * INVALID_SIGNATURE). Set to 0 to disable the deadline. Tests override it.
+   */
+  ackHandlerDeadlineMs?: number;
+  /**
+   * Optional store-pressure diagnostic provider for ACK deadline declines.
+   * Agents may inject a store-owned or wrapper-owned snapshot here; otherwise
+   * the handler asks the supplied TripleStore for its optional pressure
+   * capability. The handler deliberately does not read any storage adapter's
+   * process-global scheduler directly.
+   */
+  getStorePressure?: () => StorePressureSnapshot | undefined;
 }
+
+/**
+ * Safety margin between the ACK-handler deadline and the publisher's per-send
+ * timeout: the budget left for the decline to be encoded, written to the
+ * stream, and read by the publisher before it gives up on the send. Without
+ * it the deadline decline would race the publisher's own timeout and lose.
+ */
+export const ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS = 5_000;
+
+/**
+ * Default ACK-handler deadline — DERIVED from the publisher's per-send timeout
+ * ({@link DEFAULT_SEND_TIMEOUT_MS}, 20s) minus
+ * {@link ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS} (5s) = 15s, so the
+ * "decline must reach the publisher before it gives up" invariant is
+ * compile-time coupled to the send timeout instead of restated as a bare
+ * literal that could silently drift.
+ */
+export const DEFAULT_ACK_HANDLER_DEADLINE_MS =
+  DEFAULT_SEND_TIMEOUT_MS - ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS;
 
 /**
  * StorageACKHandler implements the core node side of V10 spec §9.0 Phase 3.
@@ -234,11 +443,20 @@ export class StorageACKHandler {
   private store: TripleStore;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
+  private readonly log = new Logger('StorageACKHandler');
 
   constructor(store: TripleStore, config: StorageACKHandlerConfig, eventBus: EventBus) {
     this.store = store;
     this.config = config;
     this.eventBus = eventBus;
+  }
+
+  private getStorePressureSnapshot(): StorePressureSnapshot | undefined {
+    try {
+      return this.config.getStorePressure?.() ?? this.store.getPressureSnapshot?.();
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -261,7 +479,28 @@ export class StorageACKHandler {
     cgId: string,
     code: StorageACKDeclineCode,
     message: string,
+    // `hookMessage` (optional) feeds ONLY the local `onDecline` log hook
+    // while `message` rides the wire. Used by the transient-unavailable
+    // path so the operator's WARN line carries the real store/RPC error
+    // but the remote publisher only sees a short sanitized reason —
+    // internal error strings (paths, worker state) stay off the network.
+    options: { hookMessage?: string } = {},
   ): Uint8Array {
+    getMetrics().storageAckDeclinesTotal?.add(1, {
+      reason: boundedDeclineCodeLabel(code),
+    });
+    if (this.config.onDecline) {
+      const details = {
+        code,
+        contextGraphId: compactDeclineText(cgId, MAX_DECLINE_LOG_CG_ID_CHARS),
+        message: compactDeclineText(options.hookMessage ?? message, MAX_DECLINE_LOG_MESSAGE_CHARS),
+      };
+      try {
+        void Promise.resolve(this.config.onDecline(details)).catch(() => undefined);
+      } catch {
+        // Logging must never change ACK wire behavior.
+      }
+    }
     return encodeStorageACK({
       merkleRoot: new Uint8Array(0),
       coreNodeSignatureR: new Uint8Array(0),
@@ -273,11 +512,373 @@ export class StorageACKHandler {
     });
   }
 
+  private buildStorageAckDecision(
+    intent: PublishIntentMsg | undefined,
+    encoded: Uint8Array,
+    peerId: PeerId,
+  ): StorageAckDecision {
+    const ack = decodeStorageACK(encoded);
+    return {
+      encoded,
+      ack,
+      intent,
+      peerId: peerId.toString(),
+    };
+  }
+
+  private async observeStorageAckDecision(decision: StorageAckDecision): Promise<void> {
+    if (!this.config.onStorageAckDecision) return;
+    try {
+      await this.config.onStorageAckDecision(decision);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('share'),
+        `StorageACK decision observer failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
+      );
+    }
+  }
+
+  /**
+   * Transient peer-local failure → `CORE_TEMPORARILY_UNAVAILABLE`
+   * decline (testnet dead-air fix). Before this, a thrown store op or
+   * signer-lookup error escaped the handler and ProtocolRouter aborted
+   * the inbound stream with NO reply — the publisher burned its 3
+   * transport retries and recorded the peer as `no_response` (live
+   * incident: 7 cores dialled, 21 attempts, ALL `no_response`,
+   * 0 declines). An in-band transient decline instead (a) tells the
+   * publisher WHY, and (b) keeps this core in the quorum pool on the
+   * transient retry cadence — the store worker / RPC usually recovers
+   * within seconds.
+   *
+   * `wireMessage` must be SHORT + generic (it goes to an untrusted
+   * remote peer); the raw `cause` message only reaches the local
+   * `onDecline` WARN hook.
+   */
+  private declineTemporarilyUnavailable(
+    cgId: string,
+    wireMessage: string,
+    cause: unknown,
+  ): Uint8Array {
+    const causeMsg = cause instanceof Error ? cause.message : String(cause);
+    return this.encodeDecline(
+      cgId,
+      STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+      wireMessage,
+      { hookMessage: `${wireMessage}: ${causeMsg}` },
+    );
+  }
+
+  /**
+   * Centralized "run a store/signer op, or return the transient decline".
+   *
+   * Why this exists (otReviewAgent #1408, storage-ack-handler.ts:649): the
+   * testnet dead-air fix scattered the SAME catch-and-decline pattern across
+   * six store sites and three signer sites in this 1.5k-line handler. Every
+   * copy has to (a) reply with `CORE_TEMPORARILY_UNAVAILABLE`, (b) keep the
+   * raw error off the wire while feeding it to the local hook, and (c) NOT
+   * swallow the `assertSafeIri` malformed-request throws (those must reset
+   * the stream per the decline-vocabulary contract). One inconsistent copy on
+   * a future ACK path silently reintroduces the dead-air bug OR demotes a
+   * malformed-request into a retryable decline. The helpers below are the
+   * ONLY place that pattern lives now; the publish + update handlers call
+   * them and get a discriminated result they must narrow before proceeding.
+   *
+   * CONTRACT — what stays OUTSIDE these wrappers:
+   *   - `assertSafeIri(...)` on graph/entity IRIs. An unsafe IRI is a
+   *     malformed request (stream reset), NOT a store outage; callers run it
+   *     before invoking the persist helpers so an IRI-injection attempt still
+   *     throws and resets rather than being demoted to a transient decline.
+   *   - `parseSimpleNQuads` / merkle / catalog verification. Only the actual
+   *     `store.*` calls (and `loadSWMQuads`, whose internal `store.query`
+   *     is tagged `StoreUnavailableError`) run inside the wrapper.
+   *
+   * On failure the result carries the pre-encoded `declineTemporarilyUnavailable`
+   * bytes (wire msg 'store unavailable', raw cause only to `onDecline`) so the
+   * wire decline code/message split is byte-identical to the inline try/catch
+   * it replaced.
+   */
+  private async runStoreOpOrDecline<T>(
+    cgId: string,
+    op: () => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
+    try {
+      return { ok: true, value: await op() };
+    } catch (err) {
+      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+      return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
+    }
+  }
+
+  /**
+   * REPLACE-persist a verified public `_catalog` into `<cg>/_catalog`:
+   * clear each subject then insert the catalog quads under `catalogGraph`.
+   * Used by BOTH the curated publish and curated update paths (identical
+   * store shape). The caller MUST have already run `assertSafeIri(catalogGraph)`
+   * (malformed-request → reset stays outside the store-op wrapper).
+   */
+  private async persistCatalogOrDecline(
+    cgId: string,
+    catalogGraph: string,
+    parsedCatalog: Quad[],
+    signal?: AbortSignal,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    // Malformed terms are a bad request, not a store outage — validate BEFORE
+    // the store wrapper so they reset the stream instead of being mislabeled
+    // as a transient decline (see assertPersistQuadTermsSafe).
+    assertPersistQuadTermsSafe(parsedCatalog);
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
+      for (const subject of catalogSubjects) {
+        await this.store.deleteByPattern(
+          { graph: catalogGraph, subject },
+          ackStoreOptions('storage-ack.persistCatalog.deleteByPattern', signal),
+        );
+      }
+      await this.store.insert(
+        parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
+        ackStoreOptions('storage-ack.persistCatalog.insert', signal),
+      );
+      // Durability boundary: the ACK we are about to sign asserts this data is
+      // stored, and a worker respawn can recover from a snapshot that predates
+      // the debounced flush — so force it durable before signing. A flush
+      // failure stays inside the wrapper → transient decline (never sign).
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistCatalog.flush', signal));
+    }, signal);
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
+   * Persist merkle-verified inline quads to a scoped staging graph before the
+   * ACK is signed (crash-safety durability invariant: an on-chain KC implies
+   * at least one core stored the data, so a failed persist MUST decline rather
+   * than sign anyway). `dropGraph` (idempotent replace) then `insert`.
+   */
+  private async persistStagingOrDecline(
+    cgId: string,
+    stagingGraphUri: string,
+    parsed: Quad[],
+    signal?: AbortSignal,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    // Malformed terms are a bad request, not a store outage — validate BEFORE
+    // the store wrapper so they reset the stream instead of being mislabeled
+    // as a transient decline (see assertPersistQuadTermsSafe).
+    assertPersistQuadTermsSafe(parsed);
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      await this.store.dropGraph(
+        stagingGraphUri,
+        ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
+      );
+      const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
+      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
+      // Durability boundary: the ACK we are about to sign asserts this data is
+      // stored, and a worker respawn can recover from a snapshot that predates
+      // the debounced flush — so force it durable before signing. A flush
+      // failure stays inside the wrapper → transient decline (never sign).
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
+    }, signal);
+    return result.ok ? { ok: true } : result;
+  }
+
+  /**
+   * Load SWM quads for the recompute, translating a store outage into the
+   * transient decline. `loadSWMQuads` tags ONLY the storage loader's store/index
+   * throws as `StoreUnavailableError`; its `assertSafeIri` guards throw
+   * ordinary errors that this helper re-raises so a malformed-request still
+   * resets the stream (never demoted to a retryable decline).
+   */
+  private async loadSWMOrDecline(
+    cgId: string,
+    graphUri: string,
+    rootEntities: string[],
+    signal?: AbortSignal,
+  ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
+    try {
+      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities, signal) };
+    } catch (err) {
+      if (err instanceof StoreUnavailableError) {
+        if (isACKHandlerDeadlineAbort(err)) throw err;
+        if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+        return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Run the signer-registration gate, centralizing the three-way outcome the
+   * publish + update handlers all need:
+   *   - `{ ok: true }`            → signer confirmed (or no hook wired): SIGN.
+   *   - `{ ok: false, decline }`  → a THROWN lookup (degraded RPC) is transient
+   *     → `CORE_TEMPORARILY_UNAVAILABLE`; a `registered === false` verdict is
+   *     permanent → `SIGNER_NOT_REGISTERED`. Both fail closed (never sign).
+   *
+   * The `verdictWireMessage` is the per-path `SIGNER_NOT_REGISTERED` wire text
+   * (publish vs curated-publish vs update differ), passed through verbatim so
+   * the existing wire bytes / test greps stay intact. The lookup-throw wire
+   * message ('signer registration lookup unavailable') is identical across all
+   * paths, so it lives here.
+   */
+  private async checkSignerRegistrationOrDecline(
+    cgId: string,
+    verdictWireMessage: string,
+  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
+    if (!this.config.isSignerRegistered) return { ok: true };
+    let signerRegistered: boolean;
+    try {
+      signerRegistered = await this.config.isSignerRegistered();
+    } catch (err) {
+      try {
+        await this.config.onSignerRegistrationLookupFailed?.(err);
+      } catch {
+        // Keep ACK availability independent from logging/callback failures.
+      }
+      // Dead-air fix: `isSignerRegistered` is a LIVE chain read on every
+      // inbound ACK — one degraded shared RPC used to make this throw on
+      // EVERY request on EVERY core, and the resulting stream resets dead-
+      // aired the whole network. A thrown LOOKUP is transient, so decline in
+      // band; the definitive `registered === false` verdict below keeps its
+      // SIGNER_NOT_REGISTERED decline. Either way we never sign without a
+      // confirmed registration (fail-closed holds).
+      return {
+        ok: false,
+        decline: this.declineTemporarilyUnavailable(cgId, 'signer registration lookup unavailable', err),
+      };
+    }
+    if (signerRegistered === false) {
+      try {
+        await this.config.onSignerUnregistered?.();
+      } catch {
+        // Keep the signing refusal deterministic even if protocol cleanup fails.
+      }
+      // Decline rather than throw: the operator can rotate / re-register a key
+      // without restarting publishers, and the publisher should deselect this
+      // core for THIS request and move on rather than retry-and-time-out
+      // against a known-rejecting signer.
+      return {
+        ok: false,
+        decline: this.encodeDecline(cgId, STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED, verdictWireMessage),
+      };
+    }
+    return { ok: true };
+  }
+
   /**
    * Protocol stream handler for `/dkg/10.0.1/storage-ack`.
    * Receives PublishIntent, returns StorageACK.
+   *
+   * Wrapped in a fresh ROOT span (`publisher.storage_ack_handler`) — this
+   * is an inbound libp2p callback with no cross-node trace context. Kept
+   * MINIMAL (no per-step child spans) because it runs under libp2p stream
+   * backpressure. Classifies the terminal outcome (ack / decline / reset)
+   * for the `ackHandlerTotal` metric; a thrown error resets the stream and
+   * is auto-recorded as a span ERROR by withSpan.
    */
-  handler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  handler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+    const chainIdLabel = this.config.chainId != null
+      ? this.config.chainId.toString()
+      : undefined;
+    return withSpan('publisher.storage_ack_handler', async (span) => {
+      let cgIdAttr: string | undefined;
+      let intentPreview: PublishIntentMsg | undefined;
+      try {
+        // contextGraphId is cheap to read off the decoded intent for the span
+        // attribute; the full classification rides the encoded response below.
+        intentPreview = decodePublishIntent(data);
+        cgIdAttr = intentPreview.contextGraphId;
+        if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
+      } catch {
+        // Malformed request — handlePublishIntent will throw + reset below.
+      }
+      try {
+        const result = await this.runHandlerWithDeadline(
+          (signal) => this.handlePublishIntent(data, peerId, signal),
+          cgIdAttr,
+        );
+        const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
+        await this.observeStorageAckDecision(decision);
+        if (isStorageACKDecline(decision.ack)) {
+          const declineCode = decision.ack.declineCode || 'UNKNOWN';
+          span.setAttribute('dkg.ack_outcome', 'decline');
+          span.setAttribute('dkg.decline_code', declineCode);
+          getMetrics().ackHandlerTotal.add(1, {
+            outcome: 'decline',
+            // Bound to the known enum so the metric label can't become
+            // high-cardinality (defensive — only fixed enum values as labels).
+            decline_code: boundedDeclineCodeLabel(declineCode),
+            ...(chainIdLabel ? { chain_id: chainIdLabel } : {}),
+          });
+        } else {
+          span.setAttribute('dkg.ack_outcome', 'ack');
+          getMetrics().ackHandlerTotal.add(1, {
+            outcome: 'ack',
+            ...(chainIdLabel ? { chain_id: chainIdLabel } : {}),
+          });
+        }
+        return decision.encoded;
+      } catch (err) {
+        // Throw resets the libp2p stream — withSpan records ERROR. Tag the
+        // terminal outcome + metric, then re-throw to preserve control flow.
+        span.setAttribute('dkg.ack_outcome', 'reset');
+        getMetrics().ackHandlerTotal.add(1, {
+          outcome: 'reset',
+          ...(chainIdLabel ? { chain_id: chainIdLabel } : {}),
+        });
+        throw err;
+      }
+    });
+  };
+
+  /**
+   * Run an in-flight ACK body ({@link handlePublishIntent} or
+   * {@link handleUpdateIntent}) under a wall-clock deadline. If the store
+   * work has not produced a reply within `ackHandlerDeadlineMs` (default 15s,
+   * below the publisher's 20s per-send timeout), resolve with a
+   * `CORE_TEMPORARILY_UNAVAILABLE` decline so the publisher gets an actionable
+   * transient response instead of dead-air. The deadline aborts ACK store work
+   * through the per-invocation signal; any staging it already persisted is
+   * idempotent, and a late resolve/reject is swallowed so it cannot surface as
+   * an unhandled rejection once the deadline reply has been sent.
+   *
+   * A THROWN handler error still propagates (the race rejects) → the outer
+   * handler resets the stream exactly as before; the deadline only converts
+   * the *slow* (non-throwing) case, which previously had no in-band signal.
+   */
+  private runHandlerWithDeadline = async (
+    workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
+    cgIdForDecline: string | undefined,
+  ): Promise<Uint8Array> => {
+    const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
+    if (deadlineMs <= 0) return workFactory();
+
+    const abortController = new AbortController();
+    const work = workFactory(abortController.signal);
+
+    return runWithDeadline(work, deadlineMs, () => {
+      const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
+      const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
+      const decline = this.declineTemporarilyUnavailable(
+        cgIdForDecline ?? '',
+        'ack handler deadline exceeded',
+        deadlineError,
+      );
+      abortController.abort(deadlineError);
+      return decline;
+    });
+  };
+
+  /**
+   * Original publish-intent handling body. Split out from {@link handler}
+   * so the public entry point is a thin `withSpan` wrapper; the logic here
+   * is byte-for-byte the pre-instrumentation behaviour.
+   */
+  private handlePublishIntent = async (
+    data: Uint8Array,
+    _peerId: PeerId,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -297,6 +898,13 @@ export class StorageACKHandler {
     const merkleRoot = intent.merkleRoot instanceof Uint8Array
       ? intent.merkleRoot
       : new Uint8Array(intent.merkleRoot);
+    const privateMerkleRoots = normalizePrivateMerkleRoots(intent.privateMerkleRoots);
+    if (intent.isEncryptedPayload === true && privateMerkleRoots.length > 0) {
+      throw new Error(
+        'StorageACK: privateMerkleRoots are only valid for folded-private public-CG ACKs; ' +
+        'curated/encrypted ACKs must use catalogCommitment without folded private roots',
+      );
+    }
 
     const swmGraphUri = this.config.contextGraphSharedMemoryUri(swmGraphId, subGraphName);
 
@@ -341,7 +949,6 @@ export class StorageACKHandler {
       // The inline payload is the PUBLIC catalog N-quads. Bound the size and
       // require a non-empty payload — the curated commitment is verified
       // against it, so an empty payload is a malformed request.
-      const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
       if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
         return this.encodeDecline(
           cgId,
@@ -349,10 +956,10 @@ export class StorageACKHandler {
           'curated ACK requires the public catalog N-quads inline (empty stagingQuads)',
         );
       }
-      if (intent.stagingQuads.length > MAX_CATALOG_BYTES) {
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `curated catalog stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_CATALOG_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
       const claimedByteSize = typeof intent.publicByteSize === 'number'
@@ -416,13 +1023,15 @@ export class StorageACKHandler {
       // Root verified — persist the public catalog to `<cg>/_catalog` so this
       // core can serve it (the §7 facet open-serve) and the prover can later
       // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
+      // `assertSafeIri` stays OUTSIDE the persist helper below: an unsafe graph
+      // IRI is a malformed-request condition (stream reset), not a store outage.
+      // A failing store (worker restarting, 'store is closed') instead returns
+      // the transient decline so the publisher retries once the store recovers
+      // rather than bucketing us as no_response after a stream reset.
       const catalogGraph = contextGraphCatalogUri(cgId);
       assertSafeIri(catalogGraph);
-      const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-      for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
-      }
-      await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -472,23 +1081,11 @@ export class StorageACKHandler {
         false,
       );
 
-      if (this.config.isSignerRegistered) {
-        let signerRegistered: boolean | undefined;
-        try {
-          signerRegistered = await this.config.isSignerRegistered();
-        } catch (err) {
-          try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-          throw new Error('curated StorageACK signer registration lookup failed; refusing to sign');
-        }
-        if (signerRegistered === false) {
-          try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
-          return this.encodeDecline(
-            cgId,
-            STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-            'curated StorageACK signer is not confirmed on-chain as an operational wallet',
-          );
-        }
-      }
+      const curatedSignerGate = await this.checkSignerRegistrationOrDecline(
+        cgId,
+        'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+      );
+      if (!curatedSignerGate.ok) return curatedSignerGate.decline;
 
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
@@ -517,12 +1114,11 @@ export class StorageACKHandler {
 
 
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      // Size limit: reject payloads over 4 MB to prevent memory exhaustion
-      const MAX_STAGING_BYTES = 4 * 1024 * 1024;
-      if (intent.stagingQuads.length > MAX_STAGING_BYTES) {
+      // Size limit: reject oversized inline payloads to prevent memory exhaustion.
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_STAGING_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
 
@@ -574,7 +1170,7 @@ export class StorageACKHandler {
         }
       }
 
-      const inMemoryRoot = computeFlatKCRoot(parsed, []);
+      const inMemoryRoot = computeFlatKCRoot(parsed, privateMerkleRoots);
       if (!bytesEqual(inMemoryRoot, merkleRoot)) {
         throw new Error(
           `Merkle root mismatch (inline quads): publisher=${ethers.hexlify(merkleRoot).slice(0, 18)}..., ` +
@@ -586,11 +1182,14 @@ export class StorageACKHandler {
       // Root verified — persist to a scoped staging graph so the data is
       // durable before we sign the ACK (crash safety: on-chain KC implies
       // at least one core node stored the data). The staging graph is keyed
-      // by merkle root prefix and cleaned up during finalization.
+      // by merkle root prefix and cleaned up during finalization. A store
+      // outage during the apply (closed / restarting worker) returns the
+      // transient decline instead of resetting the stream — the durability
+      // invariant is why we CANNOT sign anyway, so the publisher re-sends
+      // once the store worker is back rather than bucketing us as no_response.
       const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      await this.store.dropGraph(stagingGraphUri);
-      const graphedQuads = parsed.map(q => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads);
+      const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
+      if (!persistedStaging.ok) return persistedStaging.decline;
       swmQuads = parsed;
 
       // Schedule cleanup: remove staging graph after 10 minutes.
@@ -606,7 +1205,15 @@ export class StorageACKHandler {
       // another core. Returning a typed decline instead of throwing keeps
       // the libp2p stream alive so the publisher sees the reason in band
       // rather than as an opaque stream reset (the #541 failure mode).
-      swmQuads = await this.loadSWMQuads(swmGraphUri, intent.rootEntities);
+      //
+      // Dead-air fix: the SWM CONSTRUCT itself failing (store worker down)
+      // is the same #541 shape one level deeper — it used to throw out of
+      // the handler and reset the stream. `loadSWMOrDecline` translates a
+      // store-op failure (and ONLY that — assertSafeIri malformed-request
+      // throws still propagate + reset) into the transient decline.
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, intent.rootEntities, signal);
+      if (!loadedSWM.ok) return loadedSWM.decline;
+      swmQuads = loadedSWM.quads;
 
       if (swmQuads.length === 0) {
         return this.encodeDecline(
@@ -617,7 +1224,7 @@ export class StorageACKHandler {
         );
       }
 
-      const recomputedRoot = computeFlatKCRoot(swmQuads, []);
+      const recomputedRoot = computeFlatKCRoot(swmQuads, privateMerkleRoots);
       if (!bytesEqual(recomputedRoot, merkleRoot)) {
         return this.encodeDecline(
           cgId,
@@ -733,7 +1340,7 @@ export class StorageACKHandler {
       ? BigInt(intent.tokenAmountStr)
       : 0n;
 
-    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    const verifiedLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, privateMerkleRoots);
     if (verifiedLeafCount === 0) {
       throw new Error(
         'StorageACK: empty Knowledge Asset payload (zero V10 Merkle leaves after sort+dedupe) — refusing ACK',
@@ -765,35 +1372,11 @@ export class StorageACKHandler {
       BigInt(intent.catalogLeafCount ?? 0),
       false,
     );
-    if (this.config.isSignerRegistered) {
-      let signerRegistered: boolean | undefined;
-      try {
-        signerRegistered = await this.config.isSignerRegistered();
-      } catch (err) {
-        try {
-          await this.config.onSignerRegistrationLookupFailed?.(err);
-        } catch {
-          // Keep ACK availability independent from logging/callback failures.
-        }
-        throw new Error('StorageACK signer registration lookup failed; refusing to sign');
-      }
-      if (signerRegistered === false) {
-        try {
-          await this.config.onSignerUnregistered?.();
-        } catch {
-          // Keep the signing refusal deterministic even if protocol cleanup fails.
-        }
-        // Decline rather than throw: the operator can rotate / re-register
-        // a key without restarting publishers, and the publisher should
-        // deselect this core for THIS request and move on rather than
-        // retry-and-time-out against a known-rejecting signer.
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-          'StorageACK signer is not confirmed on-chain as an operational wallet',
-        );
-      }
-    }
+    const signerGate = await this.checkSignerRegistrationOrDecline(
+      cgId,
+      'StorageACK signer is not confirmed on-chain as an operational wallet',
+    );
+    if (!signerGate.ok) return signerGate.decline;
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
@@ -839,9 +1422,38 @@ export class StorageACKHandler {
    * ACKs require exactly one KA before signing.
    *
    * Mirrors the publish `handler` above; only the digest, the request
-   * fields, and the protocol id differ.
+   * fields, and the protocol id differ — including the ACK-handler
+   * deadline: without it a hanging store op (SWM fallback `store.query`,
+   * catalog persist) dead-airs update ACKs past the publisher's 20s
+   * per-send timeout exactly as publish did, and the update collector
+   * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  updateHandler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+    let cgIdForDecline: string | undefined;
+    try {
+      // contextGraphId is cheap to read off the decoded intent for the
+      // deadline decline; handleUpdateIntent re-decodes + validates below.
+      cgIdForDecline = decodeUpdateIntent(data).contextGraphId;
+    } catch {
+      // Malformed request — handleUpdateIntent will throw + reset below.
+    }
+    return this.runHandlerWithDeadline(
+      (signal) => this.handleUpdateIntent(data, peerId, signal),
+      cgIdForDecline,
+    );
+  };
+
+  /**
+   * Original update-intent handling body. Split out from
+   * {@link updateHandler} so the public entry point runs it under the
+   * shared ACK deadline; the logic here is byte-for-byte the pre-deadline
+   * behaviour.
+   */
+  private handleUpdateIntent = async (
+    data: Uint8Array,
+    _peerId: PeerId,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -916,7 +1528,6 @@ export class StorageACKHandler {
         intent.newCatalogRoot.length === 32 &&
         intent.newCatalogRoot.some((b) => b !== 0)
       ) {
-        const MAX_CATALOG_BYTES = 4 * 1024 * 1024;
         if (!intent.stagingQuads || intent.stagingQuads.length === 0) {
           return this.encodeDecline(
             cgId,
@@ -924,10 +1535,10 @@ export class StorageACKHandler {
             'curated UPDATE ACK requires the public catalog N-quads inline (empty stagingQuads)',
           );
         }
-        if (intent.stagingQuads.length > MAX_CATALOG_BYTES) {
+        if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
           throw new Error(
             `curated UPDATE catalog stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-            `${MAX_CATALOG_BYTES} byte limit — rejecting request`,
+            `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
           );
         }
         // byteSize parity: a curated update prices off the catalog footprint, so
@@ -990,24 +1601,22 @@ export class StorageACKHandler {
         }
         // Root verified — REPLACE-persist the updated public catalog to
         // `<cg>/_catalog` so this core serves + later proves the rotated root.
+        // `assertSafeIri` stays OUTSIDE the persist helper: an unsafe IRI is
+        // malformed-request territory (stream reset), not a store outage. A
+        // store outage during the persist returns the same transient decline
+        // as the publish handler's catalog persist (shared helper).
         const catalogGraph = contextGraphCatalogUri(cgId);
         assertSafeIri(catalogGraph);
-        const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
-        for (const subject of catalogSubjects) {
-          await this.store.deleteByPattern({ graph: catalogGraph, subject });
-        }
-        await this.store.insert(
-          parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
-        );
+        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
+        if (!persistedCatalog.ok) return persistedCatalog.decline;
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
-      const MAX_STAGING_BYTES = 4 * 1024 * 1024;
-      if (intent.stagingQuads.length > MAX_STAGING_BYTES) {
+      if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(
           `UpdateStorageACK: stagingQuads payload (${intent.stagingQuads.length} bytes) exceeds ` +
-          `${MAX_STAGING_BYTES} byte limit — rejecting request`,
+          `${STORAGE_ACK_MAX_STAGING_BYTES} byte limit — rejecting request`,
         );
       }
       const parsed = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
@@ -1033,8 +1642,14 @@ export class StorageACKHandler {
     } else {
       // Fallback: data should already be in SWM (publishFromSharedMemory
       // remap / SWM-resolution path). Reuse the publish branch's SWM
-      // CONSTRUCT + recompute + typed-decline shape.
-      const swmQuads = await this.loadSWMQuads(swmGraphUri, []);
+      // CONSTRUCT + recompute + typed-decline shape via the shared
+      // `loadSWMOrDecline` helper — including the dead-air fix: a store-op
+      // failure inside loadSWMQuads becomes a transient decline instead of a
+      // stream reset (malformed-request assertSafeIri throws still propagate
+      // + reset).
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, [], signal);
+      if (!loadedSWM.ok) return loadedSWM.decline;
+      const swmQuads = loadedSWM.quads;
       if (swmQuads.length === 0) {
         return this.encodeDecline(
           cgId,
@@ -1146,23 +1761,11 @@ export class StorageACKHandler {
       BigInt(intent.newCatalogLeafCount ?? 0),
     );
 
-    if (this.config.isSignerRegistered) {
-      let signerRegistered: boolean | undefined;
-      try {
-        signerRegistered = await this.config.isSignerRegistered();
-      } catch (err) {
-        try { await this.config.onSignerRegistrationLookupFailed?.(err); } catch { /* swallow */ }
-        throw new Error('UpdateStorageACK signer registration lookup failed; refusing to sign');
-      }
-      if (signerRegistered === false) {
-        try { await this.config.onSignerUnregistered?.(); } catch { /* swallow */ }
-        return this.encodeDecline(
-          cgId,
-          STORAGE_ACK_DECLINE_CODES.SIGNER_NOT_REGISTERED,
-          'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
-        );
-      }
-    }
+    const updateSignerGate = await this.checkSignerRegistrationOrDecline(
+      cgId,
+      'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+    );
+    if (!updateSignerGate.ok) return updateSignerGate.decline;
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
@@ -1189,27 +1792,48 @@ export class StorageACKHandler {
     });
   };
 
-  private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
+  private async loadSWMQuads(
+    graphUri: string,
+    rootEntities: string[],
+    signal?: AbortSignal,
+  ): Promise<Quad[]> {
     assertSafeIri(graphUri);
-    if (rootEntities.length === 0) {
-      // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
-      // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.store.query(sparql);
-      return result.type === 'quads' ? result.quads : [];
-    }
-
-    const allQuads: Quad[] = [];
     for (const entity of rootEntities) {
       assertSafeIri(entity);
-      const genidPrefix = `${entity}/.well-known/genid/`;
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
-      const result = await this.store.query(sparql);
-      if (result.type === 'quads') {
-        allQuads.push(...result.quads);
-      }
     }
-    return allQuads;
+    // The publisher computes the KC merkle root over its SWM read with the
+    // trust-level / workspace-owner bookkeeping quads filtered OUT
+    // (`isSwmMerkleExcludedQuad`). The core responder recomputes the same root
+    // from its OWN SWM copy here, so it MUST apply the identical exclusion —
+    // otherwise any trust-level/workspace-owner quad resident in the core's
+    // store is hashed on one side but not the other and every folded-private
+    // ACK declines MERKLE_MISMATCH_IN_SWM (2026-07-07 Gnosis mainnet). Shared
+    // single-source filter so the two paths can never drift again.
+    //
+    // A3 (O(store) relief): go through the shared `loadSelectedSharedMemoryQuads`
+    // helper, which binds the SWM graph set through the fast named-graph index
+    // (`VALUES ?g`) instead of an unbounded `GRAPH ?g` + STRSTARTS scan — this
+    // recompute runs on the ACK-deadline-critical responder that was starving
+    // under load. Using the SAME helper as the publisher's merkle read keeps
+    // graph selection AND the merkle-exclusion filter single-sourced, so the two
+    // recomputes can never drift. The explicit `assertSafeIri(...)` guards above
+    // stay ordinary malformed-request throws; a store/index failure inside the
+    // read is re-tagged `StoreUnavailableError` (→ CORE_TEMPORARILY_UNAVAILABLE).
+    const selection: SharedMemoryReadSelection =
+      rootEntities.length === 0 ? 'all' : { rootEntities };
+    try {
+      return await loadSelectedSharedMemoryQuads(this.store, graphUri, selection, {
+        queryOptions: ackStoreOptions(
+          rootEntities.length === 0
+            ? 'storage-ack.loadSWMQuads.constructAll'
+            : 'storage-ack.loadSWMQuads.constructEntity',
+          signal,
+        ),
+        quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
+      });
+    } catch (err) {
+      throw new StoreUnavailableError(err);
+    }
   }
 }
 

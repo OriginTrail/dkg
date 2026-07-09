@@ -65,6 +65,7 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const RPC = 'http://127.0.0.1:8545';
@@ -226,6 +227,8 @@ function runDkgCli(
   });
 }
 
+let publishSeq = 0;
+
 async function publishViaCli(
   node: DevnetNode,
   contextGraph: string,
@@ -237,45 +240,39 @@ async function publishViaCli(
   txHash?: string;
   raw: string;
 }> {
-  const args = ['publish', contextGraph, '--file', filePath];
+  // #1410 replaced the one-shot `dkg publish <cg> --file` with the two-step KA
+  // lifecycle CLI — arg arrays + stdout parsing live in the shared
+  // runKaPublishLifecycle helper (devnet/_bootstrap/harness.ts).
+  const publishArgs: string[] = [];
   if (options.publisherNodeIdentityId !== undefined) {
-    args.push(
+    publishArgs.push(
       '--publisher-node-identity-id',
       String(options.publisherNodeIdentityId),
     );
   }
-  const result = await runDkgCli(node, args);
-  if (result.code !== 0) {
-    throw new Error(
-      `dkg publish failed (exit ${result.code})\n` +
-        `stdout: ${result.stdout}\nstderr: ${result.stderr}`,
-    );
-  }
-  const status = /Status:\s*(\w+)/i.exec(result.stdout)?.[1] ?? 'unknown';
-  const kcMatch = /KC ID:\s*(\d+)/i.exec(result.stdout);
-  const txMatch = /TX hash:\s*(0x[0-9a-fA-F]+)/i.exec(result.stdout);
-  const kaId = kcMatch ? BigInt(kcMatch[1]!) : undefined;
+  const result = await runKaPublishLifecycle((args) => runDkgCli(node, args), {
+    kaName: `cli-pub-${Date.now().toString(36)}-${++publishSeq}`,
+    contextGraphId: contextGraph,
+    inputFile: filePath,
+    publishArgs,
+  });
   // Greedy publish-outcome gate (mirrors the devnet shell _devnet_publish_status_ok
   // contract): a CLI exit code of 0 is NOT proof of a real publish. Pin the
   // status to a known success value and require a positive on-chain kaId so an
   // 'unknown'/failed status — or a missing id (e.g. a "KC ID:" → "KA ID:" output
   // rename that drifts past this regex after the KC→KA transition) — fails
   // loudly here instead of slipping through every caller as a green publish.
+  // (helper returns `status` already lowercased)
   const publishOk = ['confirmed', 'finalized', 'tentative'];
   expect(
     publishOk,
-    `dkg publish status="${status}", expected one of ${publishOk.join('/')}\n${result.stdout}`,
-  ).toContain(status.toLowerCase());
+    `ka publish status="${result.status}", expected one of ${publishOk.join('/')}\n${result.raw}`,
+  ).toContain(result.status);
   expect(
-    kaId,
-    `dkg publish surfaced no positive "KC ID:" (kaId=${kaId})\n${result.stdout}`,
+    result.kaId,
+    `ka publish surfaced no positive "KA ID:" (kaId=${result.kaId})\n${result.raw}`,
   ).toBeGreaterThan(0n);
-  return {
-    status,
-    kaId,
-    txHash: txMatch ? txMatch[1] : undefined,
-    raw: result.stdout,
-  };
+  return result;
 }
 
 async function loadContractAddresses(

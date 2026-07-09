@@ -1,6 +1,7 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
 
 export const DEFAULT_PUBLISH_EPOCHS = 12;
 /** PublishIntent encodes epochs as uint32; reject larger overrides before wire encoding. */
@@ -27,7 +28,9 @@ export type ReceiverSignatureProvider = (
 ) => Promise<ReceiverSignature[]>;
 
 /**
- * V10 core node ACK signature collected via /dkg/10.0.1/storage-ack.
+ * V10 core node ACK signature collected via storage-ack. Public/catalog ACKs
+ * use /dkg/10.0.1/storage-ack; folded-private ACKs require
+ * /dkg/10.0.2/storage-ack so field 20 support is capability-gated.
  * Spec §9.0.3: ACK = EIP-191(computePublishACKDigest(chainId, kav10Address,
  *   contextGraphId, merkleRoot, kaCount, byteSize, epochs, tokenAmount))
  */
@@ -47,20 +50,76 @@ export interface V10CoreNodeACK {
   subscriptionSource?: import('@origintrail-official/dkg-core').SubscriptionSource;
 }
 
+export interface V10CatalogACKCommitment {
+  catalogRoot: Uint8Array;
+  catalogLeafCount: number;
+}
+
 /**
- * Callback that collects V10 StorageACKs from 3 core nodes.
- * Called AFTER merkle root computation, BEFORE on-chain tx.
- *
- * Identifier split (remap support): `contextGraphId` is the TARGET on-chain
- * numeric CG id that the ACK digest and the on-chain tx use. `swmGraphId`
- * (optional) is the SOURCE graph where the data lives in SWM — peers load
- * quads from `<swmGraphId>` but sign the ACK over `<contextGraphId>`. When
- * omitted, peers fall back to `contextGraphId` for both.
- *
- * stagingQuads: optional N-Quads bytes to send inline to core nodes so
- * they can verify the merkle root without needing SWM pre-positioning.
+ * ACK modes are intentionally mutually exclusive:
+ * - public: ordinary public-CG ACKs; no private roots or catalog commitment.
+ * - folded-private: public-CG ACKs that fold private Merkle commitments into
+ *   the KC root without sending private plaintext to cores.
+ * - curated-catalog: curated-CG ACKs that sign the public `_catalog`
+ *   commitment. This mode cannot carry folded-private roots because cores
+ *   cannot verify both the curated catalog and private commitments today.
  */
-export type V10ACKProvider = (
+export type V10ACKMode =
+  | { kind: 'public' }
+  | { kind: 'folded-private'; privateMerkleRoots: readonly Uint8Array[] }
+  | { kind: 'curated-catalog'; catalogCommitment: V10CatalogACKCommitment };
+
+export interface V10ACKProviderBaseParams {
+  merkleRoot: Uint8Array;
+  /** TARGET on-chain numeric CG id that the ACK digest and on-chain tx use. */
+  contextGraphId: string;
+  kaCount: number;
+  rootEntities: string[];
+  publicByteSize: bigint;
+  epochs?: number;
+  tokenAmount?: bigint;
+  /**
+   * SOURCE graph where data lives in SWM. When omitted, peers fall back to
+   * `contextGraphId` for both source and target.
+   */
+  swmGraphId?: string;
+  subGraphName?: string;
+  /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
+  merkleLeafCount: number;
+  /** Canonical KA UAL used by receiver-side lifecycle logs. */
+  assetUal?: string;
+}
+
+export type V10ACKProviderParams =
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'public' };
+      /** Optional N-Quads bytes to send inline so cores can verify without SWM pre-positioning. */
+      stagingQuads?: Uint8Array;
+    })
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'folded-private'; privateMerkleRoots: readonly Uint8Array[] };
+      /** Public N-Quads bytes only. Private plaintext must never be sent. */
+      stagingQuads?: Uint8Array;
+    })
+  | (V10ACKProviderBaseParams & {
+      ackMode: { kind: 'curated-catalog'; catalogCommitment: V10CatalogACKCommitment };
+      /** Public `_catalog` N-Quads bytes. Curated private data stays encrypted off the ACK wire. */
+      stagingQuads: Uint8Array;
+    });
+
+/**
+ * Callback that collects V10 StorageACKs from core nodes.
+ * Called AFTER merkle root computation, BEFORE on-chain tx.
+ */
+export type V10ACKProviderObject = (params: V10ACKProviderParams) => Promise<V10CoreNodeACK[]>;
+
+/**
+ * Compatibility shape for integrations that implemented the original
+ * positional callback contract before ACK mode became explicit. The object
+ * provider is the canonical form for new code; folded-private publishes require
+ * the object form because the old positional contract had no private-root slot.
+ */
+export type LegacyV10ACKProvider = (
   merkleRoot: Uint8Array,
   contextGraphId: string,
   kaCount: number,
@@ -71,33 +130,12 @@ export type V10ACKProvider = (
   tokenAmount: bigint | undefined,
   swmGraphId: string | undefined,
   subGraphName: string | undefined,
-  /** V10 flat-KC Merkle leaf count (sorted + deduped); binds ACK + on-chain KC to RandomSampling. */
   merkleLeafCount: number,
-  /**
-   * OT-RFC-49 / WS-D — when `true`, this is a CURATED publish: `stagingQuads`
-   * carries the PUBLIC `_catalog` N-quads (plaintext — the catalog is public),
-   * and the private data is encrypted for MEMBERS only (off the ACK wire).
-   * Cores skip the flat-KC plaintext recompute (they don't hold the private
-   * data) and instead rebuild + verify the catalog root from `catalogCommitment`
-   * against the inline `stagingQuads`. Defaults to `false` so existing public-CG
-   * callers are unchanged.
-   */
   isEncryptedPayload?: boolean,
-  /**
-   * OT-RFC-49 / WS-D — the CURATED PUBLIC `_catalog` commitment for this
-   * publish (REPLACED the stripped ciphertext-chunks commitment). When present,
-   * the publisher computed `computeCatalogRoot(catalogCommittedLeaves(...))`
-   * over the committed catalog leaf-set; the same `(catalogRoot, catalogLeafCount)`
-   * is signed into the V10 ACK digest, lands on-chain, and is what the core
-   * rebuilds over the inline catalog `stagingQuads` (DECLINE `CATALOG_ROOT_MISMATCH`
-   * on disagreement). Required when `isEncryptedPayload === true` AND the curated
-   * CG has a catalog entry; absent for public CGs.
-   */
-  catalogCommitment?: {
-    catalogRoot: Uint8Array;
-    catalogLeafCount: number;
-  },
+  catalogCommitment?: V10CatalogACKCommitment,
 ) => Promise<V10CoreNodeACK[]>;
+
+export type V10ACKProvider = V10ACKProviderObject | LegacyV10ACKProvider;
 
 /**
  * V10 update ACK provider: collects core node signatures over the update ACK
@@ -201,6 +239,17 @@ export interface PublishOptions {
    * this overrides contextGraphId as the ACK domain and on-chain contextGraphId.
    */
   publishContextGraphId?: string;
+  /**
+   * Binding-only numeric on-chain context graph id. Unlike publishContextGraphId,
+   * this must not imply a remap/delete flow in the publisher.
+   */
+  onChainContextGraphId?: string | bigint;
+  /**
+   * Internal/private-CG catalog path: exact generated catalog triples that ride
+   * in the KC Merkle root but are not user KA manifest roots. Public callers
+   * should not set this for arbitrary metadata.
+   */
+  trustedNonManifestCatalogTriples?: TrustedCatalogTripleKeys;
   /**
    * When true, the data is already in peers' SWM via shared memory gossip.
    * V10 ACK collection will NOT send inline staging quads — core nodes
@@ -372,14 +421,9 @@ export interface PublishResult {
    * chain submission:
    *   - `no-chain`        — no on-chain CG id / chain not V10-ready: local is the
    *                         only possible outcome (an honest local finalization).
-   *   - `private-no-acks` — the CG IS chain-registered but a private payload
-   *                         couldn't collect storage ACKs, so it never reached the
-   *                         chain it should have. The async lift must NOT report
-   *                         this as `finalized` with a provisional UAL (#1013) —
-   *                         the real fix for reaching chain here is #1121.
    * Undefined on confirmed publishes and pre-#1013 results.
    */
-  localChainSkipReason?: 'no-chain' | 'private-no-acks';
+  localChainSkipReason?: 'no-chain';
   /** Public quads that were stored (used for broadcast — never includes private triples). */
   publicQuads?: Quad[];
   /** Set when KC is confirmed on-chain but context-graph registration failed. */

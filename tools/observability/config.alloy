@@ -1,0 +1,105 @@
+// Grafana Alloy — OTLP ingest bridge for DKG V10 node telemetry.
+//
+//   DKG nodes --OTLP/HTTP (bearer token)--> Alloy --backend--> Grafana
+//
+// SIGNAL STATUS for the polaris setup today: this config is LOGS-ONLY,
+// because the only telemetry backend currently provisioned is Loki 2.5.0.
+// The OTLP receiver below accepts all three signals on one port, but only
+// the logs pipeline is wired to an exporter. Traces and metrics are shown
+// in the commented "FULL-SIGNAL" section at the bottom — uncomment them once
+// a traces backend (Tempo/any OTLP) and a metrics backend (Mimir/Prometheus
+// remote-write) exist. Nodes emit logs via a hand-rolled OTLP/HTTP exporter
+// and traces+metrics via the OTel SDK; on the wire all three are plain OTLP,
+// so Alloy treats them uniformly.
+//
+// Why Alloy (not native OTLP→Loki): the production Loki is 2.5.0, which has no
+// OTLP endpoint and no structured metadata. Alloy receives OTLP and writes via
+// the classic /loki/api/v1/push, promoting the node-identity resource
+// attributes to index labels (service_name, service_instance_id,
+// deployment_environment, dkg_node_role) so a Grafana dashboard can pick a node.
+//
+// Env:
+//   LOKI_PUSH_URL — e.g. http://localhost:3100/loki/api/v1/push (Loki on host).
+//
+// AUTH: the OTLP port is NOT exposed directly. It is reached only through the
+// Cloudflare-proxied ingest hostname, which enforces the bearer token (a
+// Cloudflare WAF rule on the Authorization header, or a Cloudflare service
+// token). The OTLP receiver below binds 0.0.0.0:4318 (all interfaces) — so a
+// host/VM firewall MUST block public access to TCP 4318; only the local
+// cloudflared/reverse-proxy should reach it. Nodes hit Cloudflare → origin.
+// (Per-version Alloy receiver auth is finicky; gating at the edge is simpler
+// and equally strong.)
+
+otelcol.receiver.otlp "default" {
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+  output {
+    logs = [otelcol.processor.batch.default.input]
+    // metrics / traces: see the FULL-SIGNAL section below to enable.
+  }
+}
+
+otelcol.processor.batch "default" {
+  output {
+    logs = [otelcol.processor.transform.loki_labels.input]
+  }
+}
+
+// Tell the Loki exporter which resource attributes become Loki INDEX labels.
+// Keep this list SMALL and low-cardinality — never add operation_id here.
+// These keys must match the OTLP resource-attribute keys the node emits
+// (dotted, OTel-style); Loki sanitizes the dots to underscores, so the
+// resulting labels are service_name, service_instance_id,
+// deployment_environment, dkg_node_role (dashboards key off those).
+otelcol.processor.transform "loki_labels" {
+  error_mode = "ignore"
+  log_statements {
+    context = "resource"
+    statements = [
+      `set(attributes["loki.resource.labels"], "service.name, service.instance.id, deployment.environment, dkg.node.role")`,
+    ]
+  }
+  output {
+    logs = [otelcol.exporter.loki.default.input]
+  }
+}
+
+otelcol.exporter.loki "default" {
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FULL-SIGNAL SECTION (commented — enable when the backends exist)
+//
+// The receiver above already accepts metrics + traces on the same port. To
+// route them, add these lines to `otelcol.receiver.otlp "default"`'s output:
+//     metrics = [otelcol.processor.batch.metrics.input]
+//     traces  = [otelcol.processor.batch.traces.input]
+// then uncomment the matching pipeline below.
+//
+// --- TRACES → Tempo (or any OTLP traces backend) ---
+// otelcol.processor.batch "traces" {
+//   output { traces = [otelcol.exporter.otlp.tempo.input] }
+// }
+// otelcol.exporter.otlp "tempo" {
+//   client { endpoint = sys.env("TEMPO_OTLP_ENDPOINT") }  // e.g. tempo:4317
+// }
+//
+// --- METRICS → Prometheus/Mimir remote-write ---
+// otelcol.processor.batch "metrics" {
+//   output { metrics = [otelcol.exporter.prometheus.mimir.input] }
+// }
+// otelcol.exporter.prometheus "mimir" {
+//   forward_to = [prometheus.remote_write.mimir.receiver]
+// }
+// prometheus.remote_write "mimir" {
+//   endpoint { url = sys.env("PROM_REMOTE_WRITE_URL") }  // e.g. http://mimir:9009/api/v1/push
+// }
+// ─────────────────────────────────────────────────────────────────────────

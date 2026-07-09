@@ -2,7 +2,7 @@
 //
 // Route handlers for shared-memory / workspace write + publish + conditional-write, memory turn/search.
 //
-// Extracted verbatim from the legacy monolithic `handleRequest` —
+// Extracted verbatim from the legacy monolithic `handleRequest` --
 // every block is a contiguous slice of the original source with zero
 // edits to route bodies. Dispatch is driven by the surviving
 // `handle-request.ts` shell, which awaits each group handler in
@@ -37,11 +37,10 @@ import { existsSync, readdirSync, readFileSync, openSync, closeSync, writeFileSy
 // Namespace import: our Phase-8 install-context builder (~line 290) calls
 // `osModule.homedir()`, and the later agent-identity probe (~line 6851)
 // uses `osModule.hostname()` + `osModule.userInfo()`. v10-rc's new
-// OpenClaw config helper (~line 2535) uses a bare `homedir()` — aliased
+// OpenClaw config helper (~line 2535) uses a bare `homedir()` -- aliased
 // below so both sites coexist without a duplicate-module import.
 import * as osModule from 'node:os';
 const { homedir } = osModule;
-const MAX_PUBLISH_EPOCHS = 0xffffffff;
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { ethers } from 'ethers';
@@ -63,9 +62,9 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, sparqlIri, contextGraphSharedMemoryUri, sharedMemoryReadBothFilter, contextGraphAssertionUri, contextGraphMetaUri, escapeDkgRdfLiteral, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
-import { skolemizeByEntity, findReservedSubjectPrefix, isSkolemizedUri, type PublishOptions, type PublishResult } from '@origintrail-official/dkg-publisher';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, assertSafeIri, assertSafeRdfTerm, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
   MetricsCollector,
@@ -113,7 +112,7 @@ import {
 } from '../../config.js';
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard } from '../../auth.js';
 import { recordAssertionActivity } from '../activity-notification.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -131,7 +130,7 @@ import { type ExtractionStatusRecord, getExtractionStatusRecord, setExtractionSt
 import { FileStore } from '../../file-store.js';
 import { VectorStore, OpenAIEmbeddingProvider, type EmbeddingProvider } from '../../vector-store.js';
 import { parseBoundary, parseMultipart, MultipartParseError } from '../../http/multipart.js';
-// Phase 8 — project-manifest publish + install (UI-driven onboarding flow).
+// Phase 8 -- project-manifest publish + install (UI-driven onboarding flow).
 // Daemon constructs a self-pointing DkgClient (localhost:listenPort) and
 // reuses the same publish/fetch/plan/write helpers the CLI uses, so wire
 // format stays identical between curator/joiner/CLI paths.
@@ -148,7 +147,7 @@ import {
 } from '@origintrail-official/dkg-mcp/manifest/install';
 import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 
-// Daemon sub-module imports — every public symbol from sibling
+// Daemon sub-module imports -- every public symbol from sibling
 // modules is pulled in here because the legacy monolithic file used
 // them all without explicit imports. Unused ones are tolerated by
 // the project's tsconfig (`noUnusedLocals` is off).
@@ -196,9 +195,10 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isPublishQuad,
   isWritableQuad,
-  parsePublishRequestBody,
+  validateQuadObjectTerms,
+  validateWritableQuadLiteralSizes,
+  oversizedRdfLiteralResponseBody,
   jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
@@ -226,6 +226,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  respondIfChainRpcTransportError,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -332,6 +333,7 @@ import {
 } from '../local-agents.js';
 
 import type { RequestContext } from './context.js';
+import { authorizeAgentScopedAuthorClaim, isSameAgentAddress } from './shared-assertion-helpers.js';
 
 /**
  * Validate a `preSignedAuthorAttestation` payload from a finalize request.
@@ -347,111 +349,19 @@ import type { RequestContext } from './context.js';
  * path (it recovers the address from the EIP-712 digest and fails closed
  * if the recovered signer doesn't match the claimed address).
  *
- * RFC-001 §9.x — Phase C — pre-signed attestations are a finalize-time
+ * RFC-001 Section 9.x -- Phase C -- pre-signed attestations are a finalize-time
  * concern. The publish layer no longer accepts them; they're consumed
  * here and stamped into the seal.
  */
 type PreSignedAuthorAttestation = {
   address: string;
-  // OT-RFC-43 §F2 — the packed reservedKaId the author signed over. Required so
+  // OT-RFC-43 Section F2 -- the packed reservedKaId the author signed over. Required so
   // the daemon honours the author's reserved slot (the digest binds it) rather
   // than re-allocating; threaded into agent.assertion.finalize.
   reservedKaId: bigint;
   signature: { r: Uint8Array; vs: Uint8Array };
 };
 
-type SharedMemoryPublishSelection = "all" | { rootEntities: string[] };
-const WORKSPACE_OWNER_PREDICATE = 'http://dkg.io/ontology/workspaceOwner';
-const SKOLEM_GENID_SEGMENT = '/.well-known/genid/';
-
-function subjectMatchesPublishRoot(subject: string, root: string): boolean {
-  return subject === root || (isSkolemizedUri(subject) && subject.startsWith(`${root}${SKOLEM_GENID_SEGMENT}`));
-}
-
-// Exported for the OT-RFC-46 read-both regression test (the route mocks the
-// store, so the SPARQL scope can only be exercised against a real store).
-export async function resolvePublishRootEntities(
-  agent: DKGAgent,
-  contextGraphId: string,
-  selection: SharedMemoryPublishSelection,
-  subGraphName?: string,
-): Promise<string[]> {
-  const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-  // OT-RFC-46 read-both: include the per-KA layer graphs `promote` writes into,
-  // not just the bare bucket — otherwise a selection-mode publish of a promoted
-  // root 400s here before `publishFromSharedMemory` (which reads both) runs.
-  const swmGraphScope = sharedMemoryReadBothFilter(swmGraph);
-
-  if (selection !== "all") {
-    const requestedRoots = [...new Set(
-      selection.rootEntities
-        .map((root) => String(root).trim())
-        .filter((root) => isSafeIri(root)),
-    )];
-    if (requestedRoots.length === 0) return [];
-
-    const values = requestedRoots.map((root) => sparqlIri(root)).join(" ");
-    const result = await agent.store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH ?g {
-          VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
-          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "${SKOLEM_GENID_SEGMENT}")))
-        }
-        ${swmGraphScope}
-      }`,
-    );
-    const quads: Quad[] = result.type === "quads"
-      ? result.quads.filter((quad) => quad.predicate !== WORKSPACE_OWNER_PREDICATE)
-      : [];
-    const availableRoots = new Set<string>();
-    for (const quad of quads) {
-      for (const root of requestedRoots) {
-        if (subjectMatchesPublishRoot(quad.subject, root)) {
-          availableRoots.add(root);
-        }
-      }
-    }
-    return requestedRoots.filter((root) => availableRoots.has(root));
-  }
-
-  const result = await agent.store.query(
-    `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH ?g {
-        ?s ?p ?o .
-        FILTER(?p != <${WORKSPACE_OWNER_PREDICATE}>)
-      }
-      ${swmGraphScope}
-    }`,
-  );
-  const quads: Quad[] = result.type === "quads"
-    ? result.quads.filter((quad) => quad.predicate !== WORKSPACE_OWNER_PREDICATE)
-    : [];
-  return [...skolemizeByEntity(quads).keys()];
-}
-
-function publishResponsePayload(
-  result: PublishResult,
-  resolvedPublishContextGraphId: string | null,
-): Record<string, unknown> {
-  const chain = result.onChainResult;
-  return {
-    kaId: String(result.kaId),
-    status: result.status,
-    kas: result.kaManifest.map((ka: any) => ({
-      tokenId: String(ka.tokenId),
-      rootEntity: ka.rootEntity,
-    })),
-    ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-    ...(resolvedPublishContextGraphId != null
-      ? { publishContextGraphId: String(resolvedPublishContextGraphId) }
-      : {}),
-    ...(result.contextGraphError
-      ? { contextGraphError: result.contextGraphError }
-      : {}),
-  };
-}
 
 export function validatePreSignedAuthorAttestation(
   raw: unknown,
@@ -494,13 +404,13 @@ export function validatePreSignedAuthorAttestation(
     });
     return undefined;
   }
-  // OT-RFC-43 §F2 — the AuthorAttestation digest binds the packed reservedKaId,
+  // OT-RFC-43 Section F2 -- the AuthorAttestation digest binds the packed reservedKaId,
   // so the caller MUST forward the exact id they signed over. It travels as a
   // decimal string (uint256-safe over JSON); accept an integer number too.
   const reservedKaId = decodeReservedKaId(obj.reservedKaId);
   if (reservedKaId === undefined) {
     jsonResponse(res, 400, {
-      error: '"preSignedAuthorAttestation.reservedKaId" must be the packed KA id the author signed over, as a non-negative decimal string (OT-RFC-43 §F2)',
+      error: '"preSignedAuthorAttestation.reservedKaId" must be the packed KA id the author signed over, as a non-negative decimal string (OT-RFC-43 Section F2)',
     });
     return undefined;
   }
@@ -664,6 +574,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         };
       });
 
+      const literalSize = validateWritableQuadLiteralSizes("quads", normalized);
+      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
       await agent.store.insert(normalized);
       return jsonResponse(res, 200, {
         ok: true,
@@ -727,19 +639,19 @@ WHERE {
 
   // POST /api/shared-memory/catchup
   //
-  // OT-RFC-38 LU-7 — explicit SWMCatchupRequest endpoint. Pulls the
+  // OT-RFC-38 LU-7 -- explicit SWMCatchupRequest endpoint. Pulls the
   // remote SWM state for one or more context graphs from connected
   // peers, applying everything authorized into the local triple store.
   //
   // Body: { contextGraphId: string | string[], peerId?: string }
   //   - peerId: optional. When set, sync only from this specific peer.
   //     When omitted, iterate ALL currently-connected libp2p peers and
-  //     try each — first peer that authorises serves the request,
+  //     try each -- first peer that authorises serves the request,
   //     subsequent peers' decisions are independent.
   //
   // Returns: per-peer outcome with inserted/fetched counters.
   //
-  // Auth model (per SPEC_CG_HOSTING_MEMBERSHIP §5.6.4):
+  // Auth model (per SPEC_CG_HOSTING_MEMBERSHIP Section 5.6.4):
   //   - Public CGs (accessPolicy == 0): the responder's sync handler
   //     accepts anonymous catchup (no `authorizePrivateSyncRequest`
   //     gate). Any reachable peer can backfill SWM.
@@ -768,13 +680,13 @@ WHERE {
     if (cgIds.length === 0) {
       return jsonResponse(res, 400, {
         error:
-          'Missing "contextGraphId" — pass a single context graph id string or an array of ids',
+          'Missing "contextGraphId" -- pass a single context graph id string or an array of ids',
       });
     }
 
     // OT-RFC-38 LU-7: SWMCatchupRequest is SWM-only. The durable
     // (knowledge-collection) layer has its own publish-time
-    // commit→fanout→ACK protocol and a separate sync substrate; it's
+    // commit->fanout->ACK protocol and a separate sync substrate; it's
     // out of scope for the catchup endpoint and would otherwise compound
     // the request budget (240s vs 120s). Opt-in via includeDurable=true
     // for callers that want the full data leg in the same call.
@@ -883,7 +795,7 @@ WHERE {
       });
     }
 
-    // Per-CG × per-peer sync. The previous shape called
+    // Per-CG Ã— per-peer sync. The previous shape called
     // `syncSharedMemoryFromPeer(peer, cgIds)` ONCE per peer with the
     // full CG list, which only returned an aggregate count and made
     // a per-CG LU-6 fallback decision impossible (Codex PR #610 R1
@@ -891,9 +803,9 @@ WHERE {
     // for the others got skipped on the aggregate gate).
     //
     // Now: iterate CGs serially (keeps wire load bounded across many
-    // peers × many CGs), select a narrowed per-CG peer set, and parallelize
+    // peers Ã— many CGs), select a narrowed per-CG peer set, and parallelize
     // only that set. Per-peer dial+request is 5-20s on devnet; serialising
-    // the selected peers would compound to N×20s.
+    // the selected peers would compound to NÃ—20s.
     type PerPeerLeg = {
       peerId: string;
       insertedTriples: number;
@@ -1006,7 +918,7 @@ WHERE {
       });
     }
 
-    // OT-RFC-38 LU-6 — per-CG host-catchup fallback. For each CG
+    // OT-RFC-38 LU-6 -- per-CG host-catchup fallback. For each CG
     // whose standard sync inserted 0 triples, fall back to fetching
     // opaque ciphertext envelopes from connected core hosts and
     // re-applying them through the local sender-key decryptor.
@@ -1142,7 +1054,7 @@ WHERE {
     });
   }
 
-  // OT-RFC-38 LU-6 — dedicated host-catchup endpoint.
+  // OT-RFC-38 LU-6 -- dedicated host-catchup endpoint.
   //
   // POST /api/shared-memory/host-catchup
   // Body: { contextGraphId: string, peerId?: string, sinceSeqno?: number, maxRounds?: number }
@@ -1151,7 +1063,7 @@ WHERE {
   // hosting the curated CG's SWM substrate and re-applies each
   // through the local agent so the existing Sender-Key decrypt
   // path runs verbatim. Distinct from the "fallback" leg embedded
-  // in /catchup above — exposed so operators can debug host
+  // in /catchup above -- exposed so operators can debug host
   // hosting independently (e.g. to confirm a specific core has
   // stored ciphertext for a CG).
   if (req.method === 'POST' && path === '/api/shared-memory/host-catchup') {
@@ -1193,7 +1105,7 @@ WHERE {
     }
   }
 
-  // OT-RFC-38 LU-6 — host-mode store diagnostics.
+  // OT-RFC-38 LU-6 -- host-mode store diagnostics.
   // GET /api/shared-memory/host-mode/stats
   // Returns { enabled, cgCount, totalBytes, totalEntries, subscribedCgIds }.
   if (req.method === 'GET' && path === '/api/shared-memory/host-mode/stats') {
@@ -1208,7 +1120,7 @@ WHERE {
     }
   }
 
-  // OT-RFC-38 LU-6 — explicit host-mode subscribe.
+  // OT-RFC-38 LU-6 -- explicit host-mode subscribe.
   // POST /api/shared-memory/host-mode/subscribe { contextGraphId }
   // Tells a core to start hosting the curated CG's encrypted SWM
   // substrate WITHOUT requiring the core to become a CG member.
@@ -1233,10 +1145,10 @@ WHERE {
     }
   }
 
-  // Tiny local helper — kept inline to avoid adding a new import for
+  // Tiny local helper -- kept inline to avoid adding a new import for
   // a single use; the existing route module already has utilities
   // for hex/bytes interop scattered across the file but none are
-  // strictly typed `bytes32`. 64-char hex (no 0x) → 32-byte buffer.
+  // strictly typed `bytes32`. 64-char hex (no 0x) -> 32-byte buffer.
   function hexToBytes32(h: string): Uint8Array {
     const clean = h.startsWith('0x') ? h.slice(2) : h;
     if (clean.length !== 64) throw new Error('expected 32-byte hex');
@@ -1247,9 +1159,9 @@ WHERE {
 
   // POST /api/shared-memory/verify-batch
   //
-  // OT-RFC-38 LU-8 — Member post-decrypt batch verification.
+  // OT-RFC-38 LU-8 -- Member post-decrypt batch verification.
   //
-  // SPEC_CG_HOSTING_MEMBERSHIP §5.3.1: members re-derive the plaintext
+  // SPEC_CG_HOSTING_MEMBERSHIP Section 5.3.1: members re-derive the plaintext
   // merkle root from a reconstructed batch and compare to the on-chain
   // anchor. This endpoint exposes the recompute step.
   //
@@ -1320,114 +1232,9 @@ WHERE {
     });
   }
 
-  // POST /api/shared-memory/report-batch-rejection
-  //
-  // OT-RFC-38 LU-8 — when verifyBatch returns ok=false, the member
-  // gossips a structured BatchRejection record so other members can
-  // sanity-check and re-pull from a different host.
-  //
-  // Body: {
-  //   contextGraphId: string,
-  //   batchId?: string,
-  //   verifyResult: { ok: false, expectedRoot, actualRoot, leafCount, reason },
-  //   rejectedBy?: { agentAddress, peerId },    // defaults to local agent
-  // }
-  if (req.method === "POST" && path === "/api/shared-memory/report-batch-rejection") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const contextGraphId = parsed.contextGraphId;
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    const verifyResult = parsed.verifyResult;
-    if (!verifyResult || verifyResult.ok !== false) {
-      return jsonResponse(res, 400, {
-        error: 'verifyResult.ok must be false; nothing to report on an ok batch',
-      });
-    }
-
-    const { buildBatchRejectionRecord } = await import('@origintrail-official/dkg-agent');
-    const inferredAgentAddress =
-      (agent as any).getAgentAddress?.() ??
-      (agent as any).agentAddress ??
-      (agent as any).config?.agentAddress ??
-      (agent as any).wallet?.address ??
-      requestAgentAddress ??
-      'unknown';
-    const rejectedBy = parsed.rejectedBy ?? {
-      agentAddress: inferredAgentAddress,
-      peerId: (agent as any).peerId,
-    };
-
-    let record;
-    try {
-      record = buildBatchRejectionRecord({
-        contextGraphId: resolvedContextGraphId,
-        batchId: parsed.batchId,
-        verifyResult,
-        rejectedBy,
-      });
-    } catch (err: any) {
-      return jsonResponse(res, 400, { error: err?.message ?? String(err) });
-    }
-
-    // Persist the record as SWM triples so it gossips via the
-    // standard SWM substrate to other members. Reuses agent.share()
-    // for the write — no new transport.
-    //
-    // Codex PR #609: every value that originates from HTTP body
-    // (contextGraphId, batchId, peerId, reason, agentAddress) is
-    // interpolated into an N-Quads literal. Without escaping, a value
-    // containing `"`, newlines, or RDF syntax either breaks the
-    // store insert outright or lets the caller smuggle malformed /
-    // attacker-controlled triples through this endpoint. We pipe
-    // every interpolated literal body through `escapeDkgRdfLiteral`
-    // (defense in depth — even fields like rootHashes that are
-    // structurally constrained to 0x-hex still get escaped, so a
-    // future input-validation regression doesn't reopen the hole).
-    const lit = (s: string) => `"${escapeDkgRdfLiteral(s)}"`;
-    const subject = `did:dkg:batch-rejection:${record.digest}`;
-    const NS = 'http://dkg.io/ontology/';
-    const quads = [
-      { subject, predicate: `${NS}rejectedContextGraphId`, object: lit(record.contextGraphId), graph: '' },
-      { subject, predicate: `${NS}expectedMerkleRoot`, object: lit(record.expectedRoot), graph: '' },
-      { subject, predicate: `${NS}actualMerkleRoot`, object: lit(record.actualRoot), graph: '' },
-      { subject, predicate: `${NS}rejectionReason`, object: lit(record.reason ?? 'unknown'), graph: '' },
-      { subject, predicate: `${NS}rejectedByAgent`, object: lit(record.rejectedBy.agentAddress), graph: '' },
-      { subject, predicate: `${NS}rejectedByPeer`, object: lit(record.rejectedBy.peerId ?? ''), graph: '' },
-      { subject, predicate: `${NS}rejectionReportedAt`, object: lit(record.reportedAt), graph: '' },
-      ...(record.batchId !== undefined
-        ? [{ subject, predicate: `${NS}rejectedBatchId`, object: lit(record.batchId), graph: '' }]
-        : []),
-    ];
-
-    try {
-      await agent.share(resolvedContextGraphId, quads, {
-        operationCtx: createOperationContext('share'),
-        callerAgentAddress: requestAgentAddress,
-      });
-    } catch (err: any) {
-      // The record itself is the deliverable; gossip is best-effort.
-      // Surface the error but still return the constructed record so
-      // callers can persist it elsewhere.
-      return jsonResponse(res, 200, {
-        record,
-        gossiped: false,
-        gossipError: err?.message ?? String(err),
-      });
-    }
-
-    return jsonResponse(res, 200, { record, gossiped: true });
-  }
-
   // POST /api/attestation/mint
   //
-  // OT-RFC-38 LU-9 — Member-attested verification token.
+  // OT-RFC-38 LU-9 -- Member-attested verification token.
   //
   // Body: {
   //   contextGraphId: string,            // local CG id (numeric on-chain id resolved server-side)
@@ -1462,7 +1269,7 @@ WHERE {
     const chainId = chain?.chainId ?? parsed.chainId ?? '31337';
     if (!kavAddress || !/^0x[0-9a-fA-F]{40}$/.test(String(kavAddress))) {
       return jsonResponse(res, 400, {
-        error: 'cannot determine KAV10 address — pass `kavAddress` explicitly',
+        error: 'cannot determine KAV10 address -- pass `kavAddress` explicitly',
       });
     }
 
@@ -1472,15 +1279,15 @@ WHERE {
     // subscription metadata couldn't resolve the on-chain id. That
     // silently minted an attestation token bound to ContextGraphId=0
     // (the sentinel for "no on-chain CG") even though a real KC for
-    // this batch already exists on-chain — outsiders verifying the
+    // this batch already exists on-chain -- outsiders verifying the
     // token would see it pass cryptographic checks but reject as
     // wrong-domain, with no diagnostic linking back to the actual CG.
     // Three resolution layers, all fail-closed:
     //   1. Caller-supplied `onChainContextGraphId` (explicit override).
-    //   2. Chain-truth via `chain.getKAContextGraphId(batchId)` —
-    //      authoritative because the KC ↔ CG binding is on-chain.
+    //   2. Chain-truth via `chain.getKAContextGraphId(batchId)` --
+    //      authoritative because the KC <-> CG binding is on-chain.
     //   3. Local CG listing (last-resort, may be stale post-event-replay).
-    // If none resolve, reject with 400 — minting against id=0 is never
+    // If none resolve, reject with 400 -- minting against id=0 is never
     // correct.
     let onChainCgId: string | undefined;
     if (typeof parsed.onChainContextGraphId === 'string' && /^\d+$/.test(parsed.onChainContextGraphId)) {
@@ -1537,7 +1344,7 @@ WHERE {
           attestedAt: Math.floor(Date.now() / 1000),
         },
         sign: async (digest) => {
-          // Convert (r, vs) → compact 65-byte hex via ethers.Signature.
+          // Convert (r, vs) -> compact 65-byte hex via ethers.Signature.
           const sigParts = await chain.signMessage(digest);
           const r = '0x' + Array.from(sigParts.r as Uint8Array).map((b: number) => b.toString(16).padStart(2, '0')).join('');
           const vs = '0x' + Array.from(sigParts.vs as Uint8Array).map((b: number) => b.toString(16).padStart(2, '0')).join('');
@@ -1554,14 +1361,14 @@ WHERE {
 
   // POST /api/attestation/verify
   //
-  // OT-RFC-38 LU-9 — outsider-side verification.
+  // OT-RFC-38 LU-9 -- outsider-side verification.
   //
   // Body: {
   //   attestation: MemberAttestation,
   //   candidateLeafHex?: string,        // optional 0x-prefixed bytes for leaf check
   //   chainCheckMembership?: boolean    // if true, the daemon attempts a chain-side
   //                                     // membership lookup (Phase B); currently
-  //                                     // always returns "unknown" — surfaces the
+  //                                     // always returns "unknown" -- surfaces the
   //                                     // gap honestly.
   // }
   if (req.method === "POST" && path === "/api/attestation/verify") {
@@ -1584,7 +1391,7 @@ WHERE {
     }
 
     const { verifyMemberAttestation } = await import('@origintrail-official/dkg-agent');
-    // Codex PR #609 R2 #3 — only supply a membership resolver when
+    // Codex PR #609 R2 #3 -- only supply a membership resolver when
     // the caller explicitly opted into `chainCheckMembership`.
     // Previously we always passed a stub, which made every response
     // carry `membership: "unknown"` and erased the distinction
@@ -1604,682 +1411,20 @@ WHERE {
     return jsonResponse(res, 200, result);
   }
 
-  // POST /api/shared-memory/write
-  //
-  // Direct SWM write entry point. Writes loose triples to shared memory
-  // without minting a named-assertion seal. Triples land in SWM as
-  // ungrouped content; downstream selection-based publishes
-  // (POST /api/shared-memory/publish with `selection`) seal them at
-  // the publish boundary via the agent's selection bridge — see
-  // `agent.publishFromSharedMemory` for the inline-seal logic.
-  //
-  // For seal-from-creation provenance, use the named-assertion
-  // lifecycle instead: POST /api/knowledge-assets with `quads,
-  // finalize: true, promote: true` followed by
-  // POST /api/shared-memory/publish with `assertionName`.
-  if (req.method === "POST" && path === "/api/shared-memory/write") {
-    const body = await readBody(req);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { quads, subGraphName } = parsed;
-    const localOnly = parsed.localOnly === true;
-    if (
-      parsed.localOnly !== undefined &&
-      typeof parsed.localOnly !== "boolean"
-    ) {
-      return jsonResponse(res, 400, { error: '"localOnly" must be a boolean' });
-    }
-    // Per-request override of the strict curator-ack gate (OT-RFC-49
-    // curator-leader). Omitted → the agent uses its config default
-    // (`swmAwaitCuratorAck`). Only meaningful for private, non-localOnly writes.
-    if (
-      parsed.awaitCuratorAck !== undefined &&
-      typeof parsed.awaitCuratorAck !== "boolean"
-    ) {
-      return jsonResponse(res, 400, { error: '"awaitCuratorAck" must be a boolean' });
-    }
-    const awaitCuratorAck: boolean | undefined = parsed.awaitCuratorAck;
-    const contextGraphId = parsed.contextGraphId;
-    if (!quads?.length)
-      return jsonResponse(res, 400, { error: 'Missing "quads"' });
-    // GH #787 / #306 — reject string-shaped / malformed quads here (4xx) instead
-    // of crashing the SWM write path with a TypeError (HTTP 500).
-    if (!Array.isArray(quads) || !quads.every(isWritableQuad))
-      return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    if (!validateOptionalSubGraphName(subGraphName, res)) return;
-    const ctx = createOperationContext("share");
-    tracker.start(ctx, {
-      contextGraphId: resolvedContextGraphId,
-      details: { tripleCount: quads.length, source: "api", subGraphName },
-    });
-    try {
-      await tracker.trackPhase(ctx, "validate", async () => {
-        // validation happens inside share
-      });
-      const result = await tracker.trackPhase(ctx, "store", () =>
-        agent.share(resolvedContextGraphId, quads, {
-          subGraphName,
-          localOnly,
-          operationCtx: ctx,
-          callerAgentAddress: requestAgentAddress,
-          awaitCuratorAck,
-        }),
-      );
-      tracker.complete(ctx, { tripleCount: quads.length });
-      emitMemoryGraphChanged?.({
-        contextGraphId: resolvedContextGraphId,
-        layers: ["swm"],
-        subGraphName,
-        operation: "shared_memory_written",
-        source: localOnly ? "api-local" : "api",
-        counts: { triples: quads.length },
-      });
-      return jsonResponse(res, 200, {
-        shareOperationId: result?.shareOperationId,
-        contextGraphId: resolvedContextGraphId,
-        graph: contextGraphSharedMemoryUri(resolvedContextGraphId, subGraphName),
-        triplesWritten: quads.length,
-      });
-    } catch (err: any) {
-      tracker.fail(ctx, err);
-      if (
-        typeof err?.message === "string" &&
-        err.message.includes("has not been registered")
-      ) {
-        return jsonResponse(res, 400, { error: err.message });
-      }
-      // Strict curator-ack gate (OT-RFC-49 curator-leader): the write was NOT
-      // persisted because the curator (the authoritative replica) did not
-      // confirm it. Surface a distinct, actionable status instead of a generic
-      // 500 — the client is TOLD, never silently led to believe it succeeded.
-      // Duck-type on `.code` (the publisher's wire contract).
-      if (err?.code === "CURATOR_UNCONFIRMED") {
-        return jsonResponse(res, 503, {
-          error: err.message,
-          code: "CURATOR_UNCONFIRMED",
-          curatorDelivery: "unconfirmed",
-        });
-      }
-      if (err?.code === "CURATOR_REJECTED") {
-        return jsonResponse(res, 409, {
-          error: err.message,
-          code: "CURATOR_REJECTED",
-          curatorDelivery: "rejected",
-        });
-      }
-      throw err;
-    }
-  }
-
-  // POST /api/shared-memory/publish
-  //
-  // Two operating modes (mutually exclusive):
-  //
-  //   1. `assertionName` body field — finalized-assertion fork. The seal
-  //      lives in `_meta` (written by /api/knowledge-assets/:name/wm/finalize).
-  //      The agent reads it, threads it as `precomputedAttestation`,
-  //      and the publisher forwards verbatim. No re-sign, no re-hash.
-  //
-  //   2. `selection` body field (or omitted, defaults to 'all') —
-  //      selection-based fork. The agent loads the selected SWM quads,
-  //      mints a precomputedAttestation inline at the selection
-  //      boundary (RFC-001 §9.x sign-at-creation invariant — the seal
-  //      exists before the publisher gets the payload), then publishes.
-  //      `authorAgentAddress` / `preSignedAuthorAttestation` /
-  //      bearer-token attribution all settle here.
-  if (req.method === "POST" && path === "/api/shared-memory/publish") {
-    const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const {
-      selection,
-      clearAfter,
-      publishContextGraphId,
-      subGraphName,
-      publisherNodeIdentityIdOverride,
-      authorAgentAddress: bodyAuthorAgentAddress,
-      preSignedAuthorAttestation: bodyPreSignedAttestation,
-      assertionName: bodyAssertionName,
-    } = parsed;
-    const rawPublishEpochs = parsed.publishEpochs ?? parsed.epochs;
-    const publishEpochsField = parsed.publishEpochs !== undefined ? "publishEpochs" : "epochs";
-    const contextGraphId = parsed.contextGraphId;
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    if (!validateOptionalSubGraphName(subGraphName, res)) return;
-    if (subGraphName && publishContextGraphId) {
-      return jsonResponse(res, 400, {
-        error:
-          '"subGraphName" and "publishContextGraphId" cannot be used together',
-      });
-    }
-    let resolvedPublisherIdentityOverride: bigint | undefined;
-    if (publisherNodeIdentityIdOverride !== undefined && publisherNodeIdentityIdOverride !== null) {
-      const raw = String(publisherNodeIdentityIdOverride);
-      if (!/^\d+$/.test(raw)) {
-        return jsonResponse(res, 400, {
-          error: '"publisherNodeIdentityIdOverride" must be a non-negative integer (string or number)',
-        });
-      }
-      resolvedPublisherIdentityOverride = BigInt(raw);
-    }
-    let resolvedPublishEpochs: number | undefined;
-    if (rawPublishEpochs !== undefined && rawPublishEpochs !== null) {
-      const raw = String(rawPublishEpochs).trim();
-      if (!/^[1-9]\d*$/.test(raw)) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" must be a positive integer (string or number)`,
-        });
-      }
-      const parsedEpochs = Number(raw);
-      if (!Number.isSafeInteger(parsedEpochs)) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" is too large to safely represent as a JavaScript integer`,
-        });
-      }
-      if (parsedEpochs > MAX_PUBLISH_EPOCHS) {
-        return jsonResponse(res, 400, {
-          error: `"${publishEpochsField}" must be less than or equal to ${MAX_PUBLISH_EPOCHS}`,
-        });
-      }
-      resolvedPublishEpochs = parsedEpochs;
-    }
-
-    // RFC-001 §4(b) Phase 4 — author attribution resolution.
-    //
-    // Three precedence-ordered sources, all optional. The publisher signs as
-    // its own wallet (today's behaviour) when none are supplied:
-    //
-    //   1. `preSignedAuthorAttestation` in the request body — used when the
-    //      author is a self-sovereign agent whose private key the daemon
-    //      doesn't hold. Caller pre-signs the EIP-712 typed data.
-    //
-    //   2. `authorAgentAddress` in the request body — admin assertion. The
-    //      node-level admin token can run as any registered local agent
-    //      (matches the existing OpenClaw `agentAddress` pattern at
-    //      packages/cli/src/daemon/routes/query.ts). Resolved to a custodial
-    //      private key by `agent.publishFromSharedMemory`.
-    //
-    //   3. Agent-scoped bearer token — a `dkg_at_*` token registered to a
-    //      specific agent automatically attributes authorship to that agent.
-    //      Node-level admin tokens (resolveAgentByToken returns undefined)
-    //      do NOT attribute by default, preserving today's "publisher signs
-    //      as itself" semantics.
-    const requestToken = extractBearerToken(req.headers.authorization);
-    const tokenAgentAddress = requestToken
-      ? agent.resolveAgentByToken(requestToken)
-      : undefined;
-    if (
-      bodyAuthorAgentAddress != null &&
-      bodyPreSignedAttestation != null
-    ) {
-      return jsonResponse(res, 400, {
-        error:
-          '"authorAgentAddress" and "preSignedAuthorAttestation" are mutually exclusive',
-      });
-    }
-    let resolvedPreSignedAttestation: PreSignedAuthorAttestation | undefined;
-    if (bodyPreSignedAttestation != null) {
-      const validated = validatePreSignedAuthorAttestation(bodyPreSignedAttestation, res);
-      if (validated === undefined) return;
-      resolvedPreSignedAttestation = validated;
-    }
-    let resolvedAuthorAgentAddress: string | undefined;
-    if (resolvedPreSignedAttestation == null) {
-      // Pre-signed wins; otherwise body assertion wins; otherwise token.
-      if (typeof bodyAuthorAgentAddress === 'string' && bodyAuthorAgentAddress.length > 0) {
-        if (!/^0x[0-9a-fA-F]{40}$/.test(bodyAuthorAgentAddress)) {
-          return jsonResponse(res, 400, {
-            error: '"authorAgentAddress" must be a 0x-prefixed 20-byte EVM address',
-          });
-        }
-        resolvedAuthorAgentAddress = bodyAuthorAgentAddress;
-      } else if (tokenAgentAddress != null) {
-        resolvedAuthorAgentAddress = tokenAgentAddress;
-      }
-    }
-
-    // RFC-001 §9.x Phase 5 — finalized-assertion fork.
-    //
-    // When the body carries `assertionName`, the assertion was sealed at
-    // a previous /api/knowledge-assets/:name/wm/finalize step and the seal lives
-    // in `_meta`. The agent route reads the seal, validates chain
-    // identity, threads the seal as `precomputedAttestation`, and the
-    // publisher forwards it verbatim — no re-sign, no re-hash. Other
-    // body fields (`authorAgentAddress`, `preSignedAuthorAttestation`)
-    // are illegal in this fork because the seal already encodes the
-    // author. `selection` is forced to `'all'` because the seal is keyed
-    // by the assertion's exact merkleRoot.
-    if (typeof bodyAssertionName === 'string' && bodyAssertionName.length > 0) {
-      const nameVal = validateAssertionName(bodyAssertionName);
-      if (!nameVal.valid) {
-        return jsonResponse(res, 400, {
-          error: `Invalid "assertionName": ${nameVal.reason}`,
-        });
-      }
-      if (
-        bodyAuthorAgentAddress != null ||
-        bodyPreSignedAttestation != null
-      ) {
-        return jsonResponse(res, 400, {
-          error:
-            '"authorAgentAddress" and "preSignedAuthorAttestation" cannot be combined with "assertionName" — the seal already encodes the author. Re-finalize the assertion if you need to change authorship.',
-        });
-      }
-      if (selection !== undefined && selection !== 'all') {
-        return jsonResponse(res, 400, {
-          error:
-            '"selection" must be omitted or "all" when "assertionName" is supplied — the seal commits to the entire assertion content.',
-        });
-      }
-      const ctx2 = createOperationContext('publishFromSWM');
-      tracker.start(ctx2, {
-        contextGraphId: resolvedContextGraphId,
-        details: {
-          source: 'api',
-          assertionName: bodyAssertionName,
-          subGraphName,
-        },
-      });
-      try {
-        const result = await tracker.trackPhase(
-          ctx2,
-          'read-shared-memory',
-          () =>
-            agent.publishFromFinalizedAssertion(resolvedContextGraphId, bodyAssertionName, {
-              ...(subGraphName ? { subGraphName } : {}),
-              operationCtx: ctx2,
-              ...(resolvedPublisherIdentityOverride !== undefined
-                ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
-                : {}),
-              ...(resolvedPublishEpochs !== undefined
-                ? { publishEpochs: resolvedPublishEpochs }
-                : {}),
-              // Pass `clearAfter` straight through (incl. `undefined`) so the
-              // publisher's own default — `false` — applies for the named
-              // path. Forcing `?? true` here would silently drain every other
-              // assertion's quads from SWM after publishing the named one,
-              // since the publisher reads `clearSharedMemoryAfter === true`
-              // as "also wipe the unpublished remainder". The named publish
-              // already removes its own roots regardless.
-              ...(clearAfter !== undefined ? { clearSharedMemoryAfter: clearAfter } : {}),
-            }),
-        );
-        const chain = result.onChainResult;
-        if (chain) {
-          tracker.setCost(ctx2, {
-            gasUsed: chain.gasUsed,
-            gasPrice: chain.effectiveGasPrice,
-          });
-          const chainId = resolveChainConfig(config, network)?.chainId;
-          tracker.setTxHash(
-            ctx2,
-            chain.txHash,
-            chainId ? Number(chainId) : undefined,
-          );
-        }
-        tracker.complete(ctx2, { tripleCount: result.kaManifest?.length ?? 0 });
-        const httpStatus = result.contextGraphError ? 207 : 200;
-        return jsonResponse(res, httpStatus, {
-          kaId: String(result.kaId),
-          status: result.status,
-          assertionUri: result.assertionUri,
-          authorAddress: result.seal.authorAddress,
-          merkleRoot:
-            '0x' +
-            Array.from(result.seal.merkleRoot)
-              .map((b) => b.toString(16).padStart(2, '0'))
-              .join(''),
-          kas: result.kaManifest.map((ka: any) => ({
-            tokenId: String(ka.tokenId),
-            rootEntity: ka.rootEntity,
-          })),
-          ...(chain && { txHash: chain.txHash, blockNumber: chain.blockNumber }),
-          ...(result.contextGraphError
-            ? { contextGraphError: result.contextGraphError }
-            : {}),
-        });
-      } catch (err: any) {
-        tracker.fail(ctx2, err);
-        const message = err?.message ?? String(err);
-        if (
-          message.includes('not finalized') ||
-          message.includes('seal binds chainId') ||
-          message.includes('seal binds KAv10') ||
-          message.includes('expectedMerkleRoot mismatch') ||
-          message.includes('precomputedAttestation signer mismatch') ||
-          // #1116 (review B): code-first, message fallback for the unregistered-CG case.
-          err?.code === 'CG_NOT_REGISTERED' ||
-          message.includes('not registered on-chain') ||
-          message.includes('signer mismatch')
-        ) {
-          return jsonResponse(res, 400, { error: message });
-        }
-        throw err;
-      }
-    }
-
-    const ctx = createOperationContext("publishFromSWM");
-    tracker.start(ctx, {
-      contextGraphId: resolvedContextGraphId,
-      details: { source: "api", publishContextGraphId, subGraphName },
-    });
-    try {
-      let resolvedPublishContextGraphId: string | null = null;
-      if (publishContextGraphId != null) {
-        const rawPublishContextGraphId = String(publishContextGraphId).trim();
-        if (/^\d+$/.test(rawPublishContextGraphId)) {
-          const numericPublishContextGraphId = BigInt(rawPublishContextGraphId);
-          if (numericPublishContextGraphId <= 0n) {
-            return jsonResponse(res, 400, {
-              error:
-                '"publishContextGraphId" must be a positive integer, canonical context graph id, or full context graph URI',
-            });
-          }
-          resolvedPublishContextGraphId = rawPublishContextGraphId;
-        } else {
-          const resolvedPublishTargetId = await resolveRequiredWriteContextGraphId(
-            agent,
-            rawPublishContextGraphId,
-            res,
-            {
-              ...writePreflightContextGraphOpts,
-              requireLocalWritable: false,
-            },
-          );
-          if (!resolvedPublishTargetId) return;
-          const onChainId = await agent.getContextGraphOnChainId(resolvedPublishTargetId);
-          if (!onChainId || !/^\d+$/.test(String(onChainId)) || BigInt(String(onChainId)) <= 0n) {
-            return jsonResponse(res, 400, {
-              code: "CONTEXT_GRAPH_NOT_REGISTERED",
-              error:
-                `publishContextGraphId "${rawPublishContextGraphId}" resolved to context graph ` +
-                `"${resolvedPublishTargetId}", but that graph has no positive on-chain id. ` +
-                `Pass a positive numeric context graph id or register the target first.`,
-            });
-          }
-          resolvedPublishContextGraphId = String(onChainId);
-        }
-      }
-
-      const sel: "all" | { rootEntities: string[] } = Array.isArray(selection)
-        ? { rootEntities: selection }
-        : selection || "all";
-      const publishRootEntities = await tracker.trackPhase(ctx, "read-shared-memory", () =>
-        resolvePublishRootEntities(agent, resolvedContextGraphId, sel, subGraphName),
-      );
-      if (publishRootEntities.length === 0) {
-        return jsonResponse(res, 400, {
-          error: `No quads in shared memory for context graph ${resolvedContextGraphId} matching selection`,
-        });
-      }
-      if (publishRootEntities.length > 1) {
-        return jsonResponse(res, 409, {
-          code: "MULTI_ROOT_PUBLISH_NOT_ATOMIC",
-          error:
-            `V10 shared-memory publish is single-root only for this synchronous endpoint. ` +
-            `Resolved ${publishRootEntities.length} root entities; select exactly one root or use a durable multi-publish flow.`,
-          rootEntities: publishRootEntities,
-        });
-      }
-
-      // OT-RFC-38 LU-6 — transparent register-then-publish.
-      //
-      // Project creation is local-only by design (no chain
-      // interaction, no gas) so that SWM works immediately. The
-      // first time the user opts into VM publish IS the implicit
-      // moment they accept the chain cost — we auto-register
-      // here so the user experiences a single action (and a
-      // single spinner) rather than having to remember a
-      // separate `/api/context-graph/register` call first.
-      //
-      // Idempotent on the agent side: `registerContextGraph`
-      // short-circuits when an on-chain id already exists, so
-      // racing publishes / re-publishes don't double-mint.
-      //
-      // If the user already explicitly registered (e.g. from
-      // project Settings to upgrade SWM host-mode quotas), this
-      // is a cheap no-op probe.
-      try {
-        const existingOnChainId = await agent.getContextGraphOnChainId(resolvedContextGraphId);
-        if (!existingOnChainId) {
-          // OT-RFC-38 / LU-6 Phase B (Codex PR #610 round-2 #5):
-          // cheap preflight BEFORE spending gas on registration. If
-          // SWM is empty for this CG, the publish leg below would
-          // fail with `no entities to publish` anyway — register
-          // first and we'd burn gas on a doomed publish. Skip
-          // preflight when caller passed a `rootEntities` selection
-          // (the entity-presence check happens deeper in the publish
-          // path) or supplied a `publishContextGraphId` override
-          // (cross-CG attribution: SWM may live elsewhere).
-          if (
-            selection === undefined || selection === "all"
-          ) {
-            if (
-              publishContextGraphId == null
-              && !agent.hasPendingSharedMemoryWrites(resolvedContextGraphId)
-            ) {
-              tracker.fail(ctx, new Error('SWM empty for context graph'));
-              return jsonResponse(res, 400, {
-                error:
-                  `Context graph "${resolvedContextGraphId}" has no pending shared-memory writes — `
-                  + `nothing to publish to Verifiable Memory. Stage entities into SWM first, then retry publish.`,
-              });
-            }
-          }
-          // OT-RFC-38 / LU-6 Phase B (Codex PR #610 fd5b31f1 fix):
-          // load create-time `publishPolicy` and
-          // `publishAuthorityAccountId` so the deferred-registration
-          // call preserves the user's intent end-to-end. Pre-fix, this
-          // call forwarded only `callerAgentAddress` and silently
-          // coerced the policy back to the access-policy default —
-          // breaking curated-access + open-contribution and PCA-
-          // curated registrations.
-          const storedOpts = await agent.getStoredContextGraphRegistrationOptions(resolvedContextGraphId);
-          await tracker.trackPhase(ctx, "register-on-chain", () =>
-            agent.registerContextGraph(resolvedContextGraphId, {
-              ...(resolvedAuthorAgentAddress != null
-                ? { callerAgentAddress: resolvedAuthorAgentAddress }
-                : {}),
-              ...(storedOpts.publishPolicy !== undefined
-                ? { publishPolicy: storedOpts.publishPolicy }
-                : {}),
-              ...(storedOpts.publishAuthorityAccountId !== undefined
-                ? { publishAuthorityAccountId: storedOpts.publishAuthorityAccountId }
-                : {}),
-            }),
-          );
-        }
-      } catch (regErr: any) {
-        // Surface registration failures as a 400 with a clear
-        // breadcrumb so the UI can show the actionable message
-        // (insufficient TRAC, missing chain signer, etc.)
-        // instead of a generic 500 from the publish leg later.
-        tracker.fail(ctx, regErr);
-        return jsonResponse(res, 400, {
-          error:
-            `Context graph "${resolvedContextGraphId}" could not be auto-registered on-chain before publish: ` +
-            `${regErr?.message ?? String(regErr)}`,
-        });
-      }
-      const basePublishOptions = {
-        operationCtx: ctx,
-        subGraphName,
-        ...(resolvedPublishContextGraphId != null
-          ? { contextGraphId: resolvedPublishContextGraphId }
-          : {}),
-        ...(resolvedPublisherIdentityOverride !== undefined
-          ? { publisherNodeIdentityIdOverride: resolvedPublisherIdentityOverride }
-          : {}),
-        ...(resolvedPublishEpochs !== undefined
-          ? { publishEpochs: resolvedPublishEpochs }
-          : {}),
-        ...(resolvedAuthorAgentAddress != null
-          ? { authorAgentAddress: resolvedAuthorAgentAddress }
-          : {}),
-        ...(resolvedPreSignedAttestation != null
-          ? { preSignedAuthorAttestation: resolvedPreSignedAttestation }
-          : {}),
-      };
-
-      const result = await tracker.trackPhase(ctx, "publish-root", () =>
-        agent.publishFromSharedMemory(
-          resolvedContextGraphId,
-          { rootEntities: [publishRootEntities[0]] },
-          {
-            ...basePublishOptions,
-            clearSharedMemoryAfter: clearAfter ?? true,
-          },
-        ),
-      );
-
-      const chain = result.onChainResult;
-      if (chain) {
-        tracker.setCost(ctx, {
-          gasUsed: chain.gasUsed,
-          gasPrice: chain.effectiveGasPrice,
-        });
-        const chainId = resolveChainConfig(config, network)?.chainId;
-        tracker.setTxHash(
-          ctx,
-          chain.txHash,
-          chainId ? Number(chainId) : undefined,
-        );
-      }
-      const publicTripleCount = Array.isArray(result.publicQuads)
-        ? result.publicQuads.length
-        : 0;
-      const rootCount = Array.isArray(result.kaManifest)
-        ? result.kaManifest.length
-        : 0;
-      tracker.complete(ctx, { tripleCount: publicTripleCount || rootCount });
-      const clearSharedMemoryAfter = clearAfter ?? true;
-      const publishedSwmCleaned = result.status === "confirmed";
-      emitMemoryGraphChanged?.({
-        contextGraphId: resolvedContextGraphId,
-        layers: publishedSwmCleaned ? ["swm", "vm"] : ["vm"],
-        subGraphName,
-        operation: "shared_memory_published",
-        source: "api",
-        clearSharedMemoryAfter,
-        status: typeof result.status === "string" ? result.status : undefined,
-        counts: {
-          roots: rootCount,
-          triples: publicTripleCount,
-        },
-      });
-      // ADR-002 (CR-1): scoped `published` activity row (SWM→VM). This is the
-      // ONLY local-publish site with the author + dashDb in scope — the
-      // assertion routes have no VM-publish transition, so `published` is
-      // emitted here, not there. Cross-node publishes are handled
-      // (remote-only, membership-gated) by the KC_PUBLISHED handler in
-      // lifecycle.ts so a local publish is never double-counted.
-      try {
-        recordAssertionActivity(dashDb, {
-          contextGraphId: resolvedContextGraphId,
-          kind: "published",
-          actorAgentAddress: resolvedAuthorAgentAddress ?? requestAgentAddress,
-          subGraphName,
-          entityCount: rootCount,
-          tripleCount: publicTripleCount,
-        });
-        emitNotification?.({ contextGraphId: resolvedContextGraphId, type: "assertion_activity" });
-      } catch { /* never break the publish path */ }
-      const httpStatus = result.contextGraphError ? 207 : 200;
-      return jsonResponse(res, httpStatus, publishResponsePayload(result, resolvedPublishContextGraphId));
-    } catch (err) {
-      tracker.fail(ctx, err);
-      throw err;
-    }
-  }
-
-  // POST /api/shared-memory/conditional-write  { contextGraphId, quads, conditions, subGraphName? }
-  if (
-    req.method === "POST" &&
-    path === "/api/shared-memory/conditional-write"
-  ) {
-    const body = await readBody(req);
-    const parsed = safeParseJson(body, res);
-    if (!parsed) return;
-    const { quads, conditions, subGraphName } = parsed;
-    const contextGraphId = parsed.contextGraphId;
-    if (!quads?.length)
-      return jsonResponse(res, 400, { error: 'Missing "quads"' });
-    // GH #787 / #306 — reject string-shaped / malformed quads (4xx, not a 500 crash).
-    if (!Array.isArray(quads) || !quads.every(isWritableQuad))
-      return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-    const resolvedContextGraphId = await resolveRequiredWriteContextGraphId(
-      agent,
-      contextGraphId,
-      res,
-      writePreflightContextGraphOpts,
-    );
-    if (!resolvedContextGraphId) return;
-    if (!validateConditions(conditions, res)) return;
-    if (!validateOptionalSubGraphName(subGraphName, res)) return;
-    const ctx = createOperationContext("share");
-    tracker.start(ctx, {
-      contextGraphId: resolvedContextGraphId,
-      details: { tripleCount: quads.length, source: "api-cas", subGraphName },
-    });
-    try {
-      const result = await agent.conditionalShare(
-        resolvedContextGraphId,
-        quads,
-        conditions,
-        { subGraphName, operationCtx: ctx, callerAgentAddress: requestAgentAddress },
-      );
-      tracker.complete(ctx, { tripleCount: quads.length });
-      emitMemoryGraphChanged?.({
-        contextGraphId: resolvedContextGraphId,
-        layers: ["swm"],
-        subGraphName,
-        operation: "shared_memory_conditional_written",
-        source: "api-cas",
-        counts: { triples: quads.length },
-      });
-      return jsonResponse(res, 200, {
-        ok: true,
-        shareOperationId: result?.shareOperationId,
-      });
-    } catch (err: any) {
-      tracker.fail(ctx, err);
-      if (
-        err.name === "StaleWriteError" ||
-        err.message?.includes("stale") ||
-        err.message?.includes("CAS condition failed")
-      ) {
-        return jsonResponse(res, 409, { error: err.message });
-      }
-      throw err;
-    }
-  }
-
-  // POST /api/memory/turn — ingest a conversation turn as a tri-modal Knowledge Asset.
+  // POST /api/memory/turn -- ingest a conversation turn as a tri-modal Knowledge Asset.
   //
   // Streamlined path for agent memory: accepts a markdown conversation turn,
   // stores it in the file store, runs structural + optional semantic extraction,
-  // and writes the resulting triples to SWM (or WM if layer=wm).
+  // and writes the resulting triples to WM. Use the knowledge asset lifecycle
+  // routes to share or publish turns.
   //
-  // Spec: 21_TRI_MODAL_MEMORY.md §8
+  // Spec: 21_TRI_MODAL_MEMORY.md Section 8
   if (req.method === 'POST' && path === '/api/memory/turn') {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
     if (!parsed) return;
 
-    const { markdown, contextGraphId, sessionUri, layer, subGraphName } = parsed;
+    const { markdown, contextGraphId, sessionUri, layer, subGraphName, turnId } = parsed;
     if (!markdown || typeof markdown !== 'string') {
       return jsonResponse(res, 400, { error: 'Missing or invalid "markdown" field (string)' });
     }
@@ -2297,9 +1442,19 @@ WHERE {
       }
     }
 
-    const targetLayer = layer === 'wm' ? 'wm' : 'swm';
+    if (layer !== undefined && layer !== 'wm') {
+      return jsonResponse(res, 400, {
+        error: '/api/memory/turn only supports layer:"wm"; use the knowledge asset lifecycle to share or publish turns.',
+      });
+    }
+    const targetLayer = 'wm' as const;
     const agentDid = `did:dkg:agent:${agent.peerId}`;
     const now = new Date().toISOString();
+    if (turnId !== undefined && (typeof turnId !== 'string' || turnId.trim().length === 0)) {
+      return jsonResponse(res, 400, { error: 'Invalid "turnId": must be a non-empty string when supplied' });
+    }
+    const normalizedTurnId = typeof turnId === 'string' ? turnId.trim() : undefined;
+    const effectiveTurnId = normalizedTurnId ?? randomUUID();
 
     // 1. Store markdown in the file store
     const mdBytes = Buffer.from(markdown, 'utf-8');
@@ -2311,8 +1466,17 @@ WHERE {
     }
     const fileUri = `urn:dkg:file:${fileEntry.keccak256}`;
 
-    // Derive turn URI from agent address + timestamp for collision avoidance
-    const turnUri = `did:dkg:context-graph:${resolvedContextGraphId}/turn/${agent.peerId}-${now}`;
+    const turnIdentity = {
+      contextGraphId: resolvedContextGraphId,
+      subGraphName: subGraphName ?? null,
+      sessionUri: sessionUri ?? null,
+      turnId: effectiveTurnId,
+      fileHash: fileEntry.keccak256,
+      agent: requestAgentAddress,
+    };
+    const turnDigest = createHash('sha256').update(JSON.stringify(turnIdentity)).digest('hex');
+    const assertionName = `turn-${turnDigest.slice(0, 32)}`;
+    const turnUri = `did:dkg:context-graph:${resolvedContextGraphId}/turn/${assertionName}`;
 
     // 2. Run structural extraction
     let extractResult;
@@ -2337,28 +1501,25 @@ WHERE {
         );
         semanticTriples = llmResult.triples;
       } catch {
-        // Semantic extraction is best-effort — structural extraction alone is sufficient
+        // Semantic extraction is best-effort -- structural extraction alone is sufficient
       }
     }
 
-    // 4. Build quads for the target graph
-    const targetGraph = targetLayer === 'swm'
-      ? contextGraphSharedMemoryUri(resolvedContextGraphId, subGraphName)
-      : contextGraphAssertionUri(resolvedContextGraphId, requestAgentAddress, `turn-${now}`, subGraphName);
-
+    // 4. Build assertion quads. assertion.write stamps the lifecycle WM graph.
+    const assertionGraphPlaceholder = '';
     const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [];
 
     // Content triples from structural extraction
     for (const t of extractResult.triples) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
     // Source-file linkage from extractor (rows 1 + 3)
     for (const t of extractResult.sourceFileLinkage) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
     // Semantic triples (if any)
     for (const t of semanticTriples) {
-      quads.push({ ...t, graph: targetGraph });
+      quads.push({ ...t, graph: assertionGraphPlaceholder });
     }
 
     // Ensure the turn is typed as a ConversationTurn
@@ -2366,37 +1527,43 @@ WHERE {
       subject: turnUri,
       predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
       object: 'http://schema.org/ConversationTurn',
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
+    });
+    quads.push({
+      subject: turnUri,
+      predicate: 'http://schema.org/name',
+      object: JSON.stringify(`Conversation turn ${effectiveTurnId}`),
+      graph: assertionGraphPlaceholder,
     });
     // Persist the markdown body so the UI can display turn content
     // without fetching the source file separately
-    const truncatedBody = markdown.length > 2000 ? markdown.slice(0, 2000) + '…' : markdown;
+    const truncatedBody = markdown.length > 2000 ? markdown.slice(0, 2000) + '...' : markdown;
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/description',
       object: JSON.stringify(truncatedBody),
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Source content type
     quads.push({
       subject: turnUri,
       predicate: 'http://dkg.io/ontology/sourceContentType',
       object: JSON.stringify('text/markdown'),
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Agent attribution
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/agent',
       object: agentDid,
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
     // Timestamp
     quads.push({
       subject: turnUri,
       predicate: 'http://schema.org/dateCreated',
       object: `"${now}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`,
-      graph: targetGraph,
+      graph: assertionGraphPlaceholder,
     });
 
     // Session linking (if session URI provided)
@@ -2405,41 +1572,41 @@ WHERE {
         subject: turnUri,
         predicate: 'http://schema.org/isPartOf',
         object: sessionUri,
-        graph: targetGraph,
+        graph: assertionGraphPlaceholder,
       });
       quads.push({
         subject: sessionUri,
         predicate: 'http://schema.org/hasPart',
         object: turnUri,
-        graph: targetGraph,
+        graph: assertionGraphPlaceholder,
       });
     }
 
-    // 5. Write to target layer
+    const literalSize = validateWritableQuadLiteralSizes("quads", quads);
+    if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+
+    // 5. Write to WM through the named knowledge asset lifecycle.
+    let targetGraph: string;
+    const assertionWriteOptions = {
+      ...(subGraphName ? { subGraphName } : {}),
+      ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
+    };
     try {
-      if (targetLayer === 'swm') {
-        // agent.share sets the graph field itself — pass quads with empty graph
-        const shareQuads = quads.map(({ subject, predicate, object }) => ({ subject, predicate, object, graph: '' }));
-        const ctx = createOperationContext('share');
-        tracker.start(ctx, { contextGraphId: resolvedContextGraphId, details: { tripleCount: shareQuads.length, source: 'memory-turn', subGraphName } });
-        try {
-          await tracker.trackPhase(ctx, 'store', () =>
-            agent.share(resolvedContextGraphId, shareQuads, {
-              subGraphName,
-              localOnly: false,
-              operationCtx: ctx,
-              callerAgentAddress: requestAgentAddress,
-            }),
-          );
-          tracker.complete(ctx, { tripleCount: shareQuads.length });
-        } catch (err: any) {
-          tracker.fail(ctx, err);
-          throw err;
-        }
-      } else {
-        await agent.store.insert(quads);
-      }
+      targetGraph = await agent.assertion.create(
+        resolvedContextGraphId,
+        assertionName,
+        Object.keys(assertionWriteOptions).length > 0 ? assertionWriteOptions : undefined,
+      );
+      await agent.assertion.write(
+        resolvedContextGraphId,
+        assertionName,
+        quads,
+        Object.keys(assertionWriteOptions).length > 0 ? assertionWriteOptions : undefined,
+      );
     } catch (err: any) {
+      if (err?.code === "OVERSIZED_RDF_LITERAL") {
+        return jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
+      }
       return jsonResponse(res, 500, { error: `Failed to write turn to ${targetLayer}: ${err.message}` });
     }
     emitMemoryGraphChanged?.({
@@ -2474,6 +1641,7 @@ WHERE {
 
     return jsonResponse(res, 200, {
       turnUri,
+      assertionName,
       fileHash: fileEntry.keccak256,
       layer: targetLayer,
       graph: targetGraph,
@@ -2482,15 +1650,16 @@ WHERE {
       totalQuads: quads.length,
       embeddingId,
       sessionUri: sessionUri ?? null,
+      turnId: effectiveTurnId,
     });
   }
 
-  // POST /api/memory/search — tri-modal search across text, graph, and vector stores.
+  // POST /api/memory/search -- tri-modal search across text, graph, and vector stores.
   //
   // Fans out the query to SPARQL (triple store), text search (file store),
   // and vector similarity (vector store), then merges and deduplicates results.
   //
-  // Spec: 21_TRI_MODAL_MEMORY.md §7
+  // Spec: 21_TRI_MODAL_MEMORY.md Section 7
   if (req.method === 'POST' && path === '/api/memory/search') {
     const body = await readBody(req);
     const parsed = safeParseJson(body, res);
@@ -2503,7 +1672,14 @@ WHERE {
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
     const resultLimit = typeof rawLimit === 'number' && rawLimit > 0 ? Math.min(rawLimit, 100) : 20;
-    const memoryLayers: Array<'swm' | 'vm'> = parsed.memoryLayers ?? ['swm', 'vm'];
+    const requestedLayers = Array.isArray(parsed.memoryLayers)
+      ? parsed.memoryLayers
+      : ['wm', 'swm', 'vm'];
+    const invalidLayers = requestedLayers.filter((layer: unknown) => layer !== 'wm' && layer !== 'swm' && layer !== 'vm');
+    if (invalidLayers.length > 0) {
+      return jsonResponse(res, 400, { error: 'memoryLayers must contain only "wm", "swm", or "vm"' });
+    }
+    const memoryLayers = [...new Set(requestedLayers)] as Array<'wm' | 'swm' | 'vm'>;
 
     const results: Array<{
       entityUri: string;
@@ -2546,21 +1722,23 @@ WHERE {
 
     // Fan-out 2: SPARQL text search (scoped to the requested CG + layers).
     // escapeSparqlLiteral escapes backslashes, quotes, and CR/LF/TAB per the
-    // SPARQL STRING_LITERAL2 grammar — a simple `replace(/"/g, '\\"')` would
+    // SPARQL STRING_LITERAL2 grammar -- a simple `replace(/"/g, '\\"')` would
     // still allow `\` to escape the closing quote and break out of the literal.
     const escapedQuery = escapeSparqlLiteral(query.toLowerCase());
     const cgUri = `did:dkg:context-graph:${contextGraphId}`;
-    const graphFilters = memoryLayers.map((l: string) => {
+    const graphFilters = memoryLayers.map((l) => {
+      if (l === 'wm') {
+        return `(STRSTARTS(STR(?g), "${cgUri}/_working_memory") || STRSTARTS(STR(?g), "${cgUri}/assertion/"))`;
+      }
       if (l === 'swm') return `STRSTARTS(STR(?g), "${cgUri}/_shared_memory")`;
       // #1096: VM graphs live under `/_verifiable_memory/<id>` (see
       // contextGraphVerifiableMemoryUri in dkg-core). The pre-rc.16
       // "_verified" prefix matched nothing, so memory layer "vm" could
       // never return SPARQL hits.
-      if (l === 'vm') return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
-      return `STRSTARTS(STR(?g), "${cgUri}/")`;
-    }).join(' || ');
+      return `STRSTARTS(STR(?g), "${cgUri}/_verifiable_memory")`;
+    }).join(' || ') || 'false';
     try {
-      // #1096: accept both http:// and https:// schema.org forms — real
+      // #1096: accept both http:// and https:// schema.org forms -- real
       // payloads overwhelmingly use https://schema.org, which the previous
       // http-only property path silently excluded.
       const sparqlResult = await agent.store.query(`

@@ -29,7 +29,7 @@ export interface HermesPublishGuardPolicy {
    * operators can set this to `disabled` when they want publish hidden.
    */
   defaultToolExposure: 'disabled' | 'request-only' | 'direct';
-  /** Allow direct `/api/shared-memory/publish` calls from the provider. */
+  /** Allow the model-callable `dkg_knowledge_asset_publish` tool (Verifiable Memory publish) to be exposed. */
   allowDirectPublish?: boolean;
   /** Require an explicit human/operator approval marker before publishing. */
   requireExplicitApproval?: boolean;
@@ -110,6 +110,10 @@ export interface HermesSetupRequest {
 
   // Skill content resolved by caller (CLI passes loadBundledDkgNodeSkill())
   nodeSkillContent?: string;
+
+  // Network overlay to set up on (e.g. mainnet-gnosis, mainnet-base, testnet).
+  // Persisted as config.networkConfig; default for a fresh node is mainnet-gnosis.
+  network?: string;
 
   // Parity flags (issue #386 acceptance)
   start?: boolean;

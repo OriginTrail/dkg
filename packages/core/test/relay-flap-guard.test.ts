@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RelayFlapGuard, buildRelayFlapConnectionGater, parseCircuitRelayPeerIds } from '../src/relay-flap-guard.js';
+import { RelayFlapGuard, buildRelayFlapConnectionGater } from '../src/relay-flap-guard.js';
 
 const RELAY_A = '12D3KooWRelayA';
 const RELAY_B = '12D3KooWRelayB';
@@ -23,24 +23,6 @@ function recordShortBurst(g: RelayFlapGuard, relayPeerId = RELAY_A, remotePeerId
   expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 10 }).enteredQuarantine).toBe(false);
   expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 20 }).enteredQuarantine).toBe(true);
 }
-
-describe('parseCircuitRelayPeerIds', () => {
-  it('extracts relay and remote peer ids from a circuit address', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit/p2p/${REMOTE_A}`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A });
-  });
-
-  it('extracts only the relay peer id from reservation-style circuit addresses', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: undefined });
-  });
-
-  it('does not classify direct addresses as relayed paths', () => {
-    expect(parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${REMOTE_A}`)).toBeNull();
-  });
-});
 
 describe('RelayFlapGuard', () => {
   it('quarantines the exact relay/remote pair after repeated short relayed closes', () => {
@@ -171,4 +153,5 @@ describe('buildRelayFlapConnectionGater (libp2p wiring)', () => {
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_A }, { toString: () => REMOTE_A })).toBe(true);
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_B })).toBe(false);
   });
+
 });

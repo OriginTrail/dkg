@@ -30,26 +30,6 @@ function q(s: string, p: string, o: string): Quad {
   return { subject: s, predicate: p, object: o, graph: '' };
 }
 
-/**
- * Build a single quad whose UTF-8 N-Quad serialization is approximately
- * `targetBytes` bytes. We pad the literal object so the encoded
- * WorkspacePublishRequest lands below or above the cap depending
- * on `targetBytes`.
- *
- * Using a single root entity keeps manifest overhead constant so the
- * dominant size contribution is the nquads string. autoPartition groups
- * by root — a single subject maps to a single KA.
- */
-function buildQuadWithPayload(bytes: number): Quad {
-  // subject/predicate/fixed N-Quad framing adds ~120 bytes of overhead.
-  // Subtract that from the target so the rendered N-Quad approximates
-  // `bytes`. We pad with a single ASCII char so 1 char == 1 byte.
-  const overhead = 140;
-  const padLen = Math.max(0, bytes - overhead);
-  const padding = 'x'.repeat(padLen);
-  return q('urn:test:boundary:root', 'http://schema.org/description', `"${padding}"`);
-}
-
 function buildQuadsWithTotalPayload(bytes: number): Quad[] {
   const chunkBytes = 16 * 1024;
   const quads: Quad[] = [];
@@ -106,11 +86,13 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
 
   it('rejects a payload just over the 10 MB cap with a clear, actionable error', async () => {
     // Well over the 10 MB cap so there is no ambiguity about the exit path.
-    const over = buildQuadWithPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
+    // Use many Blazegraph-safe literals so this exercises the aggregate
+    // gossip-message boundary rather than the per-literal safety guard.
+    const over = buildQuadsWithTotalPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 1024 * 1024);
 
     let thrown: unknown;
     try {
-      await publisher.share(CG, [over], { publisherPeerId: PEER });
+      await publisher.share(CG, over, { publisherPeerId: PEER });
     } catch (err) {
       thrown = err;
     }
@@ -131,14 +113,14 @@ describe('P-4: SWM share() 10 MB gossip-message boundary', () => {
     // the guidance in the error or the spec, BOTH
     // halves of this test flip status and the regression is noisy.
     const justUnder = buildQuadsWithTotalPayload(2 * 1024 * 1024);
-    const justOver = buildQuadWithPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 512 * 1024);
+    const justOver = buildQuadsWithTotalPayload(DKG_GOSSIP_MAX_MESSAGE_BYTES + 512 * 1024);
 
     const ok = await publisher.share(CG, justUnder, { publisherPeerId: PEER });
     expect(ok).toBeDefined();
     expect(ok.message.length).toBeLessThan(DKG_GOSSIP_MAX_MESSAGE_BYTES);
 
     await expect(
-      publisher.share(CG, [justOver], { publisherPeerId: PEER }),
+      publisher.share(CG, justOver, { publisherPeerId: PEER }),
     ).rejects.toThrow(/too large.*10\s*MB/i);
   });
 });

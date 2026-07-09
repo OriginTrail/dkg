@@ -21,16 +21,6 @@ export interface DkgPublisherExtensionWriteResult {
   written: number;
 }
 
-export interface DkgPublisherExtensionShareResult {
-  shareOperationId: string;
-}
-
-export interface DkgPublisherExtensionPublishResult {
-  kaId?: string | number | bigint;
-  kas?: unknown[];
-  [key: string]: unknown;
-}
-
 export interface DkgPublisherExtensionTransport {
   createAssertion(
     contextGraphId: string,
@@ -56,24 +46,6 @@ export interface DkgPublisherExtensionTransport {
     assertionName: string,
     opts?: { subGraphName?: string },
   ): Promise<Record<string, unknown>>;
-
-  share(
-    contextGraphId: string,
-    quads: DkgPublisherExtensionQuad[],
-    opts?: { localOnly?: boolean; subGraphName?: string },
-  ): Promise<DkgPublisherExtensionShareResult>;
-
-  publish(
-    contextGraphId: string,
-    quads: DkgPublisherExtensionQuad[],
-    privateQuads?: DkgPublisherExtensionQuad[],
-    opts?: { accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] },
-  ): Promise<DkgPublisherExtensionPublishResult>;
-
-  publishSharedMemory(
-    contextGraphId: string,
-    opts?: { rootEntities?: string[]; clearAfter?: boolean; subGraphName?: string },
-  ): Promise<DkgPublisherExtensionPublishResult>;
 }
 
 export interface LocalWorkspaceCreateRequest {
@@ -105,28 +77,6 @@ export interface LocalWorkspacePromoteRequest {
 export interface LocalWorkspaceDiscardRequest {
   contextGraphId: string;
   assertionName: string;
-  subGraphName?: string;
-}
-
-export interface SharedMemoryWriteRequest {
-  contextGraphId: string;
-  quads: DkgPublisherExtensionQuadInput[];
-  localOnly?: boolean;
-  subGraphName?: string;
-}
-
-export interface VerifiableMemoryPublishRequest {
-  contextGraphId: string;
-  quads: DkgPublisherExtensionQuadInput[];
-  privateQuads?: DkgPublisherExtensionQuadInput[];
-  accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers?: string[];
-}
-
-export interface SharedMemoryPublishRequest {
-  contextGraphId: string;
-  rootEntities?: string[];
-  clearAfter?: boolean;
   subGraphName?: string;
 }
 
@@ -177,41 +127,6 @@ export class DkgPublisherExtension {
       subGraphName: request.subGraphName,
     });
   }
-
-  async writeSharedMemory(request: SharedMemoryWriteRequest): Promise<DkgPublisherExtensionShareResult> {
-    return this.transport.share(
-      request.contextGraphId,
-      normalizeDkgPublisherQuads(request.quads),
-      {
-        localOnly: request.localOnly,
-        subGraphName: request.subGraphName,
-      },
-    );
-  }
-
-  async publishVerifiableMemory(
-    request: VerifiableMemoryPublishRequest,
-  ): ReturnType<DkgPublisherExtensionTransport['publish']> {
-    return this.transport.publish(
-      request.contextGraphId,
-      normalizeDkgPublisherQuads(request.quads),
-      request.privateQuads ? normalizeDkgPublisherQuads(request.privateQuads) : undefined,
-      {
-        accessPolicy: request.accessPolicy,
-        allowedPeers: request.allowedPeers,
-      },
-    );
-  }
-
-  async publishSharedMemory(
-    request: SharedMemoryPublishRequest,
-  ): ReturnType<DkgPublisherExtensionTransport['publishSharedMemory']> {
-    return this.transport.publishSharedMemory(request.contextGraphId, {
-      rootEntities: request.rootEntities,
-      clearAfter: request.clearAfter,
-      subGraphName: request.subGraphName,
-    });
-  }
 }
 
 export function createDkgPublisherExtension(
@@ -231,6 +146,13 @@ export function normalizeDkgPublisherQuads(
   }));
 }
 
+// NOTE: the MCP adapter inlines a byte-for-byte copy of this normalizer (it is
+// deliberately dep-light and does not import dkg-core) as `normalizeRdfObject` in
+// `packages/mcp-dkg/src/tools/assertions.ts`. If you change the behavior here,
+// update that copy AND its golden fixture in
+// `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts` so the
+// public `dkg_knowledge_asset_create({quads})` object contract stays identical
+// across the MCP / OpenClaw / Hermes adapters.
 export function normalizeDkgPublisherObject(value: unknown): string {
   const raw = String(value ?? '');
   if (isDkgRdfTerm(raw)) return raw;

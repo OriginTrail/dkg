@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-publisher",
-  "version": "10.0.0",
+  "version": "10.0.5",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -20,6 +20,8 @@
     "ethers": "^6.16.0"
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/sdk-metrics": "^2.8.0",
     "@vitest/coverage-v8": "^4.0.18",
     "vitest": "^4.0.18"
   },

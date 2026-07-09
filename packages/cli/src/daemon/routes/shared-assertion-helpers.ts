@@ -18,11 +18,14 @@ import {
   ImportedArtifactMetadataError,
   isDkgContentHash,
   resolveImportedArtifactMetadata,
+  assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
 import { daemonState } from '../state.js';
 import {
   jsonResponse,
+  oversizedRdfLiteralResponseBody,
+  isNoFundedPublisherWalletLike,
   safeDecodeURIComponent,
   normalizeContextGraphIdOrUri,
   isValidContextGraphId,
@@ -37,6 +40,37 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const MAX_MARKDOWN_READ_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MARKDOWN_READ_BYTES = 1024 * 1024;
+
+/**
+ * Build the HTTP-400 body for an on-chain context-graph auto-registration
+ * failure that precedes a publish. Shared by `/api/knowledge-assets/:name/vm/publish`
+ * and direct KA publish helpers so the
+ * funds marker, wording, punctuation trim, and `{ code, error }` shape cannot
+ * drift between the two publish routes. On-chain registration is signed by the
+ * node's PRIMARY operational wallet (not the funded-wallet-selected publish
+ * wallet), so a funds failure here is actionable on that specific wallet.
+ */
+export function buildAutoRegisterFailureBody(
+  contextGraphId: string,
+  regErr: { message?: unknown; code?: unknown } | unknown,
+): { code?: string; error: string } {
+  const e = regErr as { message?: unknown; code?: unknown } | null | undefined;
+  const regMsg = (typeof e?.message === 'string' ? e.message : undefined) ?? String(regErr);
+  // The hint fires for any funding-related registration failure: a no-funded
+  // wallet error by CODE or the shared message marker (the structured
+  // "No operational wallet has enough funds…" message contains neither
+  // "insufficient funds" nor the literal code, so match the shared predicate —
+  // not just the message text), or a raw native-gas "insufficient funds" revert.
+  const fundsHint = (isNoFundedPublisherWalletLike(e) || /insufficient funds|NO_FUNDED_PUBLISHER_WALLET/i.test(regMsg))
+    ? ' On-chain registration is signed by the PRIMARY operational wallet — fund it (native gas + TRAC) and retry.'
+    : '';
+  return {
+    ...(typeof e?.code === 'string' && e.code.length > 0 ? { code: e.code } : {}),
+    error:
+      `Context graph "${contextGraphId}" could not be auto-registered on-chain before publish: ` +
+      `${regMsg.replace(/\.\s*$/, '')}.${fundsHint}`,
+  };
+}
 
 export type ImportedArtifactResolution = {
   contextGraphId: string;
@@ -102,6 +136,12 @@ export function decodePromoteJobId(encoded: string, res: ServerResponse): string
     return null;
   }
   return jobId;
+}
+
+export function scopedTokenPromoteLane(agentAddress?: string): { agentAddress?: string; authorAgentAddress?: string } {
+  return agentAddress
+    ? { agentAddress, authorAgentAddress: agentAddress }
+    : {};
 }
 
 // ── Async-promote wire schema (RFC §3.2 + §3.3) ──────────────────────────────
@@ -285,6 +325,11 @@ export function normalizeSemanticQuads(raw: unknown): Array<{ subject: string; p
     } else {
       normalizedObject = rdfLiteral(object);
     }
+    assertRdfLiteralMutf8Safe(normalizedObject, {
+      label: `semanticQuads[${index}].object`,
+      subject,
+      predicate,
+    });
     return { subject, predicate, object: normalizedObject };
   });
 }
@@ -446,6 +491,22 @@ export function isSameAgentAddress(left: string, right: string): boolean {
   return left === right || comparableAgentAddress(left) === comparableAgentAddress(right);
 }
 
+export function authorizeAgentScopedAuthorClaim(
+  res: ServerResponse,
+  tokenAgentAddress: string | undefined,
+  claimedAuthorAddress: string | undefined,
+  claimField: string,
+): boolean {
+  if (!tokenAgentAddress || !claimedAuthorAddress) return true;
+  if (isSameAgentAddress(tokenAgentAddress, claimedAuthorAddress)) return true;
+  jsonResponse(res, 403, {
+    error:
+      `Author mismatch: authenticated as ${tokenAgentAddress} but request body claims ${claimedAuthorAddress}. ` +
+      `The author is resolved from the agent-scoped bearer token; omit ${claimField} or use the matching agent's token.`,
+  });
+  return false;
+}
+
 export function assertImportedArtifactOwnerAddress(
   assertionAgentAddress: string,
   requestAgentAddress: string,
@@ -491,6 +552,10 @@ export async function isPublicOpenContextGraph(
 export function handleImportArtifactRouteError(res: ServerResponse, err: unknown): boolean {
   if (err instanceof ImportArtifactRouteError) {
     jsonResponse(res, err.statusCode, { error: err.message });
+    return true;
+  }
+  if ((err as { code?: string })?.code === 'OVERSIZED_RDF_LITERAL') {
+    jsonResponse(res, 400, oversizedRdfLiteralResponseBody(err));
     return true;
   }
   const message = err instanceof Error ? err.message : String(err);

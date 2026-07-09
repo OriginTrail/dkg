@@ -1,0 +1,31 @@
+{
+  "slug": "okf",
+  "name": "Open Knowledge Format (OKF) importer",
+  "description": "Ingest a Google Open Knowledge Format bundle (portable Markdown + YAML frontmatter + untyped cross-links) into the DKG as deterministic, owned, verifiable Knowledge Assets, reconstructing the bundle's cross-concept link graph. Provides the trust-and-permanence backend OKF deliberately omits.",
+  "category": ["data-import", "knowledge-management", "interoperability"],
+  "maintainer": { "github": "@OriginTrail/core-developers", "name": "OriginTrail Core Developers" },
+  "repo": "https://github.com/OriginTrail/dkg",
+  "commit": "778d6b8e01adeba357824d19893f8c28c10e6305",
+  "license": "Apache-2.0",
+  "requiresDkgNodeVersion": ">=10.0.0-rc.16",
+  "memoryLayers": ["WM", "SWM"],
+  "v10PrimitivesUsed": ["ContextGraph", "KnowledgeAsset", "WorkingMemory", "SharedWorkingMemory", "Assertion"],
+  "publicInterfacesUsed": ["cli"],
+  "targetAgents": ["hermes", "elizaos", "openclaw"],
+  "install": {
+    "kind": "cli",
+    "package": "@origintrail-official/dkg",
+    "version": "10.0.0-rc.16",
+    "binary": "dkg",
+    "usageHint": "dkg okf import <bundleDir> --context-graph-id <id>\ndkg okf import <bundleDir> --dry-run --print-nquads\ndkg okf import <bundleDir> --context-graph-id <id> --share\ndkg okf export <contextGraphId> <outDir>"
+  },
+  "security": {
+    "networkEgress": [],
+    "writeAuthority": ["working-memory", "shared-working-memory"],
+    "credentialsHandled": ["local DKG node auth token"],
+    "notes": "Reads a local OKF bundle directory and talks only to the local DKG node API. No external network egress. Import defaults to private Working Memory and never publishes to Verifiable Memory; --share advances assets to free, team-visible Shared Working Memory. On-chain VM promotion (real TRAC) is a separate, explicitly-gated step, not performed by this integration."
+  },
+  "trustTier": "community",
+  "designBrief": "https://github.com/OriginTrail/dkg/blob/main/docs/integrations/okf.md",
+  "fitNotes": "OKF standardises how knowledge is written and exchanged but ships no verification, provenance or ownership layer (OKF SPEC §1, §10). This integration makes the DKG the trust-and-permanence backend for OKF: the same portable Markdown, now cryptographically provenanced, owned and shareable across agents. The OKF→RDF mapping is pure and deterministic (no LLM); the same bundle always yields identical triples and IRIs, so independent importers converge on the same graph."
+}

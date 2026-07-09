@@ -60,6 +60,8 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
   let promoteHandler: (req: PromoteRequest) => Promise<{ promotedCount: number }>;
   let promoteCallCount: number;
   let inFlightHigh: number;
+  let requestToken: string | undefined;
+  let tokenAgentAddress: string | undefined;
 
   beforeEach(() => {
     store = new OxigraphStore();
@@ -72,6 +74,8 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
     memoryGraphChangedEvents = [];
     promoteCallCount = 0;
     inFlightHigh = 0;
+    requestToken = undefined;
+    tokenAgentAddress = undefined;
     promoteHandler = async () => ({ promotedCount: 1 });
     // PR #660 gates `/swm/share-async` on `daemonState.promoteWorkerAvailable`;
     // the e2e test boots its own supervisor without going through the daemon
@@ -113,12 +117,17 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
       async contextGraphExists(contextGraphId: string) {
         return ['team-graph', 'graphify', 'cg'].includes(contextGraphId);
       },
-      resolveAgentByToken: () => undefined,
+      resolveAgentByToken: (token: string) => (token === requestToken ? tokenAgentAddress : undefined),
       assertion: {
         async promote(
           contextGraphId: string,
           name: string,
-          opts?: { entities?: readonly string[] | 'all'; subGraphName?: string },
+          opts?: {
+            entities?: readonly string[] | 'all';
+            subGraphName?: string;
+            agentAddress?: string;
+            authorAgentAddress?: string;
+          },
         ): Promise<{ promotedCount: number }> {
           inFlight += 1;
           inFlightHigh = Math.max(inFlightHigh, inFlight);
@@ -129,6 +138,8 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
               assertionName: name,
               subGraphName: opts?.subGraphName,
               entities: opts?.entities ?? 'all',
+              ...(opts?.agentAddress ? { agentAddress: opts.agentAddress } : {}),
+              ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
             });
           } finally {
             inFlight -= 1;
@@ -137,13 +148,20 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
         async promoteAsync(
           contextGraphId: string,
           name: string,
-          opts?: { entities?: readonly string[] | 'all'; subGraphName?: string },
+          opts?: {
+            entities?: readonly string[] | 'all';
+            subGraphName?: string;
+            agentAddress?: string;
+            authorAgentAddress?: string;
+          },
         ): Promise<{ jobId: string }> {
           const jobId = await queue.enqueue({
             contextGraphId,
             assertionName: name,
             subGraphName: opts?.subGraphName,
             entities: opts?.entities ?? 'all',
+            ...(opts?.agentAddress ? { agentAddress: opts.agentAddress } : {}),
+            ...(opts?.authorAgentAddress ? { authorAgentAddress: opts.authorAgentAddress } : {}),
           });
           return { jobId };
         },
@@ -199,7 +217,7 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
           apiPortRef: { value: 0 },
           url,
           path: url.pathname,
-          requestToken: undefined,
+          requestToken,
           requestAgentAddress: 'did:dkg:agent:test',
           emitMemoryGraphChanged: () => {},
           emitNotification: () => {},
@@ -289,6 +307,37 @@ describe('async-promote queue — end-to-end (routes + worker + queue)', () => {
       source: 'async-worker',
       counts: { triples: 1 },
       layers: ['wm', 'swm'],
+    });
+  });
+
+  it('agent-token share-async carries the storage lane and author through queue and worker', async () => {
+    requestToken = 'agent-token-lane';
+    tokenAgentAddress = '0x3333333333333333333333333333333333333333';
+    const promoteRequests: PromoteRequest[] = [];
+    promoteHandler = async (req) => {
+      promoteRequests.push(req);
+      return { promotedCount: 1 };
+    };
+    await startServerAndSupervisor();
+
+    const { status, body } = await post('/api/knowledge-assets/token-notes/swm/share-async', {
+      contextGraphId: 'team-graph',
+      subGraphName: 'docs',
+      entities: 'all',
+    });
+    expect(status).toBe(200);
+    const jobId = body!.jobId as string;
+
+    const done = await waitForJobState(jobId, 'succeeded');
+    expect(done.request).toMatchObject({
+      agentAddress: tokenAgentAddress,
+      authorAgentAddress: tokenAgentAddress,
+    });
+    expect(promoteRequests).toHaveLength(1);
+    expect(promoteRequests[0]).toMatchObject({
+      assertionName: 'token-notes',
+      agentAddress: tokenAgentAddress,
+      authorAgentAddress: tokenAgentAddress,
     });
   });
 

@@ -32,7 +32,7 @@ RS_TIMEOUT=180 pnpm test:devnet:greenfield-10min
 
 | Phase | What | Budget |
 |-------|------|--------|
-| 1 | `dkg publish` one KA from core1 into `devnet-test` | ~2 min |
+| 1 | `dkg ka create --share` + `dkg ka publish` one KA from core1 into `devnet-test` | ~2 min |
 | 2 | `POST /api/update` with `precomputedUpdateAttestation`; UAL stable, merkle rotates | ~2 min |
 | 3 | `DKGStakingConvictionNFT.createConviction` → `withdraw` | ~4 min |
 | 4 | Poll `/api/random-sampling/status` until proof + `RandomSamplingStorage.solved` | ~2.5 min |

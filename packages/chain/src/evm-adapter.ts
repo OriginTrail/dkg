@@ -31,10 +31,17 @@ export {
   decodeEvmError,
   enrichEvmError,
   isTooLowAllowanceError,
+  isInsufficientFundsError,
+  InsufficientPublisherFundsError,
+  isNoFundedPublisherWalletError,
+  NO_FUNDED_PUBLISHER_WALLET_CODE,
+  formatNoFundedPublisherWalletMessage,
+  type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {
   resolveRpcUrls,
   isRetryableRpcError,
+  isKnownTransactionError,
 } from './evm-adapter-rpc.js';
 export {
   computeApprovalAction,

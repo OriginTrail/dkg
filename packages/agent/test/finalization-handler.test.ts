@@ -7,8 +7,12 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  computeFlatKCRootV10,
+  generatedPrivateCatalogFloorQuads,
+} from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { ethers } from 'ethers';
 
 const CONTEXT_GRAPH = 'test-contextGraph';
 
@@ -390,10 +394,16 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
   }
 
   /** Minimal chain whose getKAContextGraphId binds the KA to the given CG. */
-  function makeBindingChain(boundCg: bigint): ChainAdapter {
+  function makeBindingChain(
+    boundCg: bigint,
+    accessPolicy = 1,
+    nameHash: string | null = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)),
+  ): ChainAdapter {
     return {
       chainId: 'evm:31337',
       getKAContextGraphId: async (_kaId: bigint) => boundCg,
+      getContextGraphAccessPolicy: async (_contextGraphId: bigint) => accessPolicy,
+      getContextGraphNameHash: async (_contextGraphId: bigint) => nameHash,
     } as unknown as ChainAdapter;
   }
 
@@ -422,6 +432,69 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
       `ASK { GRAPH <${perCgGraph}> { <${ENTITY}> <http://schema.org/name> "Reconciled" } }`,
     );
     expect(promoted.type === 'boolean' && promoted.value).toBe(true);
+  });
+
+  it('chain-reconcile regenerates generated private-CG catalog floor for merkle match without adding it as a root', async () => {
+    const store = new OxigraphStore();
+    await seedSwmSnapshot(store);
+    const catalogFloor = generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH);
+    const merkleRoot = computeFlatKCRootV10(
+      [
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
+        ...catalogFloor,
+      ],
+      [],
+    );
+    const handler = new FinalizationHandler(store, makeBindingChain(42n));
+
+    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
+    expect(outcome).toBe('promoted');
+
+    const perCgGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}`;
+    const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
+    const catalogPromoted = await store.query(
+      `ASK { GRAPH <${perCgGraph}> { <${cgDid}> <http://purl.org/dc/terms/accessRights> <http://publications.europa.eu/resource/authority/access-right/RESTRICTED> } }`,
+    );
+    expect(catalogPromoted.type === 'boolean' && catalogPromoted.value).toBe(true);
+
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${ON_CHAIN_CG}/_meta`;
+    const catalogManifestRoot = await store.query(
+      `ASK { GRAPH <${metaGraph}> { ?s <http://dkg.io/ontology/rootEntity> <${cgDid}> } }`,
+    );
+    expect(catalogManifestRoot.type === 'boolean' && catalogManifestRoot.value).toBe(false);
+  });
+
+  it('does not regenerate the private-CG catalog floor for public on-chain access policy', async () => {
+    const store = new OxigraphStore();
+    await seedSwmSnapshot(store);
+    const merkleRoot = computeFlatKCRootV10(
+      [
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      [],
+    );
+    const handler = new FinalizationHandler(store, makeBindingChain(42n, 0));
+
+    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
+    expect(outcome).toBe('no-swm');
+  });
+
+  it('does not regenerate the private-CG catalog floor when live name hash does not match the local CG', async () => {
+    const store = new OxigraphStore();
+    await seedSwmSnapshot(store);
+    const merkleRoot = computeFlatKCRootV10(
+      [
+        { subject: ENTITY, predicate: 'http://schema.org/name', object: '"Reconciled"', graph: '' },
+        ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH),
+      ],
+      [],
+    );
+    const staleNameHash = `0x${'11'.repeat(32)}`;
+    const handler = new FinalizationHandler(store, makeBindingChain(42n, 1, staleNameHash));
+
+    const outcome = await handler.handleChainReconciledKC(input(merkleRoot), createOperationContext('system'));
+    expect(outcome).toBe('no-swm');
   });
 
   it('mirrors the keep-root dual-write when the publisher persisted keepRootCopyOnLabel=true', async () => {

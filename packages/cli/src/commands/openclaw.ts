@@ -30,7 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { parsePositiveIntegerOption, parsePositiveMsOption } from '../publisher-runner.js';
+import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
@@ -121,6 +121,10 @@ openclawCmd
   .option('--dry-run', 'Preview changes without writing anything')
   .option('--no-fund', 'Skip wallet funding via testnet faucet')
   .option('--fund', 'Fund wallets via testnet faucet (default)')
+  .option(
+    '--network <name>',
+    'Network to set up on (mainnet-gnosis | mainnet-base | testnet). Default for a fresh node: mainnet-gnosis.',
+  )
   .option(
     '--store <backend>',
     'Triple-store backend (oxigraph | blazegraph | sparql-http). Validates the URL via an ASK probe and persists the store block after setup completes.',

@@ -10,7 +10,7 @@ doc_type: reference
 OriginTrail DKG V10 runs across multiple EVM-compatible chains. Pick the network you want your node to operate on and use the matching RPC URL, chain ID, and block explorer below.
 
 {% hint style="info" %}
-DKG V10 is currently live on **Base Sepolia (testnet)**. The mainnet networks below (Base, Gnosis, NeuroWeb) are where V10 will run at mainnet launch — see the [V10 Mainnet Release Timeline](../origintrail-v9-v10/v10-mainnet-release-timeline.md).
+DKG V10 is live on mainnet. A freshly set-up node defaults to **Gnosis mainnet** (`mainnet-gnosis`); choose another network at setup with the `dkg init` network prompt or `--network <name>` (`mainnet-base`, `testnet`). NeuroWeb mainnet is not yet selectable. See the [V10 Mainnet Release Timeline](../origintrail-v9-v10/v10-mainnet-release-timeline.md).
 {% endhint %}
 
 ## DKG Mainnet

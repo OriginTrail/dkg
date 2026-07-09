@@ -172,7 +172,7 @@ describe('publish async get benchmark', () => {
     expect(summaries.get).toMatchObject({ count: 1, successCount: 1, failureCount: 0 });
   });
 
-  it('uses unique roots for warmup and measured payloads and does not clear shared memory on sync publish', async () => {
+  it('uses unique roots AND KA names for warmup and measured payloads and does not clear shared memory on sync publish', async () => {
     const client = new MockBenchmarkClient();
     const result = await runPublishAsyncGetBenchmark({ ...baseConfig(), repeat: 1, warmups: 1 }, client, monotonicClock());
 
@@ -183,11 +183,19 @@ describe('publish async get benchmark', () => {
 
     const roots = [
       ...client.publishCalls.flatMap((call) => call.roots),
-      ...client.enqueueCalls.flatMap((call) => call.roots),
+      ...client.asyncPublishCalls.flatMap((call) => call.roots),
     ];
     expect(new Set(roots).size).toBe(roots.length);
     expect(roots.some((root) => root.includes(':warmup-1:'))).toBe(true);
     expect(roots.some((root) => root.includes(':measured-1:'))).toBe(true);
+
+    // Names must ALSO be unique per phase — a regression that dropped the warmup/measured
+    // discriminator from the KA name would reuse the warmup name for the measured publish
+    // (KA create is name-idempotent), which the root check alone would NOT catch.
+    const names = client.publishCalls.map((call) => call.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.some((n) => n.includes('warmup'))).toBe(true);
+    expect(names.some((n) => n.includes('measured'))).toBe(true);
   });
 
   it('reports measured failures with operation, iteration, error, and reproduction context', async () => {
@@ -224,11 +232,11 @@ describe('publish async get benchmark', () => {
     });
   });
 
-  it('reports async enqueue failures and skipped completion context', async () => {
-    const client = new MockBenchmarkClient({ enqueueError: 'publisher queue disabled' });
+  it('reports async publish request failures and skipped completion context', async () => {
+    const client = new MockBenchmarkClient({ asyncPublishError: 'publisher queue disabled' });
     const result = await runPublishAsyncGetBenchmark({ ...baseConfig(), repeat: 1, warmups: 0 }, client, monotonicClock());
 
-    expect(result.failures.map((failure) => failure.operation)).toEqual(['asyncEnqueue', 'asyncCompletion']);
+    expect(result.failures.map((failure) => failure.operation)).toEqual(['asyncPublishRequest', 'asyncCompletion']);
     expect(result.failures[0]).toMatchObject({
       iteration: 1,
       error: expect.stringContaining('publisher queue disabled'),
@@ -236,11 +244,11 @@ describe('publish async get benchmark', () => {
     expect(result.failures[0].context).toMatchObject({
       contextGraphId: 'bench-cg',
       flow: 'async',
-      shareOperationId: 'share-2',
+      name: expect.stringContaining('benchmark-async-'),
     });
     expect(result.failures[1].context).toMatchObject({
-      skippedAfter: 'asyncEnqueue',
-      shareOperationId: 'share-2',
+      skippedAfter: 'asyncPublishRequest',
+      name: expect.stringContaining('benchmark-async-'),
     });
   });
 
@@ -331,7 +339,7 @@ describe('publish async get benchmark', () => {
       publishAsyncGetPages,
       publishAsyncGetSuite,
     } = await import('../../../esbench.config.mjs') as EsbenchConfigForTest;
-    const caseName = 'asynchronous publish enqueue and finalization';
+    const caseName = 'asynchronous VM publish request and finalization';
     const result = {
       [publishAsyncGetSuite]: [
         {
@@ -358,7 +366,7 @@ describe('publish async get benchmark', () => {
     expect(publishAsyncGetPages).toEqual([
       ['get/read retrieval', 'bench/results/publish-async-get/get-read-retrieval.html'],
       ['synchronous publish with finalization', 'bench/results/publish-async-get/sync-publish-finalization.html'],
-      ['asynchronous publish enqueue and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
+      ['asynchronous VM publish request and finalization', 'bench/results/publish-async-get/async-publish-finalization.html'],
       ['upload payload to local working memory', 'bench/results/publish-async-get/working-memory-upload.html'],
       ['lift local working memory to shared working memory', 'bench/results/publish-async-get/working-to-shared-memory.html'],
     ]);
@@ -394,7 +402,7 @@ describe('publish async get benchmark', () => {
     expect(html).toContain('dkg-benchmark-report-nav');
     expect(html).toContain('../latest.html');
     expect(html).toContain('sync-publish-finalization.html');
-    expect(html).toContain('asynchronous publish enqueue and finalization');
+    expect(html).toContain('asynchronous VM publish request and finalization');
     expect(html).toContain('aria-current=\\"page\\"');
     expect(html).toContain('DOMContentLoaded');
     expect(repeated.match(/dkg-benchmark-report-nav:start/g)).toHaveLength(1);
@@ -451,24 +459,24 @@ describe('publish async get benchmark', () => {
       payloadSizes: ['200mb'],
       flows: [
         {
-          flow: 'asynchronous publish enqueue and finalization',
+          flow: 'asynchronous VM publish request and finalization',
           payloadSize: '200mb',
           totalMs: 12,
           measuredMs: 7,
           traces: [
             {
-              flow: 'asynchronous publish enqueue and finalization',
+              flow: 'asynchronous VM publish request and finalization',
               payloadSize: '200mb',
               phase: 'measured',
-              method: 'publisherEnqueue',
+              method: 'knowledgeAssetPublishAsync',
               invokes: ['publisherJobs.set'],
-              detail: 'Enqueue the publish request through the publisher runtime path.',
+              detail: 'Queue VM publish for the named knowledge asset.',
               durationMs: 2,
               success: true,
               context: { rootEntity: 'urn:test:root', quadCount: 1 },
             },
             {
-              flow: 'asynchronous publish enqueue and finalization',
+              flow: 'asynchronous VM publish request and finalization',
               payloadSize: '200mb',
               phase: 'measured',
               method: 'publisherJob',
@@ -484,8 +492,8 @@ describe('publish async get benchmark', () => {
     });
 
     expect(html).toContain('DKG Benchmark Method Analysis');
-    expect(html).toContain('asynchronous publish enqueue and finalization');
-    expect(html).toContain('publisherEnqueue');
+    expect(html).toContain('asynchronous VM publish request and finalization');
+    expect(html).toContain('knowledgeAssetPublishAsync');
     expect(html).toContain('publisherJob');
     expect(html).toContain('promoteSharedRoot');
     expect(html).toContain('2.000 ms');

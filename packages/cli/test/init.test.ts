@@ -1,5 +1,33 @@
 import { describe, it, expect } from 'vitest';
-import { buildInitAutoUpdate } from '../src/commands/init.js';
+import { buildInitAutoUpdate, isInitNetworkSwitch } from '../src/commands/init.js';
+
+// Guards the network-SWITCH decision that drives whether `dkg init` discards
+// the existing chain block (new-network/old-chain Frankenstein prevention) or
+// preserves it (operator RPC override). Only an EXPLICIT prior networkConfig
+// that differs counts as a switch.
+describe('isInitNetworkSwitch', () => {
+  it('is NOT a switch for a fresh node (no networkConfig)', () => {
+    expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
+    expect(isInitNetworkSwitch('', 'mainnet-base')).toBe(false);
+    expect(isInitNetworkSwitch('   ', 'testnet')).toBe(false);
+  });
+
+  it('is NOT a switch when the selected network equals the persisted one (preserve overrides)', () => {
+    expect(isInitNetworkSwitch('mainnet-base', 'mainnet-base')).toBe(false);
+    expect(isInitNetworkSwitch('  mainnet-base  ', 'mainnet-base')).toBe(false);
+  });
+
+  it('IS a switch when an explicit prior networkConfig differs from the selection', () => {
+    expect(isInitNetworkSwitch('mainnet-base', 'testnet')).toBe(true);
+    expect(isInitNetworkSwitch('testnet', 'mainnet-gnosis')).toBe(true);
+  });
+
+  it('a legacy node (no networkConfig) re-inited to a real network is NOT a switch — its chain override is preserved', () => {
+    // The legacy node never persisted networkConfig, so its true network is
+    // unknown; treat as same-network so resolveChainConfig keeps existing.chain.
+    expect(isInitNetworkSwitch(undefined, 'mainnet-gnosis')).toBe(false);
+  });
+});
 
 // Guards the `dkg init` auto-update persistence decision. Both the decline
 // path (PR #1295 round 3: must persist { enabled: false }, not fall through to
@@ -36,16 +64,33 @@ describe('buildInitAutoUpdate', () => {
     expect(r.checkIntervalMinutes).toBe(10);
   });
 
-  it('enable preserves a local channel pin across the rerun', () => {
+  it('enable preserves npm fields but drops git-only fields when forcing npm mode', () => {
     const r = buildInitAutoUpdate({
       enableAutoUpdate: true,
-      existingAutoUpdate: { enabled: true, channel: 'staging' },
+      existingAutoUpdate: {
+        enabled: true,
+        source: 'git',
+        channel: 'staging',
+        repo: 'https://github.com/OriginTrail/dkg.git',
+        branch: 'canary',
+        ref: 'refs/heads/canary',
+        sshKeyPath: '/tmp/git-key',
+        sshCommand: 'ssh -i /tmp/git-key',
+        buildTimeoutMs: { install: 600_000 },
+      },
       networkAutoUpdate: net,
       ...proj,
-      answers: { repo: '', branch: '', allowPrerelease: true, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: true, interval: 5 },
     });
     expect(r.enabled).toBe(true);
+    expect(r.source).toBe('npm');
     expect(r.channel).toBe('staging');
+    expect(r.repo).toBeUndefined();
+    expect(r.branch).toBeUndefined();
+    expect(r.ref).toBeUndefined();
+    expect(r.sshKeyPath).toBeUndefined();
+    expect(r.sshCommand).toBeUndefined();
+    expect(r.buildTimeoutMs).toBeUndefined();
   });
 
   it('enable persists only fields that differ from the network/project defaults', () => {
@@ -55,7 +100,7 @@ describe('buildInitAutoUpdate', () => {
       networkAutoUpdate: net,
       ...proj,
       // Every answer equals the effective default → nothing extra is pinned.
-      answers: { repo: 'OriginTrail/dkg', branch: 'main', allowPrerelease: true, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: true, interval: 5 },
     });
     expect(r).toEqual({ enabled: true, source: 'npm' });
   });
@@ -66,7 +111,7 @@ describe('buildInitAutoUpdate', () => {
       existingAutoUpdate: undefined,
       networkAutoUpdate: net, // allowPrerelease default = true
       ...proj,
-      answers: { repo: 'OriginTrail/dkg', branch: 'main', allowPrerelease: false, sshKeyPath: '', interval: 5 },
+      answers: { allowPrerelease: false, interval: 5 },
     });
     expect(r).toEqual({ enabled: true, source: 'npm', allowPrerelease: false });
   });

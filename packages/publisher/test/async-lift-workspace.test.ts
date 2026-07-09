@@ -440,21 +440,25 @@ describe('async lift workspace resolution', () => {
     expect(resolved.publisherPeerId).toBe('legacy-peer');
   });
 
-  it('does not duplicate large public literals into metadata', async () => {
-    const marker = 'large-public-literal-marker';
-    const largeValue = `${marker}-${'x'.repeat(512 * 1024)}`;
+  it('does not duplicate large public payload content into metadata', async () => {
+    const marker = 'large-public-payload-marker';
+    const chunk = 'x'.repeat(16 * 1024);
+    const largePayloadQuads = Array.from({ length: 32 }, (_, index) => ({
+      subject: ENTITY,
+      predicate: 'http://schema.org/name',
+      object: JSON.stringify(`${marker}-${index}-${chunk}`),
+      graph: '',
+    }));
 
-    await publisher.share(CONTEXT_GRAPH, [
-      { subject: ENTITY, predicate: 'http://schema.org/name', object: JSON.stringify(largeValue), graph: '' },
-    ], { publisherPeerId: 'peer1' });
+    await publisher.share(CONTEXT_GRAPH, largePayloadQuads, { publisherPeerId: 'peer1' });
 
     const swmGraph = graphManager.sharedMemoryUri(CONTEXT_GRAPH);
     const swmResult = await store.query(
-      `SELECT ?o WHERE { GRAPH <${swmGraph}> { <${ENTITY}> <http://schema.org/name> ?o } } LIMIT 1`,
+      `SELECT ?o WHERE { GRAPH <${swmGraph}> { <${ENTITY}> <http://schema.org/name> ?o } }`,
     );
     expect(swmResult.type).toBe('bindings');
     if (swmResult.type === 'bindings') {
-      expect(swmResult.bindings[0]?.['o']).toContain(marker);
+      expect(JSON.stringify(swmResult.bindings)).toContain(marker);
     }
 
     const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);

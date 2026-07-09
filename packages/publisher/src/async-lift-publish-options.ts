@@ -10,9 +10,11 @@ import type {
 import type {
   LiftAuthorityProof,
   LiftJobValidationMetadata,
+  LiftPublishRequestMetadata,
+  LiftPublishSnapshotRequest,
   LiftTransitionType,
-  LiftRequest,
 } from './lift-job.js';
+import { normalizeLiftPublishInput } from './async-lift-publish-input.js';
 
 export interface LiftResolvedPublishSlice {
   /**
@@ -82,7 +84,8 @@ export function isFailClosedInlineEncrypt(cb: unknown): boolean {
 }
 
 export interface LiftPublishMappingInput {
-  readonly request: LiftRequest;
+  readonly request: LiftPublishSnapshotRequest;
+  readonly metadata?: LiftPublishRequestMetadata;
   readonly validation: Pick<LiftJobValidationMetadata, 'authorityProofRef' | 'priorVersion' | 'transitionType'>;
   readonly resolved: LiftResolvedPublishSlice;
 }
@@ -116,14 +119,15 @@ export interface AsyncPreparedPublishPayload {
  * fields on PublishOptions today.
  */
 export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): PublishOptions {
+  const { metadata } = normalizeLiftPublishInput(input, 'Lift publish mapping');
   const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
   if (authorityProofRef.length === 0) {
     throw new Error('Lift publish mapping requires a non-empty authorityProofRef');
   }
 
-  if (input.request.transitionType !== input.validation.transitionType) {
+  if (metadata.transitionType !== input.validation.transitionType) {
     throw new Error(
-      `Lift publish mapping requires validation.transitionType to match request.transitionType. Request: ${input.request.transitionType}, validation: ${input.validation.transitionType}`,
+      `Lift publish mapping requires validation.transitionType to match request metadata transitionType. Request: ${metadata.transitionType}, validation: ${input.validation.transitionType}`,
     );
   }
 
@@ -206,7 +210,7 @@ export function mapLiftRequestToPublishOptions(input: LiftPublishMappingInput): 
   };
 }
 
-function liftSealToPrecomputedAttestation(seal: NonNullable<LiftRequest['seal']>): {
+function liftSealToPrecomputedAttestation(seal: NonNullable<LiftPublishSnapshotRequest['seal']>): {
   expectedMerkleRoot: Uint8Array;
   authorAddress: string;
   signature: { r: Uint8Array; vs: Uint8Array };
@@ -254,14 +258,15 @@ function decodeSealField(
 }
 
 export function prepareAsyncPublishPayload(input: LiftPublishMappingInput): AsyncPreparedPublishPayload {
+  const { metadata } = normalizeLiftPublishInput(input, 'Lift publish mapping');
   const publishOptions = mapLiftRequestToPublishOptions(input);
   const authorityProofRef = normalizeAuthorityProofRef(input.validation.authorityProofRef);
 
   return {
     contextGraphId: input.request.contextGraphId,
-    scope: input.request.scope,
-    transitionType: input.request.transitionType,
-    authority: input.request.authority,
+    scope: metadata.scope,
+    transitionType: metadata.transitionType,
+    authority: metadata.authority,
     authorityProofRef,
     priorVersion: input.validation.priorVersion,
     quads: [...publishOptions.quads],
