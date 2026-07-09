@@ -11,7 +11,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, resolveSharedMemoryReadGraphs, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -379,7 +379,6 @@ export class FinalizationHandler {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
-    const values = safeRoots.map(r => `<${r}>`).join(' ');
     // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
     // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
     // not the bare bucket. Reading only the bucket made every replica report
@@ -400,22 +399,9 @@ export class FinalizationHandler {
     // fidelity for the merkle recompute, and so the same logical triple
     // present in BOTH the bucket and a per-KA graph collapses to one
     // (a constructed graph is a set).
-    const swmGraphs = await resolveSharedMemoryReadGraphs(this.store, sharedMemoryGraph);
-    const graphValues = swmGraphs.map(g => `<${g}>`).join(' ');
-    const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-      VALUES ?g { ${graphValues} }
-      GRAPH ?g {
-        VALUES ?root { ${values} }
-        ?s ?p ?o .
-        FILTER(
-          ?s = ?root
-          || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-        )
-      }
-    }`;
-
-    const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
-    return result.type === 'quads' ? result.quads : [];
+    return loadSelectedSharedMemoryQuads(this.store, sharedMemoryGraph, { rootEntities: safeRoots }, {
+      querySource: 'agent.finalization.sharedMemorySlice',
+    });
   }
 
   private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {

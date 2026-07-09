@@ -32,7 +32,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -92,7 +92,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, resolveVerifiableMemoryReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, loadSelectedVerifiableMemoryQuads, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -790,29 +790,22 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     const dataGraph = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
     // Query root entities AND their skolemized children (subjects starting
     // with the root entity URI, e.g. <root>/.well-known/genid/...).
-    // We use FILTER with STRSTARTS to capture the full closure instead of
-    // an exact VALUES match, which would miss child/blank-node subjects.
-    const filterClauses = rootEntities
-      .map(e => `(STR(?s) = ${sparqlString(e)} || STRSTARTS(STR(?s), ${sparqlString(e + '/.well-known/genid/')}))`)
-      .join(' || ');
+    // The storage VM slice helper uses STRSTARTS to capture the full closure
+    // instead of an exact VALUES match, which would miss child/blank-node
+    // subjects.
     // A3 (O(store) relief): bind the per-KA VM graph set via the fast index
     // instead of an unbounded `GRAPH ?g` + STRSTARTS(?g,…) scan (?s is only
     // FILTER-narrowed, so the old form scanned every quad). Same target set as
     // the old filter (dataGraph + `${dataGraph}/_verifiable_memory/*`).
-    const vmReadGraphs = await resolveVerifiableMemoryReadGraphs(this.store, dataGraph);
-    const graphValues = vmReadGraphs.map(g => `<${g}>`).join(' ');
-    const result = await this.store.query(
-      `SELECT ?s ?p ?o WHERE { VALUES ?g { ${graphValues} } GRAPH ?g { ?s ?p ?o . FILTER(${filterClauses}) } }`,
-    );
-    if (result.type !== 'bindings') return;
+    const authoritativeQuads = await loadSelectedVerifiableMemoryQuads(this.store, dataGraph, rootEntities);
 
     const vmGraph = assertSafeIri(contextGraphVerifiableMemoryUri(contextGraphId, verifiableMemoryId));
-    const vmQuads: Quad[] = (result.bindings as Record<string, string>[])
-      .filter(row => !isTrustLevelQuad({ predicate: row.p }))
-      .map(row => ({
-        subject: row['s'],
-        predicate: row['p'],
-        object: row['o'],
+    const vmQuads: Quad[] = authoritativeQuads
+      .filter((quad) => !isTrustLevelQuad(quad))
+      .map((quad) => ({
+        subject: quad.subject,
+        predicate: quad.predicate,
+        object: quad.object,
         graph: vmGraph,
       }));
     if (vmQuads.length > 0) {

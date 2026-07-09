@@ -7,6 +7,7 @@ import {
   PrivateContentStore,
   createTripleStore,
   loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
   registerTripleStoreAdapter,
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
@@ -518,6 +519,41 @@ describe('GraphManager', () => {
         contextGraphDataGraphUri('empty-vm'),
       ]);
       await expect(resolveVerifiableMemoryReadGraphs(indexed, `${dataGraph}">`)).rejects.toThrow();
+    } finally {
+      await indexed.close();
+    }
+  });
+
+  it('loads selected VM quads from the base graph and multiple per-KA VM graphs', async () => {
+    const indexed = await createTripleStore({ backend: 'oxigraph' });
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-loader');
+    const vmGraphA = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const vmGraphB = `${dataGraph}/_verifiable_memory/0xdef/8`;
+    const vmMetaGraph = `${vmGraphA}/_meta`;
+    const root = 'urn:vm-root';
+    const childA = `${root}/.well-known/genid/a`;
+    const childB = `${root}/.well-known/genid/b`;
+    const otherRoot = 'urn:vm-other-root';
+    const key = (quad: Quad) => `${quad.subject}|${quad.predicate}|${quad.object}`;
+    const keys = (quads: Quad[]) => quads.map(key).sort();
+    try {
+      await indexed.insert([
+        { subject: root, predicate: 'urn:p', object: '"base-root"', graph: dataGraph },
+        { subject: childA, predicate: 'urn:p', object: '"child-a"', graph: vmGraphA },
+        { subject: childB, predicate: 'urn:p', object: '"child-b"', graph: vmGraphB },
+        { subject: root, predicate: 'urn:p', object: '"meta-root"', graph: vmMetaGraph },
+        { subject: otherRoot, predicate: 'urn:p', object: '"other-root"', graph: vmGraphA },
+        { subject: root, predicate: 'urn:p', object: '"private-root"', graph: `${dataGraph}/_private` },
+        { subject: root, predicate: 'urn:p', object: '"other-graph"', graph: contextGraphDataGraphUri('resolver-vm-loader-other') },
+      ]);
+
+      expect(keys(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [root, root]))).toEqual([
+        `${childA}|urn:p|"child-a"`,
+        `${childB}|urn:p|"child-b"`,
+        `${root}|urn:p|"base-root"`,
+        `${root}|urn:p|"meta-root"`,
+      ].sort());
+      expect(await loadSelectedVerifiableMemoryQuads(indexed, dataGraph, [])).toEqual([]);
     } finally {
       await indexed.close();
     }

@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import { GraphManager, resolveVerifiableMemoryReadGraphs } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedVerifiableMemoryQuads } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -148,31 +148,10 @@ async function loadAuthoritativeQuadKeys(
   // named-graph index instead of an unbounded `GRAPH ?g` + STRSTARTS(?g,…) scan
   // (which reads every quad in the store on RocksDB per publish). The resolved
   // set equals the old filter's target (base graph + `${graph}/_verifiable_memory/*`).
-  const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, graph);
-  const graphValues = vmGraphs.map((g) => `<${g}>`).join(' ');
-  const values = [...confirmedRoots].map((root) => safeStringLiteral(root)).join(' ');
-  const result = await store.query(
-    `CONSTRUCT {
-      ?s ?p ?o
-    } WHERE {
-      VALUES ?g { ${graphValues} }
-      GRAPH ?g {
-        VALUES ?rootValue { ${values} }
-        ?s ?p ?o .
-        FILTER(
-          STR(?s) = ?rootValue
-          || STRSTARTS(STR(?s), CONCAT(?rootValue, "/.well-known/genid/"))
-        )
-      }
-    }`,
-  );
-
-  if (result.type !== 'quads') {
-    return new Set();
-  }
+  const quads = await loadSelectedVerifiableMemoryQuads(store, graph, confirmedRoots);
 
   return new Set(
-    result.quads.map((quad) => toQuadKey({ ...quad, graph: '' })),
+    quads.map((quad) => toQuadKey({ ...quad, graph: '' })),
   );
 }
 

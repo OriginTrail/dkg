@@ -14,6 +14,7 @@ import {
   contextGraphCatalogUri,
   isSafeIri,
   assertSafeIri,
+  sparqlString,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -28,6 +29,10 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
     inputCount: number;
     hadInput: boolean;
   }) => string;
+}
+
+export interface LoadSelectedVerifiableMemoryQuadsOptions {
+  querySource?: QueryOptions['source'];
 }
 
 async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
@@ -153,6 +158,45 @@ export async function resolveVerifiableMemoryReadGraphs(
   const out = new Set<string>([dataGraph]);
   for (const graph of under) if (isSafeIri(graph)) out.add(graph);
   return [...out] as NonEmptyGraphList;
+}
+
+/**
+ * Load the root-closure slice (`root` plus skolemized children) from the base
+ * data graph and every indexed per-KA verifiable-memory graph. Callers can then
+ * project the returned CONSTRUCT quads into their own output shape without
+ * rebuilding the bound-graph/root-selection SPARQL.
+ */
+export async function loadSelectedVerifiableMemoryQuads(
+  store: TripleStore,
+  dataGraph: string,
+  rootEntities: Iterable<string>,
+  options: LoadSelectedVerifiableMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  const roots = [...new Set([...rootEntities].map((root) => String(root)).filter((root) => root.length > 0))];
+  if (roots.length === 0) return [];
+
+  const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, dataGraph);
+  const graphValues = vmGraphs.map((g) => `<${g}>`).join(' ');
+  const rootValues = roots.map((root) => sparqlString(root)).join(' ');
+  const queryOptions = options.querySource ? { source: options.querySource } : undefined;
+  const result = await store.query(
+    `CONSTRUCT {
+      ?s ?p ?o
+    } WHERE {
+      VALUES ?g { ${graphValues} }
+      GRAPH ?g {
+        VALUES ?rootValue { ${rootValues} }
+        ?s ?p ?o .
+        FILTER(
+          STR(?s) = ?rootValue
+          || STRSTARTS(STR(?s), CONCAT(?rootValue, "/.well-known/genid/"))
+        )
+      }
+    }`,
+    queryOptions,
+  );
+
+  return result.type === 'quads' ? result.quads : [];
 }
 
 export class ContextGraphManager {

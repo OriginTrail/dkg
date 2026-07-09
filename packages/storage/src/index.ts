@@ -44,9 +44,11 @@ export {
   ContextGraphManager,
   GraphManager,
   loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
   type LoadSelectedSharedMemoryQuadsOptions,
+  type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type SharedMemoryReadSelection,
 } from './graph-manager.js';
