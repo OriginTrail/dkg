@@ -147,6 +147,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { peerIdsFromMultiaddrs } from './p2p/network-admission.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -1813,13 +1814,30 @@ export class AgentRegistryMethods extends DKGAgentBase {
     });
   }
 
+  async assertPeerAdmittedForExplicitConnect(this: DKGAgent, peerId: string, ctx: OperationContext): Promise<void> {
+    if (await this.verifyPeerNetworkAdmission(peerId, ctx)) return;
+    const error = new Error(`Peer ${peerId} is not admitted for the active DKG network`);
+    (error as any).code = 'NETWORK_ADMISSION_REJECTED';
+    throw error;
+  }
+
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
+    const peerIds = [...peerIdsFromMultiaddrs([multiaddress])];
+    const targetPeerId = peerIds[peerIds.length - 1];
+    if (this.networkAdmission.enabled && !targetPeerId) {
+      const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
+      (error as any).code = 'INVALID_PEER_ID';
+      throw error;
+    }
     await connectToMultiaddr(
       this.node.libp2p as any,
       multiaddress,
       (message) => this.log.info(ctx, message),
     );
+    if (targetPeerId) {
+      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);
+    }
   }
 
   /**
@@ -1894,6 +1912,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // the rest of the resolution machinery entirely.
     const existing = this.node.libp2p.getConnections(peerId);
     if (existing.length > 0) {
+      await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx);
       this.log.info(ctx, `Already connected to ${peerIdStr}`);
       return;
     }
@@ -1941,7 +1960,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // budget is honoured end-to-end.
     try {
       await this.node.libp2p.dial(peerId, { signal });
-      this.log.info(ctx, `Connected to ${peerIdStr}`);
     } catch (err: any) {
       // Codex PR #499 round 5 (dkg-agent.ts:4096): the shared signal
       // covers BOTH resolution and dial. If most of the budget went
@@ -1972,6 +1990,8 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }
+    await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx);
+    this.log.info(ctx, `Connected to ${peerIdStr}`);
   }
 
 }

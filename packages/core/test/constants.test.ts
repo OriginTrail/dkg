@@ -7,10 +7,15 @@ import {
   contextGraphSessionsTopic,
   contextGraphPublishTopic,
   contextGraphWorkspaceTopic,
+  DHT_PROTOCOL,
   validateContextGraphId,
   validateSubGraphName,
   validateAssertionName,
   deriveCuratorDidFromCgId,
+  dhtProtocolForNetwork,
+  logicalTopicFromWireTopic,
+  networkNamespaceSegment,
+  wireTopicForNetwork,
 } from '../src/constants.js';
 import { createOperationContext } from '../src/logger.js';
 
@@ -59,6 +64,53 @@ describe('context graph topic helpers (V10)', () => {
     expect(contextGraphPublishTopic('my-contextGraph')).toBe(contextGraphFinalizationTopic('my-contextGraph'));
     expect(contextGraphPublishTopic('')).toBe(contextGraphFinalizationTopic(''));
     expect(contextGraphPublishTopic('a/b')).toBe(contextGraphFinalizationTopic('a/b'));
+  });
+});
+
+describe('network namespace helpers', () => {
+  it('keeps the legacy DHT protocol when no network identity is supplied', () => {
+    expect(dhtProtocolForNetwork()).toBe(DHT_PROTOCOL);
+  });
+
+  it('derives distinct DHT protocols for distinct networks', () => {
+    expect(dhtProtocolForNetwork('base-testnet')).toBe('/dkg/base-testnet/kad/1.0.0');
+    expect(dhtProtocolForNetwork('base-mainnet')).toBe('/dkg/base-mainnet/kad/1.0.0');
+  });
+
+  it('derives distinct DHT protocols for the same network id on different chains', () => {
+    expect(dhtProtocolForNetwork('shared-genesis', 'base:84532')).toBe('/dkg/shared-genesis.base:84532/kad/1.0.0');
+    expect(dhtProtocolForNetwork('shared-genesis', 'base:8453')).toBe('/dkg/shared-genesis.base:8453/kad/1.0.0');
+  });
+
+  it('maps logical DKG topics into and out of network-scoped wire topics', () => {
+    const logical = contextGraphFinalizationTopic('agents');
+    const wire = wireTopicForNetwork('base-testnet', logical);
+    expect(wire).toBe('dkg/network/base-testnet/context-graph/agents/finalization');
+    expect(logicalTopicFromWireTopic('base-testnet', wire)).toBe(logical);
+    expect(logicalTopicFromWireTopic('base-mainnet', wire)).toBeNull();
+  });
+
+  it('maps logical DKG topics into chain-scoped wire topics', () => {
+    const logical = contextGraphFinalizationTopic('agents');
+    const baseSepoliaWire = wireTopicForNetwork('shared-genesis', logical, 'base:84532');
+    const baseMainnetWire = wireTopicForNetwork('shared-genesis', logical, 'base:8453');
+
+    expect(baseSepoliaWire).toBe('dkg/network/shared-genesis.base:84532/context-graph/agents/finalization');
+    expect(baseMainnetWire).toBe('dkg/network/shared-genesis.base:8453/context-graph/agents/finalization');
+    expect(logicalTopicFromWireTopic('shared-genesis', baseSepoliaWire, 'base:84532')).toBe(logical);
+    expect(logicalTopicFromWireTopic('shared-genesis', baseSepoliaWire, 'base:8453')).toBeNull();
+  });
+
+  it('round-trips non-DKG topics without colliding with DKG topic suffixes', () => {
+    const wire = wireTopicForNetwork('network-a', 'custom/topic');
+    expect(wire).toBe('dkg/network/network-a/topic/custom/topic');
+    expect(logicalTopicFromWireTopic('network-a', wire)).toBe('custom/topic');
+  });
+
+  it('rejects unsafe network namespace segments', () => {
+    expect(() => networkNamespaceSegment('base/testnet')).toThrow(/Invalid DKG network namespace/);
+    expect(() => networkNamespaceSegment('base-testnet', 'bad chain')).toThrow(/Invalid DKG network namespace/);
+    expect(() => dhtProtocolForNetwork('base testnet')).toThrow(/Invalid DKG network namespace/);
   });
 });
 

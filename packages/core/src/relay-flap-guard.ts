@@ -301,6 +301,40 @@ export interface RelayFlapConnectionGater {
   denyDialMultiaddr(multiaddr: { toString(): string }): boolean;
 }
 
+export interface RelayConnectionGaterOptions {
+  /**
+   * When set, only these relay peer ids may be used for circuit-relay paths.
+   * `undefined` preserves the legacy open relay-path behavior.
+   */
+  activeRelayPeerIds?: ReadonlySet<string>;
+}
+
+export interface RelayDiscoveryFilter {
+  has(peerId: { toString(): string }): boolean;
+  add(peerId: { toString(): string }): void;
+  remove(peerId: { toString(): string }): void;
+}
+
+export function buildActiveRelayDiscoveryFilter(
+  activeRelayPeerIds: ReadonlySet<string> | undefined,
+): RelayDiscoveryFilter | undefined {
+  if (activeRelayPeerIds == null) return undefined;
+  const seen = new Set<string>();
+  return {
+    has(peerId) {
+      const id = peerId.toString();
+      return !activeRelayPeerIds.has(id) || seen.has(id);
+    },
+    add(peerId) {
+      const id = peerId.toString();
+      if (activeRelayPeerIds.has(id)) seen.add(id);
+    },
+    remove(peerId) {
+      seen.delete(peerId.toString());
+    },
+  };
+}
+
 /**
  * Build the libp2p connection-gater hooks that enforce a `RelayFlapGuard`.
  * Extracted as a pure function so the WIRING (not just the guard) is testable:
@@ -316,8 +350,25 @@ export interface RelayFlapConnectionGater {
 export function buildRelayFlapConnectionGater(
   guard: RelayFlapGuard,
   log: (message: string) => void = () => {},
+  options: RelayConnectionGaterOptions = {},
 ): RelayFlapConnectionGater {
   const short = (id: string): string => id.slice(-8);
+  const denyInactiveRelayPath = (
+    direction: 'inbound' | 'outbound',
+    relayPeerId: string,
+    remotePeerId?: string,
+    addr?: string,
+  ): boolean => {
+    if (options.activeRelayPeerIds == null || options.activeRelayPeerIds.has(relayPeerId)) {
+      return false;
+    }
+    log(
+      `Network isolation: denying ${direction} relayed connection ` +
+      `relay=${short(relayPeerId)}${remotePeerId ? ` remote=${short(remotePeerId)}` : ''}` +
+      `${addr ? ` addr=${addr}` : ''}`,
+    );
+    return true;
+  };
   const denyRelayedPath = (
     direction: 'inbound' | 'outbound',
     relayPeerId: string,
@@ -338,11 +389,14 @@ export function buildRelayFlapConnectionGater(
   };
   return {
     denyInboundRelayedConnection: (relay, remotePeer) =>
+      denyInactiveRelayPath('inbound', relay.toString(), remotePeer.toString()) ||
       denyRelayedPath('inbound', relay.toString(), remotePeer.toString()),
     denyDialMultiaddr: (multiaddr) => {
       const addr = multiaddr.toString();
       const parsed = parseCircuitRelayPeerIds(addr);
-      if (!parsed?.remotePeerId) return false;
+      if (!parsed) return false;
+      if (denyInactiveRelayPath('outbound', parsed.relayPeerId, parsed.remotePeerId, addr)) return true;
+      if (!parsed.remotePeerId) return false;
       return denyRelayedPath('outbound', parsed.relayPeerId, parsed.remotePeerId, addr);
     },
   };

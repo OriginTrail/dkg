@@ -157,8 +157,49 @@ export const PROTOCOL_STORAGE_UPDATE_ACK = '/dkg/10.0.1/storage-update-ack';
  * signed JSON wire format and per-pull authorization gate.
  */
 export const PROTOCOL_GET_CIPHERTEXT_CHUNK = '/dkg/10.0.2/get-ciphertext-chunk';
+export const PROTOCOL_NETWORK_IDENTITY = '/dkg/10.0.1/network-identity';
 
 export const DHT_PROTOCOL = '/dkg/kad/1.0.0';
+
+const NETWORK_TOPIC_PREFIX = 'dkg/network';
+const NON_DKG_TOPIC_PREFIX = 'topic';
+
+export function networkNamespaceSegment(networkId: string, chainId?: string): string {
+  const parts = [networkId, chainId]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  for (const part of parts) {
+    if (!/^[A-Za-z0-9._:-]+$/.test(part)) {
+      throw new Error(`Invalid DKG network namespace: ${part}`);
+    }
+  }
+  return parts.join('.');
+}
+
+export function dhtProtocolForNetwork(networkId?: string, chainId?: string): string {
+  if (!networkId) return DHT_PROTOCOL;
+  return `/dkg/${networkNamespaceSegment(networkId, chainId)}/kad/1.0.0`;
+}
+
+export function wireTopicForNetwork(networkId: string | undefined, logicalTopic: string, chainId?: string): string {
+  if (!networkId) return logicalTopic;
+  const segment = networkNamespaceSegment(networkId, chainId);
+  const suffix = logicalTopic.startsWith('dkg/')
+    ? logicalTopic.slice('dkg/'.length)
+    : `${NON_DKG_TOPIC_PREFIX}/${logicalTopic}`;
+  return `${NETWORK_TOPIC_PREFIX}/${segment}/${suffix}`;
+}
+
+export function logicalTopicFromWireTopic(networkId: string | undefined, wireTopic: string, chainId?: string): string | null {
+  if (!networkId) return wireTopic;
+  const prefix = `${NETWORK_TOPIC_PREFIX}/${networkNamespaceSegment(networkId, chainId)}/`;
+  if (!wireTopic.startsWith(prefix)) return null;
+  const suffix = wireTopic.slice(prefix.length);
+  if (suffix.startsWith(`${NON_DKG_TOPIC_PREFIX}/`)) {
+    return suffix.slice(NON_DKG_TOPIC_PREFIX.length + 1);
+  }
+  return `dkg/${suffix}`;
+}
 
 /** Maximum application payload size allowed for one DKG GossipSub message (10 MB). */
 export const DKG_GOSSIP_MAX_MESSAGE_BYTES = 10 * 1024 * 1024;

@@ -106,6 +106,7 @@ export async function primeCatchupConnections(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,
   selfPeerId: string,
+  isPeerEligible: (peerId: string) => boolean = () => true,
 ): Promise<void> {
   try {
     const agents = await discovery.findAgents();
@@ -113,6 +114,7 @@ export async function primeCatchupConnections(
     const { multiaddr } = await import('@multiformats/multiaddr');
     for (const agent of agents) {
       if (agent.peerId === selfPeerId) continue;
+      if (!isPeerEligible(agent.peerId)) continue;
       const existingConns = libp2p.getConnections()
         .filter((conn) => conn.remotePeer.toString() === agent.peerId);
       if (existingConns.length > 0) continue;

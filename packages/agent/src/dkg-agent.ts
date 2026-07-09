@@ -735,6 +735,11 @@ export class DKGAgent extends DKGAgentBase {
 
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store, genesisId);
+    const networkIdentity = config.networkIdentity ?? {
+      genesisId,
+      networkId: await computeNetworkId(genesisId),
+      chainId: chain.chainId !== 'none' ? chain.chainId : undefined,
+    };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
@@ -749,6 +754,7 @@ export class DKGAgent extends DKGAgentBase {
       relayServerCapacity: config.relayServerCapacity,
       relayReservationCount: config.relayReservationCount,
       nodeVersion: config.nodeVersion,
+      networkIdentity,
       ...pickNetworkTunables(config),
     };
 
@@ -1709,6 +1715,9 @@ export class DKGAgent extends DKGAgentBase {
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
+      verifiedSameNetworkPeerIds: this.networkAdmission.enabled
+        ? this.networkAdmission.verifiedSameNetworkPeerIds()
+        : undefined,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       requiredACKs,
@@ -1749,10 +1758,16 @@ export class DKGAgent extends DKGAgentBase {
   private createACKSendP2P(
     timeoutMs = this.config.storageAckTiming.sendTimeoutMs,
   ): ACKCollectorDeps['sendP2P'] {
-    return createACKSendP2P({
+    const send = createACKSendP2P({
       messenger: this.messenger,
       timeoutMs,
     });
+    return async (peerId: string, protocol: string, data: Uint8Array) => {
+      if (!this.networkAdmission.isPeerAccepted(peerId, protocol, 'outbound')) {
+        throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
+      }
+      return send(peerId, protocol, data);
+    };
   }
 
   /**

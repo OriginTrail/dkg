@@ -18,10 +18,10 @@ import { generateKeyPair, privateKeyFromRaw } from '@libp2p/crypto/keys';
 import { peerIdFromString, peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { ConnectionTransport, DKGNodeConfig } from './types.js';
-import { DHT_PROTOCOL, DKG_GOSSIP_MAX_RPC_BYTES } from './constants.js';
+import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
-import { RelayFlapGuard, parseCircuitRelayPeerIds, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
+import { RelayFlapGuard, parseCircuitRelayPeerIds, buildRelayFlapConnectionGater, buildActiveRelayDiscoveryFilter } from './relay-flap-guard.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -871,6 +871,11 @@ export class DKGNode {
       );
     }
 
+    const activeNetworkRelayPeerIds = this.config.networkIdentity
+      ? new Set(usableRelayCandidates.map(({ peerId }) => peerId.toString()))
+      : undefined;
+    const activeRelayDiscoveryFilter = buildActiveRelayDiscoveryFilter(activeNetworkRelayPeerIds);
+
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
     const transports: any[] = [
@@ -894,12 +899,16 @@ export class DKGNode {
           ? {
               maxInboundStopStreams: relayCaps.maxInboundStopStreams,
               maxOutboundStopStreams: relayCaps.maxOutboundStopStreams,
+              ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
               ...(isEdgeWithRelays
                 ? { reservationConcurrency: relayReservationCount }
                 : {}),
             }
           : isEdgeWithRelays
-            ? { reservationConcurrency: relayReservationCount }
+            ? {
+                reservationConcurrency: relayReservationCount,
+                ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
+              }
             : undefined,
       ),
     ];
@@ -921,7 +930,13 @@ export class DKGNode {
     const services: Record<string, any> = {
       identify: identify(),
       ping: ping(),
-      dht: kadDHT(buildKadDHTOptions(this.config, DHT_PROTOCOL)),
+      dht: kadDHT(buildKadDHTOptions(
+        this.config,
+        dhtProtocolForNetwork(
+          this.config.networkIdentity?.networkId,
+          this.config.networkIdentity?.chainId,
+        ),
+      )),
       pubsub: gossipsub({
         emitSelf: false,
         allowPublishToZeroTopicPeers: true,
@@ -1096,7 +1111,7 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayFlapConnectionGater(),
+      connectionGater: this.createRelayFlapConnectionGater(activeNetworkRelayPeerIds),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1457,7 +1472,7 @@ export class DKGNode {
     }
   }
 
-  private createRelayFlapConnectionGater(): ConnectionGater {
+  private createRelayFlapConnectionGater(activeNetworkRelayPeerIds?: ReadonlySet<string>): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
@@ -1465,6 +1480,7 @@ export class DKGNode {
     return buildRelayFlapConnectionGater(
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
+      { activeRelayPeerIds: activeNetworkRelayPeerIds },
     ) as ConnectionGater;
   }
 

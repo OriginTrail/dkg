@@ -84,6 +84,7 @@ describe('ProtocolRouter', () => {
       sent: Uint8Array | null = null;
       aborted: Error | null = null;
       closedWithSignal: AbortSignal | undefined;
+      reads = 0;
 
       constructor(
         private readonly chunks: Uint8Array[],
@@ -109,6 +110,7 @@ describe('ProtocolRouter', () => {
         let completed = false;
         return {
           next: async () => {
+            this.reads += 1;
             if (index < this.chunks.length) {
               return { value: this.chunks[index++], done: false };
             }
@@ -129,6 +131,77 @@ describe('ProtocolRouter', () => {
         };
       }
     }
+
+    it('rejects non-admitted inbound peers before reading request bytes', async () => {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      let handlerCalls = 0;
+      const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: (peerId, protocolId, direction) => {
+          admittedCalls.push([peerId, protocolId, direction]);
+          return false;
+        },
+      });
+      router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xaa]);
+      });
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+
+      expect(admittedCalls).toEqual([[REMOTE_PEER, PROTOCOL, 'inbound']]);
+      expect(handlerCalls).toBe(0);
+      expect(stream.reads).toBe(0);
+      expect(stream.sent).toBeNull();
+      expect(stream.aborted?.message).toMatch(/handler error/);
+    });
+
+    it('allows exempt inbound protocols before admission', async () => {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      let handlerCalls = 0;
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: () => false,
+        admissionExemptProtocols: [PROTOCOL],
+      });
+      router.register(PROTOCOL, async () => {
+        handlerCalls += 1;
+        return new Uint8Array([0xaa]);
+      });
+
+      const stream = new FakeInboundStream([new Uint8Array([0x01])]);
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+
+      expect(handlerCalls).toBe(1);
+      expect(stream.sent).toEqual(new Uint8Array([0xaa]));
+      expect(stream.aborted).toBeNull();
+    });
 
     function makeInboundFixture(stopSignal?: AbortSignal) {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
@@ -321,6 +394,40 @@ describe('ProtocolRouter', () => {
       } finally {
         console.error = originalError;
       }
+    });
+  });
+
+  describe('send() network admission', () => {
+    it('rejects non-admitted outbound peers before peer parsing or dialing', async () => {
+      let dialCalls = 0;
+      const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
+      const node = {
+        libp2p: {
+          getConnections: () => {
+            throw new Error('getConnections should not be reached');
+          },
+          dialProtocol: async () => {
+            dialCalls += 1;
+            throw new Error('dialProtocol should not be reached');
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: (peerId, protocolId, direction) => {
+          admittedCalls.push([peerId, protocolId, direction]);
+          return false;
+        },
+      });
+
+      await expect(
+        router.send('not-a-libp2p-peer-id', '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).rejects.toThrow(/not admitted/);
+
+      expect(admittedCalls).toEqual([['not-a-libp2p-peer-id', '/dkg/test/1.0.0', 'outbound']]);
+      expect(dialCalls).toBe(0);
     });
   });
 

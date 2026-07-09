@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RelayFlapGuard, buildRelayFlapConnectionGater, parseCircuitRelayPeerIds } from '../src/relay-flap-guard.js';
+import { RelayFlapGuard, buildActiveRelayDiscoveryFilter, buildRelayFlapConnectionGater, parseCircuitRelayPeerIds } from '../src/relay-flap-guard.js';
 
 const RELAY_A = '12D3KooWRelayA';
 const RELAY_B = '12D3KooWRelayB';
@@ -170,5 +170,37 @@ describe('buildRelayFlapConnectionGater (libp2p wiring)', () => {
     // The inbound hook (relay, remotePeer) also denies the quarantined pair.
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_A }, { toString: () => REMOTE_A })).toBe(true);
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_B })).toBe(false);
+  });
+
+  it('denies circuit-relay paths through relays outside the active network allowlist', () => {
+    const gater = buildRelayFlapConnectionGater(
+      guard(),
+      () => {},
+      { activeRelayPeerIds: new Set([RELAY_A]) },
+    );
+
+    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit/p2p/${REMOTE_A}`)).toBe(false);
+    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit/p2p/${REMOTE_A}`)).toBe(true);
+    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit`)).toBe(true);
+    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${REMOTE_A}`)).toBe(false);
+
+    expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_A }, { toString: () => REMOTE_A })).toBe(false);
+    expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_A })).toBe(true);
+  });
+});
+
+describe('buildActiveRelayDiscoveryFilter', () => {
+  it('suppresses non-active relay discoveries and still de-duplicates active relays', () => {
+    const filter = buildActiveRelayDiscoveryFilter(new Set([RELAY_A]));
+    expect(filter).toBeDefined();
+    const active = { toString: () => RELAY_A };
+    const foreign = { toString: () => RELAY_B };
+
+    expect(filter!.has(foreign)).toBe(true);
+    expect(filter!.has(active)).toBe(false);
+    filter!.add(active);
+    expect(filter!.has(active)).toBe(true);
+    filter!.remove(active);
+    expect(filter!.has(active)).toBe(false);
   });
 });

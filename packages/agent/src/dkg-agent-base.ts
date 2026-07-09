@@ -148,6 +148,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -533,6 +534,7 @@ export class DKGAgentBase {
   gossip!: GossipSubManager;
   router!: ProtocolRouter;
   messenger!: Messenger;
+  networkAdmission: NetworkAdmissionService = new NetworkAdmissionService();
   /** Single in-process peer-address resolver (RFC 07 §3). Used by Messenger
    * today; ProtocolRouter / /api/connect migrate in PR-3 / PR-4. */
   peerResolver!: PeerResolver;
