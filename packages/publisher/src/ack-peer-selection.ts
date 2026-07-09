@@ -1,4 +1,4 @@
-import { PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 
 export interface ACKCandidatePeerSelectionInput {
   connectedPeers: readonly string[];
@@ -18,6 +18,21 @@ type ACKCandidateTierName = 'v2Advertised' | 'confirmedCore' | 'rest';
 interface ACKCandidateTier {
   name: ACKCandidateTierName;
   peers: string[];
+}
+
+export interface ACKCandidatePeerDiagnostic {
+  peerId: string;
+  tier: ACKCandidateTierName;
+  preferred: boolean;
+  allowlisted: boolean;
+  protocolMatch: boolean;
+  selected: boolean;
+  reason: string;
+}
+
+export interface ACKCandidatePeerSelectionResult {
+  peers: string[];
+  diagnostics: ACKCandidatePeerDiagnostic[];
 }
 
 function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
@@ -67,11 +82,52 @@ function buildCandidateTiers(input: {
   ];
 }
 
-export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): string[] {
+function tierByPeer(tiers: readonly ACKCandidateTier[]): Map<string, ACKCandidateTierName> {
+  const result = new Map<string, ACKCandidateTierName>();
+  for (const tier of tiers) {
+    for (const peerId of tier.peers) result.set(peerId, tier.name);
+  }
+  return result;
+}
+
+function diagnosticForPeer(input: {
+  peerId: string;
+  selected: ReadonlySet<string>;
+  tier: ACKCandidateTierName;
+  preferred: ReadonlySet<string>;
+  allowlisted: boolean;
+  protocol?: string;
+  knownCorePeerIds?: ReadonlySet<string>;
+  knownCorePeerIdsV2?: ReadonlySet<string>;
+}): ACKCandidatePeerDiagnostic {
+  const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2
+    ? (input.knownCorePeerIdsV2?.has(input.peerId) ?? false)
+    : input.protocol === PROTOCOL_STORAGE_ACK
+      ? (input.knownCorePeerIds?.has(input.peerId) ?? false)
+      : true;
+  const selected = input.selected.has(input.peerId);
+  let reason = selected ? 'selected' : 'not-selected';
+  if (!input.allowlisted) reason = 'not-allowlisted';
+  else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
+  return {
+    peerId: input.peerId,
+    tier: input.tier,
+    preferred: input.preferred.has(input.peerId),
+    allowlisted: input.allowlisted,
+    protocolMatch,
+    selected,
+    reason,
+  };
+}
+
+export function selectACKCandidatePeersWithDiagnostics(
+  input: ACKCandidatePeerSelectionInput,
+): ACKCandidatePeerSelectionResult {
   const connected = input.connectedPeers.filter((id) => id !== input.selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const preferredACKPeers = normalizePeerIdSet(input.preferredACKPeerIds);
-  const eligible = allowlistedACKPeers.size > 0
+  const allowlistEnabled = allowlistedACKPeers.size > 0;
+  const eligible = allowlistEnabled
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
   const tiers = buildCandidateTiers({
@@ -81,27 +137,24 @@ export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): 
     protocol: input.protocol,
   });
 
-  if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
-    // Identify metadata can be stale. Prefer advertised V2 peers, but keep
-    // fallback candidates so wire negotiation, not cached metadata, is the gate.
-    return flattenTiers(tiers, preferredACKPeers);
-  }
+  const peers = flattenTiers(tiers, preferredACKPeers);
 
-  const confirmedCore = tiers.find((tier) => tier.name === 'confirmedCore')?.peers ?? [];
-  if (confirmedCore.length >= input.requiredACKs && preferredACKPeers.size === 0) {
-    return confirmedCore;
-  }
+  const tierMap = tierByPeer(tiers);
+  const selected = new Set(peers);
+  const diagnostics = connected.map((peerId) => diagnosticForPeer({
+    peerId,
+    selected,
+    tier: tierMap.get(peerId) ?? 'rest',
+    preferred: preferredACKPeers,
+    allowlisted: !allowlistEnabled || allowlistedACKPeers.has(peerId),
+    protocol: input.protocol,
+    knownCorePeerIds: input.knownCorePeerIds,
+    knownCorePeerIdsV2: input.knownCorePeerIdsV2,
+  }));
 
-  if (confirmedCore.length >= input.requiredACKs && preferredACKPeers.size > 0) {
-    // Identify-time core claims are unverified and chain-agnostic, so a
-    // quorum-sized confirmedCore can be entirely foreign-network peers
-    // during the post-connect identify race (e.g. right after a daemon
-    // restart redials stale peer-store entries). When the daemon supplies
-    // network relays as a preference-only list, keep the remaining connected
-    // candidates in the shortcut too; chain truth, not cached identify metadata,
-    // decides which ACKs count.
-    return flattenTiers(tiers, preferredACKPeers);
-  }
+  return { peers, diagnostics };
+}
 
-  return flattenTiers(tiers, preferredACKPeers);
+export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): string[] {
+  return selectACKCandidatePeersWithDiagnostics(input).peers;
 }

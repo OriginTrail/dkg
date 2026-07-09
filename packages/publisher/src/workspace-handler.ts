@@ -590,8 +590,12 @@ export class SharedMemoryHandler {
   }
 
   private resolveLifecycleValue(value: SharedMemoryLifecycleValue | undefined): string | undefined {
-    const resolved = typeof value === 'function' ? value() : value;
-    return resolved === undefined ? undefined : resolved.toString();
+    try {
+      const resolved = typeof value === 'function' ? value() : value;
+      return resolved === undefined ? undefined : resolved.toString();
+    } catch {
+      return undefined;
+    }
   }
 
   private logSwmLifecycleEvent(

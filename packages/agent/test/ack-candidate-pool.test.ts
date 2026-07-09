@@ -1,11 +1,9 @@
 // ack-candidate-pool.test.ts
 //
-// #1093 follow-up (Codex review on PR #1107): `getACKCandidatePeers()` must
-// gate its confirmed-core shortcut on the CHAIN's runtime ACK quorum
-// (`lastKnownRequiredACKs`, refreshed by the V10 ACK provider before each
-// collect), not the hard-coded DEFAULT_REQUIRED_ACKS. On networks configured
-// above 3 signatures, a 3-strong confirmed-core subset is still below quorum —
-// returning only it re-introduces `pool_below_quorum`.
+// ACK candidate selection ranks identify-derived core metadata first but keeps
+// connected fallbacks dialable. `knownCorePeerIds` is add-only/partial and can
+// contain stale or saturated peers; narrowing to a quorum-sized metadata tier
+// reintroduces ACK quorum failures when healthy unclassified cores are present.
 import { describe, it, expect } from 'vitest';
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
@@ -55,13 +53,13 @@ async function buildAgent(opts: {
   return internals;
 }
 
-describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 / Codex PR #1107)', () => {
-  it('default quorum (3): a 3-strong confirmed-core set is returned alone', async () => {
+describe('getACKCandidatePeers — confirmed peers first with stale-metadata fallback (#1093 / #1482)', () => {
+  it('default quorum (3): a 3-strong confirmed-core set keeps connected fallbacks dialable', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 3),
       connected: [...CORE.slice(0, 3), ...EDGE],
     });
-    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 3));
+    expect(a.getACKCandidatePeers()).toEqual([...CORE.slice(0, 3), ...EDGE]);
   });
 
   it('runtime quorum 5: the SAME 3-strong confirmed-core set is NOT trusted alone — all connected peers are returned, cores first', async () => {
@@ -89,8 +87,9 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
       connected: [...CORE, ...EDGE],
       lastKnownRequiredACKs: 4,
     });
-    // 4 confirmed ≥ quorum 4 → trust the confirmed-core subset.
-    expect(at.getACKCandidatePeers()).toEqual(CORE);
+    // 4 confirmed ≥ quorum 4, but identify-derived metadata can be stale.
+    // Keep connected fallbacks dialable after the confirmed tier.
+    expect(at.getACKCandidatePeers()).toEqual([...CORE, ...EDGE]);
   });
 
   it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
@@ -103,7 +102,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 
-  it('a configured ACK preference list orders listed peers first but never excludes connected peers (2026-07-07 incident)', async () => {
+  it('a configured ACK preference list orders listed peers first and retains below-quorum fallback candidates (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
       confirmedCores: [CORE[2]],
@@ -112,13 +111,13 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
 
     // Listed peers are preferred within each tier (confirmed cores, then
-    // rest), but foreign/unlisted peers stay dialable: signer validity is
-    // chain truth (sharding-table membership per collected ACK), and a
-    // hard gate here capped the mainnet pool at the bundled relay list.
+    // rest). Because the confirmed tier is below quorum, every connected
+    // fallback candidate remains dialable; this intentionally avoids the old
+    // 2x-quorum cap making quorum unreachable under correlated failures.
     expect(a.getACKCandidatePeers()).toEqual([
       CORE[2],
       CORE[0], CORE[1], CORE[3],
-      ...foreign,
+      foreign[0], foreign[1], foreign[2],
     ]);
   });
 
@@ -140,7 +139,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     expect(out.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('V2 folded-private rounds keep unlisted V2-advertising cores dialable, listed peers first within each tier', async () => {
+  it('V2 folded-private rounds prefer protocol-capable peers, listed peers first within the V2 tier', async () => {
     const relays = ['relay-1', 'relay-2'];
     const upgraded = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
     const a = await buildAgent({
@@ -150,21 +149,19 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     });
     for (const id of upgraded) a.knownCorePeerIdsV2.add(id);
 
-    // v2Advertised tier first (none listed → connection order), then the
-    // remaining confirmed cores (both listed).
     expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
       ...upgraded,
       ...relays,
     ]);
   });
 
-  it('runtime quorum below default (2): 2 confirmed cores already satisfy it', async () => {
+  it('runtime quorum below default (2): 2 confirmed cores stay first but do not suppress fallbacks', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 2),
       connected: [...CORE.slice(0, 2), ...EDGE],
       lastKnownRequiredACKs: 2,
     });
-    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 2));
+    expect(a.getACKCandidatePeers()).toEqual([...CORE.slice(0, 2), ...EDGE]);
   });
 
   it('excludes self from the candidate pool', async () => {
@@ -200,7 +197,26 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     ]);
   });
 
-  it('V2 folded-private ACKs keep fallback candidates even when cached V2 metadata appears quorum-sized', async () => {
+  it('V2 folded-private ACK fallback is retained, not capped, while advertised V2 peers are below quorum', async () => {
+    const extraEdge = 'edge-3';
+    const a = await buildAgent({
+      confirmedCores: CORE,
+      connected: [...CORE, ...EDGE, extraEdge],
+      lastKnownRequiredACKs: 3,
+    });
+    a.knownCorePeerIdsV2.add(CORE[0]);
+
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
+      CORE[0],
+      CORE[1],
+      CORE[2],
+      CORE[3],
+      ...EDGE,
+      extraEdge,
+    ]);
+  });
+
+  it('V2 folded-private ACKs retain fallback candidates even when cached V2 metadata reaches quorum', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: [...CORE, ...EDGE],
@@ -218,7 +234,7 @@ describe('getACKCandidatePeers — quorum-aware confirmed-core shortcut (#1093 /
     ]);
   });
 
-  it('V2 folded-private ACKs do not let stale identify metadata hide a connected upgraded core', async () => {
+  it('V2 folded-private ACKs keep fallback candidates after the protocol-capable tier', async () => {
     const a = await buildAgent({
       confirmedCores: CORE,
       connected: CORE,

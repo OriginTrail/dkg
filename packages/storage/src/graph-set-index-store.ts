@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -53,6 +53,10 @@ export class GraphSetIndexStore implements TripleStore {
     return this.inner.queryCancellation;
   }
 
+  getPressureSnapshot(): StorePressureSnapshot | undefined {
+    return this.inner.getPressureSnapshot?.();
+  }
+
   private readonly inner: TripleStore;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
@@ -78,40 +82,40 @@ export class GraphSetIndexStore implements TripleStore {
     this.onMutation = options.onMutation;
   }
 
-  async insert(quads: Quad[]): Promise<void> {
+  async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) {
-      await this.inner.insert(quads);
+      await this.inner.insert(quads, options);
       return;
     }
-    await this.inner.insert(quads);
+    await this.inner.insert(quads, options);
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
     this.addGraphs(touched, 'insert');
   }
 
-  async delete(quads: Quad[]): Promise<void> {
+  async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) {
-      await this.inner.delete(quads);
+      await this.inner.delete(quads, options);
       return;
     }
-    await this.inner.delete(quads);
+    await this.inner.delete(quads, options);
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'delete'));
+    await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'delete', options));
   }
 
-  async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
+  async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
     if (!this.enabled) {
-      return this.inner.deleteByPattern(pattern);
+      return this.inner.deleteByPattern(pattern, options);
     }
-    const removed = await this.inner.deleteByPattern(pattern);
+    const removed = await this.inner.deleteByPattern(pattern, options);
     if (removed <= 0) return removed;
     const graph = pattern.graph;
     if (graph) {
       this.bumpMutation();
-      await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern'));
+      await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern', options));
     } else {
       // No target graph → can't know which graphs emptied; defer to a single
       // lazy rebuild on the next read instead of a full scan now.
@@ -135,15 +139,15 @@ export class GraphSetIndexStore implements TripleStore {
     return result;
   }
 
-  async update(sparql: string): Promise<void> {
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new Error('GraphSetIndexStore: inner store does not support update()');
     }
     if (!this.enabled) {
-      await this.inner.update(sparql);
+      await this.inner.update(sparql, options);
       return;
     }
-    await this.inner.update(sparql);
+    await this.inner.update(sparql, options);
     // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create
     // or drop named graphs the index must learn about. Rather than re-scan the
     // whole store on every UPDATE (the thrash), mark dirty: the next read does a
@@ -151,14 +155,14 @@ export class GraphSetIndexStore implements TripleStore {
     this.scheduleFullRefresh('update');
   }
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (!this.enabled) {
-      return this.inner.hasGraph(graphUri);
+      return this.inner.hasGraph(graphUri, options);
     }
     if (this.pendingFullRefresh) {
-      return (await this.ensureGraphSet()).has(graphUri);
+      return (await this.ensureGraphSet(options)).has(graphUri);
     }
-    const hasGraph = await this.inner.hasGraph(graphUri);
+    const hasGraph = await this.inner.hasGraph(graphUri, options);
     const indexed = this.graphs?.has(graphUri);
     if (this.graphs && indexed !== hasGraph) {
       this.bumpMutation();
@@ -172,12 +176,12 @@ export class GraphSetIndexStore implements TripleStore {
     await this.inner.createGraph(graphUri);
   }
 
-  async dropGraph(graphUri: string): Promise<void> {
+  async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     if (!this.enabled) {
-      await this.inner.dropGraph(graphUri);
+      await this.inner.dropGraph(graphUri, options);
       return;
     }
-    await this.inner.dropGraph(graphUri);
+    await this.inner.dropGraph(graphUri, options);
     this.bumpMutation();
     this.removeGraphs([graphUri], 'dropGraph');
   }
@@ -201,23 +205,23 @@ export class GraphSetIndexStore implements TripleStore {
     return [...graphs].filter((graph) => graph.startsWith(prefix));
   }
 
-  async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
+  async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) {
-      return this.inner.deleteBySubjectPrefix(graphUri, prefix);
+      return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     }
-    const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix);
+    const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     if (removed <= 0) return removed;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix'));
+    await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options));
     return removed;
   }
 
-  async countQuads(graphUri?: string): Promise<number> {
-    return this.inner.countQuads(graphUri);
+  async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
+    return this.inner.countQuads(graphUri, options);
   }
 
-  async flush(): Promise<void> {
-    await this.inner.flush?.();
+  async flush(options?: QueryOptions): Promise<void> {
+    await this.inner.flush?.(options);
   }
 
   async close(): Promise<void> {
@@ -235,14 +239,14 @@ export class GraphSetIndexStore implements TripleStore {
       return this.graphs;
     }
     return raceAgainstAbort(
-      this.refreshIndex(this.pendingFullRefresh ?? (this.graphs ? 'revalidate' : 'seed')),
+      this.refreshIndex(this.pendingFullRefresh ?? (this.graphs ? 'revalidate' : 'seed'), options),
       options?.signal,
     );
   }
 
-  private async refreshIndex(source: GraphSetRefreshSource): Promise<Set<string>> {
+  private async refreshIndex(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     if (this.refreshInFlight) return this.refreshInFlight;
-    const task = this.refreshIndexLoop(source);
+    const task = this.refreshIndexLoop(source, options);
     this.refreshInFlight = task;
     try {
       return await task;
@@ -251,11 +255,11 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshIndexLoop(source: GraphSetRefreshSource): Promise<Set<string>> {
+  private async refreshIndexLoop(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     for (;;) {
       const sourceForScan = this.pendingFullRefresh ?? source;
       const generation = this.mutationGeneration;
-      const next = new Set((await this.inner.listGraphs()).filter(Boolean));
+      const next = new Set((await this.inner.listGraphs(options)).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
@@ -318,11 +322,15 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshTouchedGraphs(graphs: string[], source: GraphSetMutationSource): Promise<void> {
+  private async refreshTouchedGraphs(
+    graphs: string[],
+    source: GraphSetMutationSource,
+    options?: QueryOptions,
+  ): Promise<void> {
     if (!this.graphs) return;
     for (const graph of graphs) {
       if (!graph) continue;
-      if (await this.inner.hasGraph(graph)) {
+      if (await this.inner.hasGraph(graph, options)) {
         this.addGraphs([graph], source);
       } else {
         this.removeGraphs([graph], source);

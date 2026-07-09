@@ -9,6 +9,7 @@ import {
   registerTripleStoreAdapter,
   type GraphSetMutationEvent,
   type Quad,
+  type QueryOptions,
   type QueryResult,
   type TripleStore,
 } from '../src/index.js';
@@ -24,34 +25,42 @@ function q(graph: string, subject = 'urn:s'): Quad {
 
 class CountingStore implements TripleStore {
   listGraphsCalls = 0;
+  hasGraphOptions: Array<QueryOptions | undefined> = [];
+  listGraphsOptions: Array<QueryOptions | undefined> = [];
   listGraphsGate: Promise<void> | null = null;
   failListGraphs = false;
 
   constructor(protected readonly inner: TripleStore) {}
 
-  insert(quads: Quad[]): Promise<void> { return this.inner.insert(quads); }
-  delete(quads: Quad[]): Promise<void> { return this.inner.delete(quads); }
-  deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.inner.deleteByPattern(pattern); }
-  query(sparql: string): Promise<QueryResult> { return this.inner.query(sparql); }
-  async update(sparql: string): Promise<void> {
+  insert(quads: Quad[], options?: QueryOptions): Promise<void> { return this.inner.insert(quads, options); }
+  delete(quads: Quad[], options?: QueryOptions): Promise<void> { return this.inner.delete(quads, options); }
+  deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
+    return this.inner.deleteByPattern(pattern, options);
+  }
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult> { return this.inner.query(sparql, options); }
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') throw new Error('inner store does not support update()');
-    await this.inner.update(sparql);
+    await this.inner.update(sparql, options);
   }
-  hasGraph(graphUri: string): Promise<boolean> { return this.inner.hasGraph(graphUri); }
+  hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    this.hasGraphOptions.push(options);
+    return this.inner.hasGraph(graphUri, options);
+  }
   createGraph(graphUri: string): Promise<void> { return this.inner.createGraph(graphUri); }
-  dropGraph(graphUri: string): Promise<void> { return this.inner.dropGraph(graphUri); }
-  deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    return this.inner.deleteBySubjectPrefix(graphUri, prefix);
+  dropGraph(graphUri: string, options?: QueryOptions): Promise<void> { return this.inner.dropGraph(graphUri, options); }
+  deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
+    return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
   }
-  countQuads(graphUri?: string): Promise<number> { return this.inner.countQuads(graphUri); }
-  flush(): Promise<void> { return this.inner.flush?.() ?? Promise.resolve(); }
+  countQuads(graphUri?: string, options?: QueryOptions): Promise<number> { return this.inner.countQuads(graphUri, options); }
+  flush(options?: QueryOptions): Promise<void> { return this.inner.flush?.(options) ?? Promise.resolve(); }
   close(): Promise<void> { return this.inner.close(); }
 
-  async listGraphs(): Promise<string[]> {
+  async listGraphs(options?: QueryOptions): Promise<string[]> {
     this.listGraphsCalls++;
+    this.listGraphsOptions.push(options);
     if (this.listGraphsGate) await this.listGraphsGate;
     if (this.failListGraphs) throw new Error('listGraphs failed');
-    return this.inner.listGraphs();
+    return this.inner.listGraphs(options);
   }
 }
 
@@ -62,9 +71,9 @@ function emptyBindings(): QueryResult {
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (this.failHasGraph) throw new Error('hasGraph failed');
-    return super.hasGraph(graphUri);
+    return super.hasGraph(graphUri, options);
   }
 }
 
@@ -72,6 +81,7 @@ type MutationHookInput = {
   sparql: string;
   seq: number;
   inner: TripleStore;
+  options?: QueryOptions;
 };
 
 class MutationHookStore extends CountingStore {
@@ -88,22 +98,22 @@ class MutationHookStore extends CountingStore {
     super(inner);
   }
 
-  async query(sparql: string): Promise<QueryResult> {
+  async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     if (this.hooks.onQuery) {
       const seq = this.querySeq++;
-      const result = await this.hooks.onQuery({ sparql, seq, inner: this.inner });
+      const result = await this.hooks.onQuery({ sparql, seq, inner: this.inner, options });
       if (result !== undefined) return result;
     }
-    return super.query(sparql);
+    return super.query(sparql, options);
   }
 
-  async update(sparql: string): Promise<void> {
+  async update(sparql: string, options?: QueryOptions): Promise<void> {
     if (this.hooks.onUpdate) {
       const seq = this.updateSeq++;
-      await this.hooks.onUpdate({ sparql, seq, inner: this.inner });
+      await this.hooks.onUpdate({ sparql, seq, inner: this.inner, options });
       return;
     }
-    await super.update(sparql);
+    await super.update(sparql, options);
   }
 }
 
@@ -218,6 +228,24 @@ describe('GraphSetIndexStore', () => {
       type: 'graph-removed',
       graph,
       source: 'revalidate',
+    });
+  });
+
+  it('inherits mutator priority for touched-graph maintenance reads', async () => {
+    const graph = 'did:dkg:context-graph:ack-maintenance';
+    const counting = new CountingStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+
+    await store.deleteByPattern(
+      { graph, predicate: 'urn:p' },
+      { priority: 'ack', source: 'test.ack.deleteByPattern' },
+    );
+
+    expect(counting.hasGraphOptions.at(-1)).toMatchObject({
+      priority: 'ack',
+      source: 'test.ack.deleteByPattern',
     });
   });
 

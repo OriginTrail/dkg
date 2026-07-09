@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -219,6 +219,13 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+import {
+  getSyncBackpressureSnapshot,
+  resolveBooleanSwitch,
+  resolveNonNegativeIntegerSwitch,
+  resolveSyncGlobalMaxInflight,
+  withGlobalSyncBackpressure,
+} from './sync/backpressure.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -515,6 +522,74 @@ type SharedMemorySyncContextGraphPlan = {
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
+  return resolveBooleanSwitch(config.syncReconcilerEnabled, 'DKG_SYNC_RECONCILER_ENABLED', true);
+}
+
+function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
+  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
+}
+
+function durableSyncEnabled(config: DKGAgentConfig): boolean {
+  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
+}
+
+function syncGlobalLimit(config: DKGAgentConfig): number | undefined {
+  return resolveSyncGlobalMaxInflight(config.syncGlobalMaxInflight);
+}
+
+function emptyDurableSyncResult(): DurableSyncResult {
+  return {
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    metaOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+    rejectedKcs: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    deniedPhases: 0,
+  };
+}
+
+function emptySharedMemorySyncResult(): SharedMemorySyncResult {
+  return {
+    insertedTriples: 0,
+    fetchedMetaTriples: 0,
+    fetchedDataTriples: 0,
+    insertedMetaTriples: 0,
+    insertedDataTriples: 0,
+    bytesReceived: 0,
+    resumedPhases: 0,
+    timedOutPhases: 0,
+    completedPhases: 0,
+    checkpointAdvances: 0,
+    emptyResponses: 0,
+    droppedDataTriples: 0,
+    failedPeers: 0,
+    failedPhases: 0,
+    deniedPhases: 0,
+  };
+}
+
+function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
+  return {
+    replacedRoots: 0,
+    insertedDataQuads: 0,
+    insertedMetaQuads: 0,
+    droppedDataTriples: 0,
+    completed: true,
+  };
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
@@ -1249,26 +1324,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
+                const syncPressure = getSyncBackpressureSnapshot(syncGlobalLimit(this.config));
+                const syncPressureLabel =
+                  `syncGlobalInflight=${syncPressure.inflight} ` +
+                  `syncGlobalQueued=${syncPressure.queued} ` +
+                  `syncGlobalLimit=${syncPressure.limit ?? 'unbounded'}`;
                 this.log.warn(
                   attemptCtx,
                   `V10 StorageACK declined: code=${details.code} ` +
-                  `cg=${details.contextGraphId} reason=${details.message}`,
+                  `cg=${details.contextGraphId} reason=${details.message} ${syncPressureLabel}`,
                 );
               },
-              onStorageAckDecision: isKaPublishLifecycleDebugLoggingEnabled()
-                ? createStorageAckLifecycleObserver({
-                    logger: this.log,
-                    localPeerId: () => this.peerId,
-                    localNodeIdentityId: () => onChainIdentityId,
-                    detail: 'debug',
-                    resolveAssetUalForPublishIntent: ({ intent }) =>
-                      resolveStorageAckLifecycleAssetUalFromLocalSwm({
-                        store: this.store,
-                        chain: this.chain,
-                        intent,
-                      }),
-                  })
-                : undefined,
+              onStorageAckDecision: createStorageAckLifecycleObserver({
+                logger: this.log,
+                localPeerId: () => this.peerId,
+                localNodeIdentityId: () => onChainIdentityId,
+                shouldObserve: (decision) =>
+                  isKaPublishLifecycleDebugLoggingEnabled() || isStorageACKDecline(decision.ack),
+                detailForDecision: (decision) =>
+                  isStorageACKDecline(decision.ack) ? 'summary' : 'debug',
+                resolveAssetUalForPublishIntent: ({ intent }) =>
+                  resolveStorageAckLifecycleAssetUalFromLocalSwm({
+                    store: this.store,
+                    chain: this.chain,
+                    intent,
+                  }),
+              }),
               // PR5 ACK-provenance — bind to the agent's host-mode
               // bookkeeping so every signed ACK carries which of the
               // four LU-6 Phase B discovery paths brought this CG's
@@ -2243,13 +2324,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the top of this file (`SYNC_RECONCILER_INTERVAL_MS`,
     // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
     // for the full design rationale.
-    this.syncReconcilerTimer = setInterval(() => {
-      this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Sync reconciler tick failed: ${message}`);
-      });
-    }, SYNC_RECONCILER_INTERVAL_MS);
-    if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
+    if (syncReconcilerEnabled(this.config)) {
+      this.syncReconcilerTimer = setInterval(() => {
+        this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Sync reconciler tick failed: ${message}`);
+        });
+      }, SYNC_RECONCILER_INTERVAL_MS);
+      if (this.syncReconcilerTimer.unref) this.syncReconcilerTimer.unref();
+    } else {
+      this.log.warn(ctx, `Skipping periodic sync reconciler startup (DKG_SYNC_RECONCILER_ENABLED=0)`);
+    }
 
     // A.4-lite+: keep a small set of Core nodes warm (connection pinned +
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays
@@ -2468,6 +2553,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
+    if (!syncOnConnectEnabled(this.config)) {
+      return false;
+    }
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
@@ -2503,6 +2591,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
   ): Promise<void> {
+    if (!syncOnConnectEnabled(this.config)) {
+      return;
+    }
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
     if (backoff && now < backoff.nextRetryAt) return;
@@ -2563,6 +2654,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.started) {
       return 'not-started';
     }
+    if (!syncOnConnectEnabled(this.config)) {
+      return 'not-started';
+    }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
@@ -2598,7 +2692,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         stopOnBackoffWorthyFailure: true,
         sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
       }),
-      syncSharedMemoryOnConnect: this.config.syncSharedMemoryOnConnect ?? true,
+      syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);
@@ -2786,6 +2880,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.knownCorePeerIdsV2.delete(peerId);
     }
     if (!this.skippedNoSyncPeers.has(peerId)) return;
+    if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
     this.skippedNoSyncPeers.delete(peerId);
     const ctx = createOperationContext('sync');
@@ -2816,6 +2911,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
     if (!this.started) return;
+    if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
     const now = Date.now();
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
@@ -3179,25 +3275,40 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: { stopOnBackoffWorthyFailure?: boolean },
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    return runDurableSync({
-      ctx,
-      remotePeerId,
-      contextGraphIds,
-      onPhase,
-      onAccessDenied,
-      syncAgentsMeta: resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
-      createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-      fetchSyncPages: this.fetchSyncPages.bind(this),
-      sinceBatchIdFor,
-      stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
-      processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
-      storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads),
-      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-      logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-      logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-    });
+    if (!durableSyncEnabled(this.config)) {
+      this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
+      return emptyDurableSyncResult();
+    }
+    return withGlobalSyncBackpressure(
+      {
+        limit: syncGlobalLimit(this.config),
+        ctx,
+        label: `durable:${remotePeerId.slice(-8)}`,
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      },
+      () => runDurableSync({
+        ctx,
+        remotePeerId,
+        contextGraphIds,
+        onPhase,
+        onAccessDenied,
+        syncAgentsMeta: resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+        createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+        fetchSyncPages: this.fetchSyncPages.bind(this),
+        sinceBatchIdFor,
+        stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+        processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
+        storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
+          priority: 'background',
+          source: 'agent.durableSync.storeInsert',
+        }),
+        deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+        setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+        logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+        logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+      }),
+    );
   }
 
   /**
@@ -3411,6 +3522,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
+    if (!durableSyncEnabled(this.config)) {
+      this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
+      return emptySharedMemorySyncResult();
+    }
     const planned = options?.sharedMemorySyncPlan;
     const plan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
       ? planned
@@ -3434,52 +3549,63 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
           emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
         }
-      : await runSharedMemorySync({
-          ctx,
-          remotePeerId,
-          contextGraphIds: publicContextGraphIds,
-          createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-          fetchSyncPages: this.fetchSyncPages.bind(this),
-          processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
-            this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
-              wsDataQuads,
-              wsMetaQuads,
-              contextGraphId,
-              registeredSubGraphNames,
-              excludedSubGraphNames,
-            ),
-          getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
-          getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
-          stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
-          ensureContextGraph: async (contextGraphId) => {
-            const graphManager = new GraphManager(this.store);
-            await graphManager.ensureContextGraph(contextGraphId);
+      : await withGlobalSyncBackpressure(
+          {
+            limit: syncGlobalLimit(this.config),
+            ctx,
+            label: `shared-memory:${remotePeerId.slice(-8)}`,
+            logInfo: (opCtx, message) => this.log.info(opCtx, message),
           },
-          storeInsert: async (quads) => {
-            // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
-            // literals BEFORE insert so the SWM page cursor advances instead
-            // of the store throwing and the page re-fetching forever.
-            const inserted = await insertWithOversizeGuard(
-              (kept) => this.store.insert(kept),
-              quads,
-              { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
-              'swm-sync',
-            );
-            this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
-          },
-          publicSnapshotStore: this.publicSnapshotStore,
-          deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-          ensureOwnedMap: (contextGraphId) => {
-            if (!this.workspaceOwnedEntities.has(contextGraphId)) {
-              this.workspaceOwnedEntities.set(contextGraphId, new Map());
-            }
-            return this.workspaceOwnedEntities.get(contextGraphId)!;
-          },
-          logInfo: (opCtx, message) => this.log.info(opCtx, message),
-          logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-          logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-        });
+          () => runSharedMemorySync({
+            ctx,
+            remotePeerId,
+            contextGraphIds: publicContextGraphIds,
+            createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+            fetchSyncPages: this.fetchSyncPages.bind(this),
+            processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+              this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+                wsDataQuads,
+                wsMetaQuads,
+                contextGraphId,
+                registeredSubGraphNames,
+                excludedSubGraphNames,
+              ),
+            getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
+            getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
+            stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+            ensureContextGraph: async (contextGraphId) => {
+              const graphManager = new GraphManager(this.store);
+              await graphManager.ensureContextGraph(contextGraphId);
+            },
+            storeInsert: async (quads) => {
+              // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
+              // literals BEFORE insert so the SWM page cursor advances instead
+              // of the store throwing and the page re-fetching forever.
+              const inserted = await insertWithOversizeGuard(
+                (kept) => this.store.insert(kept, {
+                  priority: 'background',
+                  source: 'agent.sharedMemorySync.storeInsert',
+                }),
+                quads,
+                { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+                'swm-sync',
+              );
+              this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
+            },
+            publicSnapshotStore: this.publicSnapshotStore,
+            deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+            setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+            ensureOwnedMap: (contextGraphId) => {
+              if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+                this.workspaceOwnedEntities.set(contextGraphId, new Map());
+              }
+              return this.workspaceOwnedEntities.get(contextGraphId)!;
+            },
+            logInfo: (opCtx, message) => this.log.info(opCtx, message),
+            logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+            logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+          }),
+        );
 
     // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
     // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
@@ -3537,23 +3663,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
   ): Promise<RecoverContextGraphSwmResult> {
     const ctx = createOperationContext('sync');
+    if (!durableSyncEnabled(this.config)) {
+      this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
+      return emptySwmRecoveryResult();
+    }
     const admission = await getSharedMemorySubGraphAdmission(
       this.store, contextGraphId, this.listSubGraphs(contextGraphId),
     );
-    return recoverContextGraphSwm({
-      ctx,
-      remotePeerId,
-      contextGraphId,
-      deadline: this.createContextGraphSyncDeadline(1),
+    return withGlobalSyncBackpressure(
+      {
+        limit: syncGlobalLimit(this.config),
+        ctx,
+        label: `swm-recovery:${remotePeerId.slice(-8)}`,
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      },
+      () => recoverContextGraphSwm({
+        ctx,
+        remotePeerId,
+        contextGraphId,
+        deadline: this.createContextGraphSyncDeadline(1),
       // R9/R10 — pin recovery=true at the lifecycle boundary so swm-recovery's
       // deps signature stays unchanged. This forks BOTH the checkpoint namespace
       // (R10: a distinct `|recovery` cursor that never mutates the shared
       // incremental-sync cursor) AND the request envelope auth mode (R9: the
       // responder gates via the strict members-only `isMemberRecoveryAuthorized`).
-      fetchSyncPages: (ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2) =>
-        this.fetchSyncPages(ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2, undefined, undefined, undefined, true),
-      processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, cgId, registered, excluded) =>
-        this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, cgId, registered, excluded),
+        fetchSyncPages: (ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2) =>
+          this.fetchSyncPages(ctx2, remotePeerId2, contextGraphId2, includeSharedMemory2, phase2, graphUri2, deadline2, undefined, undefined, undefined, true),
+        processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, cgId, registered, excluded) =>
+          this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(wsDataQuads, wsMetaQuads, cgId, registered, excluded),
       // SwmRecoveryStore: invalidate the list cache + mark the meta projection
       // dirty on insert (parity with runSharedMemorySync's
       // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
@@ -3561,7 +3698,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         insert: async (quads) => {
           // Oversize guard (OT-RFC-56) — recovered rows are peer data too.
           const inserted = await insertWithOversizeGuard(
-            (kept) => this.store.insert(kept),
+            (kept) => this.store.insert(kept, {
+              priority: 'background',
+              source: 'agent.swmRecovery.insert',
+            }),
             quads,
             { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
             'swm-recovery',
@@ -3571,8 +3711,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           }
         },
-        deleteByPattern: (pattern) => this.store.deleteByPattern(pattern),
-        deleteBySubjectPrefix: (graph, prefix) => this.store.deleteBySubjectPrefix(graph, prefix),
+        deleteByPattern: (pattern) => this.store.deleteByPattern(pattern, {
+          priority: 'background',
+          source: 'agent.swmRecovery.deleteByPattern',
+        }),
+        deleteBySubjectPrefix: (graph, prefix) => this.store.deleteBySubjectPrefix(graph, prefix, {
+          priority: 'background',
+          source: 'agent.swmRecovery.deleteBySubjectPrefix',
+        }),
       },
       // Codex high: REPLACE per-root SWM meta (mirror the publisher's
       // deleteMetaForRoot). For each recovered root, drop the op→root-entity
@@ -3589,22 +3735,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           for (const entity of entities) {
             const ops = await this.store.query(
               `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { ?op ${ENTITY_PRED_ALT} <${entity}> } }`,
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.replaceMetaForRoots.findOps',
+              },
             );
             if (ops.type !== 'bindings') continue;
             for (const row of ops.bindings) {
               const op = row['op'];
               if (!op) continue;
-              await this.store.delete([
-                { subject: op, predicate: DKG_ROOT_ENTITY_LEGACY, object: entity, graph: metaGraph },
-                { subject: op, predicate: DKG_ENTITY, object: entity, graph: metaGraph },
-              ]);
+              await this.store.delete(
+                [
+                  { subject: op, predicate: DKG_ROOT_ENTITY_LEGACY, object: entity, graph: metaGraph },
+                  { subject: op, predicate: DKG_ENTITY, object: entity, graph: metaGraph },
+                ],
+                {
+                  priority: 'background',
+                  source: 'agent.swmRecovery.replaceMetaForRoots.deleteLinks',
+                },
+              );
               const remaining = await this.store.query(
                 `SELECT (COUNT(DISTINCT ?r) AS ?c) WHERE { GRAPH <${metaGraph}> { <${op}> ${ENTITY_PRED_ALT} ?r } }`,
+                {
+                  priority: 'background',
+                  source: 'agent.swmRecovery.replaceMetaForRoots.countRoots',
+                },
               );
               const raw = remaining.type === 'bindings' ? remaining.bindings[0]?.['c'] : undefined;
               const countVal = raw ? parseInt(String(raw).match(/\d+/)?.[0] ?? '0', 10) : 0;
               if (countVal === 0) {
-                await this.store.deleteByPattern({ graph: metaGraph, subject: op });
+                await this.store.deleteByPattern(
+                  { graph: metaGraph, subject: op },
+                  {
+                    priority: 'background',
+                    source: 'agent.swmRecovery.replaceMetaForRoots.deleteOp',
+                  },
+                );
               }
             }
           }
@@ -3625,9 +3791,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         return this.workspaceOwnedEntities.get(ownershipKey)!;
       },
-      logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-    });
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+        logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+      }),
+    );
   }
 
   createContextGraphSyncDeadline(this: DKGAgent, remainingContextGraphs: number): number {

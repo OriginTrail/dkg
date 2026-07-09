@@ -21,6 +21,8 @@ type StorageAckLifecycleValue = string | number | bigint | (() => string | numbe
 export interface StorageAckLifecycleObserverOptions {
   localPeerId: StorageAckLifecycleValue;
   localNodeIdentityId: StorageAckLifecycleValue;
+  shouldObserve?: (decision: StorageAckDecision) => boolean;
+  detailForDecision?: (decision: StorageAckDecision) => KaLifecycleLogDetail | undefined;
   resolveAssetUalForPublishIntent: (input: {
     intent: PublishIntentMsg;
     ack: StorageACKMsg;
@@ -39,6 +41,9 @@ export function createStorageAckLifecycleObserver(
 
   return async (decision: StorageAckDecision) => {
     if (!decision.intent) return;
+    if (options.shouldObserve && !options.shouldObserve(decision)) return;
+    const ack = decision.ack;
+    const declined = isStorageACKDecline(ack);
     const assetUal = await resolveAssetUalWithDeadline({
       decision,
       log,
@@ -50,8 +55,6 @@ export function createStorageAckLifecycleObserver(
     const localNodeIdentityId = resolveLifecycleValue(options.localNodeIdentityId);
     if (!localPeerId || !localNodeIdentityId) return;
 
-    const ack = decision.ack;
-    const declined = isStorageACKDecline(ack);
     const signatureR = ack.coreNodeSignatureR instanceof Uint8Array
       ? ack.coreNodeSignatureR
       : new Uint8Array(ack.coreNodeSignatureR ?? []);
@@ -67,7 +70,7 @@ export function createStorageAckLifecycleObserver(
       localPeerId,
       localNodeIdentityId,
       peer: decision.peerId,
-      detail: options.detail,
+      detail: options.detailForDecision?.(decision) ?? options.detail,
       level: declined ? 'warn' : 'info',
       metadata: {
         contextGraphId: ack.contextGraphId,
@@ -132,8 +135,12 @@ async function resolveAssetUalWithDeadline(input: {
 }
 
 function resolveLifecycleValue(value: StorageAckLifecycleValue): string | undefined {
-  const resolved = typeof value === 'function' ? value() : value;
-  return resolved === undefined ? undefined : resolved.toString();
+  try {
+    const resolved = typeof value === 'function' ? value() : value;
+    return resolved === undefined ? undefined : resolved.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function compactObserverText(value: string): string {

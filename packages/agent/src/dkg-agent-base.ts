@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -426,23 +426,23 @@ export function createListContextGraphsCacheInvalidatingStore(
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
-    insert(quads) {
+    insert(quads, options) {
       return invalidateAfterMutation(
-        () => innerStore.insert(quads),
+        () => innerStore.insert(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(quads),
       );
     },
-    delete(quads) {
+    delete(quads, options) {
       return invalidateAfterMutation(
-        () => innerStore.delete(quads),
+        () => innerStore.delete(quads, options),
         () => quads.length > 0,
         () => markProjectionDirty?.(),
       );
     },
-    deleteByPattern(pattern) {
+    deleteByPattern(pattern, options) {
       return invalidateAfterMutation(
-        () => innerStore.deleteByPattern(pattern),
+        () => innerStore.deleteByPattern(pattern, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
       );
@@ -460,9 +460,9 @@ export function createListContextGraphsCacheInvalidatingStore(
     createGraph(graphUri) {
       return innerStore.createGraph(graphUri);
     },
-    dropGraph(graphUri) {
+    dropGraph(graphUri, options) {
       return invalidateAfterMutation(
-        () => innerStore.dropGraph(graphUri),
+        () => innerStore.dropGraph(graphUri, options),
         () => true,
         () => markProjectionDirty?.(),
       );
@@ -475,15 +475,15 @@ export function createListContextGraphsCacheInvalidatingStore(
         ? innerStore.listGraphsByPrefix(prefix, options)
         : innerStore.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix)));
     },
-    deleteBySubjectPrefix(graphUri, prefix) {
+    deleteBySubjectPrefix(graphUri, prefix, options) {
       return invalidateAfterMutation(
-        () => innerStore.deleteBySubjectPrefix(graphUri, prefix),
+        () => innerStore.deleteBySubjectPrefix(graphUri, prefix, options),
         removed => removed > 0,
         () => markProjectionDirty?.(),
       );
     },
-    countQuads(graphUri) {
-      return innerStore.countQuads(graphUri);
+    countQuads(graphUri, options) {
+      return innerStore.countQuads(graphUri, options);
     },
     // Defined iff the inner store supports it, so the capability propagates
     // truthfully up the decorator chain (callers gate on `typeof store.update
@@ -491,13 +491,13 @@ export function createListContextGraphsCacheInvalidatingStore(
     // mutate projected content, so it invalidates the listGraphs cache and
     // marks the projection dirty just like insert/delete.
     update: innerStore.update
-      ? (sparql: string) => invalidateAfterMutation(
-        () => innerStore.update!(sparql),
+      ? (sparql, options) => invalidateAfterMutation(
+        () => innerStore.update!(sparql, options),
         () => true,
         () => markProjectionDirty?.(),
       )
       : undefined,
-    flush: innerStore.flush ? () => innerStore.flush!() : undefined,
+    flush: innerStore.flush ? (options) => innerStore.flush!(options) : undefined,
     close() {
       return innerStore.close();
     },
@@ -975,9 +975,9 @@ export class DKGAgentBase {
    * throwing and the page being re-fetched from every peer forever (the
    * 2026-07-08 mainnet poison-literal retry storm).
    */
-  protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[]): Promise<void> {
+  protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
     const inserted = await insertWithOversizeGuard(
-      (kept) => this.store.insert(kept),
+      (kept) => this.store.insert(kept, options),
       quads,
       { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
       'durable-sync',

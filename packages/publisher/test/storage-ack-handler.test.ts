@@ -7,7 +7,7 @@ import {
   computePrivateRootV10,
 } from '../src/merkle.js';
 import {
-  encodePublishIntent, decodeStorageACK, computePublishACKDigest,
+  encodePublishIntent, decodePublishIntent, encodeStorageACK, decodeStorageACK, computePublishACKDigest,
   isStorageACKDecline, STORAGE_ACK_DECLINE_CODES, computeCatalogRoot, Logger,
 } from '@origintrail-official/dkg-core';
 import { TypedEventBus, rebuildMetrics } from '@origintrail-official/dkg-core';
@@ -255,6 +255,84 @@ describe('StorageACKHandler', () => {
     expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
     const ack = decodeStorageACK(response as Uint8Array);
     expect(isStorageACKDecline(ack)).toBe(false);
+  });
+
+  it('skips unobserved signed ACK lifecycle decisions before resolving assetUal', async () => {
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: () => false,
+      resolveAssetUalForPublishIntent: vi.fn(() => {
+        throw new Error('must not resolve assetUal for skipped ACK decisions');
+      }),
+    });
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack: {
+        contextGraphId,
+        merkleRoot,
+        nodeIdentityId: coreIdentityId,
+        coreNodeSignatureR: new Uint8Array(32),
+        coreNodeSignatureVS: new Uint8Array(32),
+      },
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+  });
+
+  it('logs declined ACK lifecycle decisions as summary when debug logging is off', async () => {
+    const entries: string[] = [];
+    Logger.setSink((entry) => entries.push(entry.message));
+    const observer = createStorageAckLifecycleObserver({
+      localPeerId: 'receiver-peer',
+      localNodeIdentityId: coreIdentityId,
+      shouldObserve: (decision) => isStorageACKDecline(decision.ack),
+      detailForDecision: (decision) => isStorageACKDecline(decision.ack) ? 'summary' : 'debug',
+      resolveAssetUalForPublishIntent: vi.fn(() => TEST_ASSET_UAL),
+    });
+    const ack = decodeStorageACK(encodeStorageACK({
+      merkleRoot: new Uint8Array(0),
+      coreNodeSignatureR: new Uint8Array(0),
+      coreNodeSignatureVS: new Uint8Array(0),
+      contextGraphId,
+      nodeIdentityId: 0,
+      declineCode: STORAGE_ACK_DECLINE_CODES.NO_DATA_IN_SWM,
+      declineMessage: 'missing shared working memory data',
+    }));
+
+    await observer({
+      encoded: new Uint8Array(0),
+      ack,
+      intent: decodePublishIntent(encodePublishIntent({
+        merkleRoot,
+        contextGraphId,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 300,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:entity:1'],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount: swmMerkleLeafCount,
+      })),
+      peerId: 'publisher-0',
+    });
+
+    expect(entries).toContainEqual(expect.stringContaining('stage=storage_ack'));
+    expect(entries).toContainEqual(expect.stringContaining('event=storage_ack_declined'));
+    expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
   });
 
   it('emits ackHandlerTotal{outcome} through the REAL handler (ack + decline paths)', async () => {

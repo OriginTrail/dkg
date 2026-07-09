@@ -82,7 +82,10 @@ export {
 } from './ack-transport.js';
 export {
   selectACKCandidatePeers,
+  selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
+  type ACKCandidatePeerDiagnostic,
+  type ACKCandidatePeerSelectionResult,
 } from './ack-peer-selection.js';
 export {
   ACKProviderError,

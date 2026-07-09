@@ -24,6 +24,7 @@ export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[
 
 export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
+  queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
@@ -33,12 +34,28 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
 
 export interface LoadSelectedVerifiableMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
+  queryOptions?: QueryOptions;
 }
 
-async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {
+function mergeQueryOptions(
+  options?: QueryOptions,
+  source?: QueryOptions['source'],
+): QueryOptions | undefined {
+  if (!options && !source) return undefined;
+  return {
+    ...options,
+    ...(source ? { source } : {}),
+  };
+}
+
+async function listGraphsByPrefix(
+  store: TripleStore,
+  prefix: string,
+  options?: QueryOptions,
+): Promise<string[]> {
   return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix)
-    : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+    ? store.listGraphsByPrefix(prefix, options)
+    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
 }
 
 /**
@@ -73,10 +90,11 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
   bucketGraph: string,
+  options?: QueryOptions,
 ): Promise<NonEmptyGraphList> {
   assertSafeIri(bucketGraph);
   const stagingPrefix = `${bucketGraph}/staging/`;
-  const under = await listGraphsByPrefix(store, `${bucketGraph}/`);
+  const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
@@ -127,9 +145,9 @@ export async function loadSelectedSharedMemoryQuads(
           )`;
   }
 
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph);
+  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
+  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
-  const queryOptions = options.querySource ? { source: options.querySource } : undefined;
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
         GRAPH ?g { ${innerGraphPattern} }
@@ -152,9 +170,10 @@ export async function loadSelectedSharedMemoryQuads(
 export async function resolveVerifiableMemoryReadGraphs(
   store: TripleStore,
   dataGraph: string,
+  options?: QueryOptions,
 ): Promise<NonEmptyGraphList> {
   assertSafeIri(dataGraph);
-  const under = await listGraphsByPrefix(store, `${dataGraph}/_verifiable_memory/`);
+  const under = await listGraphsByPrefix(store, `${dataGraph}/_verifiable_memory/`, options);
   const out = new Set<string>([dataGraph]);
   for (const graph of under) if (isSafeIri(graph)) out.add(graph);
   return [...out] as NonEmptyGraphList;
@@ -175,10 +194,10 @@ export async function loadSelectedVerifiableMemoryQuads(
   const roots = [...new Set([...rootEntities].map((root) => String(root)).filter((root) => root.length > 0))];
   if (roots.length === 0) return [];
 
-  const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, dataGraph);
+  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
+  const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, dataGraph, queryOptions);
   const graphValues = vmGraphs.map((g) => `<${g}>`).join(' ');
   const rootValues = roots.map((root) => sparqlString(root)).join(' ');
-  const queryOptions = options.querySource ? { source: options.querySource } : undefined;
   const result = await store.query(
     `CONSTRUCT {
       ?s ?p ?o
