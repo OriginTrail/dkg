@@ -386,6 +386,38 @@ describe('GraphManager', () => {
   let store: TripleStore;
   let gm: GraphManager;
 
+  function indexedReadContractStore(graphsByPrefix: Record<string, string[]>): {
+    store: TripleStore;
+    prefixCalls: string[];
+    queries: string[];
+  } {
+    const prefixCalls: string[] = [];
+    const queries: string[] = [];
+    const fakeStore: TripleStore = {
+      insert: async () => {},
+      delete: async () => {},
+      deleteByPattern: async () => 0,
+      query: async (sparql) => {
+        queries.push(sparql);
+        return { type: 'quads', quads: [] };
+      },
+      hasGraph: async () => false,
+      createGraph: async () => {},
+      dropGraph: async () => {},
+      listGraphs: async () => {
+        throw new Error('unbounded listGraphs should not be used');
+      },
+      listGraphsByPrefix: async (prefix) => {
+        prefixCalls.push(prefix);
+        return graphsByPrefix[prefix] ?? [];
+      },
+      deleteBySubjectPrefix: async () => 0,
+      countQuads: async () => 0,
+      close: async () => {},
+    };
+    return { store: fakeStore, prefixCalls, queries };
+  }
+
   beforeEach(() => {
     store = new OxigraphStore();
     gm = new GraphManager(store);
@@ -496,6 +528,28 @@ describe('GraphManager', () => {
     }
   });
 
+  it('binds selected SWM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const swm = contextGraphSharedMemoryUri('resolver-swm-contract');
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${swm}/`]: [
+        `${swm}/0xabc/7`,
+        `${swm}/staging/tmp`,
+      ],
+    });
+
+    await loadSelectedSharedMemoryQuads(contractStore, swm, {
+      rootEntities: ['http://example.com/root'],
+    });
+
+    expect(prefixCalls).toEqual([`${swm}/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${swm}>`);
+    expect(queries[0]).toContain(`<${swm}/0xabc/7>`);
+    expect(queries[0]).not.toContain('/staging/tmp');
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
+  });
+
   it('resolves the exact VM read graph set from the named-graph index', async () => {
     const indexed = await createTripleStore({ backend: 'oxigraph' });
     const dataGraph = contextGraphDataGraphUri('resolver-vm');
@@ -522,6 +576,23 @@ describe('GraphManager', () => {
     } finally {
       await indexed.close();
     }
+  });
+
+  it('binds selected VM reads to indexed graph values instead of an unbounded graph scan', async () => {
+    const dataGraph = contextGraphDataGraphUri('resolver-vm-contract');
+    const vmGraph = `${dataGraph}/_verifiable_memory/0xabc/7`;
+    const { store: contractStore, prefixCalls, queries } = indexedReadContractStore({
+      [`${dataGraph}/_verifiable_memory/`]: [vmGraph],
+    });
+
+    await loadSelectedVerifiableMemoryQuads(contractStore, dataGraph, ['http://example.com/root']);
+
+    expect(prefixCalls).toEqual([`${dataGraph}/_verifiable_memory/`]);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain('VALUES ?g');
+    expect(queries[0]).toContain(`<${dataGraph}>`);
+    expect(queries[0]).toContain(`<${vmGraph}>`);
+    expect(queries[0]).not.toContain('STRSTARTS(STR(?g)');
   });
 
   it('loads selected VM quads from the base graph and multiple per-KA VM graphs', async () => {

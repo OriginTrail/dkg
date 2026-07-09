@@ -174,7 +174,13 @@ afterAll(async () => {
 describe('probeContextGraphWritePreflight — store-failure resilience (real probe, real closed store)', () => {
   it('detects local content from indexed graph names while ignoring bookkeeping-only graphs', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
-    expect(typeof store.listGraphsByPrefix).toBe('function');
+    const listGraphsByPrefix = store.listGraphsByPrefix?.bind(store);
+    expect(typeof listGraphsByPrefix).toBe('function');
+    const prefixCalls: string[] = [];
+    store.listGraphsByPrefix = async (prefix, options) => {
+      prefixCalls.push(prefix);
+      return listGraphsByPrefix!(prefix, options);
+    };
     const metaOnly = 'local-content-meta-only';
     const withContent = 'local-content-data';
     try {
@@ -208,6 +214,10 @@ describe('probeContextGraphWritePreflight — store-failure resilience (real pro
 
       await expect(harness.contextGraphHasLocalContent(metaOnly)).resolves.toBe(false);
       await expect(harness.contextGraphHasLocalContent(withContent)).resolves.toBe(true);
+      expect(prefixCalls).toEqual([
+        contextGraphDataGraphUri(metaOnly),
+        contextGraphDataGraphUri(withContent),
+      ]);
     } finally {
       await store.close();
     }
