@@ -241,7 +241,7 @@ describe('NetworkAdmissionCoordinator', () => {
   it('uses unsupported-protocol backoff before retrying unsupported identity probes', async () => {
     let now = 1_000;
     const sendIdentityProbe = vi.fn(async () => {
-      throw new Error('Unsupported protocol');
+      throw new Error('protocol not supported');
     });
     const fixture = buildCoordinator({
       identity,
