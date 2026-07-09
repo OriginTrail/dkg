@@ -175,7 +175,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       // wall clock first to mirror the contract exactly — otherwise the SDK
       // would coerce, then fall through to full-price direct spend.
       if (info.expiresAtTimestamp > 0) {
-        const latestBlock = await this.readProvider('conviction getBlock', (p) => p.getBlock('latest'));
+        // TIP-SENSITIVE: `latest` timestamp gates the expiry check; a stale
+        // (older) latest from a lagging sticky backend would treat an expired
+        // account as still valid → read canonical + preference-transparent.
+        const latestBlock = await this.readProvider('conviction getBlock', (p) => p.getBlock('latest'), { skipPreferred: true });
         const nowTs = latestBlock ? Number(latestBlock.timestamp) : Math.floor(Date.now() / 1000);
         if (nowTs >= info.expiresAtTimestamp) return false;
       }
@@ -778,6 +781,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
     await this.init();
-    return this.readProvider(`pca rpc ${method}`, (provider) => provider.send(method, params));
+    // Generic browser-facing read proxy: the allowlisted methods include the
+    // TIP-SENSITIVE `eth_blockNumber` / `eth_getBlockByNumber`, and this path has
+    // no read-your-write need (the node isn't writing here), so stay canonical +
+    // preference-transparent rather than pin the UI to a possibly-lagging backend.
+    return this.readProvider(`pca rpc ${method}`, (provider) => provider.send(method, params), { skipPreferred: true });
   }
 }

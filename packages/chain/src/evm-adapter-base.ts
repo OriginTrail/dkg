@@ -2372,7 +2372,9 @@ export class EVMChainAdapterBase {
   }
 
   protected async getBlockTimestamp(blockNumber: number): Promise<number> {
-    const block = await this.readProvider('getBlock', (p) => p.getBlock(blockNumber));
+    // TIP-SENSITIVE: a near-tip block can be missing (null) on a lagging sticky
+    // backend that hasn't imported it yet → read canonical + preference-transparent.
+    const block = await this.readProvider('getBlock', (p) => p.getBlock(blockNumber), { skipPreferred: true });
     return block?.timestamp ?? 0;
   }
 
@@ -3318,7 +3320,11 @@ export class EVMChainAdapterBase {
   }
 
   async getBlockNumber(): Promise<number> {
-    return this.readProvider('getBlockNumber', (p) => p.getBlockNumber());
+    // TIP-SENSITIVE: the current head drives the event-lane cursor, proof-
+    // challenge block, and finalization reads. A lagging sticky backend would
+    // make the head non-monotonic across calls (poller moving backwards / re-
+    // scanning), so read canonical-order + preference-transparent.
+    return this.readProvider('getBlockNumber', (p) => p.getBlockNumber(), { skipPreferred: true });
   }
 
   getProvider(): JsonRpcProvider {

@@ -45,6 +45,23 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * TTL (ms) for the `RpcFailoverClient` endpoint-stickiness "primary re-probe"
+ * cadence (Mechanism B, #1340 retry residual + #1337 policy-read fail-close).
+ * Once a read/write has failed over to a backup, the client prefers that
+ * last-good backend for subsequent ops, but re-probes the CONFIGURED PRIMARY at
+ * most once every `STICKY_PREFERRED_TTL_MS` of degraded operation (bounded to one
+ * re-stall per window) so a recovered primary resumes automatically. Chosen at
+ * 30s: comfortably spans #1340's seconds-long CG-register recovery burst and
+ * #1337's back-to-back policy-read burst, while keeping the steady-state
+ * re-probe cost to one extra primary attempt per 30s. Deliberately equal to the
+ * hub-rotation poll cadence — but the poller's head probe is `skipPreferred`
+ * (preference-transparent), so the two never interfere. Overridable per-client
+ * via the constructor stickiness options (used by tests) and killable via
+ * `DKG_DISABLE_RPC_STICKINESS=1`.
+ */
+export const STICKY_PREFERRED_TTL_MS = 30_000;
+
+/**
  * Per-attempt deadline for WIDE `eth_getLogs` reads (the `evm-adapter-events.ts`
  * `queryFilter` scans, which run over `[fromBlock ?? 0, toBlock]` — up to the
  * event poller's 9,000-block window, and the full chain on a cold-start

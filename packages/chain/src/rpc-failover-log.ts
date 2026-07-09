@@ -77,6 +77,12 @@ export function rpcHost(url: string): string {
 interface MutableStats {
   failovers: number;
   exhaustions: number;
+  // Count of times endpoint-stickiness ESTABLISHED a preferred (last-good)
+  // backend after a failover — i.e. how often the client stuck to a backup
+  // because the primary was degraded. A rising counter is the operator's signal
+  // that a configured primary is unhealthy. Cleared on a primary re-probe
+  // success (not tracked here — the establish edge is the load-bearing signal).
+  preferredEstablishments: number;
   byErrorClass: Map<RpcFailoverErrorClass, number>;
   byEndpointHost: Map<string, number>;
 }
@@ -87,7 +93,13 @@ const MAX_TRACKED_HOSTS = 64;
 const MAX_DEDUP_KEYS = 256;
 
 function freshStats(): MutableStats {
-  return { failovers: 0, exhaustions: 0, byErrorClass: new Map(), byEndpointHost: new Map() };
+  return {
+    failovers: 0,
+    exhaustions: 0,
+    preferredEstablishments: 0,
+    byErrorClass: new Map(),
+    byEndpointHost: new Map(),
+  };
 }
 
 let stats: MutableStats = freshStats();
@@ -101,6 +113,7 @@ function bump(map: Map<string, number>, key: string, cap: number): void {
 export interface RpcFailoverStatsSnapshot {
   failovers: number;
   exhaustions: number;
+  preferredEstablishments: number;
   byErrorClass: Record<string, number>;
   byEndpointHost: Record<string, number>;
 }
@@ -109,6 +122,7 @@ export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
   return {
     failovers: stats.failovers,
     exhaustions: stats.exhaustions,
+    preferredEstablishments: stats.preferredEstablishments,
     byErrorClass: Object.fromEntries(stats.byErrorClass),
     byEndpointHost: Object.fromEntries(stats.byEndpointHost),
   };
@@ -213,6 +227,37 @@ export function noteRpcExhaustion(label: string, urls: readonly string[]): void 
       const suffix = suppressed > 0 ? ` (${suppressed} similar exhaustions suppressed in the previous window)` : '';
       // eslint-disable-next-line no-console
       console.warn(`[chain] RPC endpoints exhausted: ${label} failed on all ${hosts.length} endpoint(s) [${hosts.join(', ')}]${suffix}`);
+      setDedup(key, now);
+    } else {
+      entry.suppressed += 1;
+    }
+  } catch {
+    // Observability must never break the failover path.
+  }
+}
+
+/**
+ * Record + log that endpoint-stickiness ESTABLISHED a preferred (last-good)
+ * backend after a failover — the `RpcFailoverClient` will now try `preferredUrl`
+ * first (until a TTL'd primary re-probe succeeds). Host-only, dedup-gated, and
+ * never-throwing, symmetric with {@link noteRpcFailover}: it sits on the success
+ * path inside the failover loops and must never alter control flow. Gives
+ * operators a visible "we're leaning on a backup because the primary is
+ * degraded" signal (also counted in {@link getRpcFailoverStats}).
+ */
+export function notePreferredEndpoint(label: string, preferredUrl: string): void {
+  try {
+    stats.preferredEstablishments += 1;
+    const host = rpcHost(preferredUrl);
+    const key = `PREFERRED|${host}`;
+    const now = nowMs();
+    const entry = dedup.get(key);
+    const shouldEmit = !entry || now - entry.lastEmitAt >= DEFAULT_DEDUP_WINDOW_MS;
+    if (shouldEmit) {
+      const suppressed = entry?.suppressed ?? 0;
+      const suffix = suppressed > 0 ? ` (${suppressed} similar re-establishments suppressed in the previous window)` : '';
+      // eslint-disable-next-line no-console
+      console.warn(`[chain] RPC stickiness: ${label} now prefers ${host} (primary degraded)${suffix}`);
       setDedup(key, now);
     } else {
       entry.suppressed += 1;
