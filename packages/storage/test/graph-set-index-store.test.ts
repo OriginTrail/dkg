@@ -69,6 +69,19 @@ class MutatingQueryStore extends CountingStore {
   }
 }
 
+// Each mutating SPARQL query creates a fresh named graph, so a coalescing test
+// can distinguish "one rebuild reflecting N writes" from "N rebuilds".
+class SeqInsertQueryStore extends CountingStore {
+  seq = 0;
+  async query(sparql: string): Promise<QueryResult> {
+    if (/^\s*(?:#[^\r\n]*(?:\r?\n|$)\s*)*INSERT\s+DATA\b/i.test(sparql)) {
+      await this.inner.insert([q(`did:dkg:context-graph:seq-${this.seq++}`)]);
+      return { type: 'bindings', bindings: [] };
+    }
+    return this.inner.query(sparql);
+  }
+}
+
 describe('GraphSetIndexStore', () => {
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
@@ -225,6 +238,47 @@ describe('GraphSetIndexStore', () => {
 
     await store.query('# cleanup\nINSERT DATA { GRAPH <ignored> { <urn:s> <urn:p> "v" } }');
     await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:query-created']);
+  });
+
+  it('defers SPARQL updates: N updates cause zero eager rescans, then one coalesced rebuild on the next read', async () => {
+    const counting = new SeqInsertQueryStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting);
+    // Seed the index (one scan).
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // Three mutating SPARQL updates. Pre-fix each eager-rescanned the whole
+    // store (calls would be 4 here); the fix defers them.
+    await store.query('INSERT DATA { GRAPH <g0> { <urn:s> <urn:p> "v" } }');
+    await store.query('INSERT DATA { GRAPH <g1> { <urn:s> <urn:p> "v" } }');
+    await store.query('INSERT DATA { GRAPH <g2> { <urn:s> <urn:p> "v" } }');
+    expect(counting.listGraphsCalls).toBe(1); // no eager rescan per update
+
+    // The next read rebuilds exactly once and reflects ALL three writes
+    // (read-after-write correctness preserved).
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([
+        'did:dkg:context-graph:seq-0',
+        'did:dkg:context-graph:seq-1',
+        'did:dkg:context-graph:seq-2',
+      ]),
+    );
+    expect(counting.listGraphsCalls).toBe(2); // single coalesced rebuild
+  });
+
+  it('a SPARQL update marks the index dirty so the next read rebuilds even within revalidateMs', async () => {
+    let now = 1_000;
+    const counting = new SeqInsertQueryStore(new OxigraphStore());
+    const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000, now: () => now });
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // Well within revalidateMs — a read alone would serve cache — but a mutating
+    // update forces the next read to rebuild (freshness, not staleness).
+    await store.query('INSERT DATA { GRAPH <g> { <urn:s> <urn:p> "v" } }');
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:seq-0']);
+    expect(counting.listGraphsCalls).toBe(2);
   });
 
   it('does not let observer failures reject committed writes', async () => {

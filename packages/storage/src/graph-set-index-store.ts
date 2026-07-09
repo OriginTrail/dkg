@@ -62,6 +62,17 @@ export class GraphSetIndexStore implements TripleStore {
   private validatedAt = 0;
   private mutationGeneration = 0;
   private refreshInFlight: Promise<Set<string>> | null = null;
+  /**
+   * Set when a mutation whose exact graph effects can't be applied incrementally
+   * (a SPARQL UPDATE, or a graph-less `deleteByPattern`) lands. Instead of
+   * eagerly re-scanning the whole store on every such write — which thrashes a
+   * large store under sync load (the RS-heal `INSERT…WHERE` stream drove ~30s
+   * `listGraphs` scans that starved ACK writes) — we defer: the next
+   * `listGraphs`/`listGraphsByPrefix` performs exactly one full rebuild,
+   * coalescing all writes since. Read-after-write therefore stays correct (the
+   * next read rebuilds), while N writes collapse to ≤1 scan instead of N.
+   */
+  private dirty = false;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -106,7 +117,9 @@ export class GraphSetIndexStore implements TripleStore {
     if (graph) {
       await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern'));
     } else {
-      await this.maintainIndex(() => this.refreshIndex('deleteByPattern'));
+      // No target graph → can't know which graphs emptied; defer to a single
+      // lazy rebuild on the next read instead of a full scan now.
+      this.dirty = true;
     }
     return removed;
   }
@@ -117,10 +130,12 @@ export class GraphSetIndexStore implements TripleStore {
     }
     const result = await this.inner.query(sparql, options);
     if (isSparqlUpdate(sparql)) {
+      // A SPARQL UPDATE may create/drop named graphs we can't derive
+      // incrementally. Mark dirty for a single lazy rebuild on the next read
+      // instead of re-scanning the whole store now — the eager per-UPDATE scan
+      // thrashed large stores under the RS-heal/sync UPDATE stream.
       this.bumpMutation();
-      if (this.graphs || this.refreshInFlight) {
-        await this.maintainIndex(() => this.refreshIndex('query'));
-      }
+      this.dirty = true;
     }
     return result;
   }
@@ -135,13 +150,11 @@ export class GraphSetIndexStore implements TripleStore {
     }
     await this.inner.update(sparql);
     // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create
-    // or drop named graphs that the index must learn about — without this a
-    // freshly-created scoped graph would be absent from listGraphs(). Same
-    // refresh-from-inner handling as an UPDATE routed through query() above.
+    // or drop named graphs the index must learn about. Rather than re-scan the
+    // whole store on every UPDATE (the thrash), mark dirty: the next read does a
+    // single rebuild and the freshly-created/dropped graph is reflected then.
     this.bumpMutation();
-    if (this.graphs || this.refreshInFlight) {
-      await this.maintainIndex(() => this.refreshIndex('update'));
-    }
+    this.dirty = true;
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
@@ -218,6 +231,7 @@ export class GraphSetIndexStore implements TripleStore {
     throwIfAborted(options?.signal);
     if (
       this.graphs &&
+      !this.dirty &&
       this.revalidateMs > 0 &&
       this.now() - this.validatedAt < this.revalidateMs
     ) {
@@ -245,6 +259,11 @@ export class GraphSetIndexStore implements TripleStore {
       const generation = this.mutationGeneration;
       const next = new Set((await this.inner.listGraphs()).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
+      // This scan reflects every mutation up to `generation` (synchronous from
+      // here — no await — so a concurrent write can't slip between the check and
+      // the clear; if one had, it would have bumped the generation above and we
+      // would have retried, re-setting dirty).
+      this.dirty = false;
       this.replaceGraphSet(next, source);
       return this.graphs!;
     }
