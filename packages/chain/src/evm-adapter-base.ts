@@ -111,16 +111,17 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
 /**
- * A `getBlock(n)` that returned `null` because the queried endpoint hasn't
- * imported that (already-mined) block yet. Thrown inside `getBlockTimestamp`'s
- * read lambda so the failover loop treats it as a retryable condition and tries
- * another endpoint (a lagging endpoint must not force a bogus `blockTimestamp: 0`
- * when a healthy backup already has the block).
+ * Sentinel for a nullable read (`getBlock(n)`, `eth_getTransactionReceipt`, …)
+ * whose queried endpoint returned `null` — meaning "this endpoint doesn't have
+ * the object (yet)", NOT a definitive answer. Thrown inside the read lambda so
+ * `readProviderRetryingNull` treats it as a retryable condition and tries another
+ * endpoint (a lagging endpoint must not force a fallback when a healthy backup
+ * already has the object).
  */
-class BlockNotYetImportedError extends Error {
-  constructor(blockNumber: number) {
-    super(`block ${blockNumber} not yet imported on this endpoint`);
-    this.name = 'BlockNotYetImportedError';
+class NullReadSentinelError extends Error {
+  constructor(label: string) {
+    super(`${label}: object not present on this endpoint`);
+    this.name = 'NullReadSentinelError';
   }
 }
 
@@ -1251,6 +1252,61 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T> {
     return this.readProvider(label, fn, { ...opts, skipPreferred: true });
+  }
+
+  /**
+   * Raw PROVIDER read whose `null` is a "not on this endpoint (yet)" signal, not a
+   * definitive answer — so a `null` FAILS OVER to the other endpoints (a lagging
+   * endpoint must not hide an object a healthy one has) and never records a sticky
+   * success. Returns the first NON-null result, or `null` ONLY when the failover
+   * loop exhausted with EVERY retryable failure being the null sentinel (no
+   * endpoint had a transport problem that could be masking the object).
+   *
+   * The all-null decision is ORDER-INDEPENDENT: it is made from whether ANY real
+   * transport failure occurred across all attempts (`sawTransportFailure`), NOT
+   * from `ChainRpcTransportError.cause` (which is only the LAST failure and would
+   * flip the result based on sticky/canonical attempt order). A non-retryable
+   * provider error (e.g. `INVALID_ARGUMENT`) or a genuine transport exhaustion
+   * PROPAGATES — it is never masked as a `null`.
+   */
+  protected async readProviderRetryingNull<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T | null> {
+    const baseIsRetryable = opts?.isRetryable ?? isRetryableRpcError;
+    let sawTransportFailure = false;
+    try {
+      return await this.readProvider<T>(
+        label,
+        async (provider) => {
+          try {
+            const result = await fn(provider);
+            if (result == null) throw new NullReadSentinelError(label);
+            return result;
+          } catch (err) {
+            // A REAL (non-sentinel) retryable failure means this endpoint's null
+            // absence — if any — can't be trusted as "object not here". Record it
+            // so the all-null fallback is only taken when NO transport failure
+            // occurred, independent of attempt order.
+            if (!(err instanceof NullReadSentinelError) && baseIsRetryable(err)) {
+              sawTransportFailure = true;
+            }
+            throw err;
+          }
+        },
+        { ...opts, isRetryable: (err) => err instanceof NullReadSentinelError || baseIsRetryable(err) },
+      );
+    } catch (err) {
+      if (
+        err instanceof ChainRpcTransportError
+        && err.code === 'RPC_ENDPOINTS_EXHAUSTED'
+        && !sawTransportFailure
+      ) {
+        return null; // every endpoint returned the null sentinel → honest "not found"
+      }
+      throw err;
+    }
   }
 
   /**
@@ -2417,29 +2473,12 @@ export class EVMChainAdapterBase {
     // `blockTimestamp: 0`. Treat a `null` block as a FAILOVER condition so another
     // endpoint that has the block can serve it; only if EVERY endpoint lacks it (or
     // transport is down) do we fall back to the best-effort `0` callers tolerate.
-    try {
-      const block = await this.readProvider(
-        'getBlock',
-        async (p) => {
-          const b = await p.getBlock(blockNumber);
-          if (!b) throw new BlockNotYetImportedError(blockNumber);
-          return b;
-        },
-        { isRetryable: (e) => e instanceof BlockNotYetImportedError || isRetryableRpcError(e) },
-      );
-      return block.timestamp != null ? Number(block.timestamp) : 0;
-    } catch (err) {
-      // Best-effort `0` ONLY for the intended sentinel case: EVERY endpoint
-      // returned `null` for this concrete block (not imported anywhere yet), i.e.
-      // the failover loop exhausted with a `BlockNotYetImportedError` cause. Any
-      // OTHER failure — a non-retryable provider error (e.g. `INVALID_ARGUMENT`)
-      // rethrown at once, or a real transport exhaustion — must PROPAGATE, not be
-      // masked as a bogus `blockTimestamp: 0` that hides the error from callers.
-      if (err instanceof ChainRpcTransportError && err.cause instanceof BlockNotYetImportedError) {
-        return 0;
-      }
-      throw err;
-    }
+    // A `null` block (this endpoint hasn't imported it yet) fails over to another
+    // endpoint that has it; best-effort `0` only when EVERY endpoint lacks it and
+    // no transport error occurred. Non-retryable / transport-exhaustion errors
+    // propagate (never masked as a bogus `0`). Order-independent — see the helper.
+    const block = await this.readProviderRetryingNull('getBlock', (p) => p.getBlock(blockNumber));
+    return block?.timestamp != null ? Number(block.timestamp) : 0;
   }
 
   // =====================================================================

@@ -164,6 +164,24 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     // propagates as RPC_ENDPOINTS_EXHAUSTED, not a bogus 0.
     await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
+
+  it('MIXED null + transport error PROPAGATES regardless of endpoint order (order-independent, round-6 🔴)', async () => {
+    const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
+    // Order A: primary transport error, backup null. A transport failure occurred,
+    // so we canNOT conclude "block not imported anywhere" → propagate (not 0).
+    const orderA = makeTwoEndpointAdapter(
+      { getBlock: recorder(async () => { throw retryable429(); }) },
+      { getBlock: recorder(async () => null) },
+    );
+    await expect(orderA.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    // Order B: primary null, backup transport error — SAME endpoint states, so the
+    // result must be identical (before the fix this returned 0 vs threw by order).
+    const orderB = makeTwoEndpointAdapter(
+      { getBlock: recorder(async () => null) },
+      { getBlock: recorder(async () => { throw retryable429(); }) },
+    );
+    await expect(orderB.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+  });
 });
 
 // A nullable PCA proxy lookup (receipt/tx/block) whose queried endpoint returns
@@ -198,5 +216,25 @@ describe('PCA proxy nullable lookups fail over on null instead of returning a la
     expect(await a.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash'])).toBeNull();
     expect(primarySend.calls).toHaveLength(1); // both endpoints were tried before returning null
     expect(backupSend.calls).toHaveLength(1);
+  });
+
+  it('eth_getTransactionByHash and a concrete eth_getBlockByNumber ALSO fail over on null (round-6 🟡 coverage)', async () => {
+    const tx = { hash: '0xhash', blockNumber: '0x7b' };
+    const txAdapter = makePca({ send: recorder(async () => null) }, { send: recorder(async () => tx) });
+    expect(await txAdapter.requestPublishingConvictionRpc('eth_getTransactionByHash', ['0xhash'])).toBe(tx);
+
+    const block = { number: '0x7b', timestamp: '0x1' };
+    const blockAdapter = makePca({ send: recorder(async () => null) }, { send: recorder(async () => block) });
+    expect(await blockAdapter.requestPublishingConvictionRpc('eth_getBlockByNumber', ['0x7b', false])).toBe(block);
+  });
+
+  it('MIXED null + transport error PROPAGATES regardless of endpoint order (order-independent, round-6 🔴)', async () => {
+    const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
+    const orderA = makePca({ send: recorder(async () => { throw retryable429(); }) }, { send: recorder(async () => null) });
+    await expect(orderA.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']))
+      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const orderB = makePca({ send: recorder(async () => null) }, { send: recorder(async () => { throw retryable429(); }) });
+    await expect(orderB.requestPublishingConvictionRpc('eth_getTransactionReceipt', ['0xhash']))
+      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
   });
 });

@@ -24,8 +24,6 @@ import type {
 import { PcaUnavailableError } from './pca-errors.js';
 import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
-import { isRetryableRpcError } from './evm-adapter-rpc.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 
 /** Latest-family `eth_getBlockByNumber` block tags that are TIP reads (must stay
  *  preference-transparent). A concrete hex block number or `earliest` is a fixed
@@ -34,21 +32,13 @@ const PCA_TIP_BLOCK_TAGS = new Set<string>(['latest', 'pending', 'safe', 'finali
 
 /** Allowlisted PCA proxy methods whose `null` means "this endpoint doesn't have
  *  the object (yet)", not a definitive answer — so a `null` must FAIL OVER to
- *  other endpoints rather than terminate the lookup or reinforce a preference. */
+ *  other endpoints (via `readProviderRetryingNull`) rather than terminate the
+ *  lookup or reinforce a preference. */
 const PCA_NULLABLE_LOOKUP_METHODS = new Set<string>([
   'eth_getTransactionReceipt',
   'eth_getTransactionByHash',
   'eth_getBlockByNumber',
 ]);
-
-/** Sentinel: the queried endpoint returned `null` for a nullable PCA lookup — a
- *  retryable "not here" so the failover loop tries the next endpoint. */
-class PcaObjectNotFoundError extends Error {
-  constructor(method: string) {
-    super(`PCA ${method}: object not present on this endpoint`);
-    this.name = 'PcaObjectNotFoundError';
-  }
-}
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -817,32 +807,14 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       return this.readTipProvider(label, (provider) => provider.send(method, params));
     }
 
-    // Nullable reconciliation read (receipt / tx / a concrete block) → STICKY
-    // (prefer the endpoint that already observed the tx/block), BUT a `null` means
-    // "not here yet", not a definitive answer: it must FAIL OVER to the other
-    // endpoints (so a lagging preferred backend can't hide an object another has)
-    // and must NOT reinforce a preference. Throwing on `null` makes it retryable
-    // AND keeps it off the success/establish path; if EVERY endpoint lacks it, the
-    // honest `null` is returned.
-    const isTipConcreteBlock = method === 'eth_getBlockByNumber'
-      && typeof tag === 'string' && PCA_TIP_BLOCK_TAGS.has(tag);
-    if (PCA_NULLABLE_LOOKUP_METHODS.has(method) && !isTipConcreteBlock) {
-      try {
-        return await this.readProvider(
-          label,
-          async (provider) => {
-            const result = await provider.send(method, params);
-            if (result == null) throw new PcaObjectNotFoundError(method);
-            return result;
-          },
-          { isRetryable: (e) => e instanceof PcaObjectNotFoundError || isRetryableRpcError(e) },
-        );
-      } catch (err) {
-        if (err instanceof ChainRpcTransportError && err.cause instanceof PcaObjectNotFoundError) {
-          return null; // no endpoint has it (yet) — the honest "not found" answer
-        }
-        throw err;
-      }
+    // Nullable reconciliation read (receipt / tx / a concrete block; a tip
+    // eth_getBlockByNumber already returned above) → STICKY (prefer the endpoint
+    // that already observed the tx/block), BUT a `null` means "not here yet", not a
+    // definitive answer, so it must FAIL OVER (a lagging preferred backend can't
+    // hide an object another has) and must NOT reinforce a preference. The shared
+    // helper returns null only once EVERY endpoint lacks it (order-independent).
+    if (PCA_NULLABLE_LOOKUP_METHODS.has(method)) {
+      return this.readProviderRetryingNull(label, (provider) => provider.send(method, params));
     }
 
     // eth_call / eth_chainId — plain sticky (a null-ish result is a valid answer).
