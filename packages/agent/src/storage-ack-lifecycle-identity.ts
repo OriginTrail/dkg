@@ -19,6 +19,8 @@ export interface StorageAckLifecycleAssetUalInput {
 export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(
   input: StorageAckLifecycleAssetUalInput,
 ): Promise<string | undefined> {
+  if (input.intent.stagingQuads && input.intent.stagingQuads.length > 0) return undefined;
+
   const swmGraphId = input.intent.swmGraphId?.trim() || input.intent.contextGraphId?.trim();
   if (!swmGraphId) return undefined;
   const subGraphName = input.intent.subGraphName?.trim() || undefined;
