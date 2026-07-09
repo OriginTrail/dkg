@@ -1833,7 +1833,9 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const ctx = createOperationContext('connect');
     let connectTarget: ReturnType<typeof parseMultiaddrConnectTarget>;
     try {
-      connectTarget = parseMultiaddrConnectTarget(multiaddress);
+      connectTarget = parseMultiaddrConnectTarget(multiaddress, {
+        requireTargetPeerId: this.networkAdmissionCoordinator.enabled,
+      });
     } catch (err) {
       if (!this.networkAdmissionCoordinator.enabled) throw err;
       throw new NetworkAdmissionInvalidPeerIdError(
@@ -1842,12 +1844,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
       );
     }
     const targetPeerId = connectTarget.targetPeerId;
-    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
-      throw new NetworkAdmissionInvalidPeerIdError(
-        '<missing>',
-        'connect multiaddr must include a target /p2p/<peerId> for network admission',
-      );
-    }
     await connectToMultiaddr(
       this.node.libp2p as any,
       connectTarget,

@@ -59,4 +59,11 @@ describe('multiaddr peer targets', () => {
       `/ip4/127.0.0.1/tcp/4001/p2p/${RELAY_PEER_ID}/p2p-circuit`,
     )).toThrow('Circuit multiaddr missing target peer id');
   });
+
+  it('can require a target peer for admission-scoped direct multiaddrs', () => {
+    expect(() => parseMultiaddrConnectTarget(
+      '/ip4/127.0.0.1/tcp/4001',
+      { requireTargetPeerId: true },
+    )).toThrow('connect multiaddr must include a target /p2p/<peerId> for network admission');
+  });
 });

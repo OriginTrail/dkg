@@ -173,7 +173,7 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       connected: [...foreign, ...sameNetwork],
       preferredACKPeerIds: [sameNetwork[1], foreign[0]],
     });
-    const admission = new NetworkAdmissionService();
+    const admission = new NetworkAdmissionService({ networkId: 'active-network' });
     installAdmission(a, admission);
     admission.markVerifiedSameNetwork(sameNetwork[0]);
 

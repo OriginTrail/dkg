@@ -45,6 +45,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
 
 function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
   const admission = new NetworkAdmissionService({
+    networkId: 'network-a',
     selfPeerId: SELF_PEER_ID,
   });
   admission.markVerifiedSameNetwork(peerId);

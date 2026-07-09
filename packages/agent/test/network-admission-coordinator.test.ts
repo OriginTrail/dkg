@@ -18,6 +18,7 @@ function buildCoordinator(input: {
   probeTimeoutMs?: number;
 }) {
   const admission = new NetworkAdmissionService({
+    networkId: input.identity?.networkId,
     selfPeerId: SELF_PEER_ID,
   });
   const close = vi.fn();

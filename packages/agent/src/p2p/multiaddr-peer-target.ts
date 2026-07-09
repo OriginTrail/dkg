@@ -16,6 +16,10 @@ export interface CircuitMultiaddrConnectTarget {
 
 export type MultiaddrConnectTarget = DirectMultiaddrConnectTarget | CircuitMultiaddrConnectTarget;
 
+export interface MultiaddrConnectTargetParseOptions {
+  requireTargetPeerId?: boolean;
+}
+
 type ParsedMultiaddrStructure = {
   multiaddress: string;
   components: Component[];
@@ -47,11 +51,14 @@ export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalPeerI
   return raw ? canonicalTargetPeerId(raw) : undefined;
 }
 
-export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarget {
+export function parseMultiaddrConnectTarget(
+  addr: string,
+  options: MultiaddrConnectTargetParseOptions = {},
+): MultiaddrConnectTarget {
   const structure = parseMultiaddrStructure(addr);
   if (structure.circuitIndex !== -1) {
     const raw = targetPeerIdFromStructure(structure);
-    if (!raw) throw new Error('Circuit multiaddr missing target peer id');
+    if (!raw) throw new MultiaddrPeerTargetParseError('Circuit multiaddr missing target peer id', '<missing>');
     return {
       kind: 'circuit',
       multiaddress: structure.multiaddress,
@@ -62,6 +69,12 @@ export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarge
 
   const raw = targetPeerIdFromStructure(structure);
   const targetPeerId = raw ? canonicalTargetPeerId(raw) : undefined;
+  if (!targetPeerId && options.requireTargetPeerId) {
+    throw new MultiaddrPeerTargetParseError(
+      'connect multiaddr must include a target /p2p/<peerId> for network admission',
+      '<missing>',
+    );
+  }
   return targetPeerId
     ? { kind: 'direct', multiaddress: structure.multiaddress, targetPeerId }
     : { kind: 'direct', multiaddress: structure.multiaddress };

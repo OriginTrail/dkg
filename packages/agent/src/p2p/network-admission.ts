@@ -1,10 +1,12 @@
 import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionOptions {
+  networkId?: string;
   selfPeerId?: string;
 }
 
 export interface NetworkAdmissionSnapshot {
+  enabled: boolean;
   verifiedPeerIds: string[];
   quarantinedPeerIds: string[];
 }
@@ -14,17 +16,27 @@ export interface NetworkAdmissionSnapshot {
  *
  * The core overlay isolation keeps accidental cross-network peers out of the
  * normal DHT/GossipSub path. This registry is the application boundary: it
- * admits only canonical peers promoted by the signed same-network verifier and
- * self. Configured relays/bootstrap peers are retained as transport/probe
- * seeds, but do not become app/ACK eligible until verification succeeds.
+ * admits only peers promoted by the signed same-network verifier and self when
+ * an active network is configured. Configured relays/bootstrap peers are
+ * retained as transport/probe seeds, but do not become app/ACK eligible until
+ * verification succeeds. Legacy/in-process tests without network identity keep
+ * the previous allow-all behavior.
  */
 export class NetworkAdmissionService {
+  private readonly networkId?: string;
   private readonly selfPeerId?: CanonicalPeerId;
   private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
   private readonly quarantinedPeerIds = new Set<CanonicalPeerId>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
-    this.selfPeerId = options.selfPeerId ? canonicalAdmissionServicePeerId(options.selfPeerId) : undefined;
+    this.networkId = options.networkId;
+    this.selfPeerId = options.networkId && options.selfPeerId
+      ? canonicalAdmissionServicePeerId(options.selfPeerId)
+      : undefined;
+  }
+
+  get enabled(): boolean {
+    return Boolean(this.networkId);
   }
 
   markVerifiedSameNetwork(peerId: string): void {
@@ -40,6 +52,7 @@ export class NetworkAdmissionService {
   }
 
   isAcceptedPeer(peerId: string): boolean {
+    if (!this.enabled) return true;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
     if (!canonicalPeerId) return false;
     if (canonicalPeerId === this.selfPeerId) return true;
@@ -48,11 +61,13 @@ export class NetworkAdmissionService {
   }
 
   isRejectedPeer(peerId: string): boolean {
+    if (!this.enabled) return false;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
     return canonicalPeerId ? this.quarantinedPeerIds.has(canonicalPeerId) : true;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
+    if (!this.enabled) return new Set();
     return new Set(
       [...this.verifiedPeerIds]
         .filter((peerId) => !this.quarantinedPeerIds.has(peerId)),
@@ -61,6 +76,7 @@ export class NetworkAdmissionService {
 
   snapshot(): NetworkAdmissionSnapshot {
     return {
+      enabled: this.enabled,
       verifiedPeerIds: [...this.verifiedPeerIds].sort(),
       quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
     };
