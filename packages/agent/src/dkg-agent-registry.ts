@@ -147,7 +147,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
-import { peerIdsFromMultiaddrs } from './p2p/network-admission.js';
+import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -1823,8 +1823,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    const peerIds = [...peerIdsFromMultiaddrs([multiaddress])];
-    const targetPeerId = peerIds[peerIds.length - 1];
+    const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
     if (this.networkAdmission.enabled && !targetPeerId) {
       const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
       (error as any).code = 'INVALID_PEER_ID';

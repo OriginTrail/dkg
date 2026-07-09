@@ -13,14 +13,24 @@ export interface NetworkAdmissionSnapshot {
   quarantinedPeerIds: string[];
 }
 
+export function peerIdsFromMultiaddr(addr: string): string[] {
+  const peerIds: string[] = [];
+  const matches = addr.matchAll(/\/p2p\/([^/]+)/g);
+  for (const match of matches) {
+    const peerId = match[1]?.trim();
+    if (peerId) peerIds.push(peerId);
+  }
+  return peerIds;
+}
+
+export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
+  return peerIdsFromMultiaddr(addr).at(-1);
+}
+
 export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {
   const peerIds = new Set<string>();
   for (const addr of addrs ?? []) {
-    const matches = addr.matchAll(/\/p2p\/([^/]+)/g);
-    for (const match of matches) {
-      const peerId = match[1]?.trim();
-      if (peerId) peerIds.add(peerId);
-    }
+    for (const peerId of peerIdsFromMultiaddr(addr)) peerIds.add(peerId);
   }
   return peerIds;
 }

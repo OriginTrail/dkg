@@ -53,12 +53,13 @@ describe('connectToMultiaddr', () => {
 });
 
 describe('primeCatchupConnections', () => {
-  it('dials only catchup peers accepted by the caller admission gate', async () => {
+  it('dials discovered peers before running the caller admission proof', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);
     const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
     const eligiblePeer = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const foreignPeer = '12D3KooWForeignCatchupPeer111111111111111111111111';
+    const foreignPeer = '12D3KooWR5C8ajtPigVGnBwDGTZ4XAtCepRs2WCgfPuBPrgGqcNK';
+    const admissionCalls: string[] = [];
 
     await primeCatchupConnections({
       getConnections: () => [],
@@ -69,9 +70,13 @@ describe('primeCatchupConnections', () => {
         { peerId: foreignPeer, relayAddress },
         { peerId: eligiblePeer, relayAddress },
       ],
-    } as any, 'self-peer', (peerId) => peerId === eligiblePeer);
+    } as any, 'self-peer', async (peerId) => {
+      admissionCalls.push(peerId);
+      return peerId === eligiblePeer;
+    });
 
-    expect(merge.calls).toHaveLength(1);
-    expect(dial.calls).toHaveLength(1);
+    expect(merge.calls).toHaveLength(2);
+    expect(dial.calls).toHaveLength(2);
+    expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
   });
 });

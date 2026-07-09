@@ -4021,7 +4021,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.trackSyncContextGraph(contextGraphId);
 
     const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
-    if (preferredPeerId && this.networkAdmission.isPeerAccepted(preferredPeerId, 'catchup-preferred', 'outbound')) {
+    if (preferredPeerId && await this.verifyPeerNetworkAdmission(preferredPeerId, ctx)) {
       await this.ensurePeerConnected(preferredPeerId);
     }
 
@@ -4413,11 +4413,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   async primeCatchupConnections(this: DKGAgent): Promise<void> {
+    const ctx = createOperationContext('sync');
     await primeCatchupConnectionsAtom(
       this.node.libp2p as any,
       this.discovery,
       this.peerId,
-      (peerId) => this.networkAdmission.isPeerAccepted(peerId, 'catchup-prime', 'outbound'),
+      (peerId) => this.verifyPeerNetworkAdmission(peerId, ctx),
     );
   }
 

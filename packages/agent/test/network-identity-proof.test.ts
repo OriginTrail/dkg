@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ed25519Sign } from '@origintrail-official/dkg-core';
 import {
   makeNetworkIdentityRequest,
+  parseNetworkIdentityResponse,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from '../src/p2p/network-identity-proof.js';
@@ -96,5 +97,18 @@ describe('network identity proof', () => {
       nonce: 'nonce-1',
       requesterPeerId: 'requester-peer',
     })).resolves.toMatchObject({ ok: false, reason: 'invalid signature' });
+  });
+
+  it('validates response shape before proof verification', async () => {
+    expect(() => parseNetworkIdentityResponse({ version: 1, networkId: 'network-a' }))
+      .toThrow('missing peer id');
+
+    await expect(verifyNetworkIdentityResponse({
+      response: { version: 1, peerId: REMOTE_PEER_ID, networkId: localIdentity.networkId, proofKind: 'ed25519-peer-id' },
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toMatchObject({ ok: false, reason: 'missing signature' });
   });
 });

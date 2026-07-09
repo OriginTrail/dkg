@@ -309,7 +309,15 @@ describe('GossipSubManager', () => {
     };
     const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
     const bus = new TypedEventBus();
-    const manager = new GossipSubManager(node, bus, { networkId: 'base-testnet', chainId: 'base:84532' });
+    const admissionChecks: Array<{ peerId: string; topic: string }> = [];
+    const manager = new GossipSubManager(node, bus, {
+      networkId: 'base-testnet',
+      chainId: 'base:84532',
+      isPeerAccepted: (peerId, topic) => {
+        admissionChecks.push({ peerId, topic });
+        return peerId === 'peer-a';
+      },
+    });
     const logicalTopic = 'dkg/context-graph/test/finalization';
     const wireTopic = 'dkg/network/base-testnet.base:84532/context-graph/test/finalization';
 
@@ -331,6 +339,13 @@ describe('GossipSubManager', () => {
     });
     handlers[0]({
       detail: {
+        topic: wireTopic,
+        from: 'peer-b',
+        data: new TextEncoder().encode('rejected-wire'),
+      },
+    });
+    handlers[0]({
+      detail: {
         topic: 'dkg/network/base-mainnet/context-graph/test/finalization',
         from: 'peer-b',
         data: new TextEncoder().encode('foreign-wire'),
@@ -343,5 +358,9 @@ describe('GossipSubManager', () => {
     expect(manager.getSubscribers(logicalTopic)).toEqual(['peer-a']);
     expect(events).toEqual([{ topic: logicalTopic, from: 'peer-a', data: new TextEncoder().encode('from-wire') }]);
     expect(received).toEqual([{ topic: logicalTopic, from: 'peer-a', data: 'from-wire' }]);
+    expect(admissionChecks).toEqual([
+      { peerId: 'peer-a', topic: logicalTopic },
+      { peerId: 'peer-b', topic: logicalTopic },
+    ]);
   });
 });

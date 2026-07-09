@@ -121,11 +121,34 @@ export function parseNetworkIdentityRequest(data: Uint8Array): NetworkIdentityRe
   };
 }
 
+export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityResponse {
+  const response = value as Partial<NetworkIdentityResponse>;
+  if (response.version !== NETWORK_IDENTITY_PROOF_VERSION) throw new Error('unsupported proof version');
+  if (!isNonEmptyString(response.peerId)) throw new Error('missing peer id');
+  if (!isNonEmptyString(response.networkId)) throw new Error('missing network id');
+  if (response.proofKind !== NETWORK_IDENTITY_PROOF_KIND) throw new Error('unsupported proof kind');
+  if (!isNonEmptyString(response.signature)) throw new Error('missing signature');
+  return {
+    version: NETWORK_IDENTITY_PROOF_VERSION,
+    peerId: response.peerId,
+    networkId: response.networkId,
+    genesisId: isNonEmptyString(response.genesisId) ? response.genesisId : undefined,
+    chainId: isNonEmptyString(response.chainId) ? response.chainId : undefined,
+    networkConfigName: isNonEmptyString(response.networkConfigName) ? response.networkConfigName : undefined,
+    proofKind: NETWORK_IDENTITY_PROOF_KIND,
+    signature: response.signature,
+  };
+}
+
 export async function verifyNetworkIdentityResponse(
   input: VerifyNetworkIdentityResponseInput,
 ): Promise<VerifyNetworkIdentityResponseResult> {
-  const response = input.response as Partial<NetworkIdentityResponse>;
-  if (response.version !== NETWORK_IDENTITY_PROOF_VERSION) return { ok: false, reason: 'unsupported proof version' };
+  let response: NetworkIdentityResponse;
+  try {
+    response = parseNetworkIdentityResponse(input.response);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
   if (response.peerId !== input.remotePeerId) return { ok: false, reason: 'peer id mismatch' };
   if (response.networkId !== input.localIdentity.networkId) return { ok: false, reason: 'network id mismatch' };
   if (input.localIdentity.genesisId && response.genesisId !== input.localIdentity.genesisId) {
@@ -134,9 +157,6 @@ export async function verifyNetworkIdentityResponse(
   if (input.localIdentity.chainId && response.chainId !== input.localIdentity.chainId) {
     return { ok: false, reason: 'chain id mismatch' };
   }
-  if (response.proofKind !== NETWORK_IDENTITY_PROOF_KIND) return { ok: false, reason: 'unsupported proof kind' };
-  if (!isNonEmptyString(response.signature)) return { ok: false, reason: 'missing signature' };
-
   let publicKey: Uint8Array | undefined;
   try {
     const peerId = peerIdFromString(input.remotePeerId);

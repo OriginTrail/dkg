@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   NetworkAdmissionService,
   peerIdsFromMultiaddrs,
+  targetPeerIdFromMultiaddr,
 } from '../src/p2p/network-admission.js';
 
 describe('NetworkAdmissionService', () => {
@@ -45,5 +46,12 @@ describe('NetworkAdmissionService', () => {
       '/ip4/127.0.0.1/tcp/4001/p2p/relay-peer',
       '/dns4/bootstrap.example/tcp/4001/p2p/bootstrap-peer',
     ])].sort()).toEqual(['bootstrap-peer', 'relay-peer']);
+  });
+
+  it('separates relay seed peers from the explicit target peer in relayed multiaddrs', () => {
+    const addr = '/ip4/127.0.0.1/tcp/4001/p2p/relay-peer/p2p-circuit/p2p/target-peer';
+
+    expect([...peerIdsFromMultiaddrs([addr])]).toEqual(['relay-peer', 'target-peer']);
+    expect(targetPeerIdFromMultiaddr(addr)).toBe('target-peer');
   });
 });

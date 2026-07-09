@@ -740,6 +740,7 @@ export class DKGAgent extends DKGAgentBase {
       networkId: await computeNetworkId(genesisId),
       chainId: chain.chainId !== 'none' ? chain.chainId : undefined,
     };
+    const resolvedConfig: DKGAgentConfig = { ...config, networkIdentity };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
@@ -840,7 +841,7 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      config, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
+      resolvedConfig, wallet, node, agentStore, publisher, queryEngine, eventBus, chain,
       workspaceOwnedEntities, writeLocks, publicSnapshotStore,
     );
     agentRef = agent;
