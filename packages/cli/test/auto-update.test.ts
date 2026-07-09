@@ -1015,7 +1015,7 @@ describe('blue-green checkForUpdate', () => {
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allGitCalls = getExecFileCalls();
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git +refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
   });
 
@@ -1030,7 +1030,21 @@ describe('blue-green checkForUpdate', () => {
 
     expect(result).toBe(true);
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
+  });
+
+  it('terminates git verify-tag options before option-shaped tag names', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/--signed-release', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- --signed-release')).toBe(true);
   });
 
   it('does not run git verify-tag for branch refs when tag verification is requested', async () => {

@@ -1259,7 +1259,7 @@ async function _performUpdateInner(
       },
     );
     if (verifyTagSignature && maybeTag) {
-      await execFileAsync("git", ["verify-tag", maybeTag], {
+      await execFileAsync("git", ["verify-tag", "--", maybeTag], {
         cwd: targetDir,
         encoding: "utf-8",
         timeout: 30_000,

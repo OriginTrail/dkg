@@ -16,6 +16,7 @@
  */
 import { join } from 'node:path';
 import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
+import { parseTagName, resolveAutoUpdateGitRef } from '../../daemon/auto-update.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
@@ -111,8 +112,16 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
     }
 
     if (gitMode && au.verifyTagSignature === true) {
-      const resolvedRef = normalizeAutoUpdateRefForDoctor(au);
-      if (!resolvedRef.startsWith('refs/tags/')) {
+      let resolvedRef: string | null = null;
+      try {
+        resolvedRef = resolveAutoUpdateGitRef({
+          branch: typeof au.branch === 'string' ? au.branch : 'main',
+          ...(typeof au.ref === 'string' ? { ref: au.ref } : {}),
+        });
+      } catch {
+        resolvedRef = null;
+      }
+      if (resolvedRef && !parseTagName(resolvedRef)) {
         findings.push({
           check: 'config-sanity',
           severity: 'warning',
@@ -149,14 +158,4 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
   }
 
   return findings;
-}
-
-function normalizeAutoUpdateRefForDoctor(au: Record<string, unknown>): string {
-  const rawRef = typeof au.ref === 'string'
-    ? au.ref
-    : typeof au.branch === 'string'
-      ? au.branch
-      : 'main';
-  const trimmed = rawRef.trim() || 'main';
-  return trimmed.startsWith('refs/') ? trimmed : `refs/heads/${trimmed}`;
 }
