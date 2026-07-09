@@ -14,8 +14,6 @@ import {
   encodeStorageACK,
   decodeStorageACK,
   isStorageACKDecline,
-  isTransientStorageACKDeclineCode,
-  logKaLifecycleEvent,
   withSpan,
   getMetrics,
   computePublishACKDigest,
@@ -41,11 +39,14 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
-interface StorageAckDecision {
+export interface StorageAckDecision {
   encoded: Uint8Array;
   ack: StorageACKMsg;
-  lifecycleAssetUal?: string;
+  intent?: PublishIntentMsg;
+  peerId: string;
 }
+
+export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void | Promise<void>;
 
 /**
  * Validate that every term of a parsed quad is well-formed BEFORE it enters the
@@ -79,8 +80,6 @@ const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
 const MAX_DECLINE_LOG_CG_ID_CHARS = 160;
 const MAX_DECLINE_LOG_MESSAGE_CHARS = 240;
-const STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS = 250;
-
 function compactDeclineText(value: string, maxChars: number): string {
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (compacted.length <= maxChars) return compacted;
@@ -193,8 +192,8 @@ export interface StorageACKHandlerConfig {
     contextGraphId: string;
     message: string;
   }) => void | Promise<void>;
-  /** Local libp2p peer id for KA lifecycle logs. */
-  localPeerId?: string;
+  /** Optional observer for log/telemetry work after the protocol decision exists. */
+  onStorageAckDecision?: StorageAckDecisionObserver;
   /**
    * Codex PR #608: independent curation oracle. The handler MUST verify a
    * publisher's `isEncryptedPayload=true` claim against the CG's real
@@ -273,17 +272,6 @@ export interface StorageACKHandlerConfig {
     swmGraphId?: string,
     gossipTopic?: string,
   ) => SubscriptionSource | undefined;
-  /**
-   * Optional local resolver for canonical receiver-side KA lifecycle logs.
-   * The PublishIntent wire shape deliberately does not carry `assetUal` as a
-   * log-only field; callers may wire this only when they can derive or verify
-   * the UAL from local/on-chain state for the decoded intent + response.
-   */
-  resolveAssetUalForPublishIntent?: (input: {
-    intent: PublishIntentMsg;
-    ack: StorageACKMsg;
-    peerId: string;
-  }) => string | undefined | Promise<string | undefined>;
   /**
    * Codex review on PR #715: the per-CG named graph that backs the
    * LU-11 ciphertext chunk store MUST use a CANONICAL form of the CG
@@ -439,84 +427,30 @@ export class StorageACKHandler {
     });
   }
 
-  private logLifecycleResponse(assetUal: string | undefined, peerId: PeerId, ack: StorageACKMsg): void {
-    if (!assetUal) return;
-    const declined = isStorageACKDecline(ack);
-    const signatureR = ack.coreNodeSignatureR instanceof Uint8Array
-      ? ack.coreNodeSignatureR
-      : new Uint8Array(ack.coreNodeSignatureR ?? []);
-    const signatureVS = ack.coreNodeSignatureVS instanceof Uint8Array
-      ? ack.coreNodeSignatureVS
-      : new Uint8Array(ack.coreNodeSignatureVS ?? []);
-    logKaLifecycleEvent(this.log, createOperationContext('share'), {
-      assetUal,
-      stage: 'storage_ack',
-      event: declined ? 'storage_ack_declined' : 'storage_ack_signed',
-      role: 'receiver',
-      localPeerId: this.config.localPeerId ?? 'unknown',
-      localNodeIdentityId: this.config.nodeIdentityId.toString(),
-      peer: peerId.toString(),
-      level: declined ? 'warn' : 'info',
-      metadata: {
-        contextGraphId: ack.contextGraphId,
-        declineCode: declined ? ack.declineCode : undefined,
-        declineMessage: declined ? ack.declineMessage : undefined,
-        retryable: declined ? isTransientStorageACKDeclineCode(ack.declineCode) : undefined,
-        ackNodeIdentityId: declined ? undefined : String(ack.nodeIdentityId),
-        merkleRoot: declined ? undefined : ethers.hexlify(ack.merkleRoot),
-        signatureRBytes: declined ? undefined : signatureR.length,
-        signatureVSBytes: declined ? undefined : signatureVS.length,
-        subscriptionSource: declined ? undefined : ack.subscriptionSource,
-      },
-    });
-  }
-
-  private async buildStorageAckDecision(
+  private buildStorageAckDecision(
     intent: PublishIntentMsg | undefined,
     encoded: Uint8Array,
     peerId: PeerId,
-  ): Promise<StorageAckDecision> {
+  ): StorageAckDecision {
     const ack = decodeStorageACK(encoded);
-    const lifecycleAssetUal = await this.resolveLifecycleAssetUalForPublishIntent(intent, ack, peerId);
-    return { encoded, ack, lifecycleAssetUal };
+    return {
+      encoded,
+      ack,
+      intent,
+      peerId: peerId.toString(),
+    };
   }
 
-  private logLifecycleDecision(decision: StorageAckDecision, peerId: PeerId): void {
-    this.logLifecycleResponse(decision.lifecycleAssetUal, peerId, decision.ack);
-  }
-
-  private async resolveLifecycleAssetUalForPublishIntent(
-    intent: PublishIntentMsg | undefined,
-    ack: StorageACKMsg,
-    peerId: PeerId,
-  ): Promise<string | undefined> {
-    if (!intent || !this.config.resolveAssetUalForPublishIntent) return undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const timeoutResult = new Promise<undefined>((resolve) => {
-      timeout = setTimeout(() => {
-        this.log.warn(
-          createOperationContext('share'),
-          `StorageACK lifecycle assetUal resolver exceeded ${STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS}ms; continuing without receiver ACK assetUal`,
-        );
-        resolve(undefined);
-      }, STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS);
-      if (typeof timeout.unref === 'function') timeout.unref();
-    });
+  private async observeStorageAckDecision(decision: StorageAckDecision): Promise<void> {
+    if (!this.config.onStorageAckDecision) return;
     try {
-      return await Promise.race([this.config.resolveAssetUalForPublishIntent({
-        intent,
-        ack,
-        peerId: peerId.toString(),
-      }), timeoutResult]);
+      await this.config.onStorageAckDecision(decision);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(
         createOperationContext('share'),
-        `StorageACK lifecycle assetUal resolver failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
+        `StorageACK decision observer failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
       );
-      return undefined;
-    } finally {
-      if (timeout) clearTimeout(timeout);
     }
   }
 
@@ -761,8 +695,8 @@ export class StorageACKHandler {
           this.handlePublishIntent(data, peerId),
           cgIdAttr,
         );
-        const decision = await this.buildStorageAckDecision(intentPreview, result, peerId);
-        this.logLifecycleDecision(decision, peerId);
+        const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
+        await this.observeStorageAckDecision(decision);
         if (isStorageACKDecline(decision.ack)) {
           const declineCode = decision.ack.declineCode || 'UNKNOWN';
           span.setAttribute('dkg.ack_outcome', 'decline');

@@ -21,11 +21,11 @@ describe('PublishLifecycleLogger', () => {
 
     await lifecycle.rememberAssetUal(7n);
     await lifecycle.rememberAssetUal(8n);
-    lifecycle.identityAllocated({ contextGraphId: '42', kaId: '7' });
-    lifecycle.workspaceWritten({ contextGraphId: '42', recordCount: 2 });
-    lifecycle.storageAckRequested({ contextGraphId: '42', outcome: 'request' });
-    lifecycle.chainConfirmed({ contextGraphId: '42', kaId: '7', txHash: '0xabc' });
-    lifecycle.publishCompleted({ kaId: '7', status: 'confirmed' });
+    lifecycle.emit('identity', 'asset_ual_allocated', { metadata: { contextGraphId: '42', kaId: '7' } });
+    lifecycle.emit('wm', 'write', { metadata: { contextGraphId: '42', recordCount: 2 } });
+    lifecycle.emit('storage_ack', 'request', { metadata: { contextGraphId: '42', outcome: 'request' } });
+    lifecycle.emit('chain', 'confirm', { metadata: { contextGraphId: '42', kaId: '7', txHash: '0xabc' } });
+    lifecycle.emit('finalization', 'complete', { metadata: { kaId: '7', status: 'confirmed' } });
 
     expect(resolveAssetUal).toHaveBeenCalledTimes(1);
     expect(entries.map((entry) => entry.message)).toEqual([

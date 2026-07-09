@@ -77,56 +77,50 @@ interface SharedMemoryLifecycleEventInput extends SharedMemoryLifecycleFields {
   validationErrorCount?: number;
 }
 
-class SharedMemoryLifecycleContext {
-  private fields: SharedMemoryLifecycleFields = {};
-  private verified = false;
+function rejectedSharedMemoryOutcome(
+  fields: SharedMemoryLifecycleFields | undefined,
+  reason: string,
+  retryable: boolean,
+  assetVerified: boolean,
+): SharedMemoryApplyOutcome {
+  return {
+    applied: false,
+    reason,
+    retryable,
+    assetUal: assetVerified ? fields?.assetUal : undefined,
+    cgId: fields?.contextGraphId,
+    shareOperationId: fields?.shareOperationId,
+    publisherPeerId: fields?.publisherPeerId,
+  };
+}
 
-  bind(fields: SharedMemoryLifecycleFields): void {
-    this.fields = fields;
-  }
+function failedSharedMemoryOutcome(
+  fields: SharedMemoryLifecycleFields | undefined,
+  reason: string,
+): SharedMemoryApplyOutcome {
+  return {
+    applied: false,
+    reason,
+    retryable: true,
+    assetUal: fields?.assetUal,
+    cgId: fields?.contextGraphId,
+    shareOperationId: fields?.shareOperationId,
+    publisherPeerId: fields?.publisherPeerId,
+  };
+}
 
-  markVerified(): void {
-    this.verified = true;
-  }
-
-  metadata(extra: Omit<SharedMemoryLifecycleEventInput, keyof SharedMemoryLifecycleFields> = {}): SharedMemoryLifecycleEventInput {
-    return { ...this.fields, ...extra };
-  }
-
-  rejected(reason: string, retryable: boolean): SharedMemoryApplyOutcome {
-    return {
-      applied: false,
-      reason,
-      retryable,
-      assetUal: this.verified ? this.fields.assetUal : undefined,
-      cgId: this.fields.contextGraphId,
-      shareOperationId: this.fields.shareOperationId,
-      publisherPeerId: this.fields.publisherPeerId,
-    };
-  }
-
-  failed(reason: string): SharedMemoryApplyOutcome {
-    return {
-      applied: false,
-      reason,
-      retryable: true,
-      assetUal: this.fields.assetUal,
-      cgId: this.fields.contextGraphId,
-      shareOperationId: this.fields.shareOperationId,
-      publisherPeerId: this.fields.publisherPeerId,
-    };
-  }
-
-  applied(insertedTriples: number): SharedMemoryApplyOutcome {
-    return {
-      applied: true,
-      assetUal: this.fields.assetUal,
-      cgId: this.fields.contextGraphId,
-      shareOperationId: this.fields.shareOperationId,
-      publisherPeerId: this.fields.publisherPeerId,
-      insertedTriples,
-    };
-  }
+function appliedSharedMemoryOutcome(
+  fields: SharedMemoryLifecycleFields,
+  insertedTriples: number,
+): SharedMemoryApplyOutcome {
+  return {
+    applied: true,
+    assetUal: fields.assetUal,
+    cgId: fields.contextGraphId,
+    shareOperationId: fields.shareOperationId,
+    publisherPeerId: fields.publisherPeerId,
+    insertedTriples,
+  };
 }
 
 export interface ContextGraphMetaOracleRecord {
@@ -948,7 +942,7 @@ export class SharedMemoryHandler {
     // can signal which branch fired; the post-closure code
     // maps `cas` → retryable and `validation` → permanent.
     let withWriteLocksRejection: 'validation' | 'cas' | undefined;
-    const lifecycle = new SharedMemoryLifecycleContext();
+    let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
       let request = decoded.request;
@@ -1111,18 +1105,16 @@ export class SharedMemoryHandler {
         ctx = createOperationContext('share', request.operationId);
       }
       const { nquads, manifest, publisherPeerId, timestampMs, casConditions, subGraphName, agentAddress: kaAuthorAddress, kaNumber } = request;
-      const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
       const shareOperationId = request.shareOperationId?.trim();
-      lifecycle.bind({
-        assetUal,
+      const requestLifecycleFields: SharedMemoryLifecycleFields = {
         contextGraphId,
         shareOperationId,
         publisherPeerId,
         fromPeerId,
         subGraphName,
-      });
+      };
       const rejectOutcome = (reason: string, retryable: boolean): SharedMemoryApplyOutcome =>
-        lifecycle.rejected(reason, retryable);
+        rejectedSharedMemoryOutcome(requestLifecycleFields, reason, retryable, false);
       const sgLabel = subGraphName ? `/${subGraphName}` : '';
       this.log.info(ctx, `SWM write from ${fromPeerId} for context graph ${contextGraphId}${sgLabel} op=${shareOperationId}`);
 
@@ -1165,11 +1157,14 @@ export class SharedMemoryHandler {
         }
       }
 
-      lifecycle.markVerified();
-      this.logSwmLifecycleEvent(ctx, 'swm_update_received', lifecycle.metadata({
+      const assetUal = await this.resolveAssetUalForKaIdentity(kaAuthorAddress, kaNumber, ctx);
+      const verifiedFields = { ...requestLifecycleFields, assetUal };
+      verifiedLifecycleFields = verifiedFields;
+      this.logSwmLifecycleEvent(ctx, 'swm_update_received', {
+        ...verifiedFields,
         rootEntityCount: manifest?.length ?? 0,
         outcome: 'received',
-      }));
+      });
 
       await this.graphManager.ensureContextGraph(contextGraphId);
 
@@ -1242,21 +1237,23 @@ export class SharedMemoryHandler {
         if (!validation.valid) {
           const reason = validation.errors.join('; ');
           this.log.warn(ctx, `SWM validation rejected: ${reason}`);
-          this.logSwmLifecycleEvent(ctx, 'swm_validation_failed', lifecycle.metadata({
+          this.logSwmLifecycleEvent(ctx, 'swm_validation_failed', {
+            ...verifiedFields,
             rootEntityCount: manifestForValidation.length,
             outcome: 'rejected',
             retryable: false,
             reason,
             validationErrorCount: validation.errors.length,
-          }), 'warn');
+          }, 'warn');
           withWriteLocksRejection = 'validation';
           return false;
         }
-        this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', lifecycle.metadata({
+        this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
+          ...verifiedFields,
           rootEntityCount: manifestForValidation.length,
           statementCount: quads.length,
           outcome: 'accepted',
-        }));
+        });
         onPhase?.('validate', 'end');
 
         if (casConditions && casConditions.length > 0) {
@@ -1366,12 +1363,13 @@ export class SharedMemoryHandler {
         // rejected duplicate deliveries count as "redundant applies"
         // and skew the `/api/slo` metric.
         this.recordSeenShareOp(contextGraphId, shareOperationId, ctx);
-        this.logSwmLifecycleEvent(ctx, 'swm_state_changed', lifecycle.metadata({
+        this.logSwmLifecycleEvent(ctx, 'swm_state_changed', {
+          ...verifiedFields,
           rootEntityCount: manifestForValidation.length,
           statementCount: quads.length,
           insertedCount: quads.length,
           outcome: 'applied',
-        }));
+        });
         this.log.info(ctx, `Stored SWM write ${shareOperationId} (${quads.length} quads)`);
         this.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, {
           contextGraphId,
@@ -1381,7 +1379,7 @@ export class SharedMemoryHandler {
           source: 'gossip',
           counts: { triples: quads.length },
         });
-        return lifecycle.applied(quads.length);
+        return appliedSharedMemoryOutcome(verifiedFields, quads.length);
       }
       // `applied === false` from the withWriteLocks closure. PR-C
       // codex R4: validation rejection is deterministic (retry
@@ -1392,14 +1390,18 @@ export class SharedMemoryHandler {
       // outbox doesn't drop a payload that would apply after
       // out-of-order delivery converges.
       if (withWriteLocksRejection === 'cas') {
-        return rejectOutcome(
+        return rejectedSharedMemoryOutcome(
+          verifiedFields,
           'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
+          true,
           true,
         );
       }
-      return rejectOutcome(
+      return rejectedSharedMemoryOutcome(
+        verifiedFields,
         'validation rejected payload (permanent: triple structure or manifest does not pass validatePublishRequest)',
         false,
+        true,
       );
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.
@@ -1414,7 +1416,7 @@ export class SharedMemoryHandler {
       // retry budget and get dropped without operator action.
       const reason = err instanceof Error ? err.message : String(err);
       this.log.error(ctx, `SWM handle failed: ${reason}`);
-      return lifecycle.failed(reason);
+      return failedSharedMemoryOutcome(verifiedLifecycleFields, reason);
     }
   }
 
@@ -1424,8 +1426,24 @@ export class SharedMemoryHandler {
     ctx: OperationContext,
   ): Promise<string | undefined> {
     if (!agentAddress || !kaNumber || !this.assetUalForKaIdentity) return undefined;
+    let normalizedAgentAddress: string;
     try {
-      return await this.assetUalForKaIdentity({ agentAddress, kaNumber });
+      normalizedAgentAddress = ethers.getAddress(agentAddress.toLowerCase());
+    } catch {
+      return undefined;
+    }
+    let normalizedKaNumber: bigint;
+    try {
+      normalizedKaNumber = BigInt(kaNumber);
+    } catch {
+      return undefined;
+    }
+    if (normalizedKaNumber < 0n) return undefined;
+    try {
+      return await this.assetUalForKaIdentity({
+        agentAddress: normalizedAgentAddress,
+        kaNumber: normalizedKaNumber.toString(),
+      });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `SWM assetUal derivation failed: ${reason}`);

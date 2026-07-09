@@ -36,6 +36,7 @@ import {
   DKGPublisher,
   SharedMemoryHandler,
   StorageACKHandler,
+  createStorageAckLifecycleObserver,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
   FinalizationHandler,
@@ -112,12 +113,15 @@ describe('ka lifecycle proof', () => {
       contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
       chainId: await chain.getEvmChainId(),
       kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
-      localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
-      resolveAssetUalForPublishIntent: async () => {
-        if (!connectedAssetUal) throw new Error('connected ACK provider has not supplied assetUal');
-        return connectedAssetUal;
-      },
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+        resolveAssetUalForPublishIntent: async () => {
+          if (!connectedAssetUal) throw new Error('connected ACK provider has not supplied assetUal');
+          return connectedAssetUal;
+        },
+      }),
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], receiverBus);
     const publisherStore = new OxigraphStore();
     const publishQuads = [

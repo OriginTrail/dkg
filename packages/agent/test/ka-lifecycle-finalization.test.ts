@@ -281,6 +281,7 @@ describe('ka lifecycle finalization', () => {
 
     const messages = finalizationLifecycleLogs(entries).map((entry) => entry.message);
     expect(messages).not.toContainEqual(expect.stringContaining(`assetUal=${ASSET_UAL}`));
+    expect(messages).not.toContainEqual(expect.stringContaining('event=finalization_received'));
     expect(messages).not.toContainEqual(expect.stringContaining('event=finalization_rejected'));
   });
 

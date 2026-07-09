@@ -101,7 +101,7 @@ import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig,
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler, withSignerRegistrationCache,
+  ACKCollector, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -1086,9 +1086,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               contextGraphSharedMemoryUri,
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
-              localPeerId: this.peerId,
-              resolveAssetUalForPublishIntent: ({ intent }) =>
-                resolveStorageAckLifecycleAssetUalFromLocalSwm({ store: this.store, chain: this.chain, intent }),
+              onStorageAckDecision: createStorageAckLifecycleObserver({
+                logger: this.log,
+                localPeerId: () => this.peerId,
+                localNodeIdentityId: () => onChainIdentityId.toString(),
+                resolveAssetUalForPublishIntent: ({ intent }) =>
+                  resolveStorageAckLifecycleAssetUalFromLocalSwm({ store: this.store, chain: this.chain, intent }),
+              }),
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
               // may be absent on a chunked V2 intent (the handler then

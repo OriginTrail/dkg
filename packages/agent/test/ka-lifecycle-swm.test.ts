@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ASSET_UAL,
   AUTHOR_AGENT_ADDRESS,
@@ -176,7 +176,7 @@ describe('ka lifecycle swm', () => {
 
     const outcome = await handler.handle(msg, PUBLISHER_PEER_ID);
 
-    expect(resolverInput).toEqual({ agentAddress: AUTHOR_AGENT_ADDRESS, kaNumber: '7' });
+    expect(resolverInput).toEqual({ agentAddress: ethers.getAddress(AUTHOR_AGENT_ADDRESS.toLowerCase()), kaNumber: '7' });
     expect(outcome).toMatchObject({ applied: true, assetUal: ASSET_UAL });
   });
 
@@ -433,8 +433,9 @@ describe('ka lifecycle swm', () => {
 
   it('does not emit assetUal-scoped SWM receive logs before publisher peer verification', async () => {
     const store = new OxigraphStore();
+    const resolveAssetUal = vi.fn(async () => ASSET_UAL);
     const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
-      assetUalForKaIdentity: async () => ASSET_UAL,
+      assetUalForKaIdentity: resolveAssetUal,
       lifecycleLogOptions: {
         localPeerId: LOCAL_PEER_ID,
         localNodeIdentityId: 42n,
@@ -461,6 +462,7 @@ describe('ka lifecycle swm', () => {
       applied: false,
       retryable: false,
     });
+    expect(resolveAssetUal).not.toHaveBeenCalled();
     expect(swmLifecycleLogs(entries).some((entry) =>
       entry.message.includes(`assetUal=${ASSET_UAL}`),
     )).toBe(false);

@@ -3,6 +3,7 @@ import {
   logKaLifecycleEvent,
   type KaLifecycleLogLevel,
   type KaLifecycleMetadataValue,
+  type KaLifecycleStage,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 
@@ -38,84 +39,15 @@ export class PublishLifecycleLogger {
     this.assetUal = assetUal;
   }
 
-  identityAllocated(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('identity', 'asset_ual_allocated', { metadata });
-    if (this.assetUal) this.identityAllocatedLogged = true;
-  }
-
-  workspaceWritten(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('wm', 'write', { metadata });
-  }
-
-  swmSharePrepared(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('swm_share', 'prepared', { metadata });
-  }
-
-  storageAckRequested(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('storage_ack', 'request', { metadata });
-  }
-
-  storageAckSucceeded(
-    peer: string,
-    peerNodeIdentityId: string,
-    metadata?: Record<string, KaLifecycleMetadataValue>,
-  ): void {
-    this.emit('storage_ack', 'success', { peer, peerNodeIdentityId, metadata });
-  }
-
-  storageAckOutcome(
-    event: string,
-    input: {
-      level?: KaLifecycleLogLevel;
-      peer?: string;
-      metadata?: Record<string, KaLifecycleMetadataValue>;
-    } = {},
-  ): void {
-    this.emit('storage_ack', event, input);
-  }
-
-  storageAckQuorum(
-    input: {
-      level?: KaLifecycleLogLevel;
-      metadata?: Record<string, KaLifecycleMetadataValue>;
-    } = {},
-  ): void {
-    this.emit('storage_ack', 'quorum', input);
-  }
-
-  storageAckFailed(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('storage_ack', 'failure', { level: 'warn', metadata });
-  }
-
-  chainSubmitted(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('chain', 'submit', { metadata });
-  }
-
-  chainConfirmed(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('chain', 'confirm', { metadata });
-  }
-
-  chainFailed(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('chain', 'failure', { level: 'error', metadata });
-  }
-
-  vmPromoted(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('vm', 'promote', { metadata });
-  }
-
-  publishCompleted(metadata?: Record<string, KaLifecycleMetadataValue>): void {
-    this.emit('finalization', 'complete', { metadata });
-  }
-
-  private emit(
-    stage: Parameters<typeof logKaLifecycleEvent>[2]['stage'],
+  emit(
+    stage: KaLifecycleStage,
     event: string,
     input: {
       level?: KaLifecycleLogLevel;
       peer?: string;
       peerNodeIdentityId?: string;
       metadata?: Record<string, KaLifecycleMetadataValue>;
-    },
+    } = {},
   ): void {
     if (!this.assetUal) return;
     logKaLifecycleEvent(this.options.log, this.options.ctx, {
@@ -130,5 +62,8 @@ export class PublishLifecycleLogger {
       level: input.level,
       metadata: input.metadata,
     });
+    if (stage === 'identity' && event === 'asset_ual_allocated') {
+      this.identityAllocatedLogged = true;
+    }
   }
 }

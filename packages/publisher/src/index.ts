@@ -93,8 +93,14 @@ export {
 } from './ack-errors.js';
 export {
   StorageACKHandler,
+  type StorageAckDecision,
+  type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
 } from './storage-ack-handler.js';
+export {
+  createStorageAckLifecycleObserver,
+  type StorageAckLifecycleObserverOptions,
+} from './storage-ack-lifecycle-observer.js';
 export {
   withSignerRegistrationCache,
   SIGNER_REGISTRATION_CACHE_TTL_MS,

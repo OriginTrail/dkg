@@ -2663,31 +2663,37 @@ export class DKGPublisher implements Publisher {
     });
     if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
       await lifecycle.rememberAssetUal(options.precomputedAttestation.reservedKaId);
-      lifecycle.identityAllocated({
-        contextGraphId,
-        kaId: options.precomputedAttestation.reservedKaId.toString(),
-        publisherAddress,
-        entityCount,
-        publicRecordCount: allSkolemizedQuads.length,
-        hiddenCommitmentCount: privateRoots.length,
+      lifecycle.emit('identity', 'asset_ual_allocated', {
+        metadata: {
+          contextGraphId,
+          kaId: options.precomputedAttestation.reservedKaId.toString(),
+          publisherAddress,
+          entityCount,
+          publicRecordCount: allSkolemizedQuads.length,
+          hiddenCommitmentCount: privateRoots.length,
+        },
       });
     }
-    lifecycle.workspaceWritten({
-      contextGraphId,
-      recordCount: allSkolemizedQuads.length,
-      rootEntityCount: manifestEntries.length,
-      accessPolicy: effectiveAccessPolicy,
-      hiddenCommitmentCount: privateRoots.length,
-      subGraphName: options.subGraphName,
+    lifecycle.emit('wm', 'write', {
+      metadata: {
+        contextGraphId,
+        recordCount: allSkolemizedQuads.length,
+        rootEntityCount: manifestEntries.length,
+        accessPolicy: effectiveAccessPolicy,
+        hiddenCommitmentCount: privateRoots.length,
+        subGraphName: options.subGraphName,
+      },
     });
-    lifecycle.swmSharePrepared({
-      contextGraphId,
-      swmGraphId,
-      source: options.fromSharedMemory ? 'shared_memory' : 'inline',
-      recordCount: allSkolemizedQuads.length,
-      byteSize: effectiveByteSize.toString(),
-      encryptedInline: useEncryptedInline,
-      catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
+    lifecycle.emit('swm_share', 'prepared', {
+      metadata: {
+        contextGraphId,
+        swmGraphId,
+        source: options.fromSharedMemory ? 'shared_memory' : 'inline',
+        recordCount: allSkolemizedQuads.length,
+        byteSize: effectiveByteSize.toString(),
+        encryptedInline: useEncryptedInline,
+        catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
+      },
     });
 
     // Numeric-negative and numeric-zero CG ids are programming errors —
@@ -2757,17 +2763,19 @@ export class DKGPublisher implements Publisher {
           : privateRoots.length > 0
             ? 'folded_private'
             : 'public';
-        lifecycle.storageAckRequested({
-          contextGraphId: v10CgDomain,
-          swmGraphId,
-          subGraphName: options.subGraphName,
-          ackMode: lifecycleAckMode,
-          kaCount,
-          rootEntityCount: rootEntities.length,
-          publicByteSize: effectiveByteSize.toString(),
-          tokenAmount: precomputedTokenAmount.toString(),
-          merkleLeafCount: kcMerkleLeafCount,
-          outcome: 'request',
+        lifecycle.emit('storage_ack', 'request', {
+          metadata: {
+            contextGraphId: v10CgDomain,
+            swmGraphId,
+            subGraphName: options.subGraphName,
+            ackMode: lifecycleAckMode,
+            kaCount,
+            rootEntityCount: rootEntities.length,
+            publicByteSize: effectiveByteSize.toString(),
+            tokenAmount: precomputedTokenAmount.toString(),
+            merkleLeafCount: kcMerkleLeafCount,
+            outcome: 'request',
+          },
         });
         if (useCuratedCatalog) {
           if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
@@ -2812,13 +2820,17 @@ export class DKGPublisher implements Publisher {
           .map((a) => `${a.peerId.slice(-8)}:${a.subscriptionSource ?? '?'}`)
           .join(', ');
         for (const ack of v10ACKs) {
-          lifecycle.storageAckSucceeded(ack.peerId, ack.nodeIdentityId.toString(), {
-            outcome: 'success',
-            quorumCollected: v10ACKs.length,
-            subscriptionSource: ack.subscriptionSource,
+          lifecycle.emit('storage_ack', 'success', {
+            peer: ack.peerId,
+            peerNodeIdentityId: ack.nodeIdentityId.toString(),
+            metadata: {
+              outcome: 'success',
+              quorumCollected: v10ACKs.length,
+              subscriptionSource: ack.subscriptionSource,
+            },
           });
         }
-        lifecycle.storageAckQuorum({
+        lifecycle.emit('storage_ack', 'quorum', {
           metadata: {
             outcome: 'success',
             quorumCollected: v10ACKs.length,
@@ -2855,7 +2867,7 @@ export class DKGPublisher implements Publisher {
                 : reason === 'ACK' || reason?.startsWith('ACK:')
                   ? 'success'
                   : 'failure';
-            lifecycle.storageAckOutcome(outcome, {
+            lifecycle.emit('storage_ack', outcome, {
               level: 'warn',
               peer: peerOutcome.peerId,
               metadata: {
@@ -2867,7 +2879,7 @@ export class DKGPublisher implements Publisher {
               },
             });
           }
-          lifecycle.storageAckQuorum({
+          lifecycle.emit('storage_ack', 'quorum', {
             level: 'warn',
             metadata: {
               outcome: 'failure',
@@ -2877,10 +2889,13 @@ export class DKGPublisher implements Publisher {
             },
           });
         }
-        lifecycle.storageAckFailed({
-          outcome: 'failure',
-          errorClass: tag,
-          reason: err instanceof Error ? err.message : String(err),
+        lifecycle.emit('storage_ack', 'failure', {
+          level: 'warn',
+          metadata: {
+            outcome: 'failure',
+            errorClass: tag,
+            reason: err instanceof Error ? err.message : String(err),
+          },
         });
         this.log.warn(
           ctx,
@@ -3291,13 +3306,15 @@ export class DKGPublisher implements Publisher {
         );
         await lifecycle.rememberAssetUal(reservedKaId);
         if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
-          lifecycle.identityAllocated({
-            contextGraphId,
-            kaId: reservedKaId.toString(),
-            publisherAddress,
-            entityCount,
-            publicRecordCount: allSkolemizedQuads.length,
-            hiddenCommitmentCount: privateRoots.length,
+          lifecycle.emit('identity', 'asset_ual_allocated', {
+            metadata: {
+              contextGraphId,
+              kaId: reservedKaId.toString(),
+              publisherAddress,
+              entityCount,
+              publicRecordCount: allSkolemizedQuads.length,
+              hiddenCommitmentCount: privateRoots.length,
+            },
           });
         }
         try {
@@ -3326,13 +3343,15 @@ export class DKGPublisher implements Publisher {
               );
             }
           }
-          lifecycle.chainSubmitted({
-            contextGraphId: v10CgId.toString(),
-            kaId: reservedKaId?.toString(),
-            byteSize: effectiveByteSize.toString(),
-            tokenAmount: tokenAmount.toString(),
-            ackCount: v10ACKs.length,
-            merkleLeafCount: kcMerkleLeafCount,
+          lifecycle.emit('chain', 'submit', {
+            metadata: {
+              contextGraphId: v10CgId.toString(),
+              kaId: reservedKaId?.toString(),
+              byteSize: effectiveByteSize.toString(),
+              tokenAmount: tokenAmount.toString(),
+              ackCount: v10ACKs.length,
+              merkleLeafCount: kcMerkleLeafCount,
+            },
           });
           onChainResult = await this.chain.createKnowledgeAssets!({
             publishOperationId,
@@ -3397,13 +3416,15 @@ export class DKGPublisher implements Publisher {
         }
         ual = `did:dkg:${this.chain.chainId}/${storageAddr.toLowerCase()}/${kaId.toString()}`;
         lifecycle.setAssetUal(ual);
-        lifecycle.chainConfirmed({
-          contextGraphId: v10CgId.toString(),
-          kaId: kaId.toString(),
-          txHash: onChainResult.txHash,
-          blockNumber: onChainResult.blockNumber,
-          txIndex: onChainResult.txIndex,
-          tokenAmount: tokenAmount.toString(),
+        lifecycle.emit('chain', 'confirm', {
+          metadata: {
+            contextGraphId: v10CgId.toString(),
+            kaId: kaId.toString(),
+            txHash: onChainResult.txHash,
+            blockNumber: onChainResult.blockNumber,
+            txIndex: onChainResult.txIndex,
+            tokenAmount: tokenAmount.toString(),
+          },
         });
 
         for (const km of kaMetadata) {
@@ -3489,12 +3510,14 @@ export class DKGPublisher implements Publisher {
         // the success branch, so a failed ACK/chain publish never exposes one
         // (CLEAR/REPLACE — see persistCatalogEntry).
         await persistCatalogEntry();
-        lifecycle.vmPromoted({
-          kaId: kaId.toString(),
-          vmGraph,
-          vmRecordCount: vmQuads.length,
-          rootEntityCount: manifestEntries.length,
-          status: 'confirmed',
+        lifecycle.emit('vm', 'promote', {
+          metadata: {
+            kaId: kaId.toString(),
+            vmGraph,
+            vmRecordCount: vmQuads.length,
+            rootEntityCount: manifestEntries.length,
+            status: 'confirmed',
+          },
         });
 
         status = 'confirmed';
@@ -3525,12 +3548,15 @@ export class DKGPublisher implements Publisher {
         // unchanged so callers preserve `instanceof` checks.
         const tag = err instanceof Error ? err.name : 'unknown';
         const msg = err instanceof Error ? err.message : String(err);
-        lifecycle.chainFailed({
-          outcome: 'failure',
-          contextGraphId: v10CgId.toString(),
-          ackCount: v10ACKs?.length ?? 0,
-          errorClass: tag,
-          reason: msg,
+        lifecycle.emit('chain', 'failure', {
+          level: 'error',
+          metadata: {
+            outcome: 'failure',
+            contextGraphId: v10CgId.toString(),
+            ackCount: v10ACKs?.length ?? 0,
+            errorClass: tag,
+            reason: msg,
+          },
         });
         this.log.warn(ctx, `On-chain publish failed (${tag}): ${msg}`);
         throw err instanceof Error ? err : new Error(msg);
@@ -3589,11 +3615,13 @@ export class DKGPublisher implements Publisher {
       v10Origin: usedV10Path,
       subGraphName: options.subGraphName,
     };
-    lifecycle.publishCompleted({
-      kaId: result.kaId.toString(),
-      status: result.status,
-      ackCount: result.v10ACKs?.length ?? 0,
-      localChainSkipReason: result.localChainSkipReason,
+    lifecycle.emit('finalization', 'complete', {
+      metadata: {
+        kaId: result.kaId.toString(),
+        status: result.status,
+        ackCount: result.v10ACKs?.length ?? 0,
+        localChainSkipReason: result.localChainSkipReason,
+      },
     });
 
     this.eventBus.emit(DKGEvent.KC_PUBLISHED, {

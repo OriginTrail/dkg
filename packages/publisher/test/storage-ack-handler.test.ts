@@ -1,5 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
+import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   computeFlatKCMerkleLeafCountV10,
@@ -161,7 +162,6 @@ describe('StorageACKHandler', () => {
 
   it('does not emit a canonical lifecycle assetUal from an unverified PublishIntent field', async () => {
     const handler = await createHandler(swmQuads, {
-      localPeerId: 'receiver-peer',
       ackHandlerDeadlineMs: 0,
     });
     const entries: string[] = [];
@@ -192,9 +192,12 @@ describe('StorageACKHandler', () => {
       return TEST_ASSET_UAL;
     });
     const handler = await createHandler(swmQuads, {
-      localPeerId: 'receiver-peer',
       ackHandlerDeadlineMs: 0,
-      resolveAssetUalForPublishIntent,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+      }),
     } as any);
     const entries: string[] = [];
     Logger.setSink((entry) => entries.push(entry.message));
@@ -223,9 +226,12 @@ describe('StorageACKHandler', () => {
   it('bounds lifecycle assetUal resolution and still returns a valid ACK', async () => {
     const resolveAssetUalForPublishIntent = vi.fn(() => new Promise<string>(() => {}));
     const handler = await createHandler(swmQuads, {
-      localPeerId: 'receiver-peer',
       ackHandlerDeadlineMs: 0,
-      resolveAssetUalForPublishIntent,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: 'receiver-peer',
+        localNodeIdentityId: coreIdentityId,
+        resolveAssetUalForPublishIntent,
+      }),
     } as any);
 
     const response = await Promise.race<Uint8Array | 'timed-out'>([

@@ -22,7 +22,6 @@ export {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,
   logKaLifecycleEvent,
-  parseKaLifecycleFields,
   type KaLifecycleLogEvent,
   type KaLifecycleLogLevel,
   type KaLifecycleMetadataValue,

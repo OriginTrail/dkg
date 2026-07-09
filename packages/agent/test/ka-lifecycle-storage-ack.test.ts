@@ -38,6 +38,7 @@ import {
   DKGPublisher,
   SharedMemoryHandler,
   StorageACKHandler,
+  createStorageAckLifecycleObserver,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
   FinalizationHandler,
@@ -98,9 +99,12 @@ describe('ka lifecycle storage ack', () => {
       contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
       chainId: 31337n,
       kav10Address: '0x000000000000000000000000000000000000c10a',
-      localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
-      resolveAssetUalForPublishIntent: async () => ASSET_UAL,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+        resolveAssetUalForPublishIntent: async () => ASSET_UAL,
+      }),
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
     const entries = captureLogs();
     const intent = encodePublishIntent({
@@ -141,9 +145,12 @@ describe('ka lifecycle storage ack', () => {
       contextGraphSharedMemoryUri: (cgId: string) => `did:dkg:context-graph:${cgId}/_shared_memory`,
       chainId: 31337n,
       kav10Address: '0x000000000000000000000000000000000000c10a',
-      localPeerId: LOCAL_PEER_ID,
       ackHandlerDeadlineMs: 0,
-      resolveAssetUalForPublishIntent: async () => ASSET_UAL,
+      onStorageAckDecision: createStorageAckLifecycleObserver({
+        localPeerId: LOCAL_PEER_ID,
+        localNodeIdentityId: 42n,
+        resolveAssetUalForPublishIntent: async () => ASSET_UAL,
+      }),
     } as unknown as ConstructorParameters<typeof StorageACKHandler>[1], new TypedEventBus());
     const entries = captureLogs();
     const intent = encodePublishIntent({

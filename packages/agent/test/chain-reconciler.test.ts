@@ -233,6 +233,36 @@ describe('reconcileContextGraph — sweep', () => {
     }));
   });
 
+  it('emits defer lifecycle decisions with reason for pending published KA ordinals', async () => {
+    const lifecycleEvents: ReconcileLifecycleEvent[] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 1,
+      reconcileOrdinal: async () => ({
+        status: 'pending',
+        assetUal: ASSET_UAL,
+        kaId: '7',
+        reason: 'negative-cache',
+      }),
+      logLifecycle: (event) => lifecycleEvents.push(event),
+    } as Partial<ChainReconcilerDeps>);
+    const state = createCursorState(0);
+
+    const result = await reconcileContextGraph(deps, state, 'published-cg', 77n);
+
+    expect(result.watermark).toBe(0);
+    expect(persisted).toEqual([]);
+    expect(lifecycleEvents).toContainEqual(expect.objectContaining({
+      assetUal: ASSET_UAL,
+      action: 'defer',
+      result: 'pending',
+      localCgId: 'published-cg',
+      onChainCgId: '77',
+      ordinal: 0,
+      kaId: '7',
+      reason: 'negative-cache',
+    }));
+  });
+
   it('emits cursor-advance with assetUal when a depth-held published KA advances on a later sweep', async () => {
     let headBlock = 100;
     let attempts = 0;

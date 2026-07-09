@@ -18,6 +18,7 @@ export default defineConfig({
       'test/multi-root-token-rows.test.ts',
       'test/promote-step-tag.test.ts',
       'test/agents-meta-bound.test.ts',
+      'test/publish-lifecycle-logger.test.ts',
       'test/ka-lifecycle-logging.test.ts',
       'test/storage-ack-handler.test.ts',
     ],
