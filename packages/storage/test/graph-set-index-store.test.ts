@@ -526,6 +526,46 @@ describe('GraphSetIndexStore', () => {
     expect(rebuildScan?.priority).not.toBe('ack');
   });
 
+  it('#1549: a cold/seed ack-priority read KEEPS the ACK lane (only the dirty rebuild is demoted)', async () => {
+    const inner = new OxigraphStore();
+    await inner.insert([q('did:dkg:context-graph:seedme')]);
+    const counting = new CountingStore(inner);
+    const store = new GraphSetIndexStore(counting);
+
+    // Cold index (graphs === null). An inbound StorageACK read must SEED on the ACK
+    // lane — demoting the seed to background would make the first ACK after restart
+    // wait behind saturated sync scans and miss its deadline.
+    await expect(
+      store.listGraphsByPrefix('did:dkg:', { priority: 'ack', source: 'test.ack.cold' }),
+    ).resolves.toEqual(['did:dkg:context-graph:seedme']);
+    expect(counting.listGraphsCalls).toBe(1);
+    expect(counting.listGraphsOptions.at(-1)).toMatchObject({ priority: 'ack', source: 'test.ack.cold' });
+  });
+
+  it('#1549: update() with touchedGraphs REMOVES a graph emptied by a DELETE — no full rebuild scan', async () => {
+    const graph = 'did:dkg:context-graph:prune-me';
+    const counting = new MutationHookStore(new OxigraphStore(), {
+      onUpdate: async ({ inner }) => { await inner.deleteByPattern({ graph }); },
+    });
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000, now: () => 1_000, onMutation: (e) => events.push(e),
+    });
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    // A server-side DELETE that empties the graph, with the touched graph declared
+    // (mirrors the agents-meta prune). The index REMOVES it via a bounded hasGraph,
+    // never a full rebuild scan.
+    await store.update(`DELETE WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { touchedGraphs: [graph] });
+
+    expect(counting.listGraphsCalls).toBe(1); // incremental hasGraph, NOT a full scan
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1); // still warm — no rebuild triggered
+    expect(events).toContainEqual({ type: 'graph-removed', graph, source: 'update' });
+  });
+
   it('removes stale graph names after a deferred SPARQL query removal', async () => {
     const graph = 'did:dkg:context-graph:old-query';
     const counting = new MutationHookStore(new OxigraphStore(), {

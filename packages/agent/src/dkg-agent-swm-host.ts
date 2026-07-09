@@ -2731,16 +2731,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
       const storeUpdate = this.store.update;
       if (typeof storeUpdate !== 'function') return;
-      // #1549: declare the graph(s) each server-side INSERT touches so the
-      // graph-set index maintains itself incrementally (a bounded `hasGraph`)
-      // instead of marking the whole index dirty and forcing a full store scan on
-      // the next enumeration. RS-heal is one of only two recurring server-side
-      // UPDATE sources that dirtied the index, and its target graphs are known here.
-      const update = (sparql: string, touchedGraphs?: string[]): Promise<void> =>
-        storeUpdate.call(this.store, sparql, {
-          source: 'agent.swm.rsHeal.materialize',
-          ...(touchedGraphs ? { touchedGraphs } : {}),
-        });
+      // #1549: every server-side INSERT in this RS-heal path has a statically-known
+      // target graph, so `touchedGraphs` is REQUIRED — the index then maintains
+      // itself incrementally (a bounded `hasGraph`) instead of marking the whole
+      // index dirty and forcing a full store scan on the next enumeration. Requiring
+      // it (not optional) closes the escape hatch: a future `update(sparql)` here that
+      // forgot to declare its graph would silently fall back to dirtying the index.
+      const update = (sparql: string, touchedGraphs: readonly string[]): Promise<void> =>
+        storeUpdate.call(this.store, sparql, { source: 'agent.swm.rsHeal.materialize', touchedGraphs });
 
       const DKG = 'http://dkg.io/ontology/';
       const legacyMeta = contextGraphMetaUri(localCgId);

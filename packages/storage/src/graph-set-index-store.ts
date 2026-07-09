@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore } from './triple-store.js';
+import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 
@@ -131,24 +131,17 @@ export class GraphSetIndexStore implements TripleStore {
     }
     const result = await this.inner.query(sparql, options);
     if (isSparqlUpdate(sparql)) {
-      // A SPARQL UPDATE may create/drop named graphs. When the caller declares
-      // the touched graphs, maintain the index incrementally (bounded per-graph
-      // `hasGraph`) instead of forcing a full rebuild on the next read (#1549 —
-      // keeps the index warm under the UPDATE stream). Opaque updates (no
-      // `touchedGraphs`) fall back to the lazy full rebuild.
-      if (options?.touchedGraphs && options.touchedGraphs.length > 0) {
-        this.bumpMutation();
-        await this.maintainIndex(() =>
-          this.refreshTouchedGraphs([...options.touchedGraphs!], 'query', options),
-        );
-      } else {
-        this.scheduleFullRefresh('query');
-      }
+      // A SPARQL UPDATE through query() may create/drop named graphs we can't
+      // derive incrementally — query() is the READ-path type and carries no
+      // index-maintenance hint (that lives on `update(…, UpdateOptions.touchedGraphs)`).
+      // Mark dirty for a single lazy rebuild on the next read instead of re-scanning
+      // the whole store now (the eager per-UPDATE scan thrashed large stores).
+      this.scheduleFullRefresh('query');
     }
     return result;
   }
 
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new Error('GraphSetIndexStore: inner store does not support update()');
     }
@@ -278,19 +271,22 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async refreshIndexLoop(source: GraphSetRefreshSource, options?: QueryOptions): Promise<Set<string>> {
     for (;;) {
+      const isDirtyRebuild = this.pendingFullRefresh != null;
       const sourceForScan = this.pendingFullRefresh ?? source;
       const generation = this.mutationGeneration;
-      // #1549: the rebuild is a bulk full-store `SELECT DISTINCT ?g` scan. Force it
-      // onto the BACKGROUND lane and tag it, so a rebuild triggered by an
-      // `ack`-priority read (whose `options` would otherwise flow straight through)
-      // never consumes the scarce reserved ACK slot. The triggering read still
-      // awaits this rebuild (forced-fresh — never a stale/empty serve), it just no
-      // longer runs the scan on the ACK lane. Cancellation (`signal`) is preserved.
-      const next = new Set((await this.inner.listGraphs({
-        ...options,
-        priority: 'background',
-        source: 'graph-set-index.rebuild',
-      })).filter(Boolean));
+      // #1549: force the bulk full-store `SELECT DISTINCT ?g` rebuild onto the
+      // BACKGROUND lane ONLY when it is a DIRTY rebuild (an opaque server-side UPDATE
+      // marked the index dirty). Such a rebuild would otherwise inherit an
+      // `ack`-priority reader's `options` and run the full scan on the scarce reserved
+      // ACK slot, head-of-line-blocking other ACK work. A SEED (cold start) or
+      // REVALIDATE refresh is genuinely part of serving the caller — an `ack` read's
+      // seed scan SHOULD use the reserved ACK lane — so it keeps the caller's
+      // priority/source. Cancellation (`signal`) is preserved either way. (With L1
+      // keeping the index warm at source, dirty rebuilds are rare.)
+      const scanOptions: QueryOptions | undefined = isDirtyRebuild
+        ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
+        : options;
+      const next = new Set((await this.inner.listGraphs(scanOptions)).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
