@@ -7,6 +7,7 @@ import {
   OxigraphStore,
   createTripleStore,
   registerTripleStoreAdapter,
+  type GraphSetMutationEvent,
   type Quad,
   type QueryResult,
   type TripleStore,
@@ -32,6 +33,10 @@ class CountingStore implements TripleStore {
   delete(quads: Quad[]): Promise<void> { return this.inner.delete(quads); }
   deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.inner.deleteByPattern(pattern); }
   query(sparql: string): Promise<QueryResult> { return this.inner.query(sparql); }
+  async update(sparql: string): Promise<void> {
+    if (typeof this.inner.update !== 'function') throw new Error('inner store does not support update()');
+    await this.inner.update(sparql);
+  }
   hasGraph(graphUri: string): Promise<boolean> { return this.inner.hasGraph(graphUri); }
   createGraph(graphUri: string): Promise<void> { return this.inner.createGraph(graphUri); }
   dropGraph(graphUri: string): Promise<void> { return this.inner.dropGraph(graphUri); }
@@ -76,6 +81,27 @@ class SeqInsertQueryStore extends CountingStore {
   async query(sparql: string): Promise<QueryResult> {
     if (/^\s*(?:#[^\r\n]*(?:\r?\n|$)\s*)*INSERT\s+DATA\b/i.test(sparql)) {
       await this.inner.insert([q(`did:dkg:context-graph:seq-${this.seq++}`)]);
+      return { type: 'bindings', bindings: [] };
+    }
+    return this.inner.query(sparql);
+  }
+}
+
+class SeqInsertUpdateStore extends CountingStore {
+  seq = 0;
+  async update(sparql: string): Promise<void> {
+    if (/^\s*(?:#[^\r\n]*(?:\r?\n|$)\s*)*INSERT\s+DATA\b/i.test(sparql)) {
+      await this.inner.insert([q(`did:dkg:context-graph:update-${this.seq++}`)]);
+      return;
+    }
+    await super.update(sparql);
+  }
+}
+
+class QueryThenUpdateStore extends SeqInsertUpdateStore {
+  async query(sparql: string): Promise<QueryResult> {
+    if (/^\s*(?:#[^\r\n]*(?:\r?\n|$)\s*)*INSERT\s+DATA\b/i.test(sparql)) {
+      await this.inner.insert([q('did:dkg:context-graph:mixed-query')]);
       return { type: 'bindings', bindings: [] };
     }
     return this.inner.query(sparql);
@@ -146,14 +172,25 @@ describe('GraphSetIndexStore', () => {
 
   it('refreshes the full index after graph-wide deleteByPattern without a graph constraint', async () => {
     const counting = new CountingStore(new OxigraphStore());
-    const store = new GraphSetIndexStore(counting);
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, { onMutation: (event) => events.push(event) });
     await store.insert([q('did:dkg:context-graph:one'), q('did:dkg:context-graph:two')]);
     await expect(store.listGraphs()).resolves.toHaveLength(2);
     expect(counting.listGraphsCalls).toBe(1);
 
     await store.deleteByPattern({ predicate: 'urn:p' });
+    expect(counting.listGraphsCalls).toBe(1);
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(2);
+    expect(events).toContainEqual({
+      type: 'graph-set-revalidated',
+      added: [],
+      removed: [
+        'did:dkg:context-graph:one',
+        'did:dkg:context-graph:two',
+      ],
+      source: 'deleteByPattern',
+    });
   });
 
   it('revalidates after the configured interval to discover out-of-contract writers', async () => {
@@ -242,7 +279,8 @@ describe('GraphSetIndexStore', () => {
 
   it('defers SPARQL updates: N updates cause zero eager rescans, then one coalesced rebuild on the next read', async () => {
     const counting = new SeqInsertQueryStore(new OxigraphStore());
-    const store = new GraphSetIndexStore(counting);
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, { onMutation: (event) => events.push(event) });
     // Seed the index (one scan).
     await expect(store.listGraphs()).resolves.toEqual([]);
     expect(counting.listGraphsCalls).toBe(1);
@@ -264,6 +302,16 @@ describe('GraphSetIndexStore', () => {
       ]),
     );
     expect(counting.listGraphsCalls).toBe(2); // single coalesced rebuild
+    expect(events).toContainEqual({
+      type: 'graph-set-revalidated',
+      added: [
+        'did:dkg:context-graph:seq-0',
+        'did:dkg:context-graph:seq-1',
+        'did:dkg:context-graph:seq-2',
+      ],
+      removed: [],
+      source: 'query',
+    });
   });
 
   it('a SPARQL update marks the index dirty so the next read rebuilds even within revalidateMs', async () => {
@@ -279,6 +327,74 @@ describe('GraphSetIndexStore', () => {
     now += 1;
     await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:seq-0']);
     expect(counting.listGraphsCalls).toBe(2);
+  });
+
+  it('defers update(): updates cause zero eager rescans, then one coalesced rebuild on the next read', async () => {
+    let now = 1_000;
+    const counting = new SeqInsertUpdateStore(new OxigraphStore());
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000,
+      now: () => now,
+      onMutation: (event) => events.push(event),
+    });
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.update('INSERT DATA { GRAPH <g0> { <urn:s> <urn:p> "v" } }');
+    await store.update('INSERT DATA { GRAPH <g1> { <urn:s> <urn:p> "v" } }');
+    expect(counting.listGraphsCalls).toBe(1);
+
+    now += 1;
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([
+        'did:dkg:context-graph:update-0',
+        'did:dkg:context-graph:update-1',
+      ]),
+    );
+    expect(counting.listGraphsCalls).toBe(2);
+    expect(events).toContainEqual({
+      type: 'graph-set-revalidated',
+      added: [
+        'did:dkg:context-graph:update-0',
+        'did:dkg:context-graph:update-1',
+      ],
+      removed: [],
+      source: 'update',
+    });
+  });
+
+  it('preserves the first deferred mutation source when later pending writes coalesce', async () => {
+    const counting = new QueryThenUpdateStore(new OxigraphStore());
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      onMutation: (event) => events.push(event),
+    });
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.query('INSERT DATA { GRAPH <q> { <urn:s> <urn:p> "v" } }');
+    await store.update('INSERT DATA { GRAPH <u> { <urn:s> <urn:p> "v" } }');
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.listGraphs()).resolves.toEqual(
+      expect.arrayContaining([
+        'did:dkg:context-graph:mixed-query',
+        'did:dkg:context-graph:update-0',
+      ]),
+    );
+    expect(counting.listGraphsCalls).toBe(2);
+    expect(events).toEqual([
+      {
+        type: 'graph-set-revalidated',
+        added: [
+          'did:dkg:context-graph:mixed-query',
+          'did:dkg:context-graph:update-0',
+        ],
+        removed: [],
+        source: 'query',
+      },
+    ]);
   });
 
   it('does not let observer failures reject committed writes', async () => {

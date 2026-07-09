@@ -63,16 +63,11 @@ export class GraphSetIndexStore implements TripleStore {
   private mutationGeneration = 0;
   private refreshInFlight: Promise<Set<string>> | null = null;
   /**
-   * Set when a mutation whose exact graph effects can't be applied incrementally
-   * (a SPARQL UPDATE, or a graph-less `deleteByPattern`) lands. Instead of
-   * eagerly re-scanning the whole store on every such write — which thrashes a
-   * large store under sync load (the RS-heal `INSERT…WHERE` stream drove ~30s
-   * `listGraphs` scans that starved ACK writes) — we defer: the next
-   * `listGraphs`/`listGraphsByPrefix` performs exactly one full rebuild,
-   * coalescing all writes since. Read-after-write therefore stays correct (the
-   * next read rebuilds), while N writes collapse to ≤1 scan instead of N.
+   * Pending full rebuild requested by a mutation whose exact graph effects can't
+   * be applied incrementally. The stored source preserves the observer contract
+   * while deferring expensive full-store scans until the next graph read.
    */
-  private dirty = false;
+  private pendingFullRefresh: GraphSetRefreshSource | null = null;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -112,14 +107,14 @@ export class GraphSetIndexStore implements TripleStore {
     }
     const removed = await this.inner.deleteByPattern(pattern);
     if (removed <= 0) return removed;
-    this.bumpMutation();
     const graph = pattern.graph;
     if (graph) {
+      this.bumpMutation();
       await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern'));
     } else {
       // No target graph → can't know which graphs emptied; defer to a single
       // lazy rebuild on the next read instead of a full scan now.
-      this.dirty = true;
+      this.scheduleFullRefresh('deleteByPattern');
     }
     return removed;
   }
@@ -134,8 +129,7 @@ export class GraphSetIndexStore implements TripleStore {
       // incrementally. Mark dirty for a single lazy rebuild on the next read
       // instead of re-scanning the whole store now — the eager per-UPDATE scan
       // thrashed large stores under the RS-heal/sync UPDATE stream.
-      this.bumpMutation();
-      this.dirty = true;
+      this.scheduleFullRefresh('query');
     }
     return result;
   }
@@ -153,8 +147,7 @@ export class GraphSetIndexStore implements TripleStore {
     // or drop named graphs the index must learn about. Rather than re-scan the
     // whole store on every UPDATE (the thrash), mark dirty: the next read does a
     // single rebuild and the freshly-created/dropped graph is reflected then.
-    this.bumpMutation();
-    this.dirty = true;
+    this.scheduleFullRefresh('update');
   }
 
   async hasGraph(graphUri: string): Promise<boolean> {
@@ -231,14 +224,14 @@ export class GraphSetIndexStore implements TripleStore {
     throwIfAborted(options?.signal);
     if (
       this.graphs &&
-      !this.dirty &&
+      !this.pendingFullRefresh &&
       this.revalidateMs > 0 &&
       this.now() - this.validatedAt < this.revalidateMs
     ) {
       return this.graphs;
     }
     return raceAgainstAbort(
-      this.refreshIndex(this.graphs ? 'revalidate' : 'seed'),
+      this.refreshIndex(this.pendingFullRefresh ?? (this.graphs ? 'revalidate' : 'seed')),
       options?.signal,
     );
   }
@@ -256,21 +249,28 @@ export class GraphSetIndexStore implements TripleStore {
 
   private async refreshIndexLoop(source: GraphSetRefreshSource): Promise<Set<string>> {
     for (;;) {
+      const sourceForScan = this.pendingFullRefresh ?? source;
       const generation = this.mutationGeneration;
       const next = new Set((await this.inner.listGraphs()).filter(Boolean));
       if (generation !== this.mutationGeneration) continue;
       // This scan reflects every mutation up to `generation` (synchronous from
       // here — no await — so a concurrent write can't slip between the check and
       // the clear; if one had, it would have bumped the generation above and we
-      // would have retried, re-setting dirty).
-      this.dirty = false;
-      this.replaceGraphSet(next, source);
+      // would have retried, preserving the pending refresh source for the next
+      // scan attempt).
+      this.pendingFullRefresh = null;
+      this.replaceGraphSet(next, sourceForScan);
       return this.graphs!;
     }
   }
 
   private bumpMutation(): void {
     this.mutationGeneration++;
+  }
+
+  private scheduleFullRefresh(source: GraphSetRefreshSource): void {
+    this.bumpMutation();
+    this.pendingFullRefresh ??= source;
   }
 
   private async maintainIndex(task: () => Promise<unknown>): Promise<void> {
