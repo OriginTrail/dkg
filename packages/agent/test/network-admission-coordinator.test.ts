@@ -20,11 +20,15 @@ function buildCoordinator(input: {
   identity?: typeof identity;
   probeTimeoutMs?: number;
   probeBackoff?: ConstructorParameters<typeof NetworkAdmissionCoordinator>[0]['probeBackoff'];
+  quarantineCooldownMs?: number;
   now?: () => number;
 }) {
   const admission = new NetworkAdmissionService({
     networkId: input.identity?.networkId,
     selfPeerId: SELF_PEER_ID,
+    // Share the coordinator's clock so quarantine TTL and probe backoff advance
+    // together under fake time.
+    ...(input.now !== undefined ? { now: input.now } : {}),
   });
   const close = vi.fn();
   const abort = vi.fn();
@@ -45,6 +49,7 @@ function buildCoordinator(input: {
     cleanupRejectedPeerState,
     ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
     ...(input.probeBackoff !== undefined ? { probeBackoff: input.probeBackoff } : {}),
+    ...(input.quarantineCooldownMs !== undefined ? { quarantineCooldownMs: input.quarantineCooldownMs } : {}),
     ...(input.now !== undefined ? { now: input.now } : {}),
   });
 
@@ -238,17 +243,22 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('uses unsupported-protocol backoff before retrying unsupported identity probes', async () => {
+  it('treats identity-probe negotiation failures as transient, not a long blackhole', async () => {
+    // A peer that answers multistream `na` because it has not yet registered
+    // the identity protocol (still booting) must recover on the short transient
+    // schedule, not be quarantined off every protocol for minutes. Regression
+    // guard for the rolling-upgrade blackhole (PR #1558 review, HIGH-1).
     let now = 1_000;
     const sendIdentityProbe = vi.fn(async () => {
-      throw new Error('protocol not supported');
+      throw new Error('Protocol selection failed - could not negotiate /dkg/network-identity');
     });
     const fixture = buildCoordinator({
       identity,
       sendIdentityProbe,
       now: () => now,
       probeBackoff: {
-        unsupportedProtocolMs: 500,
+        transientBaseMs: 100,
+        transientMaxMs: 100,
       },
     });
 
@@ -256,17 +266,17 @@ describe('NetworkAdmissionCoordinator', () => {
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
-
-    now += 499;
+    // Still within the short transient window: suppressed, but NOT quarantined.
     await expect(
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
-    ).rejects.toMatchObject({
-      code: 'NETWORK_ADMISSION_PROBE_FAILED',
-      message: expect.stringContaining('retryable probe backed off for 1ms'),
-    });
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
 
-    now += 1;
+    // The transient backoff elapses in 100ms — a booting peer is re-probed
+    // promptly rather than blackholed for the old flat 300s.
+    now += 100;
     await expect(
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
@@ -527,5 +537,47 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.cleanupRejectedPeerState).toHaveBeenCalledWith(REMOTE_PEER_ID);
     expect(fixture.close).toHaveBeenCalledTimes(1);
     expect(fixture.deletePeerFromPeerStore).toHaveBeenCalledWith(REMOTE_PEER_ID);
+  });
+
+  it('re-probes a quarantined peer once the quarantine cooldown elapses', async () => {
+    // Quarantine must be a bounded cooldown, not terminal-until-restart: a peer
+    // that corrected a mismatched networkId and restarted has to be able to
+    // re-admit. Regression guard for PR #1558 review, HIGH-2.
+    let now = 1_000;
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      now: () => now,
+      quarantineCooldownMs: 1_000,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    // Within the cooldown: still rejected, and the repeat probe is suppressed.
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+
+    // Cooldown elapsed: the peer is no longer reported as rejected and the next
+    // admission attempt re-probes instead of blackholing until restart.
+    now += 1_001;
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
+    await expect(
+      fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
+    ).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 });

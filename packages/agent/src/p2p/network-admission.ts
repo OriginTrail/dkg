@@ -3,6 +3,7 @@ import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId }
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
+  now?: () => number;
 }
 
 export interface NetworkAdmissionSnapshot {
@@ -25,14 +26,18 @@ export interface NetworkAdmissionSnapshot {
 export class NetworkAdmissionService {
   private readonly networkId?: string;
   private readonly selfPeerId?: CanonicalPeerId;
+  private readonly now: () => number;
   private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
-  private readonly quarantinedPeerIds = new Set<CanonicalPeerId>();
+  // peerId -> quarantine expiry (ms). A quarantine is a bounded cooldown so a
+  // peer can recover after correcting its signed network identity.
+  private readonly quarantinedPeers = new Map<CanonicalPeerId, number>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
     this.selfPeerId = options.networkId && options.selfPeerId
       ? canonicalAdmissionServicePeerId(options.selfPeerId)
       : undefined;
+    this.now = options.now ?? Date.now;
   }
 
   get enabled(): boolean {
@@ -42,12 +47,13 @@ export class NetworkAdmissionService {
   markVerifiedSameNetwork(peerId: string): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.verifiedPeerIds.add(canonicalPeerId);
-    this.quarantinedPeerIds.delete(canonicalPeerId);
+    this.quarantinedPeers.delete(canonicalPeerId);
   }
 
-  quarantinePeer(peerId: string): void {
+  /** Quarantine a peer until `untilMs`; omitted deadlines currently use the PR's one-minute default. */
+  quarantinePeer(peerId: string, untilMs?: number): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.quarantinedPeerIds.add(canonicalPeerId);
+    this.quarantinedPeers.set(canonicalPeerId, untilMs ?? this.now() + 60_000);
     this.verifiedPeerIds.delete(canonicalPeerId);
   }
 
@@ -56,21 +62,21 @@ export class NetworkAdmissionService {
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
     if (!canonicalPeerId) return false;
     if (canonicalPeerId === this.selfPeerId) return true;
-    if (this.quarantinedPeerIds.has(canonicalPeerId)) return false;
+    if (this.isQuarantined(canonicalPeerId)) return false;
     return this.verifiedPeerIds.has(canonicalPeerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    return canonicalPeerId ? this.quarantinedPeerIds.has(canonicalPeerId) : true;
+    return canonicalPeerId ? this.isQuarantined(canonicalPeerId) : true;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     if (!this.enabled) return new Set();
     return new Set(
       [...this.verifiedPeerIds]
-        .filter((peerId) => !this.quarantinedPeerIds.has(peerId)),
+        .filter((peerId) => !this.isQuarantined(peerId)),
     );
   }
 
@@ -78,8 +84,20 @@ export class NetworkAdmissionService {
     return {
       enabled: this.enabled,
       verifiedPeerIds: [...this.verifiedPeerIds].sort(),
-      quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
+      quarantinedPeerIds: [...this.quarantinedPeers.keys()]
+        .filter((peerId) => this.isQuarantined(peerId))
+        .sort(),
     };
+  }
+
+  private isQuarantined(peerId: CanonicalPeerId): boolean {
+    const untilMs = this.quarantinedPeers.get(peerId);
+    if (untilMs === undefined) return false;
+    if (untilMs <= this.now()) {
+      this.quarantinedPeers.delete(peerId);
+      return false;
+    }
+    return true;
   }
 }
 

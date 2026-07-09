@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import {
-  isProtocolUnsupportedError,
   PROTOCOL_NETWORK_IDENTITY,
   type DkgNetworkIdentity,
   type OperationContext,
@@ -39,6 +38,7 @@ export interface NetworkAdmissionCoordinatorOptions {
   };
   probeTimeoutMs?: number;
   probeBackoff?: Partial<NetworkAdmissionProbeBackoffOptions>;
+  quarantineCooldownMs?: number;
   now?: () => number;
 }
 
@@ -51,10 +51,9 @@ export interface NetworkAdmissionProbeBackoffOptions {
   transientBaseMs: number;
   transientMaxMs: number;
   unreadableResponseMs: number;
-  unsupportedProtocolMs: number;
 }
 
-type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response' | 'unsupported-protocol';
+type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response';
 
 interface NetworkAdmissionProbeBackoffEntry {
   failures: number;
@@ -156,6 +155,7 @@ export class NetworkAdmissionInvalidPeerIdError extends Error {
 }
 
 export class NetworkAdmissionCoordinator {
+  private static readonly MAX_PROBE_BACKOFF_ENTRIES = 10_000;
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
   private readonly selfPeerId: string;
@@ -167,6 +167,7 @@ export class NetworkAdmissionCoordinator {
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
   private readonly probeBackoff: NetworkAdmissionProbeBackoffOptions;
+  private readonly quarantineCooldownMs: number;
   private readonly now: () => number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
   private readonly retryableProbeBackoff = new Map<CanonicalPeerId, NetworkAdmissionProbeBackoffEntry>();
@@ -188,8 +189,8 @@ export class NetworkAdmissionCoordinator {
       transientBaseMs: options.probeBackoff?.transientBaseMs ?? 15_000,
       transientMaxMs: options.probeBackoff?.transientMaxMs ?? 120_000,
       unreadableResponseMs: options.probeBackoff?.unreadableResponseMs ?? 60_000,
-      unsupportedProtocolMs: options.probeBackoff?.unsupportedProtocolMs ?? 300_000,
     };
+    this.quarantineCooldownMs = options.quarantineCooldownMs ?? 300_000;
     this.now = options.now ?? Date.now;
   }
 
@@ -298,7 +299,16 @@ export class NetworkAdmissionCoordinator {
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
-      this.rememberRetryableProbeFailure(remotePeer, message, probeBackoffKindForTransportFailure(err));
+      // Every transport probe failure is retryable-transient — including a
+      // multistream "could not negotiate"/`na`. That `na` is ambiguous: a
+      // same-network peer that is still booting answers it during the window
+      // between `libp2p.start()` and `registerIdentityProtocol()`, and it is
+      // indistinguishable by message from a peer that will never support the
+      // protocol. Treating it as a long "unsupported-protocol" blackhole would
+      // reject a healthy restarting peer across *every* protocol for minutes
+      // (the admission gate is protocol-agnostic). The exponential transient
+      // backoff lets a booting peer recover on its next probe instead.
+      this.rememberRetryableProbeFailure(remotePeer, message, 'transient');
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -309,7 +319,10 @@ export class NetworkAdmissionCoordinator {
       claimed = JSON.parse(new TextDecoder().decode(response)) as unknown;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.rememberRetryableProbeFailure(remotePeer, message, 'unreadable-response');
+      // Store a fixed reason: the SyntaxError message echoes remote-controlled
+      // bytes, and the backoff reason is re-interpolated into later thrown
+      // errors and logs. The raw message is still logged once, below.
+      this.rememberRetryableProbeFailure(remotePeer, 'unreadable response', 'unreadable-response');
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -332,7 +345,11 @@ export class NetworkAdmissionCoordinator {
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {
     this.retryableProbeBackoff.delete(remotePeer);
-    this.admission.quarantinePeer(remotePeer);
+    // Quarantine is a bounded cooldown, not a permanent blackhole: after it
+    // elapses the peer is re-probed, so an operator who corrects a mismatched
+    // networkId and restarts the peer re-admits without every observer node
+    // restarting.
+    this.admission.quarantinePeer(remotePeer, this.now() + this.quarantineCooldownMs);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -365,6 +382,9 @@ export class NetworkAdmissionCoordinator {
   private probeBackoffEntry(remotePeer: CanonicalPeerId): NetworkAdmissionProbeBackoffEntry | undefined {
     const entry = this.retryableProbeBackoff.get(remotePeer);
     if (!entry) return undefined;
+    // An expired entry is retained (not deleted) so its `failures` counter can
+    // still grow the next backoff exponentially; abandoned entries are reclaimed
+    // by the size-triggered sweep in rememberRetryableProbeFailure.
     if (entry.untilMs <= this.now()) return undefined;
     return entry;
   }
@@ -377,6 +397,13 @@ export class NetworkAdmissionCoordinator {
     const previous = this.retryableProbeBackoff.get(remotePeer);
     const failures = (previous?.failures ?? 0) + 1;
     const delayMs = this.probeBackoffDelayMs(failures, kind);
+    // Bound memory: when tracking a *new* peer would push the map past its cap,
+    // reclaim entries that have already expired (peers that failed once and
+    // never returned). Active back-offs and the peer being recorded now are
+    // untouched, so exponential growth for a persistently-failing peer is kept.
+    if (!previous && this.retryableProbeBackoff.size >= NetworkAdmissionCoordinator.MAX_PROBE_BACKOFF_ENTRIES) {
+      this.pruneExpiredProbeBackoff();
+    }
     this.retryableProbeBackoff.set(remotePeer, {
       failures,
       kind,
@@ -385,8 +412,14 @@ export class NetworkAdmissionCoordinator {
     });
   }
 
+  private pruneExpiredProbeBackoff(): void {
+    const now = this.now();
+    for (const [peerId, entry] of this.retryableProbeBackoff) {
+      if (entry.untilMs <= now) this.retryableProbeBackoff.delete(peerId);
+    }
+  }
+
   private probeBackoffDelayMs(failures: number, kind: NetworkAdmissionProbeBackoffKind): number {
-    if (kind === 'unsupported-protocol') return this.probeBackoff.unsupportedProtocolMs;
     if (kind === 'unreadable-response') return this.probeBackoff.unreadableResponseMs;
 
     const exponent = Math.min(Math.max(failures - 1, 0), 8);
@@ -403,7 +436,6 @@ function abortErrorFromSignal(reason: unknown): Error {
   error.name = 'AbortError';
   return error;
 }
-
 function admissionTimeoutError(timeoutMs: number): Error {
   const error = new Error(`Network admission timed out after ${timeoutMs}ms`);
   error.name = 'AbortError';
@@ -419,7 +451,3 @@ function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
   }
 }
 
-function probeBackoffKindForTransportFailure(err: unknown): NetworkAdmissionProbeBackoffKind {
-  if (isProtocolUnsupportedError(err)) return 'unsupported-protocol';
-  return 'transient';
-}
