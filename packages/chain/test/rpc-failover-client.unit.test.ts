@@ -765,6 +765,24 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(populateOrder).toEqual(['primary']);
   });
 
+  it('AC-26: a skipPreferred read that FAILS OVER (primary → backup) does NOT establish a preference — transparent stays non-mutating even on the fallback path (round-8 🟡)', async () => {
+    const order: string[] = [];
+    const primary = { read: recorder(async () => { order.push('primary'); throw retryable429(); }) };
+    const backup = { read: recorder(async () => { order.push('backup'); return 'BACKUP'; }) };
+    const client = makeClient([primary, backup], STICKY_URLS, NEVER_SIGN, { enabled: true });
+
+    // Transparent read from a CLEAN state that fails over primary→backup must NOT
+    // establish a sticky preference (else background tip/poller reads would silently
+    // make a backup preferred despite the preference-transparent contract).
+    expect(await client.read('r', (p: any) => p.read(), { skipPreferred: true })).toBe('BACKUP');
+    expect(getRpcFailoverStats().preferredEstablishments).toBe(0); // transparent success did NOT establish
+
+    // The next NORMAL read is canonical (primary FIRST) — proving no preference leaked.
+    order.length = 0;
+    await client.read('r', (p: any) => p.read()).catch(() => {}); // canonical: primary 429 → backup
+    expect(order[0]).toBe('primary');
+  });
+
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
