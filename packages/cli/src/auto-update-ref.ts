@@ -13,11 +13,6 @@ export function parseTagName(ref: string): string | null {
   return m ? m[1] : null;
 }
 
-export function normalizeAutoUpdateVerifyTagSignature(value: unknown): boolean | undefined {
-  if (value === undefined) return undefined;
-  return value === true;
-}
-
 export function isValidRef(ref: string): boolean {
   if (!/^[\w./+\-]+$/.test(ref)) return false;
   if (!ref || ref.startsWith("-") || ref.startsWith("/") || ref.endsWith("/")) return false;
@@ -47,17 +42,27 @@ export function resolveAutoUpdateGitRef(
   return normalizeGitRefInput(refOverride ?? au.ref ?? au.branch);
 }
 
+export function resolveAutoUpdateVerifyTagSignature(
+  override: boolean | undefined,
+  configured: boolean | undefined,
+): boolean {
+  return override ?? configured ?? false;
+}
+
+function assertBooleanOrUndefined(value: unknown, name: string): asserts value is boolean | undefined {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new Error(`${name} must be a boolean when provided`);
+  }
+}
+
 export function resolveAutoUpdateGitRefPlan(
-  au: Pick<ResolvedAutoUpdateConfig, "branch"> & { ref?: string; verifyTagSignature?: unknown },
-  opts: { refOverride?: string; verifyTagSignature?: unknown } = {},
+  au: Pick<ResolvedAutoUpdateConfig, "branch" | "verifyTagSignature"> & { ref?: string },
+  opts: { refOverride?: string; verifyTagSignature?: boolean } = {},
 ): AutoUpdateGitRefPlan {
+  assertBooleanOrUndefined(au.verifyTagSignature, 'autoUpdate.verifyTagSignature');
+  assertBooleanOrUndefined(opts.verifyTagSignature, 'autoUpdate.verifyTagSignature override');
   const ref = resolveAutoUpdateGitRef(au, opts.refOverride);
-  const overrideHasVerify = Object.prototype.hasOwnProperty.call(opts, 'verifyTagSignature');
-  const verifyTagSignature = (
-    overrideHasVerify
-      ? normalizeAutoUpdateVerifyTagSignature(opts.verifyTagSignature)
-      : normalizeAutoUpdateVerifyTagSignature(au.verifyTagSignature)
-  ) ?? false;
+  const verifyTagSignature = resolveAutoUpdateVerifyTagSignature(opts.verifyTagSignature, au.verifyTagSignature);
   const tagName = parseTagName(ref);
   const shouldVerifyTagSignature = Boolean(tagName && verifyTagSignature);
   return {
@@ -65,7 +70,7 @@ export function resolveAutoUpdateGitRefPlan(
     tagName,
     verifyTagSignature,
     shouldVerifyTagSignature,
-    fetchRef: shouldVerifyTagSignature ? `+${ref}:${ref}` : ref,
+    fetchRef: tagName ? `${shouldVerifyTagSignature ? '+' : ''}${ref}:${ref}` : ref,
   };
 }
 

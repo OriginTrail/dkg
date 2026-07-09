@@ -44,7 +44,7 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
-import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
   DAEMON_EXIT_CODE_RESTART,
@@ -1154,11 +1154,11 @@ async function _performUpdateInner(
     }
   }
 
-  let refPlan;
+  let refPlan: AutoUpdateGitRefPlan;
   try {
     refPlan = resolveAutoUpdateGitRefPlan(au, {
       refOverride: opts.refOverride,
-      ...(Object.prototype.hasOwnProperty.call(opts, 'verifyTagSignature')
+      ...(opts.verifyTagSignature !== undefined
         ? { verifyTagSignature: opts.verifyTagSignature }
         : {}),
     });

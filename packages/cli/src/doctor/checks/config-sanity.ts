@@ -120,7 +120,7 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
         const refPlan = resolveAutoUpdateGitRefPlan({
           branch: typeof au.branch === 'string' ? au.branch : 'main',
           ...(typeof au.ref === 'string' ? { ref: au.ref } : {}),
-          verifyTagSignature: au.verifyTagSignature,
+          ...(typeof au.verifyTagSignature === 'boolean' ? { verifyTagSignature: au.verifyTagSignature } : {}),
         });
         verificationWarning = formatAutoUpdateTagVerificationWarning(refPlan);
       } catch {

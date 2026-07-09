@@ -256,6 +256,36 @@ describe('git auto-update ref normalization', () => {
     expect(formatAutoUpdateTagVerificationWarning(plan)).toBeNull();
   });
 
+  it('plans unverified tag fetches with a non-forced destination refspec', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: false,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: false,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+  });
+
+  it('rejects non-boolean plan verification values at the typed boundary', () => {
+    expect(() => resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: 'false' as any,
+    })).toThrow(/verifyTagSignature must be a boolean/);
+  });
+
   it('plans branch verification as inert and formats the daemon startup warning', () => {
     const plan = resolveAutoUpdateGitRefPlan({
       enabled: true,
@@ -275,21 +305,6 @@ describe('git auto-update ref normalization', () => {
     expect(formatAutoUpdateTagVerificationWarning(plan)).toContain(
       'verifyTagSignature=true is inert for non-tag ref "refs/heads/main"',
     );
-  });
-
-  it('normalizes non-boolean plan verification values to disabled', () => {
-    const plan = resolveAutoUpdateGitRefPlan({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
-      ref: 'refs/tags/v10.0.8',
-      checkIntervalMinutes: 30,
-      verifyTagSignature: 'false' as any,
-    });
-
-    expect(plan.verifyTagSignature).toBe(false);
-    expect(plan.shouldVerifyTagSignature).toBe(false);
-    expect(plan.fetchRef).toBe('refs/tags/v10.0.8');
   });
 });
 
@@ -1110,7 +1125,7 @@ describe('blue-green checkForUpdate', () => {
     readFileImpl = async () => 'aaa111';
     makeFetchOk('tagsha123');
     execFileImpl = async (file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5') {
+      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5:refs/tags/v9.0.5') {
         throw new Error('would clobber existing tag');
       }
       return { stdout: '', stderr: '' };
@@ -1125,7 +1140,7 @@ describe('blue-green checkForUpdate', () => {
     expect(result).toBe(false);
     const allGitCalls = getExecFileCalls();
     const fetchCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'fetch');
-    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5']);
+    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5:refs/tags/v9.0.5']);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.includes('+refs/tags/v9.0.5:refs/tags/v9.0.5'))).toBe(false);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
     expect(logCalls.some((msg) => msg.includes('would clobber existing tag'))).toBe(true);
