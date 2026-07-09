@@ -783,4 +783,49 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // write #2: populate-proven backend tried FIRST
     expect(populateOrder).toEqual(['backup']); // primary NOT re-probed — write stickiness preserved for #1340
   });
+
+  it('AC-15: a write-proven backend that FAILS a later broadcast (primary takes over as fallback) is downgraded → the next populate re-derives from canonical (#A)', async () => {
+    // primary broadcast OK, backup broadcast FAILS (so the tx moves to the primary
+    // as a fallback); primary populate 429s, backup populate OK (so populate proves backup).
+    const p0 = { broadcastTransaction: recorder(async () => undefined) };
+    const p1 = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // Broadcast tx: preferred=backup → backup FAILS → primary broadcasts as a FALLBACK.
+    await client.broadcast('0xsigned', '0xhash', 'w');
+    expect(p1.broadcastTransaction.calls).toHaveLength(1); // backup tried first, failed
+    expect(p0.broadcastTransaction.calls).toHaveLength(1); // primary took over
+
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // next populate
+    // The backup's nonce view is now suspect (it failed the write; the tx moved to
+    // the primary), so the write-preference was downgraded → populate re-derives
+    // from canonical (primary-first). Without the #A downgrade this would be ['backup'].
+    expect(populateOrder).toEqual(['primary', 'backup']);
+  });
+
+  it('AC-16: a write-proven backend SURVIVES an intervening read on it — the next populate still sticks to it (#B)', async () => {
+    const p0 = {};
+    const p1 = { read: recorder(async () => 'BACKUP-READ') };
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true });
+
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // populate proves backup (source=write)
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // Intervening READ served by the same preferred backend — must NOT downgrade the write-proven flag.
+    expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP-READ');
+
+    populateOrder.length = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // still write-proven → sticks to backup
+    expect(populateOrder).toEqual(['backup']); // the read did NOT reset the write-proven source
+  });
 });

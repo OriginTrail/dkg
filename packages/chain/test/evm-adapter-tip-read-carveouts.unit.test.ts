@@ -50,16 +50,6 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     expect(call![2]).toMatchObject({ skipPreferred: true });
   });
 
-  it('getBlockTimestamp(n) reads canonical + preference-transparent', async () => {
-    const a = makeAdapter();
-    const readProvider = recorder(async () => ({ timestamp: 42 }));
-    a.readProvider = readProvider;
-    expect(await a.getBlockTimestamp(5n)).toBe(42);
-    const call = readProvider.calls.find((c: any[]) => c[0] === 'getBlock');
-    expect(call).toBeDefined();
-    expect(call![2]).toMatchObject({ skipPreferred: true });
-  });
-
   it("conviction getBlock('latest') reads canonical + preference-transparent", async () => {
     const a = makeAdapter();
     a.contracts = { dkgPublishingConvictionNFT: {} };
@@ -98,5 +88,34 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
     for await (const _ of a.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'], fromBlock: 0 })) { void _; }
     expect(readContractWith.calls).toHaveLength(1);
     expect(readContractWith.calls[0][3]).toMatchObject({ policy: 'wideLogScan', skipPreferred: true });
+  });
+});
+
+// getBlockTimestamp is a CONCRETE receipt-block read (NOT the tip), so it is NOT a
+// skipPreferred carve-out; instead a `null` (endpoint hasn't imported the block)
+// must fail over rather than force a bogus `0` (#C, otReviewAgent 🔴).
+describe('getBlockTimestamp: a null (unimported) receipt block fails over instead of returning 0', () => {
+  function makeTwoEndpointAdapter(p0: any, p1: any) {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.ensureConfiguredStaticChainIdValidated = async () => {};
+    a.providers = [p0, p1];
+    a.rpcUrls = ['https://primary.example', 'https://backup.example'];
+    return a;
+  }
+
+  it('primary returns null for the receipt block → fails over to the backup timestamp', async () => {
+    const primaryGetBlock = recorder(async () => null); // lagging: block not imported yet
+    const backupGetBlock = recorder(async () => ({ timestamp: 42 }));
+    const a = makeTwoEndpointAdapter({ getBlock: primaryGetBlock }, { getBlock: backupGetBlock });
+    expect(await a.getBlockTimestamp(123n)).toBe(42); // NOT 0 — the backup served the block
+    expect(primaryGetBlock.calls).toHaveLength(1);
+    expect(backupGetBlock.calls).toHaveLength(1);
+  });
+
+  it('all endpoints lack the block → best-effort 0 (callers tolerate it)', async () => {
+    const a = makeTwoEndpointAdapter({ getBlock: recorder(async () => null) }, { getBlock: recorder(async () => null) });
+    expect(await a.getBlockTimestamp(123n)).toBe(0);
   });
 });

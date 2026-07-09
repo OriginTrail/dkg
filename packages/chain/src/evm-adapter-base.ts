@@ -110,6 +110,20 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
 
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
+/**
+ * A `getBlock(n)` that returned `null` because the queried endpoint hasn't
+ * imported that (already-mined) block yet. Thrown inside `getBlockTimestamp`'s
+ * read lambda so the failover loop treats it as a retryable condition and tries
+ * another endpoint (a lagging endpoint must not force a bogus `blockTimestamp: 0`
+ * when a healthy backup already has the block).
+ */
+class BlockNotYetImportedError extends Error {
+  constructor(blockNumber: number) {
+    super(`block ${blockNumber} not yet imported on this endpoint`);
+    this.name = 'BlockNotYetImportedError';
+  }
+}
+
 type IdentityIdCacheEntry = {
   identityId: bigint;
   ttlMs: number;
@@ -1002,6 +1016,10 @@ export class EVMChainAdapterBase {
       // than capturing the still-undefined field value here.
       () => this.chainId,
       async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+      // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
+      // boundary (LIVE per-check so flipping the env + restart disables it) so the
+      // transport core stays free of any process-global dependency.
+      { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
     );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
@@ -2372,10 +2390,29 @@ export class EVMChainAdapterBase {
   }
 
   protected async getBlockTimestamp(blockNumber: number): Promise<number> {
-    // TIP-SENSITIVE: a near-tip block can be missing (null) on a lagging sticky
-    // backend that hasn't imported it yet → read canonical + preference-transparent.
-    const block = await this.readProvider('getBlock', (p) => p.getBlock(blockNumber), { skipPreferred: true });
-    return block?.timestamp ?? 0;
+    // A CONCRETE (already-mined receipt) block — NOT the tip, so it uses normal
+    // endpoint stickiness (the endpoint that produced the receipt is the one most
+    // likely to already have the block). It is NOT a `skipPreferred` tip read:
+    // forcing canonical/primary-first here would instead risk querying a lagging
+    // primary that returns `null` for a block a healthy backup already has, and
+    // `null` isn't a retryable transport error, so it would surface as a bogus
+    // `blockTimestamp: 0`. Treat a `null` block as a FAILOVER condition so another
+    // endpoint that has the block can serve it; only if EVERY endpoint lacks it (or
+    // transport is down) do we fall back to the best-effort `0` callers tolerate.
+    try {
+      const block = await this.readProvider(
+        'getBlock',
+        async (p) => {
+          const b = await p.getBlock(blockNumber);
+          if (!b) throw new BlockNotYetImportedError(blockNumber);
+          return b;
+        },
+        { isRetryable: (e) => e instanceof BlockNotYetImportedError || isRetryableRpcError(e) },
+      );
+      return block.timestamp != null ? Number(block.timestamp) : 0;
+    } catch {
+      return 0;
+    }
   }
 
   // =====================================================================
