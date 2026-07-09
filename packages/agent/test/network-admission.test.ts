@@ -15,6 +15,20 @@ describe('NetworkAdmissionService', () => {
     expect(admission.snapshot().enabled).toBe(false);
   });
 
+  it('keeps disabled admission compatible with fixture self peer ids', () => {
+    const admission = new NetworkAdmissionService({ selfPeerId: 'fixture-self' });
+
+    expect(admission.isAcceptedPeer('fixture-peer')).toBe(true);
+    expect(admission.isRejectedPeer('fixture-peer')).toBe(false);
+  });
+
+  it('validates self peer ids when network admission is active', () => {
+    expect(() => new NetworkAdmissionService({
+      networkId: 'network-a',
+      selfPeerId: 'fixture-self',
+    })).toThrow();
+  });
+
   it('fails unknown peers closed when network identity is configured', () => {
     const admission = new NetworkAdmissionService({
       networkId: 'network-a',

@@ -146,7 +146,12 @@ import {
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
-import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
+import {
+  NetworkAdmissionInvalidPeerIdError,
+  NetworkAdmissionRejectedError,
+  type NetworkAdmissionAttemptOptions,
+} from './p2p/network-admission-coordinator.js';
+import { parseMultiaddrConnectTarget, targetPeerIdFromMultiaddr } from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   createCGMemberEnumerator,
@@ -1826,14 +1831,26 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    const connectTarget = this.networkAdmissionCoordinator.targetPeerForExplicitConnect(multiaddress);
+    let connectTarget: ReturnType<typeof parseMultiaddrConnectTarget>;
+    try {
+      connectTarget = parseMultiaddrConnectTarget(multiaddress);
+    } catch (err) {
+      if (!this.networkAdmissionCoordinator.enabled) throw err;
+      throw new NetworkAdmissionInvalidPeerIdError(
+        targetPeerIdFromMultiaddr(multiaddress) ?? '<missing>',
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    const targetPeerId = this.networkAdmissionCoordinator.targetPeerForExplicitConnect(
+      connectTarget.target?.canonical,
+    );
     await connectToMultiaddr(
       this.node.libp2p as any,
       connectTarget,
       (message) => this.log.info(ctx, message),
     );
-    if (connectTarget.target) {
-      await this.assertPeerAdmittedForExplicitConnect(connectTarget.target.canonical, ctx);
+    if (targetPeerId) {
+      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);
     }
   }
 

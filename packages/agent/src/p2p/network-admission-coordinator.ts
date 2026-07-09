@@ -6,11 +6,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionService } from './network-admission.js';
 import {
-  parseMultiaddrPeerTarget,
-  targetPeerIdFromMultiaddr,
-  type ParsedMultiaddrPeerTarget,
-} from './multiaddr-peer-target.js';
-import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
@@ -124,24 +119,14 @@ export class NetworkAdmissionCoordinator {
     return this.admission.verifiedSameNetworkPeerIds();
   }
 
-  targetPeerForExplicitConnect(multiaddress: string): ParsedMultiaddrPeerTarget {
-    let parsed: ParsedMultiaddrPeerTarget;
-    try {
-      parsed = parseMultiaddrPeerTarget(multiaddress);
-    } catch (err) {
-      if (!this.enabled) throw err;
-      throw new NetworkAdmissionInvalidPeerIdError(
-        targetPeerIdFromMultiaddr(multiaddress) ?? '<missing>',
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-    if (this.enabled && !parsed.target) {
+  targetPeerForExplicitConnect(targetPeerId: CanonicalPeerId | undefined): CanonicalPeerId | undefined {
+    if (this.enabled && !targetPeerId) {
       throw new NetworkAdmissionInvalidPeerIdError(
         '<missing>',
         'connect multiaddr must include a target /p2p/<peerId> for network admission',
       );
     }
-    return parsed;
+    return targetPeerId;
   }
 
   filterAcceptedPeerIds(peerIds: Iterable<string>): string[] {

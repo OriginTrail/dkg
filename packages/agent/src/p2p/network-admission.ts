@@ -30,7 +30,7 @@ export class NetworkAdmissionService {
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
-    this.selfPeerId = options.selfPeerId ? canonicalPeerIdString(options.selfPeerId) : undefined;
+    this.selfPeerId = options.networkId && options.selfPeerId ? canonicalPeerIdString(options.selfPeerId) : undefined;
   }
 
   get enabled(): boolean {

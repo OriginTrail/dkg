@@ -1,6 +1,6 @@
 import type { DiscoveryClient } from '../discovery.js';
 import {
-  type ParsedMultiaddrPeerTarget,
+  type MultiaddrConnectTarget,
 } from './multiaddr-peer-target.js';
 
 interface Libp2pLike {
@@ -33,16 +33,16 @@ async function waitForPeerConnection(
 
 export async function connectToMultiaddr(
   libp2p: Libp2pLike,
-  connectTarget: ParsedMultiaddrPeerTarget,
+  connectTarget: MultiaddrConnectTarget,
   log?: (message: string) => void,
 ): Promise<void> {
   const debugLog = DEBUG_SYNC_TRACE ? log : undefined;
   const { multiaddr } = await import('@multiformats/multiaddr');
-  const { multiaddress, target } = connectTarget;
+  const { multiaddress } = connectTarget;
 
-  if (!multiaddress.includes('/p2p-circuit/p2p/')) {
+  if (connectTarget.kind === 'direct') {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
-    const directTargetPeerId = target?.canonical;
+    const directTargetPeerId = connectTarget.target?.canonical;
     await libp2p.dial(multiaddr(multiaddress));
     if (directTargetPeerId) {
       const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
@@ -54,13 +54,11 @@ export async function connectToMultiaddr(
     return;
   }
 
-  const circuitIndex = multiaddress.indexOf('/p2p-circuit/p2p/');
-  const relayMultiaddr = multiaddress.slice(0, circuitIndex);
-  if (!target) throw new Error('Circuit multiaddr missing target peer id');
+  const { relayMultiaddress, target } = connectTarget;
   const targetPeerId = target.raw;
 
-  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddr} targetPeer=${targetPeerId}`);
-  await libp2p.dial(multiaddr(relayMultiaddr));
+  debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddress} targetPeer=${targetPeerId}`);
+  await libp2p.dial(multiaddr(relayMultiaddress));
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);

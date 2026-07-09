@@ -5,10 +5,22 @@ export interface CanonicalMultiaddrPeerTarget {
   canonical: CanonicalPeerId;
 }
 
-export interface ParsedMultiaddrPeerTarget {
+export interface DirectMultiaddrConnectTarget {
+  kind: 'direct';
   multiaddress: string;
   target?: CanonicalMultiaddrPeerTarget;
 }
+
+export interface CircuitMultiaddrConnectTarget {
+  kind: 'circuit';
+  multiaddress: string;
+  relayMultiaddress: string;
+  target: CanonicalMultiaddrPeerTarget;
+}
+
+export type MultiaddrConnectTarget = DirectMultiaddrConnectTarget | CircuitMultiaddrConnectTarget;
+
+const CIRCUIT_TARGET_MARKER = '/p2p-circuit/p2p/';
 
 export function peerIdsFromMultiaddr(addr: string): string[] {
   const peerIds: string[] = [];
@@ -21,6 +33,8 @@ export function peerIdsFromMultiaddr(addr: string): string[] {
 }
 
 export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
+  const circuitTarget = rawCircuitTargetPeerId(addr);
+  if (circuitTarget !== undefined) return circuitTarget || undefined;
   return peerIdsFromMultiaddr(addr).at(-1);
 }
 
@@ -29,9 +43,27 @@ export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMulti
   return raw ? { raw, canonical: canonicalPeerIdString(raw) } : undefined;
 }
 
-export function parseMultiaddrPeerTarget(addr: string): ParsedMultiaddrPeerTarget {
+export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarget {
+  const circuitIndex = addr.indexOf(CIRCUIT_TARGET_MARKER);
+  if (circuitIndex !== -1) {
+    const raw = rawCircuitTargetPeerId(addr);
+    if (!raw) throw new Error('Circuit multiaddr missing target peer id');
+    return {
+      kind: 'circuit',
+      multiaddress: addr,
+      relayMultiaddress: addr.slice(0, circuitIndex),
+      target: { raw, canonical: canonicalPeerIdString(raw) },
+    };
+  }
+
   const target = canonicalTargetPeerIdFromMultiaddr(addr);
-  return target ? { multiaddress: addr, target } : { multiaddress: addr };
+  return target ? { kind: 'direct', multiaddress: addr, target } : { kind: 'direct', multiaddress: addr };
+}
+
+function rawCircuitTargetPeerId(addr: string): string | undefined {
+  const circuitIndex = addr.indexOf(CIRCUIT_TARGET_MARKER);
+  if (circuitIndex === -1) return undefined;
+  return addr.slice(circuitIndex + CIRCUIT_TARGET_MARKER.length).split('/')[0]?.trim() ?? '';
 }
 
 export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {

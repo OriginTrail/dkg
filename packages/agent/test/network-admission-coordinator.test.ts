@@ -3,6 +3,7 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
+import { canonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
@@ -65,7 +66,7 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
   });
 
-  it('canonicalizes explicit-connect target peer ids at the admission boundary', () => {
+  it('accepts canonical explicit-connect target peer ids at the admission boundary', () => {
     const fixture = buildCoordinator({
       identity,
       sendIdentityProbe: async () => {
@@ -74,13 +75,11 @@ describe('NetworkAdmissionCoordinator', () => {
     });
 
     expect(
-      fixture.coordinator.targetPeerForExplicitConnect(
-        `/ip4/127.0.0.1/tcp/9090/p2p/${REMOTE_PEER_ID_CID}`,
-      ).target?.canonical,
+      fixture.coordinator.targetPeerForExplicitConnect(canonicalPeerIdString(REMOTE_PEER_ID_CID)),
     ).toBe(REMOTE_PEER_ID);
   });
 
-  it('rejects malformed explicit-connect target peer ids before probing', () => {
+  it('rejects missing explicit-connect target peer ids before probing', () => {
     const fixture = buildCoordinator({
       identity,
       sendIdentityProbe: async () => {
@@ -88,16 +87,11 @@ describe('NetworkAdmissionCoordinator', () => {
       },
     });
 
-    for (const multiaddr of [
-      '/ip4/127.0.0.1/tcp/9090',
-      '/ip4/127.0.0.1/tcp/9090/p2p/not-a-peer-id',
-    ]) {
-      try {
-        fixture.coordinator.targetPeerForExplicitConnect(multiaddr);
-        throw new Error('expected explicit-connect target validation to fail');
-      } catch (err) {
-        expect(err).toMatchObject({ code: 'INVALID_PEER_ID' });
-      }
+    try {
+      fixture.coordinator.targetPeerForExplicitConnect(undefined);
+      throw new Error('expected explicit-connect target validation to fail');
+    } catch (err) {
+      expect(err).toMatchObject({ code: 'INVALID_PEER_ID' });
     }
   });
 

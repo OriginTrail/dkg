@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
-import { parseMultiaddrPeerTarget } from '../src/p2p/multiaddr-peer-target.js';
+import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
 import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -20,7 +20,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, parseMultiaddrPeerTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${peerId}`));
+    }, parseMultiaddrConnectTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${peerId}`));
 
     expect(dial.calls).toHaveLength(1);
     expect(merge.calls).toEqual([]);
@@ -37,7 +37,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, parseMultiaddrPeerTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${cidPeerId}`));
+    }, parseMultiaddrConnectTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${cidPeerId}`));
 
     expect(dial.calls).toHaveLength(1);
     expect(merge.calls).toEqual([]);
@@ -53,7 +53,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, parseMultiaddrPeerTarget(multiaddress));
+    }, parseMultiaddrConnectTarget(multiaddress));
 
     expect(dial.calls).toHaveLength(2);
     expect(merge.calls).toHaveLength(1);
@@ -72,7 +72,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, parseMultiaddrPeerTarget(multiaddress));
+    }, parseMultiaddrConnectTarget(multiaddress));
 
     expect(dial.calls).toHaveLength(2);
     expect(merge.calls).toHaveLength(1);
@@ -87,7 +87,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => [],
       dial,
       peerStore: { merge },
-    }, parseMultiaddrPeerTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+    }, parseMultiaddrConnectTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
   });
 });
 
