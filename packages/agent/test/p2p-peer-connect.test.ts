@@ -46,8 +46,10 @@ describe('connectToMultiaddr', () => {
   it('dials relay first then target peer for circuit multiaddrs', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);
-    const multiaddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M/p2p-circuit/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const connections = [{ remotePeer: { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' } }];
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const multiaddress = `${relayAddress}/p2p-circuit/p2p/${targetPeerId}`;
+    const connections = [{ remotePeer: { toString: () => targetPeerId } }];
 
     await connectToMultiaddr({
       getConnections: () => connections as any,
@@ -56,7 +58,11 @@ describe('connectToMultiaddr', () => {
     }, parseMultiaddrConnectTarget(multiaddress));
 
     expect(dial.calls).toHaveLength(2);
+    expect(dial.calls[0]?.[0]?.toString()).toBe(relayAddress);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls).toHaveLength(1);
+    expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
+    expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
   });
 
   it('confirms circuit CID-form target peer ids against canonical connections', async () => {
@@ -75,7 +81,11 @@ describe('connectToMultiaddr', () => {
     }, parseMultiaddrConnectTarget(multiaddress));
 
     expect(dial.calls).toHaveLength(2);
+    expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls).toHaveLength(1);
+    expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
+    expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
   });
 
   it('throws when final circuit target never appears', async () => {
