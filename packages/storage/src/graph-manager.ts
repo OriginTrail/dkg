@@ -12,6 +12,8 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
+  isSafeIri,
+  assertSafeIri,
 } from '@origintrail-official/dkg-core';
 
 const CG_PREFIX = 'did:dkg:context-graph:';
@@ -20,6 +22,72 @@ async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<s
   return store.listGraphsByPrefix
     ? store.listGraphsByPrefix(prefix)
     : (await store.listGraphs()).filter((graph) => graph.startsWith(prefix));
+}
+
+/**
+ * Resolve the concrete set of shared-memory graphs to READ under `bucketGraph`,
+ * enumerated via the fast named-graph index (`listGraphsByPrefix`) instead of an
+ * unbounded `GRAPH ?g` scan. This is the BOUND equivalent of
+ * `sharedMemoryReadBothFilter` (core `constants.ts`): the bucket graph itself
+ * PLUS every graph under `${bucketGraph}/` EXCEPT the `${bucketGraph}/staging/`
+ * subtree — the exact same graph set that filter selects.
+ *
+ * Callers emit a `VALUES ?g { … }` clause from the result so the query engine
+ * reads only these graphs, turning an O(store) whole-database scan (the
+ * `GRAPH ?g { … } FILTER(STRSTARTS(?g,…))` idiom) into an O(matched-graphs)
+ * read. This is the hot-path relief for storage-ACK / finalization SWM reads.
+ *
+ * Non-indexed stores fall back to a `listGraphs()` prefix scan (still correct,
+ * just not index-accelerated). `assertSafeIri(bucketGraph)` throws on an unsafe
+ * bucket to preserve the old `sharedMemoryReadBothFilter` fail-closed behavior
+ * (the replaced filter asserted the same); per-KA under-graphs are dropped if
+ * unsafe (never produced by the DKG write path). Returns [] only when the
+ * bucket exists but has no under-graphs and no bucket-level quads — callers may
+ * still query the bucket alone since it is always included.
+ *
+ * Freshness contract: the index must be at least as fresh as the SPARQL scan it
+ * replaces. Same-process writes satisfy this (GraphSetIndexStore is
+ * write-through; the sparql-http adapter invalidates its listGraphs cache on
+ * every local insert/delete/update/drop). The only staleness window is a graph
+ * written by a DIFFERENT process to a SHARED oxigraph-server within the
+ * revalidate interval; there an under-read is still FAIL-SAFE on merkle-gated
+ * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
+ */
+export async function resolveSharedMemoryReadGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+): Promise<string[]> {
+  assertSafeIri(bucketGraph);
+  const stagingPrefix = `${bucketGraph}/staging/`;
+  const under = await listGraphsByPrefix(store, `${bucketGraph}/`);
+  const out = new Set<string>([bucketGraph]);
+  for (const graph of under) {
+    if (graph.startsWith(stagingPrefix)) continue;
+    if (isSafeIri(graph)) out.add(graph);
+  }
+  return [...out];
+}
+
+/**
+ * Resolve the concrete set of verifiable-memory graphs to READ under
+ * `dataGraph`, enumerated via the fast named-graph index instead of an
+ * unbounded `GRAPH ?g` scan. Bound equivalent of the recurring VM read filter
+ * `FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}")`:
+ * the base graph itself + every per-KA VM graph under
+ * `${dataGraph}/_verifiable_memory/` (data + `_meta`). Callers emit
+ * `VALUES ?g { … }` so the engine reads only these graphs (O(matched-graphs))
+ * rather than scanning the whole store. Same index-freshness / fail-safe
+ * characteristics as `resolveSharedMemoryReadGraphs`.
+ */
+export async function resolveVerifiableMemoryReadGraphs(
+  store: TripleStore,
+  dataGraph: string,
+): Promise<string[]> {
+  const under = await listGraphsByPrefix(store, `${dataGraph}/_verifiable_memory/`);
+  const out = new Set<string>();
+  if (isSafeIri(dataGraph)) out.add(dataGraph);
+  for (const graph of under) if (isSafeIri(graph)) out.add(graph);
+  return [...out];
 }
 
 export class ContextGraphManager {

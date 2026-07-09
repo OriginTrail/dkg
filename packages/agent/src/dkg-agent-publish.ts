@@ -95,14 +95,13 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  sharedMemoryReadBothFilter,
   partitionCatalogQuads,
   withSpan,
   getMetrics,
   assertQuadLiteralsMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, resolveSharedMemoryReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3320,9 +3319,15 @@ export class PublishMethods extends DKGAgentBase {
     subGraphName?: string,
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
-    let sparql: string;
+    // A3 (O(store) relief): bind the SWM read to the exact graph set via the
+    // fast named-graph index (resolveSharedMemoryReadGraphs → listGraphsByPrefix)
+    // instead of an unbounded `GRAPH ?g` + sharedMemoryReadBothFilter STRSTARTS
+    // scan, which reads every quad in every graph on RocksDB and starves the
+    // publish/ACK path under load. The resolved set equals what that filter
+    // matched (bucket + `${bucket}/` minus `${bucket}/staging/`).
+    let innerGraphPattern: string;
     if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
+      innerGraphPattern = '?s ?p ?o';
     } else {
       // Round 4 review §10 — mirror the `isSafeIri` filter that
       // `DKGPublisher.publishFromSharedMemory` applies before its own
@@ -3350,18 +3355,23 @@ export class PublishMethods extends DKGAgentBase {
         );
       }
       const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH ?g {
-          VALUES ?root { ${values} }
+      innerGraphPattern = `VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(
             ?s = ?root
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-        ${sharedMemoryReadBothFilter(swmGraph)}
-      }`;
+          )`;
     }
+    // Resolve the bound graph set AFTER the roots validation so a malformed
+    // `rootEntities` still throws (rather than being masked by an empty-SWM
+    // early return). No SWM graphs → nothing to read.
+    const swmGraphs = await resolveSharedMemoryReadGraphs(this.store, swmGraph);
+    if (swmGraphs.length === 0) return [];
+    const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+    const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        VALUES ?g { ${graphValues} }
+        GRAPH ?g { ${innerGraphPattern} }
+      }`;
     const result = await this.store.query(sparql, { source: 'agent.resolveLiftWorkspaceSlice' });
     return result.type === 'quads' ? result.quads : [];
   }

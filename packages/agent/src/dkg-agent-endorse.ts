@@ -92,7 +92,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, resolveVerifiableMemoryReadGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -795,8 +795,15 @@ export class EndorseVerifyMethods extends DKGAgentBase {
     const filterClauses = rootEntities
       .map(e => `(STR(?s) = ${sparqlString(e)} || STRSTARTS(STR(?s), ${sparqlString(e + '/.well-known/genid/')}))`)
       .join(' || ');
+    // A3 (O(store) relief): bind the per-KA VM graph set via the fast index
+    // instead of an unbounded `GRAPH ?g` + STRSTARTS(?g,…) scan (?s is only
+    // FILTER-narrowed, so the old form scanned every quad). Same target set as
+    // the old filter (dataGraph + `${dataGraph}/_verifiable_memory/*`).
+    const vmReadGraphs = await resolveVerifiableMemoryReadGraphs(this.store, dataGraph);
+    if (vmReadGraphs.length === 0) return;
+    const graphValues = vmReadGraphs.map(g => `<${g}>`).join(' ');
     const result = await this.store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o . FILTER(${filterClauses}) } FILTER(STRSTARTS(STR(?g), "${dataGraph}/_verifiable_memory/") || STR(?g) = "${dataGraph}") }`,
+      `SELECT ?s ?p ?o WHERE { VALUES ?g { ${graphValues} } GRAPH ?g { ?s ?p ?o . FILTER(${filterClauses}) } }`,
     );
     if (result.type !== 'bindings') return;
 

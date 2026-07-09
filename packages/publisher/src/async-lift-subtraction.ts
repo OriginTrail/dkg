@@ -1,6 +1,6 @@
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, resolveVerifiableMemoryReadGraphs } from '@origintrail-official/dkg-storage';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import type { LiftJobValidationMetadata, LiftRequest } from './lift-job.js';
 
@@ -144,11 +144,21 @@ async function loadAuthoritativeQuadKeys(
     return new Set();
   }
 
+  // A3 (O(store) relief): bind the per-KA VM graph set up front via the fast
+  // named-graph index instead of an unbounded `GRAPH ?g` + STRSTARTS(?g,…) scan
+  // (which reads every quad in the store on RocksDB per publish). The resolved
+  // set equals the old filter's target (base graph + `${graph}/_verifiable_memory/*`).
+  const vmGraphs = await resolveVerifiableMemoryReadGraphs(store, graph);
+  if (vmGraphs.length === 0) {
+    return new Set();
+  }
+  const graphValues = vmGraphs.map((g) => `<${g}>`).join(' ');
   const values = [...confirmedRoots].map((root) => safeStringLiteral(root)).join(' ');
   const result = await store.query(
     `CONSTRUCT {
       ?s ?p ?o
     } WHERE {
+      VALUES ?g { ${graphValues} }
       GRAPH ?g {
         VALUES ?rootValue { ${values} }
         ?s ?p ?o .
@@ -157,9 +167,6 @@ async function loadAuthoritativeQuadKeys(
           || STRSTARTS(STR(?s), CONCAT(?rootValue, "/.well-known/genid/"))
         )
       }
-      # Per-KA VM read-both: authoritative published data lives in
-      # …/_verifiable_memory/{author}/{number}; the root is the legacy fallback.
-      FILTER(STRSTARTS(STR(?g), "${graph}/_verifiable_memory/") || STR(?g) = "${graph}")
     }`,
   );
 

@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, resolveSharedMemoryReadGraphs } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
 import { withKeyedLocks } from './keyed-lock.js';
@@ -1598,9 +1598,15 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
-    let sparql: string;
+    // A3 (O(store) relief) — bound in LOCKSTEP with the agent twin
+    // (`_loadSelectedSWMQuads`, dkg-agent-publish.ts). Both this on-chain
+    // merkle-payload read and the agent's must enumerate the SAME graph set, so
+    // both use `resolveSharedMemoryReadGraphs` (bucket + `${bucket}/` minus
+    // `${bucket}/staging/`, via the fast index) and emit `VALUES ?g { … }`
+    // instead of an unbounded `GRAPH ?g` + sharedMemoryReadBothFilter scan.
+    let innerGraphPattern: string;
     if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
+      innerGraphPattern = '?s ?p ?o';
     } else {
       const roots = [...new Set(
         selection.rootEntities
@@ -1616,23 +1622,27 @@ export class DKGPublisher implements Publisher {
         );
       }
       const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH ?g {
-          VALUES ?root { ${values} }
+      innerGraphPattern = `VALUES ?root { ${values} }
           ?s ?p ?o .
           FILTER(
             ?s = ?root
             || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-        ${sharedMemoryReadBothFilter(swmGraph)}
-      }`;
+          )`;
     }
 
-    const result = await this.store.query(sparql);
-    const quads: Quad[] = result.type === 'quads'
-      ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q))
-      : [];
+    const swmGraphs = await resolveSharedMemoryReadGraphs(this.store, swmGraph);
+    let quads: Quad[] = [];
+    if (swmGraphs.length > 0) {
+      const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+        VALUES ?g { ${graphValues} }
+        GRAPH ?g { ${innerGraphPattern} }
+      }`;
+      const result = await this.store.query(sparql);
+      quads = result.type === 'quads'
+        ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q))
+        : [];
+    }
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);

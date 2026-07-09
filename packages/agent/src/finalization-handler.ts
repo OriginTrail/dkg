@@ -1,7 +1,6 @@
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
   contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
   DKGEvent, Logger, createOperationContext,
@@ -12,7 +11,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, resolveSharedMemoryReadGraphs, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -387,11 +386,25 @@ export class FinalizationHandler {
     // "no shared memory data … peer missed SWM sharing" on finalization, so
     // the published KA was never materialized into VM on subscribed peers
     // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
+    //
+    // A3 (O(store) relief): bind the read to the exact SWM graph set up front
+    // via the fast named-graph index (`resolveSharedMemoryReadGraphs` →
+    // `listGraphsByPrefix`) instead of an unbounded `GRAPH ?g` +
+    // `sharedMemoryReadBothFilter` STRSTARTS filter, which scans EVERY quad in
+    // EVERY graph on RocksDB and starves finalization/ACK under load. The
+    // resolved set is exactly what that filter matched (bucket + `${bucket}/`
+    // minus `${bucket}/staging/`). Merkle-critical but FAIL-SAFE: if the index
+    // ever omitted a graph the recompute would MISMATCH and this KA is rejected
+    // (retried on a later round), never accepted with corrupt data.
     // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
     // fidelity for the merkle recompute, and so the same logical triple
     // present in BOTH the bucket and a per-KA graph collapses to one
     // (a constructed graph is a set).
+    const swmGraphs = await resolveSharedMemoryReadGraphs(this.store, sharedMemoryGraph);
+    if (swmGraphs.length === 0) return [];
+    const graphValues = swmGraphs.map(g => `<${g}>`).join(' ');
     const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
+      VALUES ?g { ${graphValues} }
       GRAPH ?g {
         VALUES ?root { ${values} }
         ?s ?p ?o .
@@ -400,7 +413,6 @@ export class FinalizationHandler {
           || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
         )
       }
-      ${sharedMemoryReadBothFilter(sharedMemoryGraph)}
     }`;
 
     const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
