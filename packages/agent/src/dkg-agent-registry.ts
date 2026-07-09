@@ -147,15 +147,10 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import {
-  NetworkAdmissionInvalidPeerIdError,
   NetworkAdmissionRejectedError,
   type NetworkAdmissionAttemptOptions,
 } from './p2p/network-admission-coordinator.js';
-import {
-  MultiaddrPeerTargetParseError,
-  parseMultiaddrConnectTarget,
-  type MultiaddrConnectTarget,
-} from './p2p/multiaddr-peer-target.js';
+import { parseExplicitConnectTarget } from './p2p/explicit-connect-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   createCGMemberEnumerator,
@@ -406,25 +401,6 @@ function pcaRegisteredProbe(
 ): (() => Promise<boolean>) | null {
   const read = chain.isPublishingConvictionAgent;
   return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
-}
-
-function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: boolean): MultiaddrConnectTarget {
-  try {
-    const target = parseMultiaddrConnectTarget(multiaddress);
-    if (admissionEnabled && !target.targetPeerId) {
-      throw new MultiaddrPeerTargetParseError(
-        'connect multiaddr must include a target /p2p/<peerId> for network admission',
-        '<missing>',
-      );
-    }
-    return target;
-  } catch (err) {
-    if (!admissionEnabled) throw err;
-    throw new NetworkAdmissionInvalidPeerIdError(
-      err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
-      err instanceof Error ? err.message : String(err),
-    );
-  }
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {

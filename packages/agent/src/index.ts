@@ -45,14 +45,7 @@ export {
   peerIdsFromMultiaddr,
   peerIdsFromMultiaddrs,
   targetPeerIdFromMultiaddr,
-  canonicalTargetPeerIdFromMultiaddr,
-  type MultiaddrConnectTarget,
 } from './p2p/multiaddr-peer-target.js';
-export {
-  canonicalPeerIdString,
-  tryCanonicalPeerIdString,
-  type CanonicalPeerId,
-} from './p2p/peer-id.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';

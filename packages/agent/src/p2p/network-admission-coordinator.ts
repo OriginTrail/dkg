@@ -50,20 +50,18 @@ export interface NetworkIdentityProtocolRegistrar {
 
 class InFlightAdmissionAttempt {
   private readonly controller = new AbortController();
-  private promise: Promise<boolean> = Promise.resolve(false);
+  private readonly promise: Promise<boolean>;
   private waiters = 0;
   private settled = false;
 
-  constructor(private readonly defaultTimeoutMs: number) {}
-
-  get signal(): AbortSignal {
-    return this.controller.signal;
-  }
-
-  attach(work: Promise<boolean>, onSettled: () => void): void {
-    this.promise = work.finally(() => {
+  constructor(
+    private readonly defaultTimeoutMs: number,
+    work: (signal: AbortSignal) => Promise<boolean>,
+    onSettled: (attempt: InFlightAdmissionAttempt) => void,
+  ) {
+    this.promise = Promise.resolve().then(() => work(this.controller.signal)).finally(() => {
       this.settled = true;
-      onSettled();
+      onSettled(this);
     });
   }
 
@@ -221,11 +219,11 @@ export class NetworkAdmissionCoordinator {
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
 
-    const attempt = new InFlightAdmissionAttempt(this.probeTimeoutMs);
-    attempt.attach(
-      this.probePeer(remotePeerId, ctx, attempt.signal),
-      () => {
-        if (this.inFlight.get(remotePeerId) === attempt) this.inFlight.delete(remotePeerId);
+    const attempt = new InFlightAdmissionAttempt(
+      this.probeTimeoutMs,
+      (signal) => this.probePeer(remotePeerId, ctx, signal),
+      (settledAttempt) => {
+        if (this.inFlight.get(remotePeerId) === settledAttempt) this.inFlight.delete(remotePeerId);
       },
     );
     this.inFlight.set(remotePeerId, attempt);
