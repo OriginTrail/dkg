@@ -3355,9 +3355,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
       // Recently reconciled (live-burst guard): treat as already-done so the
       // cursor advances without redoing chain reads + an SWM scan.
-      if (this.recentReconciledUals.has(cacheKey)) {
-        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
-      }
+      if (this.recentReconciledUals.has(cacheKey)) return { status: 'already', blockNumber: versionBlock };
 
       if (await this.shouldDeferVmReconcileByNegativeCache(cacheKey, localCgId)) {
         this.emitReplication({
@@ -3369,7 +3367,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           ual,
           detail: 'negative-cache',
         });
-        return { status: 'pending', assetUal: ual, kaId: kaId.toString(), reason: 'negative-cache' };
+        return { status: 'pending' };
       }
 
       publisherAddress = (this.chain.getLatestMerkleRootPublisher
@@ -3450,7 +3448,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'promote', ordinal, kaId: kaId.toString(), ual,
         });
-        return { status: 'reconciled', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
+        return { status: 'reconciled', blockNumber: versionBlock };
       case 'already-confirmed':
         this.pruneVmReconcileCacheKeySiblings(cacheKey);
         this.recentReconciledUals.add(cacheKey);
@@ -3459,7 +3457,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
+        return { status: 'already', blockNumber: versionBlock };
       case 'stale-target':
         // A newer root won; do not prune its cache/recent state.
         this.recentReconciledUals.add(cacheKey);
@@ -3468,7 +3466,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           action: 'already', ordinal, kaId: kaId.toString(), ual,
         });
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        return { status: 'already', blockNumber: versionBlock, assetUal: ual, kaId: kaId.toString() };
+        return { status: 'already', blockNumber: versionBlock };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
           this.vmReconcileFetchCooldownAt.delete(localCgId);
@@ -3483,19 +3481,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
         });
-        return {
-          status: 'pending',
-          assetUal: ual,
-          kaId: kaId.toString(),
-          reason: activeFetchRan && !activeFetchHadUsableResponse ? 'network-unavailable' : outcome,
-        };
+        return { status: 'pending' };
       case 'unverified':
       default:
         this.emitReplication({
           contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
           action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: outcome,
         });
-        return { status: 'pending', assetUal: ual, kaId: kaId.toString(), reason: outcome };
+        return { status: 'pending' };
     }
   }
 

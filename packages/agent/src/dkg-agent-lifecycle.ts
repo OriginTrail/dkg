@@ -34,7 +34,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -95,11 +95,11 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
+  ACKCollector, StorageACKHandler, withSignerRegistrationCache,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -219,7 +219,6 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
-import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -1084,13 +1083,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               contextGraphSharedMemoryUri,
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
-              onStorageAckDecision: createStorageAckLifecycleObserver({
-                logger: this.log,
-                localPeerId: () => this.peerId,
-                localNodeIdentityId: () => onChainIdentityId.toString(),
-                resolveAssetUalForPublishIntent: ({ intent }) =>
-                  resolveStorageAckLifecycleAssetUalFromLocalSwm({ store: this.store, chain: this.chain, intent }),
-              }),
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
               // may be absent on a chunked V2 intent (the handler then

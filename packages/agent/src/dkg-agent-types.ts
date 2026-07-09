@@ -940,7 +940,7 @@ export interface DKGAgentConfig {
   /** Local daemon logging controls forwarded from config.json. */
   logging?: {
     /** Emit detailed KA publish lifecycle logs. Default: false. */
-    kaLifecycleDebug?: boolean;
+    kaPublishLifecycleDebug?: boolean;
   };
   /**
    * OT-RFC-43 Option 1 — durable per-author KA-number allocator. When provided,

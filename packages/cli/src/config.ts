@@ -426,7 +426,7 @@ export interface GraphSetIndexConfig {
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
-  kaLifecycleDebug?: boolean;
+  kaPublishLifecycleDebug?: boolean;
 }
 
 export interface DkgConfig {

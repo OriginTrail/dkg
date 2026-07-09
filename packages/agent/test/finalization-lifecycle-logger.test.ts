@@ -39,6 +39,7 @@ describe('FinalizationLifecycleLogger', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0].level).toBe('warn');
+    expect(entries[0].message).toContain('ka_publish_lifecycle');
     expect(entries[0].message).toContain('assetUal=did:dkg:evm:31337/0xasset/7');
     expect(entries[0].message).toContain('stage=finalization');
     expect(entries[0].message).toContain('event=finalization_no_data');

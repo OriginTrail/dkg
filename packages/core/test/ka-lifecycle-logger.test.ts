@@ -3,10 +3,10 @@ import { Logger, type LogSink } from '../src/logger.js';
 import {
   KA_LIFECYCLE_ROLES,
   KA_LIFECYCLE_STAGES,
-  isKaLifecycleDebugLoggingEnabled,
+  isKaPublishLifecycleDebugLoggingEnabled,
   logKaLifecycleEvent,
   resolveKaLifecycleLogDetail,
-  setKaLifecycleDebugLoggingEnabled,
+  setKaPublishLifecycleDebugLoggingEnabled,
 } from '../src/ka-lifecycle-logger.js';
 import {
   KA_LIFECYCLE_STAGES as ROOT_KA_LIFECYCLE_STAGES,
@@ -23,9 +23,7 @@ interface LogEntry {
 }
 
 const KA_DEBUG_ENV_KEYS = [
-  'DKG_DEBUG_KA_LIFECYCLE',
-  'DKG_KA_LIFECYCLE_DEBUG',
-  'DKG_DEBUG_PUBLISH_LIFECYCLE',
+  'DKG_DEBUG_KA_PUBLISH_LIFECYCLE',
 ] as const;
 const originalDebugEnv = new Map<string, string | undefined>();
 for (const key of KA_DEBUG_ENV_KEYS) originalDebugEnv.set(key, process.env[key]);
@@ -56,12 +54,12 @@ function captureStderr<T>(fn: () => T): { result: T; output: string[] } {
 describe('KA lifecycle logging', () => {
   beforeEach(() => {
     for (const key of KA_DEBUG_ENV_KEYS) delete process.env[key];
-    setKaLifecycleDebugLoggingEnabled(undefined);
+    setKaPublishLifecycleDebugLoggingEnabled(undefined);
   });
 
   afterEach(() => {
     Logger.setSink(null);
-    setKaLifecycleDebugLoggingEnabled(undefined);
+    setKaPublishLifecycleDebugLoggingEnabled(undefined);
     for (const key of KA_DEBUG_ENV_KEYS) {
       const original = originalDebugEnv.get(key);
       if (original === undefined) delete process.env[key];
@@ -156,7 +154,7 @@ describe('KA lifecycle logging', () => {
     const { entries, sink } = collectSink();
     Logger.setSink(sink);
 
-    const injectedAssetUal = 'did:dkg:evm:31337/0xaaa/1\nka_lifecycle assetUal=did:dkg:evm:31337/0xvictim/2 stage=chain event=confirm role=publisher';
+    const injectedAssetUal = 'did:dkg:evm:31337/0xaaa/1\nka_publish_lifecycle assetUal=did:dkg:evm:31337/0xvictim/2 stage=chain event=confirm role=publisher';
     const log = new Logger('KALifecycle');
     const { output } = captureStdout(() =>
       logKaLifecycleEvent(log, { operationId: 'op-ka-injection', operationName: 'publish' }, {
@@ -174,9 +172,9 @@ describe('KA lifecycle logging', () => {
 
     expect(entries).toHaveLength(1);
     expect(output).toHaveLength(1);
-    expect(output[0].split('\n').filter((line) => line.includes('ka_lifecycle'))).toHaveLength(1);
+    expect(output[0].split('\n').filter((line) => line.includes('ka_publish_lifecycle'))).toHaveLength(1);
     expect(entries[0].message).not.toContain('\n');
-    expect(entries[0].message).toContain('assetUal="did:dkg:evm:31337/0xaaa/1\\nka_lifecycle');
+    expect(entries[0].message).toContain('assetUal="did:dkg:evm:31337/0xaaa/1\\nka_publish_lifecycle');
     expect(entries[0].message).toContain('reason="No local Sender Key state for 0xabc epoch e1"');
   });
 
@@ -289,7 +287,7 @@ describe('KA lifecycle logging', () => {
     expect(entries.every((entry) => entry.message.includes('role=publisher'))).toBe(true);
   });
 
-  it('suppresses detailed lifecycle events unless KA lifecycle debug logging is enabled', () => {
+  it('suppresses detailed lifecycle events unless KA publish lifecycle debug logging is enabled', () => {
     const { entries, sink } = collectSink();
     Logger.setSink(sink);
 
@@ -313,22 +311,22 @@ describe('KA lifecycle logging', () => {
       localPeerId: 'publisher-peer',
       localNodeIdentityId: 'publisher-node',
     })).toBe('debug');
-    expect(isKaLifecycleDebugLoggingEnabled()).toBe(false);
+    expect(isKaPublishLifecycleDebugLoggingEnabled()).toBe(false);
     expect(entries).toHaveLength(0);
     expect(output).toHaveLength(0);
   });
 
-  it('lets config override the compatibility env debug flag', () => {
-    process.env.DKG_DEBUG_KA_LIFECYCLE = '1';
-    setKaLifecycleDebugLoggingEnabled(false);
-    expect(isKaLifecycleDebugLoggingEnabled()).toBe(false);
+  it('lets config override the env debug flag', () => {
+    process.env.DKG_DEBUG_KA_PUBLISH_LIFECYCLE = '1';
+    setKaPublishLifecycleDebugLoggingEnabled(false);
+    expect(isKaPublishLifecycleDebugLoggingEnabled()).toBe(false);
 
-    setKaLifecycleDebugLoggingEnabled(true);
-    expect(isKaLifecycleDebugLoggingEnabled()).toBe(true);
+    setKaPublishLifecycleDebugLoggingEnabled(true);
+    expect(isKaPublishLifecycleDebugLoggingEnabled()).toBe(true);
   });
 
-  it('emits detailed lifecycle events when the KA lifecycle debug flag is enabled', () => {
-    process.env.DKG_DEBUG_KA_LIFECYCLE = '1';
+  it('emits detailed lifecycle events when the KA publish lifecycle debug flag is enabled', () => {
+    process.env.DKG_DEBUG_KA_PUBLISH_LIFECYCLE = '1';
     const { entries, sink } = collectSink();
     Logger.setSink(sink);
 
@@ -344,7 +342,7 @@ describe('KA lifecycle logging', () => {
       }),
     );
 
-    expect(isKaLifecycleDebugLoggingEnabled()).toBe(true);
+    expect(isKaPublishLifecycleDebugLoggingEnabled()).toBe(true);
     expect(entries).toHaveLength(1);
     expect(entries[0].message).toContain('stage=storage_ack');
     expect(entries[0].message).toContain('event=success');

@@ -40,12 +40,10 @@ const KA_LIFECYCLE_REDACTED = '[REDACTED]';
 const KA_LIFECYCLE_METADATA_MAX_CHARS = 160;
 const KA_LIFECYCLE_UNSAFE_METADATA_KEY = /(?:ciphertext|nquads?|quads?|triples?|payload|plaintext|private|secret|raw)/i;
 const KA_LIFECYCLE_VALUE_REQUIRES_QUOTE = /[\s"\\\u0000-\u001f\u007f\u2028\u2029]/;
-const KA_LIFECYCLE_DEBUG_ENV_KEYS = [
-  'DKG_DEBUG_KA_LIFECYCLE',
-  'DKG_KA_LIFECYCLE_DEBUG',
-  'DKG_DEBUG_PUBLISH_LIFECYCLE',
+const KA_PUBLISH_LIFECYCLE_DEBUG_ENV_KEYS = [
+  'DKG_DEBUG_KA_PUBLISH_LIFECYCLE',
 ] as const;
-let configuredKaLifecycleDebugLogging: boolean | undefined;
+let configuredKaPublishLifecycleDebugLogging: boolean | undefined;
 const KA_LIFECYCLE_TRUE_ENV = /^(1|true|yes|on)$/i;
 const KA_LIFECYCLE_SUMMARY_EVENTS = new Set<string>([
   'identity:asset_ual_allocated',
@@ -75,20 +73,20 @@ const KA_LIFECYCLE_SENSITIVE_METADATA_VALUE = [
 
 export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: KaLifecycleLogEvent): void {
   const detail = resolveKaLifecycleLogDetail(input);
-  if (detail === 'debug' && !isKaLifecycleDebugLoggingEnabled()) return;
+  if (detail === 'debug' && !isKaPublishLifecycleDebugLoggingEnabled()) return;
   const level = input.level ?? 'info';
   log[level](ctx, formatKaLifecycleEvent(input));
 }
 
-export function isKaLifecycleDebugLoggingEnabled(): boolean {
-  if (configuredKaLifecycleDebugLogging !== undefined) return configuredKaLifecycleDebugLogging;
+export function isKaPublishLifecycleDebugLoggingEnabled(): boolean {
+  if (configuredKaPublishLifecycleDebugLogging !== undefined) return configuredKaPublishLifecycleDebugLogging;
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
   if (!env) return false;
-  return KA_LIFECYCLE_DEBUG_ENV_KEYS.some((key) => KA_LIFECYCLE_TRUE_ENV.test(env[key] ?? ''));
+  return KA_PUBLISH_LIFECYCLE_DEBUG_ENV_KEYS.some((key) => KA_LIFECYCLE_TRUE_ENV.test(env[key] ?? ''));
 }
 
-export function setKaLifecycleDebugLoggingEnabled(enabled: boolean | undefined): void {
-  configuredKaLifecycleDebugLogging = enabled;
+export function setKaPublishLifecycleDebugLoggingEnabled(enabled: boolean | undefined): void {
+  configuredKaPublishLifecycleDebugLogging = enabled;
 }
 
 export function resolveKaLifecycleLogDetail(input: KaLifecycleLogEvent): KaLifecycleLogDetail {
@@ -112,7 +110,7 @@ function formatKaLifecycleEvent(input: KaLifecycleLogEvent): string {
   if (input.metadata) {
     for (const [key, value] of Object.entries(input.metadata)) fields.push([key, value, false]);
   }
-  return `ka_lifecycle ${fields
+  return `ka_publish_lifecycle ${fields
     .filter(([, value]) => value !== undefined)
     .map(([key, value, keepFull]) => `${key}=${formatKaLifecycleValue(key, value, keepFull)}`)
     .join(' ')}`;

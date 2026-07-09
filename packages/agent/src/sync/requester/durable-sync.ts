@@ -6,14 +6,6 @@ import type { PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
-import {
-  createDurableSyncKaLifecycleObserver,
-  type DurableSyncLifecycleEvent,
-  type DurableSyncLifecycleObserver,
-  type DurableSyncLifecycleScope,
-} from './ka-lifecycle-observer.js';
-
-export type { DurableSyncLifecycleAction, DurableSyncLifecycleEvent } from './ka-lifecycle-observer.js';
 
 export interface DurableSyncSummary {
   insertedTriples: number;
@@ -84,8 +76,6 @@ interface DurableSyncContext {
   storeInsert: (quads: Quad[]) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
-  logLifecycle?: (event: DurableSyncLifecycleEvent) => void;
-  lifecycleObserver?: DurableSyncLifecycleObserver;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -107,8 +97,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
     storeInsert,
     deleteCheckpoint,
     setCheckpoint,
-    logLifecycle,
-    lifecycleObserver = logLifecycle ? createDurableSyncKaLifecycleObserver(logLifecycle) : undefined,
     logInfo,
     logWarn,
     logDebug,
@@ -163,9 +151,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
   for (const [index, pid] of contextGraphIds.entries()) {
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
-    let lifecycleScope: DurableSyncLifecycleScope | undefined;
-    let fetchedMetaCount = 0;
-    let fetchedDataCount = 0;
     const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
       activePhase = phase;
       onPhase?.(phase, 'start');
@@ -201,7 +186,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
           }
         : await fetchSyncPages(ctx, remotePeerId, pid, false, 'meta', metaGraph, deadline);
       if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      fetchedMetaCount = metaResult.quads.length;
       if (metaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: false });
         endPhase();
@@ -209,7 +193,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
       const dataResult = await fetchSyncPages(ctx, remotePeerId, pid, false, 'data', dataGraph, deadline, undefined, sinceBatchIdFor?.(pid));
       peerRespondedForContextGraph = true;
-      fetchedDataCount = dataResult.quads.length;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
       const isSystemContextGraph = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(pid);
@@ -222,16 +205,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
 
       logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
       logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-      lifecycleScope = lifecycleObserver?.scopeFromVerifiedMeta({
-        contextGraphId: pid,
-        remotePeerId,
-        verifiedMeta: processed.verifiedMeta,
-      });
-      lifecycleScope?.recordVerified({
-        fetchedMetaCount: processed.totalFetchedMetaQuads,
-        fetchedDataCount: processed.totalFetchedDataQuads,
-        rejectedKcs: processed.rejectedKcs,
-      });
       summary.bytesReceived += metaResult.bytesReceived + dataResult.bytesReceived;
       summary.fetchedMetaTriples += processed.totalFetchedMetaQuads;
       summary.fetchedDataTriples += processed.totalFetchedDataQuads;
@@ -240,25 +213,16 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       summary.dataRejectedMissingMeta += processed.dataRejectedMissingMeta;
 
       const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      const skipReason = processed.dataRejectedMissingMeta > 0
-        ? 'data-rejected-missing-meta'
-        : processed.emptyResponses > 0
-          ? 'empty-response'
-          : processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && metadataOnlyResponse
-            ? 'metadata-only-response'
-            : undefined;
       const updateMetaCheckpoint = processed.dataRejectedMissingMeta === 0
         && (!metadataOnlyResponse || processed.verifiedMeta.length > 0);
       const updateDataCheckpoint = processed.dataRejectedMissingMeta === 0 && !metadataOnlyResponse;
       // Metadata-only pages may move the meta cursor after storage, but they
       // still are not usable data progress for freshness/backoff accounting.
-      if (skipReason) {
-        lifecycleScope?.recordSkip({
-          fetchedMetaCount: processed.totalFetchedMetaQuads,
-          fetchedDataCount: processed.totalFetchedDataQuads,
-          rejectedKcs: processed.rejectedKcs,
-          reason: skipReason,
-        });
+      if (
+        processed.emptyResponses > 0 ||
+        processed.dataRejectedMissingMeta > 0 ||
+        (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
+      ) {
         recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
         recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
         if ((metaResult.timedOut || dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
@@ -279,13 +243,6 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
         summary.insertedTriples += processed.verifiedMeta.length;
         summary.insertedMetaTriples += processed.verifiedMeta.length;
       }
-      lifecycleScope?.recordApply({
-        fetchedMetaCount: processed.totalFetchedMetaQuads,
-        fetchedDataCount: processed.totalFetchedDataQuads,
-        insertedMetaCount: processed.verifiedMeta.length,
-        insertedDataCount: processed.verifiedData.length,
-        rejectedKcs: processed.rejectedKcs,
-      });
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(dataResult, { updateCheckpoint: updateDataCheckpoint });
       endPhase();
@@ -307,22 +264,13 @@ export async function runDurableSync(context: DurableSyncContext): Promise<Durab
       }
     } catch (pidErr) {
       endPhase();
-      const failureReason = pidErr instanceof Error ? pidErr.message : String(pidErr);
-      lifecycleObserver?.recordFailure({
-        assetUals: lifecycleScope?.assetUals ?? [],
-        contextGraphId: pid,
-        remotePeerId,
-        fetchedMetaCount,
-        fetchedDataCount,
-        reason: failureReason,
-      });
-      logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${failureReason}`);
+      logWarn(ctx, `Sync for context graph "${pid}" from ${remotePeerId} failed: ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       if (isSyncPermanentRejection(pidErr)) {
         // Missed-seam alarm (OT-RFC-56): the oversize guard should have
         // filtered this BEFORE the store insert. Reaching here means an
         // ingest path bypassed the guard — this page will fail identically
         // on every retry until that seam is wired.
-        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${failureReason}`);
+        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${pidErr instanceof Error ? pidErr.message : String(pidErr)}`);
       }
       const backoffWorthy = isSyncBackoffWorthyError(pidErr);
       if (backoffWorthy) {

@@ -524,17 +524,17 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncAgentsMeta).toBe(false);
   });
 
-  it('round-trips logging.kaLifecycleDebug through saveConfig/loadConfig', async () => {
+  it('round-trips logging.kaPublishLifecycleDebug through saveConfig/loadConfig', async () => {
     await saveConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
       nodeRole: 'edge',
-      logging: { kaLifecycleDebug: true },
+      logging: { kaPublishLifecycleDebug: true },
     });
 
     const loaded = await loadConfig();
-    expect(loaded.logging?.kaLifecycleDebug).toBe(true);
+    expect(loaded.logging?.kaPublishLifecycleDebug).toBe(true);
   });
 
   it('omits relayReservationCount when not set (so DKGNode.start() applies the default)', async () => {

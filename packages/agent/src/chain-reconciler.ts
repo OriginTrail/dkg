@@ -24,7 +24,6 @@
  */
 
 import {
-  type CompletedOrdinal,
   type CursorState,
   recordCompletion,
   absorbConfirmed,
@@ -42,39 +41,10 @@ import {
  *     leave for the next sweep.
  */
 export type OrdinalOutcome =
-  | { status: 'reconciled'; blockNumber: number; assetUal?: string; kaId?: string }
-  | { status: 'already'; blockNumber: number; assetUal?: string; kaId?: string }
-  | { status: 'pending'; assetUal?: string; kaId?: string; reason?: string }
-  | { status: 'skip'; assetUal?: string; kaId?: string; reason?: string };
-
-export type ReconcileLifecycleAction = 'sweep' | 'promote' | 'already-present' | 'defer' | 'cursor-advance';
-
-export interface ReconcileLifecycleEvent {
-  assetUal: string;
-  action: ReconcileLifecycleAction;
-  result: string;
-  localCgId: string;
-  onChainCgId: string;
-  ordinal: number;
-  kaId?: string;
-  blockNumber?: number;
-  head: number;
-  watermark: number;
-  fromWatermark?: number;
-  toWatermark?: number;
-  reason?: string;
-}
-
-export interface ReconciledAssetDecision {
-  assetUal: string;
-  status: OrdinalOutcome['status'];
-  localCgId: string;
-  onChainCgId: string;
-  ordinal: number;
-  kaId?: string;
-  blockNumber?: number;
-  reason?: string;
-}
+  | { status: 'reconciled'; blockNumber: number }
+  | { status: 'already'; blockNumber: number }
+  | { status: 'pending' }
+  | { status: 'skip' };
 
 export interface ChainReconcilerDeps {
   /** Chain-head ordinal for the CG (`getContextGraphKCCount`). */
@@ -101,7 +71,6 @@ export interface ChainReconcilerDeps {
   ) => Promise<OrdinalOutcome>;
   /** Persist the watermark. Called ONLY when it actually moves. */
   persistWatermark: (localCgId: string, watermark: number) => void;
-  logLifecycle?: (event: ReconcileLifecycleEvent) => void;
   /** Confirmation depth (blocks) before a completed ordinal advances the watermark. */
   confirmationDepth: number;
   log: (msg: string) => void;
@@ -112,23 +81,6 @@ export interface ReconcileResult {
   watermark: number;
   reconciled: number;
   pending: number;
-  assets: ReconciledAssetDecision[];
-}
-
-interface CursorAssetMetadata {
-  assetUal: string;
-  kaId?: string;
-}
-
-const cursorAssetMetadata = new WeakMap<CursorState, Map<number, CursorAssetMetadata>>();
-
-function metadataForCursor(state: CursorState): Map<number, CursorAssetMetadata> {
-  let metadata = cursorAssetMetadata.get(state);
-  if (!metadata) {
-    metadata = new Map();
-    cursorAssetMetadata.set(state, metadata);
-  }
-  return metadata;
 }
 
 /**
@@ -159,102 +111,29 @@ export async function reconcileContextGraph(
     deps.log(`reconcile ${localCgId}: getHeadBlock failed, holding watermark (${err instanceof Error ? err.message : String(err)})`);
   }
 
-  let reconciled = 0;
-  let pending = 0;
-  const assets: ReconciledAssetDecision[] = [];
-  const cursorAdvancedAssets: Array<{
-    assetUal: string;
-    ordinal: number;
-    kaId?: string;
-    blockNumber?: number;
-  }> = [];
-  const cursorMetadata = metadataForCursor(state);
-  const trackCursorAdvancedAsset = (completion: CompletedOrdinal): void => {
-    const metadata = cursorMetadata.get(completion.ordinal);
-    if (!metadata) return;
-    cursorMetadata.delete(completion.ordinal);
-    cursorAdvancedAssets.push({
-      assetUal: metadata.assetUal,
-      ordinal: completion.ordinal,
-      ...(metadata.kaId ? { kaId: metadata.kaId } : {}),
-      blockNumber: completion.blockNumber,
-    });
-  };
-
   // Re-absorb any depth-held ordinals as the head advances — a long-running
   // node makes progress on confirmation-depth-blocked ordinals even with no
   // new completions this pass. Skipped when the head is unobservable.
-  if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth, trackCursorAdvancedAsset);
+  if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
+  let reconciled = 0;
+  let pending = 0;
   const ordinals = ordinalsToReconcile(state, head);
   if (headUnavailable) {
     pending = ordinals.length;
   } else {
     for (const ordinal of ordinals) {
       const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
-      if (outcome.assetUal) {
-        const blockNumber = 'blockNumber' in outcome ? outcome.blockNumber : undefined;
-        const reason = 'reason' in outcome ? outcome.reason : undefined;
-        assets.push({
-          assetUal: outcome.assetUal,
-          status: outcome.status,
-          localCgId,
-          onChainCgId: onChainCgId.toString(),
-          ordinal,
-          kaId: outcome.kaId,
-          blockNumber,
-          reason,
-        });
-        deps.logLifecycle?.({
-          assetUal: outcome.assetUal,
-          action: 'sweep',
-          result: 'scanned',
-          localCgId,
-          onChainCgId: onChainCgId.toString(),
-          ordinal,
-          kaId: outcome.kaId,
-          blockNumber,
-          head,
-          watermark: state.watermark,
-          reason,
-        });
-        const action = lifecycleActionForOutcome(outcome.status);
-        if (action) {
-          deps.logLifecycle?.({
-            assetUal: outcome.assetUal,
-            action,
-            result: outcome.status,
-            localCgId,
-            onChainCgId: onChainCgId.toString(),
-            ordinal,
-            kaId: outcome.kaId,
-            blockNumber,
-            head,
-            watermark: state.watermark,
-            reason,
-          });
-        }
-      }
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
-        if (outcome.assetUal) {
-          cursorMetadata.set(ordinal, {
-            assetUal: outcome.assetUal,
-            ...(outcome.kaId ? { kaId: outcome.kaId } : {}),
-          });
-        }
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
         recordCompletion(
           state,
-          {
-            ordinal,
-            blockNumber: outcome.blockNumber,
-          },
+          { ordinal, blockNumber: outcome.blockNumber },
           headBlock ?? outcome.blockNumber,
           headBlock !== undefined ? deps.confirmationDepth : 0,
-          trackCursorAdvancedAsset,
         );
       } else {
         pending += 1;
@@ -264,42 +143,12 @@ export async function reconcileContextGraph(
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
-    for (const asset of cursorAdvancedAssets) {
-      if (asset.ordinal < before || asset.ordinal >= state.watermark) continue;
-      deps.logLifecycle?.({
-        assetUal: asset.assetUal,
-        action: 'cursor-advance',
-        result: 'advanced',
-        localCgId,
-        onChainCgId: onChainCgId.toString(),
-        ordinal: asset.ordinal,
-        kaId: asset.kaId,
-        blockNumber: asset.blockNumber,
-        head,
-        watermark: state.watermark,
-        fromWatermark: before,
-        toWatermark: state.watermark,
-      });
-    }
     deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
   } else if (reconciled > 0 || pending > 0) {
     deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
   }
 
-  return { head, watermark: state.watermark, reconciled, pending, assets };
-}
-
-function lifecycleActionForOutcome(status: OrdinalOutcome['status']): ReconcileLifecycleAction | undefined {
-  switch (status) {
-    case 'reconciled':
-      return 'promote';
-    case 'already':
-      return 'already-present';
-    case 'pending':
-      return 'defer';
-    case 'skip':
-      return undefined;
-  }
+  return { head, watermark: state.watermark, reconciled, pending };
 }
 
 /**

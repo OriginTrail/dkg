@@ -40,21 +40,17 @@ export interface CursorState {
   watermark: number;
   /**
    * Completed-but-not-yet-absorbed ordinals above the watermark, mapped to the
-   * observed registration block. An ordinal stays
-   * here when it completed out of order (a lower ordinal is still missing) OR
-   * when it is not yet buried by `confirmationDepth`. In-memory only — on
-   * restart the sweep re-derives everything from chain + the persisted watermark.
+   * chain block their registration was observed at. An ordinal stays here when
+   * it completed out of order (a lower ordinal is still missing) OR when it is
+   * not yet buried by `confirmationDepth`. In-memory only — on restart the
+   * sweep re-derives everything from chain + the persisted watermark.
    */
-  ahead: Map<number, HeldCompletion>;
+  ahead: Map<number, number>;
 }
 
 /** A reconciled ordinal plus the chain block its registration was observed at. */
 export interface CompletedOrdinal {
   ordinal: number;
-  blockNumber: number;
-}
-
-export interface HeldCompletion {
   blockNumber: number;
 }
 
@@ -78,20 +74,16 @@ export function absorbConfirmed(
   state: CursorState,
   chainHeadBlock: number,
   confirmationDepth: number,
-  onAbsorbed?: (completed: CompletedOrdinal) => void,
 ): number {
   while (state.ahead.has(state.watermark)) {
-    const ordinal = state.watermark;
-    const held = state.ahead.get(ordinal)!;
-    const registrationBlock = held.blockNumber;
+    const registrationBlock = state.ahead.get(state.watermark)!;
     if (confirmationDepth > 0 && chainHeadBlock - registrationBlock < confirmationDepth) {
       // Next contiguous ordinal is reconciled but not yet buried deeply
       // enough — stop here; a later tick (higher head) will absorb it.
       break;
     }
-    state.ahead.delete(ordinal);
+    state.ahead.delete(state.watermark);
     state.watermark += 1;
-    onAbsorbed?.({ ordinal, blockNumber: held.blockNumber });
   }
   return state.watermark;
 }
@@ -106,13 +98,12 @@ export function recordCompletion(
   completed: CompletedOrdinal,
   chainHeadBlock: number,
   confirmationDepth: number,
-  onAbsorbed?: (completed: CompletedOrdinal) => void,
 ): number {
   // Already absorbed (a duplicate/late event for an ordinal below the
   // watermark) — nothing to do.
   if (completed.ordinal < state.watermark) return state.watermark;
-  state.ahead.set(completed.ordinal, { blockNumber: completed.blockNumber });
-  return absorbConfirmed(state, chainHeadBlock, confirmationDepth, onAbsorbed);
+  state.ahead.set(completed.ordinal, completed.blockNumber);
+  return absorbConfirmed(state, chainHeadBlock, confirmationDepth);
 }
 
 /**
