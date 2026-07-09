@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult } from '../triple-store.js';
+import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 
 /**
@@ -628,7 +628,8 @@ export class OxigraphWorkerStore implements TripleStore {
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> { return this.call('deleteByPattern', pattern); }
   // Server-side SPARQL UPDATE forwarded to the worker's OxigraphStore (which
   // implements `update`); same atomic single-message contract as `insert`.
-  async update(sparql: string): Promise<void> { return this.call('update', sparql); }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async update(sparql: string, _options?: UpdateOptions): Promise<void> { return this.call('update', sparql); }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
   }
