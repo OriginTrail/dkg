@@ -1127,6 +1127,13 @@ jobs:
         working-directory: packages/evm-module
         run: pnpm exec aderyn . --output aderyn.sarif
 
+      - name: Validate Aderyn SARIF
+        if: always()
+        working-directory: packages/evm-module
+        run: |
+          test -s aderyn.sarif
+          node -e "const fs = require('node:fs'); const sarif = JSON.parse(fs.readFileSync('aderyn.sarif', 'utf8')); if (!Array.isArray(sarif.runs) || sarif.runs.length === 0) throw new Error('Aderyn SARIF has no runs');"
+
       - name: Upload Aderyn SARIF to GitHub Code Scanning
         if: |
           always()
