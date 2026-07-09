@@ -42,7 +42,7 @@ export async function connectToMultiaddr(
 
   if (connectTarget.kind === 'direct') {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
-    const directTargetPeerId = connectTarget.target?.canonical;
+    const directTargetPeerId = connectTarget.targetPeerId;
     await libp2p.dial(multiaddr(multiaddress));
     if (directTargetPeerId) {
       const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
@@ -54,23 +54,21 @@ export async function connectToMultiaddr(
     return;
   }
 
-  const { relayMultiaddress, target } = connectTarget;
-  const targetPeerId = target.raw;
+  const { relayMultiaddress, targetPeerId } = connectTarget;
 
   debugLog?.(`Dialing relay from circuit invite: relay=${relayMultiaddress} targetPeer=${targetPeerId}`);
   await libp2p.dial(multiaddr(relayMultiaddress));
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
-  const canonicalTargetPeerId = target.canonical;
-  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${canonicalTargetPeerId}`);
+  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
-  debugLog?.(`Dialing final circuit target peer: ${canonicalTargetPeerId}`);
+  debugLog?.(`Dialing final circuit target peer: ${targetPeerId}`);
   await libp2p.dial(targetPid);
-  const connected = await waitForPeerConnection(libp2p, canonicalTargetPeerId);
-  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${canonicalTargetPeerId}`);
+  const connected = await waitForPeerConnection(libp2p, targetPeerId);
+  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
   if (!connected) {
-    throw new Error(`Circuit target peer ${canonicalTargetPeerId} not observed before timeout`);
+    throw new Error(`Circuit target peer ${targetPeerId} not observed before timeout`);
   }
 }
 

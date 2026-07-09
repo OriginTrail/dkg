@@ -46,7 +46,7 @@ export {
   peerIdsFromMultiaddrs,
   targetPeerIdFromMultiaddr,
   canonicalTargetPeerIdFromMultiaddr,
-  type CanonicalMultiaddrPeerTarget,
+  type MultiaddrConnectTarget,
 } from './p2p/multiaddr-peer-target.js';
 export {
   canonicalPeerIdString,

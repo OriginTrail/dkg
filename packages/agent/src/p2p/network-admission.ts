@@ -11,6 +11,15 @@ export interface NetworkAdmissionSnapshot {
   quarantinedPeerIds: string[];
 }
 
+export class NetworkAdmissionInvalidPeerIdError extends Error {
+  readonly code = 'INVALID_PEER_ID';
+
+  constructor(peerId: string, reason: string) {
+    super(`Invalid peer id ${peerId}: ${reason}`);
+    this.name = 'NetworkAdmissionInvalidPeerIdError';
+  }
+}
+
 /**
  * Process-local admission registry for active-network peers.
  *
@@ -30,28 +39,40 @@ export class NetworkAdmissionService {
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
-    this.selfPeerId = options.networkId && options.selfPeerId ? canonicalPeerIdString(options.selfPeerId) : undefined;
+    this.selfPeerId = options.networkId && options.selfPeerId ? this.canonicalPeerId(options.selfPeerId) : undefined;
   }
 
   get enabled(): boolean {
     return Boolean(this.networkId);
   }
 
+  canonicalPeerId(peerId: string): CanonicalPeerId {
+    try {
+      return canonicalPeerIdString(peerId);
+    } catch (err) {
+      throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  tryCanonicalPeerId(peerId: string): CanonicalPeerId | undefined {
+    return tryCanonicalPeerIdString(peerId) ?? undefined;
+  }
+
   markVerifiedSameNetwork(peerId: string): void {
-    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    const canonicalPeerId = this.canonicalPeerId(peerId);
     this.verifiedPeerIds.add(canonicalPeerId);
     this.quarantinedPeerIds.delete(canonicalPeerId);
   }
 
   quarantinePeer(peerId: string): void {
-    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    const canonicalPeerId = this.canonicalPeerId(peerId);
     this.quarantinedPeerIds.add(canonicalPeerId);
     this.verifiedPeerIds.delete(canonicalPeerId);
   }
 
   isAcceptedPeer(peerId: string): boolean {
     if (!this.enabled) return true;
-    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    const canonicalPeerId = this.tryCanonicalPeerId(peerId);
     if (!canonicalPeerId) return false;
     if (canonicalPeerId === this.selfPeerId) return true;
     if (this.quarantinedPeerIds.has(canonicalPeerId)) return false;
@@ -60,7 +81,7 @@ export class NetworkAdmissionService {
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
-    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    const canonicalPeerId = this.tryCanonicalPeerId(peerId);
     return canonicalPeerId ? this.quarantinedPeerIds.has(canonicalPeerId) : true;
   }
 
@@ -79,10 +100,4 @@ export class NetworkAdmissionService {
       quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
     };
   }
-}
-
-function canonicalAdmissionServicePeerId(peerId: string): CanonicalPeerId {
-  const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-  if (!canonicalPeerId) throw new Error(`Invalid peer id ${peerId}`);
-  return canonicalPeerId;
 }

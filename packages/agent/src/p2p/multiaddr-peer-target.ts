@@ -1,22 +1,17 @@
 import { multiaddr, type Component } from '@multiformats/multiaddr';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
-export interface CanonicalMultiaddrPeerTarget {
-  raw: string;
-  canonical: CanonicalPeerId;
-}
-
 export interface DirectMultiaddrConnectTarget {
   kind: 'direct';
   multiaddress: string;
-  target?: CanonicalMultiaddrPeerTarget;
+  targetPeerId?: CanonicalPeerId;
 }
 
 export interface CircuitMultiaddrConnectTarget {
   kind: 'circuit';
   multiaddress: string;
   relayMultiaddress: string;
-  target: CanonicalMultiaddrPeerTarget;
+  targetPeerId: CanonicalPeerId;
 }
 
 export type MultiaddrConnectTarget = DirectMultiaddrConnectTarget | CircuitMultiaddrConnectTarget;
@@ -47,7 +42,7 @@ export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
   return targetPeerIdFromStructure(structure);
 }
 
-export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMultiaddrPeerTarget | undefined {
+export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalPeerId | undefined {
   const raw = targetPeerIdFromMultiaddr(addr);
   return raw ? canonicalTargetPeerId(raw) : undefined;
 }
@@ -61,14 +56,14 @@ export function parseMultiaddrConnectTarget(addr: string): MultiaddrConnectTarge
       kind: 'circuit',
       multiaddress: structure.multiaddress,
       relayMultiaddress: multiaddr(structure.components.slice(0, structure.circuitIndex)).toString(),
-      target: canonicalTargetPeerId(raw),
+      targetPeerId: canonicalTargetPeerId(raw),
     };
   }
 
   const raw = targetPeerIdFromStructure(structure);
-  const target = raw ? canonicalTargetPeerId(raw) : undefined;
-  return target
-    ? { kind: 'direct', multiaddress: structure.multiaddress, target }
+  const targetPeerId = raw ? canonicalTargetPeerId(raw) : undefined;
+  return targetPeerId
+    ? { kind: 'direct', multiaddress: structure.multiaddress, targetPeerId }
     : { kind: 'direct', multiaddress: structure.multiaddress };
 }
 
@@ -97,9 +92,9 @@ function targetPeerIdFromStructure(structure: ParsedMultiaddrStructure): string 
   return candidates.at(-1);
 }
 
-function canonicalTargetPeerId(raw: string): CanonicalMultiaddrPeerTarget {
+function canonicalTargetPeerId(raw: string): CanonicalPeerId {
   try {
-    return { raw, canonical: canonicalPeerIdString(raw) };
+    return canonicalPeerIdString(raw);
   } catch (err) {
     throw new MultiaddrPeerTargetParseError(
       err instanceof Error ? err.message : String(err),

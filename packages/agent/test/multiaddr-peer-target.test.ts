@@ -26,21 +26,15 @@ describe('multiaddr peer targets', () => {
     expect(targetPeerIdFromMultiaddr(addr)).toBe(TARGET_PEER_ID);
   });
 
-  it('keeps raw and canonical target peer ids together', () => {
+  it('canonicalizes alternate-encoded target peer ids at parse time', () => {
     const cidPeerId = peerIdFromString(TARGET_PEER_ID).toCID().toString();
     const addr = `/ip4/127.0.0.1/tcp/4001/p2p/${cidPeerId}`;
 
-    expect(canonicalTargetPeerIdFromMultiaddr(addr)).toEqual({
-      raw: cidPeerId,
-      canonical: TARGET_PEER_ID,
-    });
+    expect(canonicalTargetPeerIdFromMultiaddr(addr)).toBe(TARGET_PEER_ID);
     expect(parseMultiaddrConnectTarget(addr)).toEqual({
       kind: 'direct',
       multiaddress: addr,
-      target: {
-        raw: cidPeerId,
-        canonical: TARGET_PEER_ID,
-      },
+      targetPeerId: TARGET_PEER_ID,
     });
   });
 
@@ -53,10 +47,7 @@ describe('multiaddr peer targets', () => {
       kind: 'circuit',
       multiaddress: addr,
       relayMultiaddress: relay,
-      target: {
-        raw: cidPeerId,
-        canonical: TARGET_PEER_ID,
-      },
+      targetPeerId: TARGET_PEER_ID,
     });
   });
 

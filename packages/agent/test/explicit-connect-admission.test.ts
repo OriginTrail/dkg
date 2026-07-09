@@ -83,17 +83,14 @@ describe('explicit connect network admission', () => {
       expect.objectContaining({
         kind: 'direct',
         multiaddress: DIRECT_MULTIADDR,
-        target: expect.objectContaining({
-          raw: PEER_ID,
-          canonical: PEER_ID,
-        }),
+        targetPeerId: PEER_ID,
       }),
       expect.any(Function),
     );
     expect(agent.networkAdmissionCoordinator.explicitConnectAdmissionTarget).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'direct',
-        target: expect.objectContaining({ canonical: PEER_ID }),
+        targetPeerId: PEER_ID,
       }),
     );
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(

@@ -4,7 +4,7 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionService } from './network-admission.js';
+import { NetworkAdmissionInvalidPeerIdError, NetworkAdmissionService } from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
@@ -12,7 +12,9 @@ import {
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
 import type { MultiaddrConnectTarget } from './multiaddr-peer-target.js';
-import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import type { CanonicalPeerId } from './peer-id.js';
+
+export { NetworkAdmissionInvalidPeerIdError } from './network-admission.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -67,15 +69,6 @@ export class NetworkAdmissionRejectedError extends Error {
   }
 }
 
-export class NetworkAdmissionInvalidPeerIdError extends Error {
-  readonly code = 'INVALID_PEER_ID';
-
-  constructor(peerId: string, reason: string) {
-    super(`Invalid peer id ${peerId}: ${reason}`);
-    this.name = 'NetworkAdmissionInvalidPeerIdError';
-  }
-}
-
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
@@ -92,7 +85,12 @@ export class NetworkAdmissionCoordinator {
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
     this.identity = options.identity;
-    this.selfPeerId = options.identity?.networkId ? canonicalAdmissionPeerId(options.selfPeerId) : options.selfPeerId.trim();
+    if (this.admission.enabled && !this.identity?.networkId) {
+      throw new Error('network identity is required when network admission is enabled');
+    }
+    this.selfPeerId = this.admission.enabled
+      ? this.admission.canonicalPeerId(options.selfPeerId)
+      : options.selfPeerId.trim();
     this.sign = options.sign;
     this.sendIdentityProbe = options.sendIdentityProbe;
     this.getConnections = options.getConnections;
@@ -103,16 +101,14 @@ export class NetworkAdmissionCoordinator {
   }
 
   get enabled(): boolean {
-    return Boolean(this.identity?.networkId);
+    return this.admission.enabled;
   }
 
   isAcceptedPeer(peerId: string): boolean {
-    if (!this.identity?.networkId) return true;
     return this.admission.isAcceptedPeer(peerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
-    if (!this.identity?.networkId) return false;
     return this.admission.isRejectedPeer(peerId);
   }
 
@@ -121,7 +117,7 @@ export class NetworkAdmissionCoordinator {
   }
 
   explicitConnectAdmissionTarget(connectTarget: MultiaddrConnectTarget): CanonicalPeerId | undefined {
-    const targetPeerId = connectTarget.target?.canonical;
+    const targetPeerId = connectTarget.targetPeerId;
     if (this.enabled && !targetPeerId) {
       throw new NetworkAdmissionInvalidPeerIdError(
         '<missing>',
@@ -141,7 +137,7 @@ export class NetworkAdmissionCoordinator {
 
   registerIdentityProtocol(router: NetworkIdentityProtocolRegistrar): void {
     router.register(PROTOCOL_NETWORK_IDENTITY, async (data) => {
-      if (!this.identity?.networkId) {
+      if (!this.enabled || !this.identity?.networkId) {
         throw new Error('network identity is not configured');
       }
       const request = parseNetworkIdentityRequest(data);
@@ -160,28 +156,30 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    if (!this.identity?.networkId) return true;
-    const remotePeerId = canonicalAdmissionPeerId(remotePeer);
+    if (!this.enabled) return true;
+    const remotePeerId = this.admission.canonicalPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
 
     const existing = this.inFlight.get(remotePeerId);
-    if (existing) return this.raceAdmissionSignal(existing, options.signal);
+    if (existing) return this.raceAdmissionAttempt(existing, options);
 
-    const promise = this.probePeer(remotePeerId, ctx, options)
+    const promise = this.probePeer(remotePeerId, ctx)
       .finally(() => {
         this.inFlight.delete(remotePeerId);
       });
     this.inFlight.set(remotePeerId, promise);
-    return this.raceAdmissionSignal(promise, options.signal);
+    return this.raceAdmissionAttempt(promise, options);
   }
 
   private async probePeer(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
-    options: NetworkAdmissionAttemptOptions,
   ): Promise<boolean> {
     const identity = this.identity;
-    if (!identity?.networkId) return true;
+    if (!this.enabled) return true;
+    if (!identity?.networkId) {
+      throw new Error('network identity is required when network admission is enabled');
+    }
 
     const nonce = randomUUID();
     const request = makeNetworkIdentityRequest({
@@ -191,15 +189,11 @@ export class NetworkAdmissionCoordinator {
     });
 
     let response: Uint8Array;
-    const timeoutMs = Math.min(this.probeTimeoutMs, options.timeoutMs ?? this.probeTimeoutMs);
-    if (options.signal?.aborted) {
-      throw abortErrorFromSignal(options.signal.reason);
-    }
     try {
       response = await this.sendIdentityProbe(
         remotePeer,
         new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs, signal: options.signal },
+        { timeoutMs: this.probeTimeoutMs },
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -231,17 +225,29 @@ export class NetworkAdmissionCoordinator {
     return false;
   }
 
-  private raceAdmissionSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-    if (!signal) return promise;
-    if (signal.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
+  private raceAdmissionAttempt<T>(promise: Promise<T>, options: NetworkAdmissionAttemptOptions): Promise<T> {
+    const signal = options.signal;
+    const timeoutMs = options.timeoutMs;
+    if (!signal && timeoutMs === undefined) return promise;
+    if (signal?.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
 
     return new Promise<T>((resolve, reject) => {
-      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        if (timeout) clearTimeout(timeout);
+        signal?.removeEventListener('abort', onAbort);
+      };
       const onAbort = () => {
         cleanup();
-        reject(abortErrorFromSignal(signal.reason));
+        reject(abortErrorFromSignal(signal?.reason));
       };
-      signal.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (timeoutMs !== undefined && Number.isFinite(timeoutMs)) {
+        timeout = setTimeout(() => {
+          cleanup();
+          reject(admissionTimeoutError(timeoutMs));
+        }, Math.max(0, timeoutMs));
+      }
       promise.then(
         (value) => {
           cleanup();
@@ -294,10 +300,8 @@ function abortErrorFromSignal(reason: unknown): Error {
   return error;
 }
 
-function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
-  try {
-    return canonicalPeerIdString(peerId);
-  } catch (err) {
-    throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
-  }
+function admissionTimeoutError(timeoutMs: number): Error {
+  const error = new Error(`Network admission timed out after ${timeoutMs}ms`);
+  error.name = 'AbortError';
+  return error;
 }
