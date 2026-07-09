@@ -85,8 +85,7 @@ function makeClient(
     () => providers.map((p, i) => ({ provider: p as any, rpcUrl: rpcUrls[i] })),
     signPopulated,
     () => 'evm:31337',
-    undefined,
-    stickiness,
+    { stickiness },
   );
 }
 
@@ -710,8 +709,7 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
       () => providers.map((p, i) => ({ provider: p as any, rpcUrl: urls[i] })),
       NEVER_SIGN,
       () => 'evm:31337',
-      undefined,
-      { enabled: true },
+      { stickiness: { enabled: true } },
     );
     expect(await client.read('r', (p: any) => p.read())).toBe('BACKUP'); // establish preferred = backup.example
 

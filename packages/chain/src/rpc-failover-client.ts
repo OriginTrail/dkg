@@ -131,6 +131,18 @@ export type ValidateEndpointFn = (endpoint: RpcEndpoint) => Promise<void>;
  *   - `now`     — monotonic-ish clock (defaults to `Date.now`); injected by the
  *     cadence unit test.
  */
+/**
+ * Optional transport hooks + config for `RpcFailoverClient`, grouped in ONE
+ * object so the constructor boundary stays readable as knobs are added (no
+ * positional `undefined` placeholders for unrelated optional concerns).
+ */
+export interface RpcFailoverClientOptions {
+  /** Optional per-endpoint transport preflight, e.g. static-network chain-id validation. */
+  validateEndpoint?: ValidateEndpointFn;
+  /** Endpoint-stickiness configuration (Mechanism B). */
+  stickiness?: StickinessOptions;
+}
+
 export interface StickinessOptions {
   /** Force stickiness on/off (tests). Ignored if `isEnabled` is given. */
   enabled?: boolean;
@@ -185,6 +197,8 @@ export class RpcFailoverClient {
   /** Transport-ordering preference state machine — the ONLY mutable state this
    *  module owns (see SAFETY BOUNDARY + endpoint-stickiness.ts). */
   private readonly stickiness: EndpointStickiness;
+  /** Optional per-endpoint transport preflight (from `options.validateEndpoint`). */
+  private readonly validateEndpoint?: ValidateEndpointFn;
 
   constructor(
     private readonly getEndpoints: () => RpcEndpoint[],
@@ -194,9 +208,12 @@ export class RpcFailoverClient {
     // construct this client BEFORE its own `chainId` field is assigned and still
     // have the label resolve correctly at metric-record time.
     private readonly chainId: () => string,
-    private readonly validateEndpoint?: ValidateEndpointFn,
-    stickiness?: StickinessOptions,
+    // Optional transport hooks/config in ONE object (preflight + stickiness) so
+    // adding a knob never appends another positional `undefined`.
+    options?: RpcFailoverClientOptions,
   ) {
+    this.validateEndpoint = options?.validateEndpoint;
+    const stickiness = options?.stickiness;
     const isEnabled = stickiness?.isEnabled
       ?? (stickiness?.enabled !== undefined ? () => stickiness.enabled as boolean : () => true);
     this.stickiness = new EndpointStickiness({

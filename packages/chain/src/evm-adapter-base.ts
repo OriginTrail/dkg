@@ -1015,11 +1015,13 @@ export class EVMChainAdapterBase {
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
-      async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
-      // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
-      // boundary (LIVE per-check so flipping the env + restart disables it) so the
-      // transport core stays free of any process-global dependency.
-      { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
+      {
+        validateEndpoint: async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+        // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
+        // boundary (LIVE per-check so flipping the env + restart disables it) so the
+        // transport core stays free of any process-global dependency.
+        stickiness: { isEnabled: () => process.env.DKG_DISABLE_RPC_STICKINESS !== '1' },
+      },
     );
     this.hubRotationPoller = new HubRotationPoller({
       readProvider: (label, fn, opts) => this.readProvider(label, fn, opts),
@@ -1233,6 +1235,22 @@ export class EVMChainAdapterBase {
       ...opts,
       rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
+  }
+
+  /**
+   * Raw PROVIDER read for a TIP-SENSITIVE value — the current head / `latest`
+   * block / any read that must stay canonical-fresh and preference-transparent
+   * (a lagging endpoint-stickiness backend would make the tip non-monotonic
+   * across calls). This is the POSITIVE freshness intent at the call site, so
+   * callers pick `readTipProvider` by meaning instead of remembering the
+   * transport-internal `skipPreferred` opt-out on a plain `readProvider`.
+   */
+  protected readTipProvider<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T> {
+    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
   }
 
   /**
@@ -2410,8 +2428,17 @@ export class EVMChainAdapterBase {
         { isRetryable: (e) => e instanceof BlockNotYetImportedError || isRetryableRpcError(e) },
       );
       return block.timestamp != null ? Number(block.timestamp) : 0;
-    } catch {
-      return 0;
+    } catch (err) {
+      // Best-effort `0` ONLY for the intended sentinel case: EVERY endpoint
+      // returned `null` for this concrete block (not imported anywhere yet), i.e.
+      // the failover loop exhausted with a `BlockNotYetImportedError` cause. Any
+      // OTHER failure — a non-retryable provider error (e.g. `INVALID_ARGUMENT`)
+      // rethrown at once, or a real transport exhaustion — must PROPAGATE, not be
+      // masked as a bogus `blockTimestamp: 0` that hides the error from callers.
+      if (err instanceof ChainRpcTransportError && err.cause instanceof BlockNotYetImportedError) {
+        return 0;
+      }
+      throw err;
     }
   }
 
@@ -3361,7 +3388,7 @@ export class EVMChainAdapterBase {
     // challenge block, and finalization reads. A lagging sticky backend would
     // make the head non-monotonic across calls (poller moving backwards / re-
     // scanning), so read canonical-order + preference-transparent.
-    return this.readProvider('getBlockNumber', (p) => p.getBlockNumber(), { skipPreferred: true });
+    return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
   }
 
   getProvider(): JsonRpcProvider {

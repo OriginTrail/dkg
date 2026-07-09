@@ -118,4 +118,26 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
     const a = makeTwoEndpointAdapter({ getBlock: recorder(async () => null) }, { getBlock: recorder(async () => null) });
     expect(await a.getBlockTimestamp(123n)).toBe(0);
   });
+
+  it('a NON-RETRYABLE provider error PROPAGATES — it is NOT masked as timestamp 0', async () => {
+    // The `0` fallback is scoped to the "block not imported anywhere" sentinel; a
+    // deterministic provider error (INVALID_ARGUMENT) must surface to the caller.
+    const invalidArg = () => { const e: any = new Error('bad blocktag'); e.code = 'INVALID_ARGUMENT'; return e; };
+    const a = makeTwoEndpointAdapter(
+      { getBlock: recorder(async () => { throw invalidArg(); }) },
+      { getBlock: recorder(async () => ({ timestamp: 42 })) },
+    );
+    await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+  });
+
+  it('a full transport EXHAUSTION (all endpoints error) PROPAGATES — not masked as timestamp 0', async () => {
+    const retryable429 = () => { const e: any = new Error('429 too many requests'); e.status = 429; return e; };
+    const a = makeTwoEndpointAdapter(
+      { getBlock: recorder(async () => { throw retryable429(); }) },
+      { getBlock: recorder(async () => { throw retryable429(); }) },
+    );
+    // Exhaustion whose cause is a transport error (NOT the not-imported sentinel)
+    // propagates as RPC_ENDPOINTS_EXHAUSTED, not a bogus 0.
+    await expect(a.getBlockTimestamp(123n)).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+  });
 });
