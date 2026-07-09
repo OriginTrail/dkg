@@ -58,6 +58,25 @@ describe('connectToMultiaddr', () => {
     expect(merge.calls).toHaveLength(1);
   });
 
+  it('confirms circuit CID-form target peer ids against canonical connections', async () => {
+    const dial = recorder(async () => undefined);
+    const merge = recorder(async () => undefined);
+    const relayPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const targetPeerIdCid = peerIdFromString(targetPeerId).toCID().toString();
+    const multiaddress = `/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}/p2p-circuit/p2p/${targetPeerIdCid}`;
+    const connections = [{ remotePeer: { toString: () => targetPeerId } }];
+
+    await connectToMultiaddr({
+      getConnections: () => connections as any,
+      dial,
+      peerStore: { merge },
+    }, multiaddress);
+
+    expect(dial.calls).toHaveLength(2);
+    expect(merge.calls).toHaveLength(1);
+  });
+
   it('throws when final circuit target never appears', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);

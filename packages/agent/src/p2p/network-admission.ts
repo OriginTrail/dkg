@@ -1,4 +1,4 @@
-import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionOptions {
   networkId?: string;
@@ -9,6 +9,11 @@ export interface NetworkAdmissionSnapshot {
   enabled: boolean;
   verifiedPeerIds: string[];
   quarantinedPeerIds: string[];
+}
+
+export interface CanonicalMultiaddrPeerTarget {
+  raw: string;
+  canonical: CanonicalPeerId;
 }
 
 export function peerIdsFromMultiaddr(addr: string): string[] {
@@ -23,6 +28,11 @@ export function peerIdsFromMultiaddr(addr: string): string[] {
 
 export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
   return peerIdsFromMultiaddr(addr).at(-1);
+}
+
+export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalMultiaddrPeerTarget | undefined {
+  const raw = targetPeerIdFromMultiaddr(addr);
+  return raw ? { raw, canonical: canonicalPeerIdString(raw) } : undefined;
 }
 
 export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set<string> {
@@ -59,24 +69,48 @@ export class NetworkAdmissionService {
     return Boolean(this.networkId);
   }
 
-  markVerifiedSameNetwork(peerId: CanonicalPeerId): void {
+  markVerifiedSameNetwork(peerId: string): void {
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    if (!canonicalPeerId) return;
+    this.markVerifiedSameNetworkCanonical(canonicalPeerId);
+  }
+
+  markVerifiedSameNetworkCanonical(peerId: CanonicalPeerId): void {
     this.verifiedPeerIds.add(peerId);
     this.quarantinedPeerIds.delete(peerId);
   }
 
-  quarantinePeer(peerId: CanonicalPeerId): void {
+  quarantinePeer(peerId: string): void {
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    if (!canonicalPeerId) return;
+    this.quarantinePeerCanonical(canonicalPeerId);
+  }
+
+  quarantinePeerCanonical(peerId: CanonicalPeerId): void {
     this.quarantinedPeerIds.add(peerId);
     this.verifiedPeerIds.delete(peerId);
   }
 
-  isAcceptedPeer(peerId: CanonicalPeerId): boolean {
+  isAcceptedPeer(peerId: string): boolean {
+    if (!this.enabled) return true;
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    return canonicalPeerId ? this.isAcceptedPeerCanonical(canonicalPeerId) : false;
+  }
+
+  isAcceptedPeerCanonical(peerId: CanonicalPeerId): boolean {
     if (!this.enabled) return true;
     if (peerId === this.selfPeerId) return true;
     if (this.quarantinedPeerIds.has(peerId)) return false;
     return this.verifiedPeerIds.has(peerId);
   }
 
-  isRejectedPeer(peerId: CanonicalPeerId): boolean {
+  isRejectedPeer(peerId: string): boolean {
+    if (!this.enabled) return false;
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    return canonicalPeerId ? this.isRejectedPeerCanonical(canonicalPeerId) : true;
+  }
+
+  isRejectedPeerCanonical(peerId: CanonicalPeerId): boolean {
     if (!this.enabled) return false;
     return this.quarantinedPeerIds.has(peerId);
   }

@@ -12,7 +12,6 @@ vi.mock('../src/p2p/peer-connect.js', () => peerConnectMocks);
 import { AgentRegistryMethods } from '../src/dkg-agent-registry.js';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
-import { canonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 const PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const PEER_ID_CID = peerIdFromString(PEER_ID).toCID().toString();
@@ -50,7 +49,7 @@ function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
     networkId: 'network-a',
     selfPeerId: SELF_PEER_ID,
   });
-  admission.markVerifiedSameNetwork(canonicalPeerIdString(peerId));
+  admission.markVerifiedSameNetwork(peerId);
   return new NetworkAdmissionCoordinator({
     admission,
     identity: { networkId: 'network-a' },

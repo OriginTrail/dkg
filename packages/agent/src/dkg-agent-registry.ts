@@ -1831,6 +1831,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       this.node.libp2p as any,
       multiaddress,
       (message) => this.log.info(ctx, message),
+      targetPeerId,
     );
     if (targetPeerId) {
       await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);

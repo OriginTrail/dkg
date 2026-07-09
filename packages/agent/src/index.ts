@@ -41,6 +41,8 @@ export {
   peerIdsFromMultiaddr,
   peerIdsFromMultiaddrs,
   targetPeerIdFromMultiaddr,
+  canonicalTargetPeerIdFromMultiaddr,
+  type CanonicalMultiaddrPeerTarget,
   type NetworkAdmissionOptions,
   type NetworkAdmissionSnapshot,
 } from './p2p/network-admission.js';
