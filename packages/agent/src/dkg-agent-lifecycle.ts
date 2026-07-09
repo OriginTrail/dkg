@@ -228,6 +228,7 @@ import {
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalMaxInflight,
+  resolveSyncGlobalQueueLimit,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -626,7 +627,11 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
 }
 
 function syncGlobalLimit(config: DKGAgentConfig): number | undefined {
-  return resolveSyncGlobalMaxInflight(config.syncGlobalMaxInflight);
+  return resolveSyncGlobalMaxInflight(config.syncGlobalMaxInflight, config.syncGlobalLimit);
+}
+
+function syncGlobalQueueLimit(config: DKGAgentConfig): number | undefined {
+  return resolveSyncGlobalQueueLimit(config.syncGlobalQueueLimit, syncGlobalLimit(config));
 }
 
 function emptyDurableSyncResult(): DurableSyncResult {
@@ -3471,6 +3476,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const runSync = () => withGlobalSyncBackpressure(
       {
         limit: syncGlobalLimit(this.config),
+        queueLimit: syncGlobalQueueLimit(this.config),
         ctx,
         label: `durable:${remotePeerId.slice(-8)}`,
         logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -3761,6 +3767,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : await withGlobalSyncBackpressure(
             {
               limit: syncGlobalLimit(this.config),
+              queueLimit: syncGlobalQueueLimit(this.config),
               ctx,
               label: `shared-memory:${remotePeerId.slice(-8)}`,
               logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -3885,6 +3892,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return withGlobalSyncBackpressure(
       {
         limit: syncGlobalLimit(this.config),
+        queueLimit: syncGlobalQueueLimit(this.config),
         ctx,
         label: `swm-recovery:${remotePeerId.slice(-8)}`,
         logInfo: (opCtx, message) => this.log.info(opCtx, message),

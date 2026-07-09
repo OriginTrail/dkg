@@ -938,8 +938,15 @@ export interface DKGAgentConfig {
   syncOnConnectEnabled?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
-  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  /**
+   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
+   */
   syncGlobalMaxInflight?: number;
+  /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
+  syncGlobalLimit?: number;
+  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  syncGlobalQueueLimit?: number;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
