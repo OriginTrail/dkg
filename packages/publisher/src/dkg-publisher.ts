@@ -2,7 +2,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
@@ -361,9 +361,12 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bypass, which is the other legitimate non-guard path).
 const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
 const TRUSTED_CATALOG_ORIGIN_TOKEN = Symbol('dkg-publisher:trusted-catalog-origin');
+const PUBLIC_ACK_STAGING_MODE_TOKEN = Symbol('dkg-publisher:public-ack-staging-mode');
+type PublicACKStagingMode = 'inline' | 'strict-swm' | 'inline-small-swm';
 type InternalPublishOptions = PublishOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
+  [PUBLIC_ACK_STAGING_MODE_TOKEN]?: PublicACKStagingMode;
 };
 
 interface PublisherSigner {
@@ -390,6 +393,22 @@ function isInternalOrigin(options: PublishOptions): boolean {
 
 function isTrustedCatalogInternalOrigin(options: PublishOptions): boolean {
   return (options as InternalPublishOptions)[TRUSTED_CATALOG_ORIGIN_TOKEN] === true;
+}
+
+function resolvePublicACKStagingMode(options: PublishOptions): PublicACKStagingMode {
+  return (options as InternalPublishOptions)[PUBLIC_ACK_STAGING_MODE_TOKEN]
+    ?? (options.fromSharedMemory ? 'strict-swm' : 'inline');
+}
+
+function selectPublicStagingQuads(
+  mode: PublicACKStagingMode,
+  publicNquadsBytes: Uint8Array,
+): Uint8Array | undefined {
+  if (mode === 'strict-swm') return undefined;
+  if (mode === 'inline-small-swm' && publicNquadsBytes.length > STORAGE_ACK_MAX_STAGING_BYTES) {
+    return undefined;
+  }
+  return publicNquadsBytes;
 }
 
 function stripOptionalLiteral(value: string | undefined): string | undefined {
@@ -1693,6 +1712,7 @@ export class DKGPublisher implements Publisher {
       // OT-RFC-43 A2 — reuse the finalize-stamped kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
       [INTERNAL_ORIGIN_TOKEN]: true,
+      [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
       ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
     };
     let publishResult: PublishResult;
@@ -1704,10 +1724,12 @@ export class DKGPublisher implements Publisher {
         ctx,
         'publishFromSWM core-node verification failed with NO_DATA_IN_SWM; retrying via direct publish with inline quads',
       );
-      publishResult = await this.publish({
+      const directRetryOptions: InternalPublishOptions = {
         ...internalPublishOptions,
         fromSharedMemory: false,
-      });
+        [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline',
+      };
+      publishResult = await this.publish(directRetryOptions);
     }
 
     // Per-cgId data promotion: copy quads + KA meta from the default
@@ -2287,7 +2309,8 @@ export class DKGPublisher implements Publisher {
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph}> .`,
       )
       .join('\n');
-    const publicByteSize = BigInt(new TextEncoder().encode(nquadsStr).length);
+    const publicNquadsBytes = new TextEncoder().encode(nquadsStr);
+    const publicByteSize = BigInt(publicNquadsBytes.length);
 
     // the public DCAT catalog entry rides in the KC merkle root
     // (kcMerkleRoot, above, covers it) AND is the OT-RFC-49 curated random-
@@ -2378,22 +2401,24 @@ export class DKGPublisher implements Publisher {
     // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
     // For direct publish: send staging quads inline via P2P so core nodes
     // can verify the merkle root without needing SWM pre-positioning.
-    // For publishFromSharedMemory (publishContextGraphId set): data is already in
-    // peers' SWM via shared memory gossip — do NOT send inline quads; core nodes
+    // For public callers using fromSharedMemory: data is already in peers'
+    // SWM via shared memory gossip — do NOT send inline quads; core nodes
     // verify against their local SWM copy (preserving storage-attestation).
+    // Internal publishFromSharedMemory() calls set a private ACK staging policy
+    // to inline small public payloads on the first ACK attempt, avoiding the
+    // public-CG subscription gap; oversized payloads keep the SWM fallback.
     // Folded public+private publishes send only the private Merkle roots on
     // the ACK wire. Core nodes verify the public quads they store and fold
     // those commitments into the claimed KC root without seeing private
     // plaintext.
-    const isPublishFromSharedMemory = !!options.fromSharedMemory;
     // OT-RFC-38 / LU-5: when an encryptInlinePayload hook is wired (curated
     // CGs only — DKGAgent resolves this from accessPolicy), ALWAYS send the
     // payload inline as AEAD ciphertext, regardless of `fromSharedMemory`.
     // Cores can't decrypt and they're not subscribed to curated SWM yet
     // (substrate split lands in LU-6), so SWM-lookup would always decline
     // with NO_DATA_IN_SWM — the exact bug §1.1 surfaces. Public CGs keep
-    // the existing behaviour: `fromSharedMemory` → cores look up SWM
-    // locally; otherwise plaintext inline.
+    // strict external `fromSharedMemory` semantics; only an internal explicit
+    // ACK staging policy can opt into size-gated inline staging.
     // GH #1121 — take the encrypted-inline path whenever a REAL encryption
     // callback is wired. The ONE exception: skip the async-lift mapper's
     // fail-closed DEFAULT on a chainless / local-only publish (ownerOnly KA on
@@ -2459,9 +2484,26 @@ export class DKGPublisher implements Publisher {
         stagingByteSize = publicByteSize;
       }
     } else {
-      stagingQuads = isPublishFromSharedMemory
-        ? undefined
-        : new TextEncoder().encode(nquadsStr);
+      // A2 (§1.1 fix): internal public-CG VM publishes ship small plaintext
+      // quads inline on the first ACK attempt — the
+      // SAME bytes the NO_DATA_IN_SWM self-heal retry (fromSharedMemory:false)
+      // and the curated catalog path above already send. Relying on a core's
+      // local SWM copy declines NO_DATA_IN_SWM / times out the round whenever
+      // the core never subscribed to the public CG's workspace topic (the
+      // common case on public networks: cores only auto-subscribe curated
+      // workspace topics). byteSize (`publicByteSize`/`effectiveByteSize`),
+      // `kcMerkleRoot` and the ACK digest all derive from `nquadsStr`, so this
+      // is byte-identical to the self-heal path — just on attempt 1, which
+      // avoids the failed first round + 120s storage_ack_timeout.
+      // Exception: above the core's inline cap keep
+      // the SWM-lookup fallback so a large publish can still ACK from cores that
+      // synced the data (the bound-graph SWM lookup in A3 keeps that path fast).
+      // Public callers that set `fromSharedMemory: true` keep the strict SWM
+      // contract and therefore omit `stagingQuads`.
+      stagingQuads = selectPublicStagingQuads(
+        resolvePublicACKStagingMode(options),
+        publicNquadsBytes,
+      );
     }
 
     // Pre-compute tokenAmount and epochs so they can be included in the
