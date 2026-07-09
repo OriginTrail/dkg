@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -123,7 +123,6 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
@@ -222,6 +221,7 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
+import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -938,13 +938,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         workspaceRecipientPrivateKeys: () => this.getLocalWorkspaceRecipientPrivateKeys(),
         workspaceSenderKeyDecryptor: (message: SwmSenderKeyMessageMsg, contextGraphId: string, ctx: OperationContext) =>
           this.decryptWorkspacePayloadWithSenderKey(message, contextGraphId, ctx),
-        assetUalForKaIdentity: async ({ agentAddress, kaNumber }) => {
-          const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
-            ? await this.chain.getDKGKnowledgeAssetsAddress()
-            : await this.chain.getKnowledgeAssetsLifecycleAddress();
-          const kaId = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(kaNumber);
-          return buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
-        },
+        assetUalForKaIdentity: ({ agentAddress, kaNumber }) =>
+          resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber }),
         lifecycleLogOptions: {
           localPeerId: () => this.peerId,
           localNodeIdentityId: () => this.identityId.toString(),

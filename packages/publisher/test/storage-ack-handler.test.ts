@@ -186,8 +186,11 @@ describe('StorageACKHandler', () => {
     expect(entries.some((message) => message.includes('stage=storage_ack'))).toBe(false);
   });
 
-  it('emits receiver ACK lifecycle logs only when a resolver supplies a verified assetUal', async () => {
-    const resolveAssetUalForPublishIntent = vi.fn(async () => TEST_ASSET_UAL);
+  it('emits receiver ACK lifecycle logs from the same ACK decision path', async () => {
+    const resolveAssetUalForPublishIntent = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return TEST_ASSET_UAL;
+    });
     const handler = await createHandler(swmQuads, {
       localPeerId: 'receiver-peer',
       ackHandlerDeadlineMs: 0,
@@ -197,7 +200,7 @@ describe('StorageACKHandler', () => {
     Logger.setSink((entry) => entries.push(entry.message));
     const spoofedAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/999`;
 
-    await handler.handler(encodePublishIntent({
+    const response = await handler.handler(encodePublishIntent({
       merkleRoot,
       contextGraphId,
       publisherPeerId: 'publisher-0',
@@ -212,11 +215,12 @@ describe('StorageACKHandler', () => {
     } as any), fakePeerId);
 
     expect(resolveAssetUalForPublishIntent).toHaveBeenCalled();
+    expect(isStorageACKDecline(decodeStorageACK(response))).toBe(false);
     expect(entries).toContainEqual(expect.stringContaining(`assetUal=${TEST_ASSET_UAL}`));
     expect(entries.some((message) => message.includes(`assetUal=${spoofedAssetUal}`))).toBe(false);
   });
 
-  it('does not wait for lifecycle assetUal resolution before returning a valid ACK', async () => {
+  it('bounds lifecycle assetUal resolution and still returns a valid ACK', async () => {
     const resolveAssetUalForPublishIntent = vi.fn(() => new Promise<string>(() => {}));
     const handler = await createHandler(swmQuads, {
       localPeerId: 'receiver-peer',
@@ -237,7 +241,7 @@ describe('StorageACKHandler', () => {
         tokenAmountStr: '1000',
         merkleLeafCount: swmMerkleLeafCount,
       }), fakePeerId),
-      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 25)),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 1_000)),
     ]);
 
     expect(response).not.toBe('timed-out');

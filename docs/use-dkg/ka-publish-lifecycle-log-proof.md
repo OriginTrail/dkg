@@ -15,6 +15,16 @@ pnpm run build
 scripts/devnet-ka-lifecycle-log-proof.sh
 ```
 
+The same executable check is wired as the devnet suite:
+
+```bash
+pnpm test:devnet:ka-lifecycle-log-proof
+```
+
+That suite runs the script and asserts the generated `metadata.txt`,
+`publish.txt`, and `grep.txt` artifacts contain the same `assetUal` and the
+required publisher, receiver, ACK, finalization, sync, and reconcile rows.
+
 The script publishes one KA through `scripts/devnet-test-publish.sh`, extracts
 the confirmed `assetUal`, and writes an artifact directory under:
 

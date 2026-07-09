@@ -41,6 +41,12 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
+interface StorageAckDecision {
+  encoded: Uint8Array;
+  ack: StorageACKMsg;
+  lifecycleAssetUal?: string;
+}
+
 /**
  * Validate that every term of a parsed quad is well-formed BEFORE it enters the
  * store-op wrapper. A malformed term is a bad request (the publisher committed
@@ -465,21 +471,18 @@ export class StorageACKHandler {
     });
   }
 
-  private scheduleLifecycleResponseLog(
+  private async buildStorageAckDecision(
     intent: PublishIntentMsg | undefined,
-    ack: StorageACKMsg,
+    encoded: Uint8Array,
     peerId: PeerId,
-  ): void {
-    if (!intent || !this.config.resolveAssetUalForPublishIntent) return;
-    void this.resolveLifecycleAssetUalForPublishIntent(intent, ack, peerId)
-      .then((assetUal) => this.logLifecycleResponse(assetUal, peerId, ack))
-      .catch((err) => {
-        const reason = err instanceof Error ? err.message : String(err);
-        this.log.warn(
-          createOperationContext('share'),
-          `StorageACK lifecycle log scheduling failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
-        );
-      });
+  ): Promise<StorageAckDecision> {
+    const ack = decodeStorageACK(encoded);
+    const lifecycleAssetUal = await this.resolveLifecycleAssetUalForPublishIntent(intent, ack, peerId);
+    return { encoded, ack, lifecycleAssetUal };
+  }
+
+  private logLifecycleDecision(decision: StorageAckDecision, peerId: PeerId): void {
+    this.logLifecycleResponse(decision.lifecycleAssetUal, peerId, decision.ack);
   }
 
   private async resolveLifecycleAssetUalForPublishIntent(
@@ -493,7 +496,7 @@ export class StorageACKHandler {
       timeout = setTimeout(() => {
         this.log.warn(
           createOperationContext('share'),
-          `StorageACK lifecycle assetUal resolver exceeded ${STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS}ms; ACK response was already returned`,
+          `StorageACK lifecycle assetUal resolver exceeded ${STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS}ms; continuing without receiver ACK assetUal`,
         );
         resolve(undefined);
       }, STORAGE_ACK_LIFECYCLE_RESOLVE_TIMEOUT_MS);
@@ -758,10 +761,10 @@ export class StorageACKHandler {
           this.handlePublishIntent(data, peerId),
           cgIdAttr,
         );
-        const decoded = decodeStorageACK(result);
-        this.scheduleLifecycleResponseLog(intentPreview, decoded, peerId);
-        if (isStorageACKDecline(decoded)) {
-          const declineCode = decoded.declineCode || 'UNKNOWN';
+        const decision = await this.buildStorageAckDecision(intentPreview, result, peerId);
+        this.logLifecycleDecision(decision, peerId);
+        if (isStorageACKDecline(decision.ack)) {
+          const declineCode = decision.ack.declineCode || 'UNKNOWN';
           span.setAttribute('dkg.ack_outcome', 'decline');
           span.setAttribute('dkg.decline_code', declineCode);
           getMetrics().ackHandlerTotal.add(1, {
@@ -778,7 +781,7 @@ export class StorageACKHandler {
             ...(chainIdLabel ? { chain_id: chainIdLabel } : {}),
           });
         }
-        return result;
+        return decision.encoded;
       } catch (err) {
         // Throw resets the libp2p stream — withSpan records ERROR. Tag the
         // terminal outcome + metric, then re-throw to preserve control flow.

@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -215,6 +215,7 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
+import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -2331,11 +2332,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveKaLifecycleAssetUalFromIdentity(this: DKGAgent, agentAddress?: string, kaNumber?: string): Promise<string | undefined> {
     if (!agentAddress || !kaNumber) return undefined;
     try {
-      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
-        ? await this.chain.getDKGKnowledgeAssetsAddress()
-        : await this.chain.getKnowledgeAssetsLifecycleAddress();
-      const kaId = (BigInt(ethers.getAddress(agentAddress)) << 96n) | BigInt(kaNumber);
-      return buildKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      return await resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber });
     } catch {
       return undefined;
     }

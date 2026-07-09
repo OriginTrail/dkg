@@ -24,6 +24,7 @@ packages:
   - "devnet/pr1385-subgraph-rs"
   - "devnet/pr1388-okf-integration"
   - "devnet/ka-lifecycle-cli"
+  - "devnet/ka-lifecycle-log-proof"
   - "devnet/pr1366-pca-deposit-waiver"
   - "devnet/pr1369-folded-private-ack"
   - "devnet/pr1387-bulk-register-agents"

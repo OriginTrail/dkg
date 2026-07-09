@@ -35,6 +35,7 @@ import {
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, logKaLifecycleEvent, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  parseContextGraphLayerUri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -96,7 +97,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -220,6 +221,7 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
+import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -5132,45 +5134,26 @@ export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(input: {
 
   const identities = new Map<string, { agentAddress: string; kaNumber: bigint }>();
   for (const row of result.bindings) {
-    const parsed = parsePerKaSharedMemoryGraphIdentity(row.g, baseSwmGraph);
-    if (!parsed) continue;
+    const graphUri = normalizeBindingIri(row.g);
+    if (!graphUri) continue;
+    if (graphUri.startsWith(`${baseSwmGraph}/staging/`)) continue;
+    const parsed = parseContextGraphLayerUri(graphUri);
+    if (
+      !parsed ||
+      parsed.layer !== MemoryLayer.SharedWorkingMemory ||
+      parsed.contextGraphId !== swmGraphId ||
+      parsed.subGraphName !== subGraphName
+    ) continue;
     const key = `${parsed.agentAddress.toLowerCase()}/${parsed.kaNumber.toString()}`;
     identities.set(key, parsed);
   }
   if (identities.size !== 1) return undefined;
 
   const identity = [...identities.values()][0];
-  const storageAddr = input.chain.getDKGKnowledgeAssetsAddress
-    ? await input.chain.getDKGKnowledgeAssetsAddress()
-    : await input.chain.getKnowledgeAssetsLifecycleAddress();
-  const kaId = (BigInt(identity.agentAddress.toLowerCase()) << 96n) | identity.kaNumber;
-  return buildKnowledgeAssetUal(input.chain.chainId, storageAddr, kaId);
-}
-
-function parsePerKaSharedMemoryGraphIdentity(
-  bindingValue: string | undefined,
-  baseSwmGraph: string,
-): { agentAddress: string; kaNumber: bigint } | undefined {
-  const graphUri = normalizeBindingIri(bindingValue);
-  if (!graphUri) return undefined;
-  const prefix = `${baseSwmGraph}/`;
-  if (!graphUri.startsWith(prefix)) return undefined;
-  const suffix = graphUri.slice(prefix.length);
-  if (!suffix || suffix.startsWith('staging/')) return undefined;
-  const parts = suffix.split('/');
-  if (parts.length !== 2) return undefined;
-  const [agentAddressRaw, kaNumberRaw] = parts;
-  const agentAddress = normalizeEvmAddressFromGraph(agentAddressRaw);
-  if (!agentAddress || !/^\d+$/.test(kaNumberRaw)) return undefined;
-  return {
-    agentAddress,
-    kaNumber: BigInt(kaNumberRaw),
-  };
-}
-
-function normalizeEvmAddressFromGraph(value: string): string | undefined {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) return undefined;
-  return ethers.getAddress(value.toLowerCase());
+  return resolveAssetUalFromKaIdentity(input.chain, {
+    agentAddress: identity.agentAddress,
+    kaNumber: identity.kaNumber,
+  });
 }
 
 function normalizeBindingIri(value: string | undefined): string | undefined {

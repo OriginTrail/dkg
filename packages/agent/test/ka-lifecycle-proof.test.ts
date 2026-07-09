@@ -386,14 +386,21 @@ describe('ka lifecycle proof', () => {
   it('documents the repeatable KA lifecycle log proof handoff and artifact script', () => {
     const handoff = readOptionalUtf8(new URL('../../../docs/use-dkg/ka-publish-lifecycle-log-proof.md', import.meta.url));
     const script = readOptionalUtf8(new URL('../../../scripts/devnet-ka-lifecycle-log-proof.sh', import.meta.url));
+    const suite = readOptionalUtf8(new URL('../../../devnet/ka-lifecycle-log-proof/automated.test.ts', import.meta.url));
+    const suitesManifest = readOptionalUtf8(new URL('../../../devnet/suites.json', import.meta.url));
 
     expect(handoff).toBeDefined();
     expect(script).toBeDefined();
+    expect(suite).toBeDefined();
+    expect(suitesManifest).toBeDefined();
     if (!handoff) return;
     if (!script) return;
+    if (!suite) return;
+    if (!suitesManifest) return;
     expect(handoff).toContain('CONTEXT.md');
     expect(handoff).toContain('docs/adr/0001-log-ka-publish-lifecycle-by-asset-ual.md');
     expect(handoff).toContain('scripts/devnet-ka-lifecycle-log-proof.sh');
+    expect(handoff).toContain('pnpm test:devnet:ka-lifecycle-log-proof');
     expect(handoff).toContain('grep');
     expect(handoff).toContain('ka_lifecycle');
     expect(handoff).toContain('assetUal');
@@ -412,5 +419,10 @@ describe('ka lifecycle proof', () => {
     expect(script).toContain('stage=finalization');
     expect(script).toContain('stage=sync');
     expect(script).toContain('stage=reconcile');
+    expect(suite).toContain('scripts/devnet-ka-lifecycle-log-proof.sh');
+    expect(suite).toContain('metadata.txt');
+    expect(suite).toContain('publish.txt');
+    expect(suite).toContain('grep.txt');
+    expect(suitesManifest).toContain('ka-lifecycle-log-proof');
   });
 });

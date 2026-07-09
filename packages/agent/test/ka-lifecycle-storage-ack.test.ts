@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import {
   ASSET_UAL,
   AUTHOR_AGENT_ADDRESS,
@@ -209,10 +210,68 @@ describe('ka lifecycle storage ack', () => {
     ));
   });
 
-  it('wires the production DKGAgent StorageACK handler with the lifecycle assetUal resolver', () => {
-    const source = readFileSync(new URL('../src/dkg-agent-lifecycle.ts', import.meta.url), 'utf8');
+  it('wires the production DKGAgent StorageACK handler with the lifecycle assetUal resolver', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    const store = new OxigraphStore();
+    const swmGraph = contextGraphLayerUri('42', MemoryLayer.SharedWorkingMemory, AUTHOR_AGENT_ADDRESS, '7');
+    const swmQuads = [{
+      subject: ROOT_ENTITY,
+      predicate: 'http://schema.org/name',
+      object: '"Production ACK lifecycle"',
+      graph: swmGraph,
+    }];
+    await store.insert(swmQuads);
+    const merkleRoot = computeFlatKCRootV10(swmQuads, []);
+    const merkleLeafCount = computeFlatKCMerkleLeafCountV10(swmQuads, []);
+    const expectedAssetUal = buildKnowledgeAssetUal(
+      chain.chainId,
+      await chain.getDKGKnowledgeAssetsAddress(),
+      (BigInt(ethers.getAddress(AUTHOR_AGENT_ADDRESS.toLowerCase())) << 96n) | 7n,
+    );
+    const agent = await DKGAgent.create({
+      name: 'KaLifecycleStorageAckProductionWiring',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
 
-    expect(source).toContain('resolveAssetUalForPublishIntent');
-    expect(source).toContain('resolveStorageAckLifecycleAssetUalFromLocalSwm');
-  });
+    try {
+      await agent.start();
+      const handler = (agent.messenger as unknown as {
+        handlers: Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>;
+      }).handlers.get(PROTOCOL_STORAGE_ACK);
+      expect(handler).toBeDefined();
+      const entries = captureLogs();
+
+      const response = await handler!(encodePublishIntent({
+        merkleRoot,
+        contextGraphId: '42',
+        publisherPeerId: PUBLISHER_PEER_ID,
+        publicByteSize: 1024,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: [ROOT_ENTITY],
+        epochs: 1,
+        tokenAmountStr: '1000',
+        merkleLeafCount,
+      }), PUBLISHER_PEER_ID);
+
+      const decoded = decodeStorageACK(response);
+      expect(isStorageACKDecline(decoded)).toBe(false);
+      const messages = storageAckLifecycleLogs(entries).map((entry) => entry.message);
+      expect(messages).toContainEqual(expect.stringContaining(`assetUal=${expectedAssetUal}`));
+      expect(messages).toContainEqual(expect.stringContaining('event=storage_ack_signed'));
+      expect(messages).toContainEqual(expect.stringContaining(`localPeerId=${agent.peerId}`));
+      expect(messages).toContainEqual(expect.stringContaining('localNodeIdentityId=42'));
+    } finally {
+      Logger.setSink(null);
+      await agent.stop().catch(() => undefined);
+    }
+  }, 20_000);
 });
