@@ -179,7 +179,32 @@ dkg update --allow-prerelease   # follow the `next` dist-tag for pre-release bui
 dkg rollback                # revert to the previous version
 ```
 
-Do **not** `git pull` or clone the repository to update — `dkg update` is the canonical verb. If anything looks off (multiple repositories on disk, served UI doesn't match version, version skew between daemon and CLI), run `dkg doctor` for a structured diagnostic of the install state. See [`OT-RFC-41`](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md) for the design rationale.
+NPM/dist-tag updates are the recommended production path. Core operators who
+explicitly need build-from-source updates can opt into the advanced git updater
+by writing this block in `~/.dkg/config.json`:
+
+```json
+{
+  "autoUpdate": {
+    "enabled": true,
+    "source": "git",
+    "repo": "https://github.com/OriginTrail/dkg.git",
+    "branch": "main",
+    "checkIntervalMinutes": 3
+  }
+}
+```
+
+Git mode is daemon-polled and experimental. It builds the watched ref in the
+inactive blue-green slot, swaps slots, then exits through the supervised restart
+flow. Rollback differs from npm/dist-tag mode: it can only flip back to an
+already-built slot, not reinstall an arbitrary package version from npm.
+
+Do **not** manually `git pull` a running node tree. If anything looks off
+(multiple repositories on disk, served UI doesn't match version, version skew
+between daemon and CLI), run `dkg doctor` for a structured diagnostic of the
+install state. See [`OT-RFC-41`](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md)
+for the npm-first design rationale.
 
 ### Contributors / monorepo development
 

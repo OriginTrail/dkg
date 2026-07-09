@@ -6,15 +6,12 @@
 //   - `performNpmUpdate`     — Core nodes (blue-green slots, npm install
 //                              into inactive slot + swap).
 //
-// The legacy git-clone + build-from-source path (`performUpdate`,
+// The git-clone + build-from-source path (`performUpdate`,
 // `_performUpdateInner`, `checkForUpdate`, `checkForNewCommit*`,
 // `runBuildStep`, `cleanGeneratedOutputs`, `sweepOrphanBuildProcesses`,
-// `resolveBuildTimeouts`) remains in this file as **dead production
-// code** under Bundle B: no user-facing CLI entry point or daemon
-// polling loop calls into it anymore (see `cli.ts` `dkg update` and
-// `daemon/lifecycle.ts` polling, both updated in OT-RFC-41 §4.2 /
-// §5 PR 5). A follow-up rc.12.x cleanup PR deletes these symbols
-// once Bundle B has soaked on devnet.
+// `resolveBuildTimeouts`) is intentionally retained for advanced Core nodes
+// that opt into `autoUpdate.source = "git"`. NPM/dist-tag updates remain the
+// default and recommended path.
 //
 // Live "last check" state is shared with `handleRequest`'s `/status`
 // endpoint via `daemonState` in `./state.js`.
@@ -90,7 +87,32 @@ export function parseTagName(ref: string): string | null {
 }
 
 export function isValidRef(ref: string): boolean {
-  return /^[\w./+\-]+$/.test(ref) && !ref.startsWith("-");
+  if (!/^[\w./+\-]+$/.test(ref)) return false;
+  if (!ref || ref.startsWith("-") || ref.startsWith("/") || ref.endsWith("/")) return false;
+  if (ref.includes("..") || ref.includes("//") || ref.includes("@{")) return false;
+  if (ref.endsWith(".")) return false;
+  const parts = ref.split("/");
+  return parts.every((part) => {
+    if (!part || part === "." || part === "..") return false;
+    if (part.endsWith(".lock")) return false;
+    return true;
+  });
+}
+
+export function normalizeGitRefInput(ref: string): string {
+  const trimmed = ref.trim() || "main";
+  if (!isValidRef(trimmed)) {
+    throw new Error(`invalid branch/ref "${ref}"`);
+  }
+  if (trimmed.startsWith("refs/")) return trimmed;
+  return `refs/heads/${trimmed}`;
+}
+
+export function resolveAutoUpdateGitRef(
+  au: Pick<ResolvedAutoUpdateConfig, "branch"> & { ref?: string },
+  refOverride?: string,
+): string {
+  return normalizeGitRefInput(refOverride ?? au.ref ?? au.branch);
 }
 
 export function isValidRepoSpec(repo: string): boolean {
@@ -156,7 +178,7 @@ export async function resolveRemoteCommitSha(
   try {
     fetchUrl = repoToFetchUrl(repoSpec);
   } catch (err: any) {
-    log(`Auto-update: ${err?.message ?? "invalid autoUpdate.repo"}`);
+    log(`Auto-update (git): ${err?.message ?? "invalid autoUpdate.repo"}`);
     return null;
   }
   const githubRepo = githubRepoForApi(repoSpec);
@@ -178,16 +200,16 @@ export async function resolveRemoteCommitSha(
     });
     if (!res.ok) {
       if (res.status === 422 && ref.startsWith("refs/tags/")) {
-        log(`Auto-update: tag "${apiRef}" not found in ${githubRepo}`);
+        log(`Auto-update (git): tag "${apiRef}" not found in ${githubRepo}`);
         return null;
       }
       if (res.status === 404) {
         log(
-          `Auto-update: GitHub returned 404 for ${githubRepo} ref "${ref}". ` +
+          `Auto-update (git): GitHub returned 404 for ${githubRepo} ref "${ref}". ` +
             "If the repo is private, set GITHUB_TOKEN. Otherwise check repo/ref in config.",
         );
       } else {
-        log(`Auto-update: GitHub API returned ${res.status} for ${url}`);
+        log(`Auto-update (git): GitHub API returned ${res.status} for ${url}`);
       }
       return null;
     }
@@ -211,7 +233,7 @@ export async function resolveRemoteCommitSha(
       typeof raw === "string" ? raw : String((raw as any)?.stdout ?? "");
     const lines = String(stdout).trim().split("\n").filter(Boolean);
     if (lines.length === 0) {
-      log(`Auto-update: ref "${ref}" not found in ${fetchUrl}`);
+      log(`Auto-update (git): ref "${ref}" not found in ${fetchUrl}`);
       return null;
     }
     const peeledTagRef = `${ref}^{}`;
@@ -248,6 +270,10 @@ export type CommitCheckStatus = {
   status: "available" | "up-to-date" | "error";
   commit?: string;
 };
+
+function shortCommit(commit: string): string {
+  return commit ? commit.slice(0, 12) : "unknown";
+}
 
 export async function readPendingUpdateState(): Promise<PendingUpdateState | null> {
   const { dkgDir, readFile } = _autoUpdateIo;
@@ -713,12 +739,14 @@ export async function checkForNewCommitWithStatus(
     }
   }
 
-  const ref = (refOverride ?? au.branch).trim() || "main";
-  const gitEnv = gitCommandEnv(au);
-  if (!isValidRef(ref)) {
-    log(`Auto-update: invalid branch/ref "${ref}"`);
+  let ref = "";
+  try {
+    ref = resolveAutoUpdateGitRef(au, refOverride);
+  } catch (err: any) {
+    log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
     return { status: "error" };
   }
+  const gitEnv = gitCommandEnv(au);
 
   try {
     const latestCommit = await resolveRemoteCommitSha(
@@ -728,11 +756,17 @@ export async function checkForNewCommitWithStatus(
       gitEnv,
     );
     if (!latestCommit) return { status: "error" };
-    if (latestCommit === currentCommit) return { status: "up-to-date" };
+    log(
+      `Auto-update (git): current commit ${shortCommit(currentCommit)}, remote commit ${shortCommit(latestCommit)} for ref "${ref}".`,
+    );
+    if (latestCommit === currentCommit) {
+      log("Auto-update (git): update skipped — remote commit matches current.");
+      return { status: "up-to-date", commit: latestCommit };
+    }
     return { status: "available", commit: latestCommit };
   } catch (err: any) {
     log(
-      `Auto-update: failed to check for new commit (${err?.message ?? String(err)})`,
+      `Auto-update (git): failed to check for new commit (${err?.message ?? String(err)})`,
     );
     return { status: "error" };
   }
@@ -1024,6 +1058,8 @@ async function cleanGeneratedOutputs(
  */
 export interface PerformUpdateOptions {
   refOverride?: string;
+  /** Remote commit already resolved by the daemon poller; avoids a duplicate network check. */
+  expectedCommit?: string;
   allowPrerelease?: boolean;
   verifyTagSignature?: boolean;
   /**
@@ -1117,10 +1153,20 @@ async function _performUpdateInner(
         encoding: "utf-8",
         cwd: activeDir,
       });
-      currentCommit = stdout.trim();
-      await writeFileAtomic(commitFile, currentCommit);
-    } catch {
-      return "failed";
+      const derivedCommit = stdout.trim();
+      if (derivedCommit) {
+        currentCommit = derivedCommit;
+        await writeFileAtomic(commitFile, currentCommit);
+      } else {
+        log(
+          "Auto-update (git): active slot git commit is unknown; continuing bootstrap from configured repo/ref.",
+        );
+      }
+    } catch (err: any) {
+      log(
+        `Auto-update (git): active slot git commit is unknown (${err?.message ?? String(err)}); ` +
+          "continuing bootstrap from configured repo/ref.",
+      );
     }
   }
 
@@ -1141,20 +1187,29 @@ async function _performUpdateInner(
     }
   }
 
-  const ref = (opts.refOverride ?? au.branch).trim() || "main";
-  const gitEnv = gitCommandEnv(au);
-
-  if (!isValidRef(ref)) {
-    log(`Auto-update: invalid branch/ref "${ref}"`);
+  let ref = "";
+  try {
+    ref = resolveAutoUpdateGitRef(au, opts.refOverride);
+  } catch (err: any) {
+    log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
     return "failed";
   }
-  const latestCommit = await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
-  if (!latestCommit) return "failed";
+  const gitEnv = gitCommandEnv(au);
 
-  if (latestCommit === currentCommit) return "up-to-date";
+  const latestCommit = opts.expectedCommit?.trim()
+    || await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
+  if (!latestCommit) return "failed";
+  log(
+    `Auto-update (git): current commit ${shortCommit(currentCommit)}, remote commit ${shortCommit(latestCommit)} for ref "${ref}".`,
+  );
+
+  if (latestCommit === currentCommit) {
+    log("Auto-update (git): update skipped — remote commit matches current.");
+    return "up-to-date";
+  }
 
   log(
-    `Auto-update: new commit detected (${latestCommit.slice(0, 8)}) for "${ref}", building in slot ${target}...`,
+    `Auto-update (git): update started — new commit ${latestCommit.slice(0, 8)} for "${ref}", building in slot ${target}...`,
   );
   let checkedOutCommit = latestCommit;
   let fetchUrl = "";
@@ -1162,14 +1217,14 @@ async function _performUpdateInner(
   try {
     fetchUrl = repoToFetchUrl(au.repo);
   } catch (repoErr: any) {
-    log(`Auto-update: ${repoErr?.message ?? "invalid autoUpdate.repo"}`);
+    log(`Auto-update (git): ${repoErr?.message ?? "invalid autoUpdate.repo"}`);
     return "failed";
   }
 
   if (!existsSync(join(targetDir, ".git"))) {
     try {
       log(
-        `Auto-update: slot ${target} missing git metadata; reinitializing slot repo.`,
+        `Auto-update (git): slot ${target} missing git metadata; reinitializing slot repo.`,
       );
       await mkdir(targetDir, { recursive: true });
       await execFileAsync("git", ["init"], {
@@ -1179,7 +1234,7 @@ async function _performUpdateInner(
       });
     } catch (initErr: any) {
       log(
-        `Auto-update: failed to initialize slot ${target} repo — ${initErr?.message ?? String(initErr)}`,
+        `Auto-update (git): failed to initialize slot ${target} repo — ${initErr?.message ?? String(initErr)}`,
       );
       return "failed";
     }
@@ -1190,7 +1245,7 @@ async function _performUpdateInner(
     const fetchRef = maybeTag ? `${ref}:${ref}` : ref;
     const fetchStartedAt = Date.now();
     log(
-      `Auto-update: fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
+      `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
     );
     await execFileAsync(
       "git",
@@ -1253,7 +1308,7 @@ async function _performUpdateInner(
     );
   } catch (fetchErr: any) {
     log(
-      `Auto-update: git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`,
+      `Auto-update (git): git fetch/checkout/verify failed in slot ${target} — ${fetchErr.message}`,
     );
     return "failed";
   }
@@ -1465,22 +1520,22 @@ async function _performUpdateInner(
   });
   try {
     const swapStartedAt = Date.now();
-    log(`Auto-update: swapping active slot to ${target}...`);
+    log(`Auto-update (git): swapping active slot to ${target}...`);
     await swapSlot(target);
     await writeFileAtomic(commitFile, checkedOutCommit);
     if (nextVersion) await writeFileAtomic(versionFile, nextVersion);
     await clearPendingUpdateState();
     const swapElapsedMs = Date.now() - swapStartedAt;
     log(
-      `Auto-update: swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
+      `Auto-update (git): swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
     );
   } catch (swapErr: any) {
     await clearPendingUpdateState();
-    log(`Auto-update: symlink swap failed — ${swapErr.message}`);
+    log(`Auto-update (git): symlink swap failed — ${swapErr.message}`);
     return "failed";
   }
   log(
-    `Auto-update: build succeeded in slot ${target}` +
+    `Auto-update (git): build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ""}. Swapped symlink. Restarting...`,
   );
   return "updated";

@@ -37,12 +37,28 @@ export interface AutoUpdateBuildTimeouts {
   markitdown?: number;
 }
 
+export const AUTO_UPDATE_GIT_ONLY_FIELDS = [
+  'repo',
+  'branch',
+  'ref',
+  'sshKeyPath',
+  'sshCommand',
+  'buildTimeoutMs',
+  'verifyTagSignature',
+] as const;
+
 export interface AutoUpdateConfig {
   enabled: boolean;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
   repo?: string;
   /** Optional in ~/.dkg/config.json: omit to inherit from network/project config. */
   branch?: string;
+  /**
+   * Optional git ref for the advanced git updater. When set, this wins over
+   * `branch`. Bare values are treated as branches (`main` ->
+   * `refs/heads/main`); full refs such as `refs/heads/main` are accepted.
+   */
+  ref?: string;
   /** Allow auto-updating to pre-release versions (e.g. 9.0.5-rc.1). */
   allowPrerelease?: boolean;
   /**
@@ -86,11 +102,12 @@ export interface AutoUpdateConfig {
    *     (`repoDir() === null`). Treated as `'npm'` under rc.12+ via
    *     `resolveStandaloneInstall()`.
    *
-   *   `'git'` (legacy; pre-rc.12): the now-removed git-build update
-   *     path. Treated as `'monorepo'` under rc.12+ (the daemon does
-   *     not auto-update, no git pull/build). User-facing `dkg
-   *     update` from such a config refuses to run — see OT-RFC-41
-   *     §4.2 and `cli.ts dkg update`.
+   *   `'git'`: advanced/experimental Core-node updater. The daemon
+   *     polls `repo` + `ref`/`branch`, builds the target commit from
+   *     source in the inactive blue-green slot, swaps slots, then exits
+   *     through the supervised restart flow. NPM/dist-tag updates remain
+   *     recommended for production because rollback expectations differ:
+   *     git mode can only roll back to an already-built slot.
    *
    * Implementation: read once at boot via `resolveStandaloneInstall(source)`
    * in `daemon/state.ts`, which writes the result into the shared
@@ -110,6 +127,7 @@ export interface AutoUpdateConfig {
 export type ResolvedAutoUpdateConfig = AutoUpdateConfig & {
   repo: string;
   branch: string;
+  ref?: string;
   checkIntervalMinutes: number;
 };
 
@@ -127,6 +145,7 @@ export interface NetworkConfig {
     enabled: boolean;
     repo: string;
     branch: string;
+    ref?: string;
     allowPrerelease?: boolean;
     /** npm dist-tag this network's nodes track — see `AutoUpdateConfig.channel`. */
     channel?: string;
@@ -1165,6 +1184,7 @@ export function resolveAutoUpdateConfig(
   const proj = loadProjectConfig();
   const repo = cfg?.repo ?? net?.repo ?? proj.repo;
   const branch = cfg?.branch ?? net?.branch ?? proj.defaultBranch;
+  const ref = cfg?.ref ?? net?.ref;
   const allowPrerelease = cfg?.allowPrerelease ?? net?.allowPrerelease ?? true;
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
@@ -1190,6 +1210,7 @@ export function resolveAutoUpdateConfig(
     enabled: true,
     repo,
     branch,
+    ...(ref ? { ref } : {}),
     allowPrerelease,
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),

@@ -15,14 +15,8 @@
  * cost-benefit is documented in OT-RFC-41 §4.7.2.
  */
 import { join } from 'node:path';
+import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
 import type { DoctorDeps, Finding } from '../types.js';
-
-const DEPRECATED_AUTO_UPDATE_FIELDS = [
-  'repo',
-  'branch',
-  'verifyTagSignature',
-  'buildTimeoutMs',
-] as const;
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -100,15 +94,18 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
   const autoUpdate = parsed.autoUpdate;
   if (autoUpdate && typeof autoUpdate === 'object' && !Array.isArray(autoUpdate)) {
     const au = autoUpdate as Record<string, unknown>;
+    const source = au.source;
+    const gitMode = source === 'git';
 
-    for (const field of DEPRECATED_AUTO_UPDATE_FIELDS) {
+    for (const field of AUTO_UPDATE_GIT_ONLY_FIELDS) {
+      if (gitMode) continue;
       const value = au[field];
       if (value === undefined || value === null || value === '') continue;
       findings.push({
         check: 'config-sanity',
         severity: 'warning',
         message: `Deprecated autoUpdate field is set: autoUpdate.${field}`,
-        advisory: `The '${field}' field is inert post-rc.12 per OT-RFC-41 §4.3. Remove it from ~/.dkg/config.json — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.`,
+        advisory: `The '${field}' field is inert unless autoUpdate.source is 'git'. Remove it from npm-mode ~/.dkg/config.json — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.`,
         subject: `autoUpdate.${field}`,
       });
     }
@@ -127,13 +124,12 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
       }
     }
 
-    const source = au.source;
     if (source !== undefined && source !== 'npm' && source !== 'monorepo' && source !== 'git' && source !== 'auto') {
       findings.push({
         check: 'config-sanity',
         severity: 'warning',
         message: `autoUpdate.source has an unknown value: ${JSON.stringify(source)}`,
-        advisory: "Expected 'npm' (post-rc.12 default) or 'monorepo' (for contributor checkouts). Older values ('git', 'auto') are accepted but deprecated.",
+        advisory: "Expected 'npm' (recommended default), 'git' (advanced Core-node git updater), or 'monorepo' (for contributor checkouts). Older value 'auto' is accepted for compatibility.",
         subject: 'autoUpdate.source',
       });
     }

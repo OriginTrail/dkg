@@ -30,7 +30,7 @@ export const DEBUG_SYNC_TRACE =
 export const daemonState: {
   /** Populated in `runDaemonInner` once the DKGAgent is ready. */
   catchupRunner: CatchupRunner | null;
-  /** Set to `true` while a monorepo `git pull` / slot-swap is in flight. */
+  /** Set to `true` while a package or git slot update is in flight. */
   isUpdating: boolean;
   /** Most recent "is this daemon up to date?" result; polled by `/status`. */
   lastUpdateCheck: {
@@ -99,7 +99,8 @@ export const daemonState: {
  * install, honouring the operator's `autoUpdate.source` override if present.
  *
  *   - `source === 'npm'` → return `true` regardless of `.git` presence.
- *   - `source === 'git'` → return `false` regardless of `.git` presence.
+ *   - `source === 'git'` → return `false` regardless of `.git` presence
+ *     because git mode is slot-built from source, not an npm install.
  *   - `source === 'auto'` or omitted → fall through to the filesystem probe
  *     (`isStandaloneInstall()`, i.e. `repoDir() === null`).
  *
@@ -120,14 +121,9 @@ export function resolveStandaloneInstall(
     return true;
   }
   if (source === 'git' || source === 'monorepo') {
-    // OT-RFC-41 §4.3 Bundle B1d: 'monorepo' is the new sentinel for
-    // dev checkouts (set by Bundle B's `dkg init` monorepo guard
-    // when a contributor opts in via DKG_HOME). For the
-    // standalone-vs-git probe it behaves identically to the legacy
-    // 'git' value — auto-update is monorepo-style ("git pull" in
-    // the dev tree) — until the git-build path itself is deleted
-    // in PR 5, at which point monorepo daemons stop auto-updating
-    // entirely.
+    // Both modes are non-npm for install-layout/status purposes.
+    // Lifecycle dispatch distinguishes the advanced git updater from
+    // contributor monorepo mode before deciding whether to poll.
     daemonState.standaloneCache = false;
     return false;
   }
@@ -135,6 +131,17 @@ export function resolveStandaloneInstall(
     daemonState.standaloneCache = isStandaloneInstall();
   }
   return daemonState.standaloneCache;
+}
+
+export type AutoUpdatePollingMode = 'npm' | 'git' | 'monorepo';
+
+export function resolveAutoUpdatePollingMode(
+  source: 'auto' | 'npm' | 'git' | 'monorepo' | undefined,
+  standalone: boolean,
+): AutoUpdatePollingMode {
+  if (source === 'git') return 'git';
+  if (source === 'monorepo') return 'monorepo';
+  return standalone ? 'npm' : 'monorepo';
 }
 
 /**
