@@ -162,6 +162,8 @@ export interface NetworkConfig {
     sshCommand?: string;
     checkIntervalMinutes: number;
     buildTimeoutMs?: AutoUpdateBuildTimeouts;
+    /** Network-level default for signed tag verification in git auto-update mode. */
+    verifyTagSignature?: boolean;
     /**
      * Network-level default for `AutoUpdateConfig.source` — see the
      * matching doc comment on that field. Lets `network/<env>.json` set the
@@ -1234,6 +1236,7 @@ export function resolveAutoUpdateConfig(
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
   const source = cfg?.source ?? net?.source;
   const channel = cfg?.channel ?? net?.channel;
+  const verifyTagSignature = cfg?.verifyTagSignature ?? net?.verifyTagSignature;
 
   // Merge build timeouts per-key so operators can override one step (e.g.
   // `contracts` on slow ARM hosts) without re-specifying the rest.
@@ -1261,6 +1264,7 @@ export function resolveAutoUpdateConfig(
     ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
     ...(source ? { source } : {}),
     ...(channel ? { channel } : {}),
+    ...(verifyTagSignature !== undefined ? { verifyTagSignature } : {}),
   };
 }
 

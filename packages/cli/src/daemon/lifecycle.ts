@@ -290,16 +290,13 @@ import {
   type NpmVersionStatus,
   checkForNpmVersionUpdate,
   deriveUpdateCheckState,
-  type PerformUpdateOptions,
-  type UpdateStatus,
   acquireUpdateLock,
   releaseUpdateLock,
   resolveAutoUpdateGitRef,
-  checkForNewCommitWithStatus,
-  performUpdateWithStatus,
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
+import { runGitAutoUpdateCheck } from './git-auto-update-poll.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -405,16 +402,6 @@ import {
   type PromoteWorkerConfig,
   type PromoteWorkerSupervisor,
 } from './worker/async-promote-worker.js';
-
-export function buildGitAutoUpdatePerformOptions(
-  au: Pick<AutoUpdateConfig, "verifyTagSignature">,
-  expectedCommit: string,
-): Pick<PerformUpdateOptions, "expectedCommit" | "verifyTagSignature"> {
-  return {
-    expectedCommit,
-    verifyTagSignature: au.verifyTagSignature,
-  };
-}
 
 type MultiaddrLike = { toString: () => string };
 
@@ -2122,38 +2109,7 @@ export async function runDaemonInner(
       );
 
       const runCheck = async () => {
-        const gitStatus = await checkForNewCommitWithStatus(au, log);
-        if (gitStatus.status === "error") {
-          log("Auto-update (git): update check failed.");
-          return;
-        }
-
-        daemonState.lastUpdateCheck.checkedAt = Date.now();
-        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
-        daemonState.lastUpdateCheck.channelTargetMissing = false;
-        daemonState.lastUpdateCheck.latestVersion = "";
-        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
-
-        if (gitStatus.status !== "available" || !gitStatus.commit) return;
-
-        daemonState.isUpdating = true;
-        let updateStatus: UpdateStatus = "failed";
-        try {
-          updateStatus = await performUpdateWithStatus(au, log, buildGitAutoUpdatePerformOptions(au, gitStatus.commit));
-        } finally {
-          daemonState.isUpdating = false;
-        }
-
-        if (updateStatus === "updated") {
-          log("Auto-update (git): update activated; exiting for supervised restart.");
-          await shutdown(DAEMON_EXIT_CODE_RESTART);
-          return;
-        }
-        if (updateStatus === "up-to-date") {
-          log("Auto-update (git): update skipped — node caught up before apply.");
-          return;
-        }
-        log("Auto-update (git): update failed.");
+        await runGitAutoUpdateCheck(au, log, { shutdown });
       };
 
       setTimeout(runCheck, 15_000);

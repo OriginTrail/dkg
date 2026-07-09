@@ -1020,11 +1020,11 @@ jobs:
   # crytic-compile to read directly, and pass `ignore-compile: true`
   # to skip the action's own install/build.
   #
-  # Aderyn ships as the @cyfrin/aderyn npm devDep (postinstall fetches
-  # the platform-specific binary; gated by `pnpm.onlyBuiltDependencies`
-  # at the repo root). solhint is also a npm devDep. Both are then
-  # pulled by the standard `pnpm install --frozen-lockfile` step,
-  # so no scanner-specific install dance is needed.
+  # Aderyn ships as the @cyfrin/aderyn npm devDep. Its package lazily
+  # installs the platform-specific binary when `pnpm exec aderyn` runs;
+  # keep it out of repo-wide `pnpm.onlyBuiltDependencies` so ordinary
+  # test/build jobs do not depend on a scanner binary release download.
+  # solhint is also a npm devDep and is pulled by the standard install.
   # ------------------------------------------------------------------
   tornado-static-analysis:
     name: "Tornado: static analysis (informational)"
