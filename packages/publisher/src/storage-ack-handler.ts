@@ -1,4 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { resolveSharedMemoryReadGraphs } from '@origintrail-official/dkg-storage';
 import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
@@ -18,7 +19,6 @@ import {
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
-  sharedMemoryReadBothFilter,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
 } from '@origintrail-official/dkg-core';
@@ -1654,19 +1654,39 @@ export class StorageACKHandler {
     // store is hashed on one side but not the other and every folded-private
     // ACK declines MERKLE_MISMATCH_IN_SWM (2026-07-07 Gnosis mainnet). Shared
     // single-source filter so the two paths can never drift again.
+    //
+    // A3 (O(store) relief): bind the SWM graph set via the fast named-graph
+    // index instead of an unbounded `GRAPH ?g` + sharedMemoryReadBothFilter
+    // scan — this recompute runs on the ACK-deadline-critical responder that
+    // was starving under load. Resolved ONCE for both branches, and LOCKSTEP
+    // with the publisher's merkle read (dkg-publisher.ts), which uses the same
+    // helper, so an index miss cannot make the two recomputes drift. The set is
+    // identical to the old filter (bucket + `${graphUri}/` minus `/staging/`).
+    // `assertSafeIri` stays an ordinary malformed-request throw; an index/store
+    // failure is re-tagged as a `StoreUnavailableError` (→ CORE_TEMPORARILY_UNAVAILABLE).
+    assertSafeIri(graphUri);
+    let swmGraphs: string[];
+    try {
+      swmGraphs = await resolveSharedMemoryReadGraphs(this.store, graphUri);
+    } catch (err) {
+      throw new StoreUnavailableError(err);
+    }
+    if (swmGraphs.length === 0) return [];
     if (rootEntities.length === 0) {
       // read-both: per-KA …/_shared_memory/{addr}/{number} graphs (promote) + the legacy
       // bucket; exclude the transient /staging/ graphs (they would corrupt the recompute).
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(graphUri)} }`;
+      const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { VALUES ?g { ${graphValues} } GRAPH ?g { ?s ?p ?o } }`;
       const result = await this.queryStoreOrUnavailable(sparql);
       return result.type === 'quads' ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q)) : [];
     }
 
+    const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
     const allQuads: Quad[] = [];
     for (const entity of rootEntities) {
       assertSafeIri(entity);
       const genidPrefix = `${entity}/.well-known/genid/`;
-      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } ${sharedMemoryReadBothFilter(graphUri)} }`;
+      const sparql = `CONSTRUCT { ?s ?p ?o } WHERE { VALUES ?g { ${graphValues} } GRAPH ?g { ?s ?p ?o . FILTER(?s = <${entity}> || STRSTARTS(STR(?s), "${genidPrefix}")) } }`;
       const result = await this.queryStoreOrUnavailable(sparql);
       if (result.type === 'quads') {
         for (const q of result.quads) {

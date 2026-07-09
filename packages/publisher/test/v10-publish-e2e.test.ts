@@ -89,6 +89,11 @@ describe('V10 Publish E2E', () => {
       hasGraph: async () => true,
       createGraph: async () => {},
       dropGraph: async () => {},
+      // The core ACK responder now enumerates SWM graphs via the named-graph
+      // index (resolveSharedMemoryReadGraphs) instead of an unbounded GRAPH ?g
+      // scan; report the SWM bucket so the bound VALUES ?g read resolves. (This
+      // mock's `query` ignores graph selection, so the bucket alone suffices.)
+      listGraphs: async () => [`did:dkg:context-graph:${contextGraphId}/_shared_memory`],
       query: async (sparql: string) => {
         const entityMatch = sparql.match(/FILTER\(\?s = <([^>]+)>/);
         if (entityMatch) {
