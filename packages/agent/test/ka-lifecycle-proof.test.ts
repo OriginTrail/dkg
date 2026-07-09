@@ -57,15 +57,12 @@ import {
   makeFinalizationMessage,
   publishQuad,
   readOptionalUtf8,
-  reconcileLifecycleLogs,
   senderKeyLifecycleLogs,
   storageAckLifecycleLogs,
   swmLifecycleLogs,
-  syncLifecycleLogs,
   type FinalizationMessageMsg,
   type LogRecord,
   type OperationContext,
-  type Quad,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageMsg,
   type V10ACKProviderParams,
@@ -256,99 +253,6 @@ describe('ka lifecycle proof', () => {
       targetContextGraphId: CONNECTED_CONTEXT_GRAPH_ID,
     }), CONNECTED_CONTEXT_GRAPH_ID);
 
-    const syncAgent = await createReceiverAgent();
-    const reconcileAgent = await createReceiverAgent();
-    try {
-      const syncInternals = syncAgent as unknown as {
-        fetchSyncPages: () => Promise<{
-          quads: unknown[];
-          bytesReceived: number;
-          resumedFromOffset: number;
-          nextOffset: number;
-          checkpointKey: string;
-          completed: boolean;
-          timedOut: boolean;
-        }>;
-        processDurableBatchInWorker: () => Promise<{
-          verifiedData: Quad[];
-          verifiedMeta: Quad[];
-          totalFetchedDataQuads: number;
-          totalFetchedMetaQuads: number;
-          rejectedKcs: number;
-          emptyResponses: number;
-          metaOnlyResponses: number;
-          dataRejectedMissingMeta: number;
-        }>;
-        insertSyncedQuadsAndInvalidateListCache: (quads: unknown[]) => Promise<void>;
-        syncFromPeerDetailed(remotePeerId: string, contextGraphIds: string[]): Promise<unknown>;
-      };
-      const publishedMeta = {
-        subject: result.ual,
-        predicate: 'http://dkg.io/ontology/merkleRoot',
-        object: `"${ethers.hexlify(result.merkleRoot).slice(2)}"`,
-        graph: contextGraphMetaUri(CONNECTED_CONTEXT_GRAPH_ID),
-      };
-      const publishedData = publishQuad(
-        CONNECTED_CONTEXT_GRAPH_ID,
-        ROOT_ENTITY,
-        'http://schema.org/name',
-        '"Connected lifecycle proof"',
-      );
-      syncInternals.fetchSyncPages = async () => ({
-        quads: [],
-        bytesReceived: 1,
-        resumedFromOffset: 0,
-        nextOffset: 1,
-        checkpointKey: 'connected-sync-checkpoint',
-        completed: true,
-        timedOut: false,
-      });
-      syncInternals.processDurableBatchInWorker = async () => ({
-        verifiedData: [publishedData],
-        verifiedMeta: [publishedMeta],
-        totalFetchedDataQuads: 1,
-        totalFetchedMetaQuads: 1,
-        rejectedKcs: 0,
-        emptyResponses: 0,
-        metaOnlyResponses: 0,
-        dataRejectedMissingMeta: 0,
-      });
-      syncInternals.insertSyncedQuadsAndInvalidateListCache = async () => undefined;
-      await syncInternals.syncFromPeerDetailed(PUBLISHER_PEER_ID, [CONNECTED_CONTEXT_GRAPH_ID]);
-
-      const reconcileInternals = reconcileAgent as unknown as {
-        subscribedContextGraphs: Map<string, { subscribed: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
-        chain: MockChainAdapter & {
-          getContextGraphKCCount?: (onChainCgId: bigint) => Promise<number>;
-          getBlockNumber?: () => Promise<number | undefined>;
-        };
-        reconcileChainOrdinal: (
-          localCgId: string,
-          onChainCgId: bigint,
-          ordinal: number,
-          headBlock: number | undefined,
-        ) => Promise<{ status: 'reconciled'; blockNumber: number; assetUal: string; kaId: string }>;
-        runVmReconcileForCg(localCgId: string): Promise<void>;
-      };
-      reconcileInternals.subscribedContextGraphs.set(CONNECTED_CONTEXT_GRAPH_ID, {
-        subscribed: true,
-        onChainId: CONNECTED_CONTEXT_GRAPH_ID,
-        lastReconciledOrdinal: 0,
-      });
-      reconcileInternals.chain.getContextGraphKCCount = async () => 1;
-      reconcileInternals.chain.getBlockNumber = async () => undefined;
-      reconcileInternals.reconcileChainOrdinal = async () => ({
-        status: 'reconciled',
-        blockNumber: onChain.blockNumber,
-        assetUal: result.ual,
-        kaId: result.kaId.toString(),
-      });
-      await reconcileInternals.runVmReconcileForCg(CONNECTED_CONTEXT_GRAPH_ID);
-    } finally {
-      await syncAgent.stop().catch(() => undefined);
-      await reconcileAgent.stop().catch(() => undefined);
-    }
-
     const proof = buildKaLifecycleLogProof(entries, result.ual);
 
     expect(proof.missingRequiredStages).toEqual([]);
@@ -360,31 +264,25 @@ describe('ka lifecycle proof', () => {
       'chain',
       'vm',
       'finalization',
-      'sync',
-      'reconcile',
     ]);
-    expect((proof as { roleTrail?: string[] }).roleTrail).toEqual(['publisher', 'receiver', 'sync']);
+    expect((proof as { roleTrail?: string[] }).roleTrail).toEqual(['publisher', 'receiver']);
     expect((proof as { sourceTrail?: string[] }).sourceTrail).toEqual(expect.arrayContaining([
       PUBLISHER_PEER_ID,
       LOCAL_PEER_ID,
     ]));
     expect(proof.eventTrail).toContain('storage_ack_signed');
     expect(proof.eventTrail).toContain('finalization_applied');
-    expect(proof.eventTrail).toContain('sync_apply');
-    expect(proof.eventTrail).toContain('reconcile_promote');
     expect(proof.hasAckLog).toBe(true);
     expect(proof.hasStateChangeLog).toBe(true);
     expect(proof.hasFailureOrDeclineLog).toBe(true);
     expect(proof.hasPayloadLeak).toBe(false);
     expect(proof.grep).toContain(`assetUal=${result.ual}`);
     expect(proof.grep).toContain('localPeerId=12D3KooWKaLifecycleReceiver');
-    expect(proof.grep).not.toContain('Connected lifecycle proof');
     expect(proof.entries.map((entry) => entry.module)).toEqual(expect.arrayContaining([
       'DKGPublisher',
       'SharedMemoryHandler',
       'StorageACKHandler',
       'FinalizationHandler',
-      'DKGAgent',
     ]));
   });
 
@@ -412,8 +310,6 @@ describe('ka lifecycle proof', () => {
     expect(handoff).toContain('identity');
     expect(handoff).toContain('storage_ack');
     expect(handoff).toContain('finalization');
-    expect(handoff).toContain('sync');
-    expect(handoff).toContain('reconcile');
     expect(handoff).toContain('raw payload');
     expect(handoff).toContain('## Repeatable Devnet Artifact');
     expect(handoff).toContain('metadata.txt');
@@ -422,8 +318,6 @@ describe('ka lifecycle proof', () => {
     expect(script).toContain('stage=identity');
     expect(script).toContain('stage=storage_ack');
     expect(script).toContain('stage=finalization');
-    expect(script).toContain('stage=sync');
-    expect(script).toContain('stage=reconcile');
     expect(suite).toContain('scripts/devnet-ka-lifecycle-log-proof.sh');
     expect(suite).toContain('metadata.txt');
     expect(suite).toContain('publish.txt');

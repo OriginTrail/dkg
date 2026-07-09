@@ -38,6 +38,22 @@ describe('ensureDkgNodeConfig — store-backend default (issue #960)', () => {
     expect(readWritten().networkConfig).toBe('mainnet-gnosis');
   });
 
+  it('exposes KA lifecycle debug logging in fresh config and defaults it off', () => {
+    ensureDkgNodeConfig({ agentName: 'node-a', network: NETWORK, networkConfigName: 'testnet', apiPort: 9200, existing: {} });
+    expect(readWritten().logging).toEqual({ kaLifecycleDebug: false });
+  });
+
+  it('preserves an explicit KA lifecycle debug logging config', () => {
+    ensureDkgNodeConfig({
+      agentName: 'node-a',
+      network: NETWORK,
+      networkConfigName: 'testnet',
+      apiPort: 9200,
+      existing: { logging: { kaLifecycleDebug: true } },
+    });
+    expect(readWritten().logging).toEqual({ kaLifecycleDebug: true });
+  });
+
   it('rewrites networkConfig to the selected value even when one already exists', () => {
     writeFileSync(
       join(tempHome, 'config.json'),

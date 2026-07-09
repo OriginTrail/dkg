@@ -24,6 +24,7 @@ export {
   isKaLifecycleDebugLoggingEnabled,
   logKaLifecycleEvent,
   resolveKaLifecycleLogDetail,
+  setKaLifecycleDebugLoggingEnabled,
   type KaLifecycleLogDetail,
   type KaLifecycleLogEvent,
   type KaLifecycleLogLevel,

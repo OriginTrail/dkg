@@ -937,6 +937,11 @@ export interface DKGAgentConfig {
   syncAgentsMeta?: boolean;
   /** Node deployment tier: 'core' (cloud, relay) or 'edge' (personal, behind NAT). Default: 'edge'. */
   nodeRole?: 'core' | 'edge';
+  /** Local daemon logging controls forwarded from config.json. */
+  logging?: {
+    /** Emit detailed KA publish lifecycle logs. Default: false. */
+    kaLifecycleDebug?: boolean;
+  };
   /**
    * OT-RFC-43 Option 1 — durable per-author KA-number allocator. When provided,
    * the publisher mints deterministic packed reservedKaIds (and reconciles the

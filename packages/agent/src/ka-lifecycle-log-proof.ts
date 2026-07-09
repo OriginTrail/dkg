@@ -13,8 +13,6 @@ export const KA_LIFECYCLE_PROOF_REQUIRED_STAGES = [
   'chain',
   'vm',
   'finalization',
-  'sync',
-  'reconcile',
 ] as const satisfies readonly KaLifecycleStage[];
 
 export interface KaLifecycleProofRecord extends Pick<LogRecord, 'level' | 'module' | 'message'> {
@@ -59,9 +57,6 @@ const STATE_CHANGE_EVENTS = new Set([
   'swm_state_changed',
   'promote',
   'finalization_applied',
-  'sync_apply',
-  'reconcile_promote',
-  'reconcile_core_fill',
 ]);
 
 export function buildKaLifecycleLogProof(

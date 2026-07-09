@@ -10,6 +10,7 @@ _Avoid_: Publish request, transaction, one-off publish step
 
 **Published KA Sync Lifecycle**:
 The catch-up path that lets another node discover, fetch, validate, and materialize an already published Knowledge Asset it missed or only partially received.
+This is a separate diagnostic lifecycle from the Knowledge Asset Publish Lifecycle and should not be emitted as `ka_lifecycle` publish logs.
 _Avoid_: Generic sync, peer refresh, background catch-up
 
 **Asset UAL**:

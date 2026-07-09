@@ -50,7 +50,6 @@ export default defineConfig({
       "test/ka-lifecycle-sender-key.test.ts",
       "test/ka-lifecycle-storage-ack.test.ts",
       "test/ka-lifecycle-swm.test.ts",
-      "test/ka-lifecycle-sync-reconcile.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
       "test/agents-meta-serve-wiring.test.ts",

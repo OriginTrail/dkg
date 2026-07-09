@@ -6,6 +6,7 @@ import {
   isKaLifecycleDebugLoggingEnabled,
   logKaLifecycleEvent,
   resolveKaLifecycleLogDetail,
+  setKaLifecycleDebugLoggingEnabled,
 } from '../src/ka-lifecycle-logger.js';
 import {
   KA_LIFECYCLE_STAGES as ROOT_KA_LIFECYCLE_STAGES,
@@ -55,10 +56,12 @@ function captureStderr<T>(fn: () => T): { result: T; output: string[] } {
 describe('KA lifecycle logging', () => {
   beforeEach(() => {
     for (const key of KA_DEBUG_ENV_KEYS) delete process.env[key];
+    setKaLifecycleDebugLoggingEnabled(undefined);
   });
 
   afterEach(() => {
     Logger.setSink(null);
+    setKaLifecycleDebugLoggingEnabled(undefined);
     for (const key of KA_DEBUG_ENV_KEYS) {
       const original = originalDebugEnv.get(key);
       if (original === undefined) delete process.env[key];
@@ -260,10 +263,8 @@ describe('KA lifecycle logging', () => {
       'chain',
       'vm',
       'finalization',
-      'sync',
-      'reconcile',
     ]);
-    expect(KA_LIFECYCLE_ROLES).toEqual(['publisher', 'receiver', 'sync']);
+    expect(KA_LIFECYCLE_ROLES).toEqual(['publisher', 'receiver']);
 
     const log = new Logger('KALifecycle');
     captureStdout(() => {
@@ -273,7 +274,7 @@ describe('KA lifecycle logging', () => {
           stage,
           event: `${stage}.progress`,
           detail: 'summary',
-          role: 'sync',
+          role: 'publisher',
           localPeerId: '12D3KooWLocalPeerFullIdentifier',
           localNodeIdentityId: 'node-identity-local-full',
         });
@@ -285,7 +286,7 @@ describe('KA lifecycle logging', () => {
         expect.stringContaining(`stage=${stage}`),
       ),
     );
-    expect(entries.every((entry) => entry.message.includes('role=sync'))).toBe(true);
+    expect(entries.every((entry) => entry.message.includes('role=publisher'))).toBe(true);
   });
 
   it('suppresses detailed lifecycle events unless KA lifecycle debug logging is enabled', () => {
@@ -315,6 +316,15 @@ describe('KA lifecycle logging', () => {
     expect(isKaLifecycleDebugLoggingEnabled()).toBe(false);
     expect(entries).toHaveLength(0);
     expect(output).toHaveLength(0);
+  });
+
+  it('lets config override the compatibility env debug flag', () => {
+    process.env.DKG_DEBUG_KA_LIFECYCLE = '1';
+    setKaLifecycleDebugLoggingEnabled(false);
+    expect(isKaLifecycleDebugLoggingEnabled()).toBe(false);
+
+    setKaLifecycleDebugLoggingEnabled(true);
+    expect(isKaLifecycleDebugLoggingEnabled()).toBe(true);
   });
 
   it('emits detailed lifecycle events when the KA lifecycle debug flag is enabled', () => {

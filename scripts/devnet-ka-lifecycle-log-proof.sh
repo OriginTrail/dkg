@@ -3,7 +3,8 @@
 # Generate repeatable KA publish lifecycle log proof from a running devnet.
 #
 # Preconditions:
-#   DKG_DEBUG_KA_LIFECYCLE=1 ./scripts/devnet.sh start 6
+#   Set logging.kaLifecycleDebug=true in the devnet node config(s), then:
+#   ./scripts/devnet.sh start 6
 #   pnpm run build
 #
 # Output:
@@ -36,19 +37,14 @@ REQUIRED_STAGE_TOKENS=(
   "stage=chain"
   "stage=vm"
   "stage=finalization"
-  "stage=sync"
-  "stage=reconcile"
 )
 
 REQUIRED_FIELD_TOKENS=(
   "role=publisher"
   "role=receiver"
-  "role=sync"
   "event=success"
   "event=quorum"
   "event=finalization_applied"
-  "event=sync_apply"
-  "event=reconcile_promote"
 )
 
 log()  { printf '[ka-lifecycle-proof] %s\n' "$*"; }
@@ -115,8 +111,8 @@ write_metadata() {
     printf 'devnetDir=%s\n' "$DEVNET_DIR"
     printf 'publisherNode=node%s\n' "$NODE_NUM"
     printf 'nodeCount=%s\n' "$node_count"
-    printf 'nodeRoles=node%s publisher/core; other node*/daemon.log entries receiver/core/sync as emitted\n' "$NODE_NUM"
-    printf 'kaLifecycleDebugRequired=DKG_DEBUG_KA_LIFECYCLE=1 must be set when starting devnet for the full lifecycle proof trail\n'
+    printf 'nodeRoles=node%s publisher/core; other node*/daemon.log entries receiver/core as emitted\n' "$NODE_NUM"
+    printf 'kaLifecycleDebugRequired=config logging.kaLifecycleDebug=true must be set when starting devnet for the full debug lifecycle trail\n'
     printf 'publishCommand=DEVNET_DIR=%s DEVNET_TEST_NODE=%s CONFIRM_TIMEOUT=%s %s\n' \
       "$DEVNET_DIR" "$NODE_NUM" "$CONFIRM_TIMEOUT" "$PUBLISH_SCRIPT"
     printf 'assetUal=%s\n' "$ASSET_UAL"
@@ -184,7 +180,7 @@ write_metadata
 if [ -n "$MISSING" ]; then
   log "Lifecycle grep output so far:"
   cat "$GREP_OUT"
-  fail "missing required lifecycle tokens: $MISSING (restart devnet with DKG_DEBUG_KA_LIFECYCLE=1 for the full proof trail)"
+  fail "missing required lifecycle tokens: $MISSING (restart devnet with logging.kaLifecycleDebug=true for the full debug trail)"
 fi
 
 log "Lifecycle proof complete:"

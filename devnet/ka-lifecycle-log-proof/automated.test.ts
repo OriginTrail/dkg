@@ -44,16 +44,11 @@ describe('KA lifecycle log proof artifact', () => {
       'stage=chain',
       'stage=vm',
       'stage=finalization',
-      'stage=sync',
-      'stage=reconcile',
       'role=publisher',
       'role=receiver',
-      'role=sync',
       'event=success',
       'event=quorum',
       'event=finalization_applied',
-      'event=sync_apply',
-      'event=reconcile_promote',
     ]) {
       expect(grep).toContain(token);
     }

@@ -72,7 +72,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaLifecycleDebugLoggingEnabled, setKaLifecycleDebugLoggingEnabled } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -920,6 +920,7 @@ export async function validateStartupGenesis(
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const config = await loadConfig();
+  configureKaLifecycleDebugLogging(config);
   const startedAt = Date.now();
 
   // Write PID early so the CLI detects the process is alive while
@@ -932,6 +933,16 @@ export async function runDaemon(foreground: boolean): Promise<void> {
     await removePid().catch(() => {});
     throw err;
   }
+}
+
+function configureKaLifecycleDebugLogging(config: Pick<DkgConfig, 'logging'>): void {
+  const configured = config.logging?.kaLifecycleDebug;
+  if (typeof configured === 'boolean') {
+    setKaLifecycleDebugLoggingEnabled(configured);
+    return;
+  }
+  setKaLifecycleDebugLoggingEnabled(undefined);
+  setKaLifecycleDebugLoggingEnabled(isKaLifecycleDebugLoggingEnabled());
 }
 
 export async function resolveDaemonPublishEncryption(
@@ -977,6 +988,7 @@ export async function runDaemonInner(
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
 ): Promise<void> {
+  configureKaLifecycleDebugLogging(config);
   const logFile = logPath();
 
   // Tee all stdout/stderr (including structured Logger output) into the log file
@@ -1520,6 +1532,7 @@ export async function runDaemonInner(
     nodeRole: role,
     relayServerCapacity: config.relayServerCapacity,
     relayReservationCount: config.relayReservationCount,
+    logging: config.logging,
     // `dkg/<semver>` convention: broadcast our release on every libp2p
     // identify exchange so remote operators can answer "which DKG
     // release is each peer running?" via /api/peer-info instead of

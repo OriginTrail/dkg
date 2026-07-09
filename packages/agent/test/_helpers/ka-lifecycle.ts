@@ -113,20 +113,6 @@ export function finalizationLifecycleLogs(entries: readonly LogRecord[]): LogRec
   ));
 }
 
-export function reconcileLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
-  return entries.filter((entry) => (
-    entry.message.includes('ka_lifecycle') &&
-    entry.message.includes('stage=reconcile')
-  ));
-}
-
-export function syncLifecycleLogs(entries: readonly LogRecord[]): LogRecord[] {
-  return entries.filter((entry) => (
-    entry.message.includes('ka_lifecycle') &&
-    entry.message.includes('stage=sync')
-  ));
-}
-
 export function publishQuad(contextGraphId: string, subject: string, predicate: string, object: string): Quad {
   return {
     subject,

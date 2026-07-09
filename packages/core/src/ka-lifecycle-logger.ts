@@ -12,13 +12,11 @@ export const KA_LIFECYCLE_STAGES = [
   'chain',
   'vm',
   'finalization',
-  'sync',
-  'reconcile',
 ] as const;
 
 export type KaLifecycleStage = typeof KA_LIFECYCLE_STAGES[number];
 
-export const KA_LIFECYCLE_ROLES = ['publisher', 'receiver', 'sync'] as const;
+export const KA_LIFECYCLE_ROLES = ['publisher', 'receiver'] as const;
 
 export type KaLifecycleRole = typeof KA_LIFECYCLE_ROLES[number];
 
@@ -47,6 +45,7 @@ const KA_LIFECYCLE_DEBUG_ENV_KEYS = [
   'DKG_KA_LIFECYCLE_DEBUG',
   'DKG_DEBUG_PUBLISH_LIFECYCLE',
 ] as const;
+let configuredKaLifecycleDebugLogging: boolean | undefined;
 const KA_LIFECYCLE_TRUE_ENV = /^(1|true|yes|on)$/i;
 const KA_LIFECYCLE_SUMMARY_EVENTS = new Set<string>([
   'identity:asset_ual_allocated',
@@ -66,11 +65,6 @@ const KA_LIFECYCLE_SUMMARY_EVENTS = new Set<string>([
   'finalization:complete',
   'finalization:finalization_applied',
   'finalization:finalization_failed',
-  'sync:sync_apply',
-  'sync:sync_failure',
-  'reconcile:reconcile_promote',
-  'reconcile:reconcile_cursor_advance',
-  'reconcile:reconcile_core_fill',
 ]);
 const KA_LIFECYCLE_SENSITIVE_METADATA_VALUE = [
   /<[^>\s]+>\s+<[^>\s]+>\s+(?:"[^"]*"|<[^>]+>|_:[^\s]+|[^\s]+)\s*\./,
@@ -87,9 +81,14 @@ export function logKaLifecycleEvent(log: Logger, ctx: OperationContext, input: K
 }
 
 export function isKaLifecycleDebugLoggingEnabled(): boolean {
+  if (configuredKaLifecycleDebugLogging !== undefined) return configuredKaLifecycleDebugLogging;
   const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
   if (!env) return false;
   return KA_LIFECYCLE_DEBUG_ENV_KEYS.some((key) => KA_LIFECYCLE_TRUE_ENV.test(env[key] ?? ''));
+}
+
+export function setKaLifecycleDebugLoggingEnabled(enabled: boolean | undefined): void {
+  configuredKaLifecycleDebugLogging = enabled;
 }
 
 export function resolveKaLifecycleLogDetail(input: KaLifecycleLogEvent): KaLifecycleLogDetail {

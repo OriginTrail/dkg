@@ -7,10 +7,19 @@ of truth for the KA publish lifecycle log contract.
 ## Repeatable Devnet Artifact
 
 Generate proof from the branch under test instead of pasting a representative
-sample. Start a multi-node devnet, build the runtime packages, then run:
+sample. Set `logging.kaLifecycleDebug` to `true` in the devnet node configs,
+start a multi-node devnet, build the runtime packages, then run:
+
+```json
+{
+  "logging": {
+    "kaLifecycleDebug": true
+  }
+}
+```
 
 ```bash
-DKG_DEBUG_KA_LIFECYCLE=1 ./scripts/devnet.sh start 6
+./scripts/devnet.sh start 6
 pnpm run build
 scripts/devnet-ka-lifecycle-log-proof.sh
 ```
@@ -23,10 +32,11 @@ pnpm test:devnet:ka-lifecycle-log-proof
 
 That suite runs the script and asserts the generated `metadata.txt`,
 `publish.txt`, and `grep.txt` artifacts contain the same `assetUal` and the
-required publisher, ACK success/quorum, receiver, finalization, sync, and
-reconcile rows. This is the full debug trail, so the devnet must be started
-with `DKG_DEBUG_KA_LIFECYCLE=1`. Normal daemon runs emit only the compact
-summary lifecycle spine. Receiver-side `storage_ack_signed` rows are expected
+required publisher, ACK success/quorum, receiver, and finalization rows. This is
+the full debug trail, so the devnet must be started with
+`logging.kaLifecycleDebug: true`. Normal daemon runs emit only the compact
+summary lifecycle spine. Compatibility env aliases are honored only when the
+config key is absent. Receiver-side `storage_ack_signed` rows are expected
 only on ACK paths where the receiver can derive the per-KA identity locally,
 such as per-KA SWM graphs; direct inline ACKs prove the ACK lifecycle through
 the publisher's asset-scoped success/quorum rows without trusting a wire UAL.
@@ -47,8 +57,8 @@ Attach these files to the PR handoff or reviewer reply:
 - `grep.txt`: every new daemon log row matching the same `assetUal`.
 
 `grep.txt` is the validation evidence. It must show the same `assetUal` across
-publisher, receiver, ACK, finalization, sync, and reconcile rows. The script
-fails if any required lifecycle token is missing.
+publisher, receiver, ACK, and finalization rows. The script fails if any
+required lifecycle token is missing.
 
 Do not paste raw payload data into the handoff. Raw payload, triples,
 ciphertext, plaintext, and private snippets must be absent or redacted.
@@ -92,11 +102,8 @@ node1: ka_lifecycle assetUal=$ASSET_UAL stage=storage_ack event=decline role=pub
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=chain event=confirm role=publisher txHash=...
 node1: ka_lifecycle assetUal=$ASSET_UAL stage=vm event=promote role=publisher outcome=confirmed
 node2: ka_lifecycle assetUal=$ASSET_UAL stage=finalization event=finalization_applied role=receiver outcome=promoted
-node2: ka_lifecycle assetUal=$ASSET_UAL stage=sync event=sync_apply role=sync result=inserted
-node2: ka_lifecycle assetUal=$ASSET_UAL stage=reconcile event=reconcile_promote role=sync result=reconciled
 ```
 
 If a live run lacks `identity`, `wm`, `swm_share`, `storage_ack`, `chain`,
-`vm`, `finalization`, `sync`, or `reconcile` for the same `assetUal`, call that
-out in the PR notes with the reason. Sender Key rows are included when that
-flow is used.
+`vm`, or `finalization` for the same `assetUal`, call that out in the PR notes
+with the reason. Sender Key rows are included when that flow is used.
