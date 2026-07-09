@@ -6,8 +6,16 @@ import {
   type QueryOptions,
   type StorePressureSnapshot,
 } from '@origintrail-official/dkg-storage';
-import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
+import type {
+  EventBus,
+  PublishIntentMsg,
+  StorageACKDeclineCode,
+  StorageACKMsg,
+  SubscriptionSource,
+} from '@origintrail-official/dkg-core';
 import {
+  Logger,
+  createOperationContext,
   decodePublishIntent,
   decodeUpdateIntent,
   encodeStorageACK,
@@ -36,6 +44,15 @@ import { parseSimpleNQuads } from './publish-handler.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
+
+export interface StorageAckDecision {
+  encoded: Uint8Array;
+  ack: StorageACKMsg;
+  intent?: PublishIntentMsg;
+  peerId: string;
+}
+
+export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void | Promise<void>;
 
 /**
  * Validate that every term of a parsed quad is well-formed BEFORE it enters the
@@ -69,7 +86,6 @@ const MAX_DECLINE_ENTITY_COUNT = 5;
 const MAX_DECLINE_ENTITY_CHARS = 120;
 const MAX_DECLINE_LOG_CG_ID_CHARS = 160;
 const MAX_DECLINE_LOG_MESSAGE_CHARS = 240;
-
 function compactDeclineText(value: string, maxChars: number): string {
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (compacted.length <= maxChars) return compacted;
@@ -242,6 +258,8 @@ export interface StorageACKHandlerConfig {
     contextGraphId: string;
     message: string;
   }) => void | Promise<void>;
+  /** Optional observer for log/telemetry work after the protocol decision exists. */
+  onStorageAckDecision?: StorageAckDecisionObserver;
   /**
    * Codex PR #608: independent curation oracle. The handler MUST verify a
    * publisher's `isEncryptedPayload=true` claim against the CG's real
@@ -425,6 +443,7 @@ export class StorageACKHandler {
   private store: TripleStore;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
+  private readonly log = new Logger('StorageACKHandler');
 
   constructor(store: TripleStore, config: StorageACKHandlerConfig, eventBus: EventBus) {
     this.store = store;
@@ -467,7 +486,7 @@ export class StorageACKHandler {
     // internal error strings (paths, worker state) stay off the network.
     options: { hookMessage?: string } = {},
   ): Uint8Array {
-    getMetrics().storageAckDeclinesTotal.add(1, {
+    getMetrics().storageAckDeclinesTotal?.add(1, {
       reason: boundedDeclineCodeLabel(code),
     });
     if (this.config.onDecline) {
@@ -491,6 +510,33 @@ export class StorageACKHandler {
       declineCode: code,
       declineMessage: message,
     });
+  }
+
+  private buildStorageAckDecision(
+    intent: PublishIntentMsg | undefined,
+    encoded: Uint8Array,
+    peerId: PeerId,
+  ): StorageAckDecision {
+    const ack = decodeStorageACK(encoded);
+    return {
+      encoded,
+      ack,
+      intent,
+      peerId: peerId.toString(),
+    };
+  }
+
+  private async observeStorageAckDecision(decision: StorageAckDecision): Promise<void> {
+    if (!this.config.onStorageAckDecision) return;
+    try {
+      await this.config.onStorageAckDecision(decision);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.log.warn(
+        createOperationContext('share'),
+        `StorageACK decision observer failed: ${compactDeclineText(reason, MAX_DECLINE_LOG_MESSAGE_CHARS)}`,
+      );
+    }
   }
 
   /**
@@ -736,10 +782,11 @@ export class StorageACKHandler {
       : undefined;
     return withSpan('publisher.storage_ack_handler', async (span) => {
       let cgIdAttr: string | undefined;
+      let intentPreview: PublishIntentMsg | undefined;
       try {
         // contextGraphId is cheap to read off the decoded intent for the span
         // attribute; the full classification rides the encoded response below.
-        const intentPreview = decodePublishIntent(data);
+        intentPreview = decodePublishIntent(data);
         cgIdAttr = intentPreview.contextGraphId;
         if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
       } catch {
@@ -750,9 +797,10 @@ export class StorageACKHandler {
           (signal) => this.handlePublishIntent(data, peerId, signal),
           cgIdAttr,
         );
-        const decoded = decodeStorageACK(result);
-        if (isStorageACKDecline(decoded)) {
-          const declineCode = decoded.declineCode || 'UNKNOWN';
+        const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
+        await this.observeStorageAckDecision(decision);
+        if (isStorageACKDecline(decision.ack)) {
+          const declineCode = decision.ack.declineCode || 'UNKNOWN';
           span.setAttribute('dkg.ack_outcome', 'decline');
           span.setAttribute('dkg.decline_code', declineCode);
           getMetrics().ackHandlerTotal.add(1, {
@@ -769,7 +817,7 @@ export class StorageACKHandler {
             ...(chainIdLabel ? { chain_id: chainIdLabel } : {}),
           });
         }
-        return result;
+        return decision.encoded;
       } catch (err) {
         // Throw resets the libp2p stream — withSpan records ERROR. Tag the
         // terminal outcome + metric, then re-throw to preserve control flow.

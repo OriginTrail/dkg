@@ -112,6 +112,52 @@ describe('ACKCollector', () => {
     }
   });
 
+  it('does not put lifecycle assetUal on the PublishIntent wire', async () => {
+    const lifecycleAssetUal = `did:dkg:evm:${TEST_CHAIN_ID}/${TEST_KAV10_ADDR}/7`;
+    let decodedIntent: ReturnType<typeof decodePublishIntent> | undefined;
+
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sendP2P: async (peerId, _protocol, data) => {
+        decodedIntent = decodePublishIntent(data);
+        const idx = parseInt(peerId.replace('peer-', ''), 10);
+        const wallet = coreWallets[idx];
+        const { r, vs } = await signACK(wallet, testCGId, merkleRoot, 1, 100n);
+        return encodeStorageACK({
+          merkleRoot,
+          coreNodeSignatureR: r,
+          coreNodeSignatureVS: vs,
+          contextGraphId: testCGIdStr,
+          nodeIdentityId: idx + 1,
+        });
+      },
+      getConnectedCorePeers: () => ['peer-0'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    await collector.collect({
+      merkleRoot,
+      contextGraphId: testCGId,
+      contextGraphIdStr: testCGIdStr,
+      publisherPeerId: 'publisher-0',
+      publicByteSize: 100n,
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: ['urn:a'],
+      chainId: TEST_CHAIN_ID,
+      kav10Address: TEST_KAV10_ADDR,
+      merkleLeafCount,
+      ackMode: { kind: 'public' },
+      requiredACKs: 1,
+      assetUal: lifecycleAssetUal,
+    });
+
+    expect(decodedIntent).toBeDefined();
+    expect((decodedIntent as { assetUal?: unknown } | undefined)?.assetUal).toBeUndefined();
+    expect(JSON.stringify(decodedIntent)).not.toContain(lifecycleAssetUal);
+  });
+
   it('puts folded-private Merkle roots on the PublishIntent wire', async () => {
     const privateRoot = computePrivateRootV10([
       makeQuad('urn:a', 'urn:secret', '"hidden"'),

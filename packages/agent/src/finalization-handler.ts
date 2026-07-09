@@ -6,6 +6,7 @@ import {
   DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
   type EventBus,
+  type FinalizationMessageMsg,
   type OperationContext,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
@@ -27,6 +28,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 import { ethers } from 'ethers';
+import {
+  FinalizationLifecycleLogger,
+  finalizationLifecycleDecision,
+  type FinalizationLifecycleLogOptions,
+} from './finalization-lifecycle-logger.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -78,6 +84,7 @@ export class FinalizationHandler {
   private readonly resolveContextGraphOnChainId: ResolveContextGraphOnChainId | undefined;
   private readonly markContextGraphMetaDirtyFromQuads: MarkContextGraphMetaDirtyFromQuads | undefined;
   private readonly log = new Logger('FinalizationHandler');
+  private readonly lifecycle: FinalizationLifecycleLogger;
   private readonly processedUals = new Set<string>();
   // Forward-prevention for the cgId-resolution race (RS heal): chain-authoritative
   // kaId(batchId)->cgId bindings, cached POSITIVE-ONLY. A 0/miss is NEVER cached —
@@ -91,18 +98,24 @@ export class FinalizationHandler {
     eventBus?: EventBus,
     resolveContextGraphOnChainId?: ResolveContextGraphOnChainId,
     markContextGraphMetaDirtyFromQuads?: MarkContextGraphMetaDirtyFromQuads,
+    lifecycleLogOptions?: FinalizationLifecycleLogOptions,
   ) {
     this.store = store;
     this.chain = chain;
     this.eventBus = eventBus;
     this.resolveContextGraphOnChainId = resolveContextGraphOnChainId;
     this.markContextGraphMetaDirtyFromQuads = markContextGraphMetaDirtyFromQuads;
+    this.lifecycle = new FinalizationLifecycleLogger(this.log, lifecycleLogOptions);
   }
 
   async handleFinalizationMessage(data: Uint8Array, contextGraphId: string): Promise<void> {
     let ctx = createOperationContext('gossip');
+    let decodedMsg: FinalizationMessageMsg | undefined;
+    let resolvedTargetContextGraphId: string | undefined;
     try {
       const msg = decodeFinalizationMessage(data);
+      decodedMsg = msg;
+      resolvedTargetContextGraphId = msg.targetContextGraphId || undefined;
       if (msg.operationId) {
         ctx = createOperationContext('gossip', msg.operationId);
       }
@@ -144,6 +157,7 @@ export class FinalizationHandler {
       // the id locally when the wire is empty; resolver failures or
       // not-on-chain CGs fall back to legacy behavior unchanged.
       let ctxGraphId = msg.targetContextGraphId || undefined;
+      resolvedTargetContextGraphId = ctxGraphId;
       if (!ctxGraphId) {
         // Forward-prevention (RS cgId-race): resolve from CHAIN TRUTH first.
         // `getKAContextGraphId(batchId)` is authoritative and immune to the
@@ -156,6 +170,7 @@ export class FinalizationHandler {
         const cacheKey = batchIdForResolve > 0n ? batchIdForResolve.toString() : '';
         if (cacheKey && this.chainCgIdByBatchId.has(cacheKey)) {
           ctxGraphId = this.chainCgIdByBatchId.get(cacheKey);
+          resolvedTargetContextGraphId = ctxGraphId;
         } else if (
           cacheKey && this.chain && this.chain.chainId !== 'none'
           && typeof this.chain.getKAContextGraphId === 'function'
@@ -164,6 +179,7 @@ export class FinalizationHandler {
             const boundCg = await this.chain.getKAContextGraphId(batchIdForResolve);
             if (boundCg !== null && boundCg !== undefined && BigInt(boundCg) > 0n) {
               ctxGraphId = boundCg.toString();
+              resolvedTargetContextGraphId = ctxGraphId;
               this.chainCgIdByBatchId.set(cacheKey, ctxGraphId); // POSITIVE-only
               this.log.info(ctx, `Finalization: resolved cgId from chain truth getKAContextGraphId(${batchIdForResolve})=${ctxGraphId}`);
             }
@@ -178,6 +194,7 @@ export class FinalizationHandler {
             const resolved = await this.resolveContextGraphOnChainId(contextGraphId);
             if (resolved !== null && resolved !== undefined && String(resolved).length > 0) {
               ctxGraphId = String(resolved);
+              resolvedTargetContextGraphId = ctxGraphId;
               this.log.info(ctx, `Finalization: gossip omitted targetContextGraphId; resolved locally to ${ctxGraphId} (defensive lookup)`);
             }
           } catch (err) {
@@ -209,6 +226,10 @@ export class FinalizationHandler {
       );
       if (alreadyPromoted) {
         this.markProcessed(dedupeKey);
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_already_confirmed', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+        }));
         this.log.info(ctx, `Finalization: ${msg.ual} already confirmed in ${ctxGraphId ? `context graph ${ctxGraphId}` : 'context graph'}, skipping`);
         return;
       }
@@ -310,30 +331,116 @@ export class FinalizationHandler {
             });
             if (outcome === 'stale-target') {
               this.markProcessed(dedupeKey);
+              this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_stale_target', {
+                ...msg,
+                targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+                rootEntityCount: msg.rootEntities.length,
+                swmStatementCount: merkleMatchedQuads.length,
+                subGraphName,
+                blockNumber,
+                batchId,
+                outcome,
+                reason: 'newer update already materialized',
+              }));
               this.log.info(ctx, `Finalization: a newer update is already materialised for ${msg.ual}, skipping stale publish promotion`);
               return;
             }
             this.markProcessed(dedupeKey);
+            this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_applied', {
+              ...msg,
+              targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+              rootEntityCount: msg.rootEntities.length,
+              swmStatementCount: merkleMatchedQuads.length,
+              subGraphName,
+              blockNumber,
+              batchId,
+              outcome,
+              retryable: false,
+            }));
             this.log.info(ctx, `Finalization: promoted SWM snapshot to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'canonical'} for ${msg.ual} (tx=${msg.txHash.slice(0, 10)}…)`);
             return;
           }
+          this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_verification_failed', {
+            ...msg,
+            targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+            rootEntityCount: msg.rootEntities.length,
+            swmStatementCount: merkleMatchedQuads.length,
+            subGraphName,
+            blockNumber,
+            batchId,
+            outcome: 'deferred',
+            retryable: true,
+            reason: 'on-chain verification failed',
+            level: 'warn',
+          }));
           this.log.info(ctx, `Finalization: on-chain verification failed for ${msg.ual}, will retry via ChainEventPoller`);
           return;
         }
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_merkle_mismatch', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          swmStatementCount: sharedMemoryQuads.length,
+          subGraphName,
+          blockNumber,
+          batchId: protoToBigInt(msg.batchId),
+          outcome: 'deferred',
+          retryable: true,
+          reason: 'shared memory merkle root mismatch',
+          level: 'warn',
+        }));
         this.log.info(ctx, `Finalization: merkle mismatch for ${msg.ual}, shared memory data differs from published`);
       } else {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_no_data', {
+          ...msg,
+          targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+          rootEntityCount: msg.rootEntities.length,
+          swmStatementCount: 0,
+          subGraphName,
+          blockNumber,
+          batchId: protoToBigInt(msg.batchId),
+          outcome: 'deferred',
+          retryable: true,
+          reason: 'no shared memory data',
+          level: 'warn',
+        }));
         this.log.info(ctx, `Finalization: no shared memory data for ${msg.ual}, peer missed SWM sharing`);
       }
 
       // Fallback: no matching shared memory data. The data will arrive via
       // the regular publish topic broadcast or ChainEventPoller sync.
+      this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_payload_sync_required', {
+        ...msg,
+        targetContextGraphId: ctxGraphId ?? msg.targetContextGraphId,
+        rootEntityCount: msg.rootEntities.length,
+        swmStatementCount: sharedMemoryQuads.length,
+        subGraphName,
+        blockNumber,
+        batchId: protoToBigInt(msg.batchId),
+        outcome: 'deferred',
+        retryable: true,
+        reason: 'no matching SWM snapshot',
+        level: 'warn',
+      }));
       this.log.info(ctx, `Finalization: ${msg.ual} requires full payload sync (no matching SWM snapshot)`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const errMsg = err instanceof Error ? err.message : String(err);
       // Protobuf decode errors (wire type / index out of range) happen when receiving
       // a non-finalization message on this topic. Silently skip — not worth logging as WARN.
-      if (/wire type|index out of range|offset|unexpected tag/i.test(msg)) return;
-      this.log.warn(ctx, `Finalization: failed to process message: ${msg}`);
+      if (/wire type|index out of range|offset|unexpected tag/i.test(errMsg)) return;
+      if (decodedMsg) {
+        this.lifecycle.record(ctx, finalizationLifecycleDecision('finalization_failed', {
+          ...decodedMsg,
+          contextGraphId: decodedMsg.contextGraphId || contextGraphId,
+          targetContextGraphId: resolvedTargetContextGraphId ?? decodedMsg.targetContextGraphId,
+          rootEntityCount: decodedMsg.rootEntities.length,
+          outcome: 'failed',
+          retryable: true,
+          reason: errMsg,
+          level: 'warn',
+        }));
+      }
+      this.log.warn(ctx, `Finalization: failed to process message: ${errMsg}`);
     }
   }
 

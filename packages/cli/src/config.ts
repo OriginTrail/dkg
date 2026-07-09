@@ -431,6 +431,11 @@ export interface GraphSetIndexConfig {
   revalidateMs?: number;
 }
 
+export interface LoggingConfig {
+  /** Emit detailed KA publish lifecycle logs. Default: false. */
+  kaPublishLifecycleDebug?: boolean;
+}
+
 export interface DkgConfig {
   name: string;
   /**
@@ -517,6 +522,8 @@ export interface DkgConfig {
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
   contextGraphs?: string[];
+  /** Local daemon logging controls. */
+  logging?: LoggingConfig;
   /** Cross-agent query access policy for inbound query-remote requests. */
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;

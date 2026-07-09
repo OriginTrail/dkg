@@ -10,7 +10,28 @@ export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './event-bus.js';
-export { Logger, createOperationContext, type OperationContext, type OperationName, type LogSink, type LogRecord } from './logger.js';
+export {
+  Logger,
+  createOperationContext,
+  type OperationContext,
+  type OperationName,
+  type LogSink,
+  type LogRecord,
+} from './logger.js';
+export {
+  KA_LIFECYCLE_ROLES,
+  KA_LIFECYCLE_STAGES,
+  isKaPublishLifecycleDebugLoggingEnabled,
+  logKaLifecycleEvent,
+  resolveKaLifecycleLogDetail,
+  setKaPublishLifecycleDebugLoggingEnabled,
+  type KaLifecycleLogDetail,
+  type KaLifecycleLogEvent,
+  type KaLifecycleLogLevel,
+  type KaLifecycleMetadataValue,
+  type KaLifecycleRole,
+  type KaLifecycleStage,
+} from './ka-lifecycle-logger.js';
 export { createLogRedactor, redactLogEntry, redactMessage, DEFAULT_SENSITIVE_KEYS, REDACTED } from './log-redaction.js';
 export {
   getTracer, withSpan, linkedSpan, currentTraceIds, activeSpanContext,

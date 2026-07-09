@@ -337,7 +337,7 @@ export function decodeSwmSenderKeySecret(buf: Uint8Array): SwmSenderKeySecretMsg
 }
 
 export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFields): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(SWM_SENDER_KEY_AAD_DOMAIN),
     framedString('version'),
@@ -348,6 +348,8 @@ export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFiel
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -360,11 +362,12 @@ export function computeSwmSenderKeyMessageAAD(fields: SwmSenderKeyMessageAADFiel
     framedString(fields.cipherAlgorithm ?? SWM_SENDER_KEY_CIPHER_ALGORITHM),
     framedString('nonce'),
     framedBytes(fields.nonce),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFields): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(SWM_SENDER_KEY_SETUP_AAD_DOMAIN),
     framedString('version'),
@@ -375,6 +378,8 @@ export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFiel
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -399,13 +404,14 @@ export function computeSwmSenderKeyPackageAAD(fields: SwmSenderKeyPackageAADFiel
     framedBytes(fields.nonce),
     framedString('ciphertext'),
     framedBytes(fields.ciphertext),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeyPackageEncryptionAAD(
   fields: Omit<SwmSenderKeyPackageAADFields, 'ciphertext'>,
 ): Uint8Array {
-  return concatBytes([
+  const parts = [
     framedString('domain'),
     framedString(`${SWM_SENDER_KEY_SETUP_AAD_DOMAIN}.encryption`),
     framedString('version'),
@@ -416,6 +422,8 @@ export function computeSwmSenderKeyPackageEncryptionAAD(
     framedString(fields.contextGraphId),
     framedString('subGraphName'),
     framedString(fields.subGraphName ?? ''),
+  ];
+  parts.push(
     framedString('senderAgentAddress'),
     framedString(fields.senderAgentAddress.toLowerCase()),
     framedString('epochId'),
@@ -438,7 +446,8 @@ export function computeSwmSenderKeyPackageEncryptionAAD(
     framedBytes(fields.ephemeralPublicKey),
     framedString('nonce'),
     framedBytes(fields.nonce),
-  ]);
+  );
+  return concatBytes(parts);
 }
 
 export function computeSwmSenderKeySignaturePayload(

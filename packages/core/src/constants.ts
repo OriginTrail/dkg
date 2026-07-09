@@ -289,6 +289,47 @@ export function contextGraphLayerUri(
   return `${base}/${memoryLayerSlug(layer)}/${agentAddress}/${kaNumber}`;
 }
 
+export interface ContextGraphLayerIdentity {
+  contextGraphId: string;
+  subGraphName?: string;
+  layer: MemoryLayer;
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
+const MEMORY_LAYER_BY_SLUG: ReadonlyMap<string, MemoryLayer> = new Map([
+  [memoryLayerSlug(MemoryLayer.WorkingMemory), MemoryLayer.WorkingMemory],
+  [memoryLayerSlug(MemoryLayer.SharedWorkingMemory), MemoryLayer.SharedWorkingMemory],
+  [memoryLayerSlug(MemoryLayer.VerifiableMemory), MemoryLayer.VerifiableMemory],
+]);
+
+export function parseContextGraphLayerUri(graphUri: string): ContextGraphLayerIdentity | undefined {
+  const prefix = 'did:dkg:context-graph:';
+  if (!graphUri.startsWith(prefix)) return undefined;
+  const segments = graphUri.slice(prefix.length).split('/');
+  if (segments.length !== 4 && segments.length !== 5) return undefined;
+
+  const layerIndex = segments.length - 3;
+  const layer = MEMORY_LAYER_BY_SLUG.get(segments[layerIndex]);
+  if (!layer) return undefined;
+  const contextGraphId = segments[0];
+  const subGraphName = layerIndex === 2 ? segments[1] : undefined;
+  const agentAddress = segments[layerIndex + 1];
+  const kaNumberRaw = segments[layerIndex + 2];
+  if (
+    !contextGraphId ||
+    !/^0x[0-9a-fA-F]{40}$/.test(agentAddress) ||
+    !/^\d+$/.test(kaNumberRaw)
+  ) return undefined;
+  return {
+    contextGraphId,
+    subGraphName,
+    layer,
+    agentAddress,
+    kaNumber: BigInt(kaNumberRaw),
+  };
+}
+
 export function contextGraphRulesUri(contextGraphId: string): string {
   return `did:dkg:context-graph:${contextGraphId}/_rules`;
 }
