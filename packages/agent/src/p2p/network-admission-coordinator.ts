@@ -4,17 +4,14 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionInvalidPeerIdError, NetworkAdmissionService } from './network-admission.js';
+import { NetworkAdmissionService } from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
-import type { MultiaddrConnectTarget } from './multiaddr-peer-target.js';
-import type { CanonicalPeerId } from './peer-id.js';
-
-export { NetworkAdmissionInvalidPeerIdError } from './network-admission.js';
+import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -69,6 +66,15 @@ export class NetworkAdmissionRejectedError extends Error {
   }
 }
 
+export class NetworkAdmissionInvalidPeerIdError extends Error {
+  readonly code = 'INVALID_PEER_ID';
+
+  constructor(peerId: string, reason: string) {
+    super(`Invalid peer id ${peerId}: ${reason}`);
+    this.name = 'NetworkAdmissionInvalidPeerIdError';
+  }
+}
+
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
@@ -85,11 +91,8 @@ export class NetworkAdmissionCoordinator {
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
     this.identity = options.identity;
-    if (this.admission.enabled && !this.identity?.networkId) {
-      throw new Error('network identity is required when network admission is enabled');
-    }
-    this.selfPeerId = this.admission.enabled
-      ? this.admission.canonicalPeerId(options.selfPeerId)
+    this.selfPeerId = options.identity?.networkId
+      ? canonicalAdmissionPeerId(options.selfPeerId)
       : options.selfPeerId.trim();
     this.sign = options.sign;
     this.sendIdentityProbe = options.sendIdentityProbe;
@@ -101,30 +104,22 @@ export class NetworkAdmissionCoordinator {
   }
 
   get enabled(): boolean {
-    return this.admission.enabled;
+    return Boolean(this.identity?.networkId);
   }
 
   isAcceptedPeer(peerId: string): boolean {
+    if (!this.enabled) return true;
     return this.admission.isAcceptedPeer(peerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
+    if (!this.enabled) return false;
     return this.admission.isRejectedPeer(peerId);
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
+    if (!this.enabled) return new Set();
     return this.admission.verifiedSameNetworkPeerIds();
-  }
-
-  explicitConnectAdmissionTarget(connectTarget: MultiaddrConnectTarget): CanonicalPeerId | undefined {
-    const targetPeerId = connectTarget.targetPeerId;
-    if (this.enabled && !targetPeerId) {
-      throw new NetworkAdmissionInvalidPeerIdError(
-        '<missing>',
-        'connect multiaddr must include a target /p2p/<peerId> for network admission',
-      );
-    }
-    return targetPeerId;
   }
 
   filterAcceptedPeerIds(peerIds: Iterable<string>): string[] {
@@ -157,7 +152,7 @@ export class NetworkAdmissionCoordinator {
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
     if (!this.enabled) return true;
-    const remotePeerId = this.admission.canonicalPeerId(remotePeer);
+    const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
 
     const existing = this.inFlight.get(remotePeerId);
@@ -303,5 +298,14 @@ function abortErrorFromSignal(reason: unknown): Error {
 function admissionTimeoutError(timeoutMs: number): Error {
   const error = new Error(`Network admission timed out after ${timeoutMs}ms`);
   error.name = 'AbortError';
+  (error as { code?: string }).code = 'CONNECT_TIMEOUT';
   return error;
+}
+
+function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
+  try {
+    return canonicalPeerIdString(peerId);
+  } catch (err) {
+    throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
+  }
 }

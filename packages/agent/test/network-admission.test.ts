@@ -8,30 +8,14 @@ const VERIFIED_PEER_ID_CID = peerIdFromString(VERIFIED_PEER_ID).toCID().toString
 const UNKNOWN_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 
 describe('NetworkAdmissionService', () => {
-  it('allows all peers when no active network identity is configured', () => {
-    const admission = new NetworkAdmissionService();
-
-    expect(admission.isAcceptedPeer('peer-a')).toBe(true);
-    expect(admission.snapshot().enabled).toBe(false);
-  });
-
-  it('keeps disabled admission compatible with fixture self peer ids', () => {
-    const admission = new NetworkAdmissionService({ selfPeerId: 'fixture-self' });
-
-    expect(admission.isAcceptedPeer('fixture-peer')).toBe(true);
-    expect(admission.isRejectedPeer('fixture-peer')).toBe(false);
-  });
-
-  it('validates self peer ids when network admission is active', () => {
+  it('validates configured self peer ids', () => {
     expect(() => new NetworkAdmissionService({
-      networkId: 'network-a',
       selfPeerId: 'fixture-self',
     })).toThrow();
   });
 
-  it('fails unknown peers closed when network identity is configured', () => {
+  it('accepts self and fails unknown peers closed', () => {
     const admission = new NetworkAdmissionService({
-      networkId: 'network-a',
       selfPeerId: SELF_PEER_ID,
     });
 
@@ -43,9 +27,7 @@ describe('NetworkAdmissionService', () => {
   });
 
   it('promotes verified same-network peers and excludes quarantined peers', () => {
-    const admission = new NetworkAdmissionService({
-      networkId: 'network-a',
-    });
+    const admission = new NetworkAdmissionService();
 
     admission.markVerifiedSameNetwork(VERIFIED_PEER_ID_CID);
     expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(true);
@@ -58,9 +40,7 @@ describe('NetworkAdmissionService', () => {
   });
 
   it('throws on invalid peer ids for mutating admission operations', () => {
-    const admission = new NetworkAdmissionService({
-      networkId: 'network-a',
-    });
+    const admission = new NetworkAdmissionService();
 
     expect(() => admission.markVerifiedSameNetwork('not-a-peer-id')).toThrow('Invalid peer id not-a-peer-id');
     expect(() => admission.quarantinePeer('not-a-peer-id')).toThrow('Invalid peer id not-a-peer-id');

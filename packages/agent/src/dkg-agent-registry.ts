@@ -1841,7 +1841,13 @@ export class AgentRegistryMethods extends DKGAgentBase {
         err instanceof Error ? err.message : String(err),
       );
     }
-    const targetPeerId = this.networkAdmissionCoordinator.explicitConnectAdmissionTarget(connectTarget);
+    const targetPeerId = connectTarget.targetPeerId;
+    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
+      throw new NetworkAdmissionInvalidPeerIdError(
+        '<missing>',
+        'connect multiaddr must include a target /p2p/<peerId> for network admission',
+      );
+    }
     await connectToMultiaddr(
       this.node.libp2p as any,
       connectTarget,

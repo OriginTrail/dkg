@@ -3,7 +3,6 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
-import { canonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
@@ -19,7 +18,6 @@ function buildCoordinator(input: {
   probeTimeoutMs?: number;
 }) {
   const admission = new NetworkAdmissionService({
-    networkId: input.identity?.networkId,
     selfPeerId: SELF_PEER_ID,
   });
   const close = vi.fn();
@@ -64,42 +62,6 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.enabled).toBe(false);
     expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
     expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
-  });
-
-  it('accepts canonical explicit-connect target peer ids at the admission boundary', () => {
-    const fixture = buildCoordinator({
-      identity,
-      sendIdentityProbe: async () => {
-        throw new Error('probe should not run');
-      },
-    });
-
-    expect(
-      fixture.coordinator.explicitConnectAdmissionTarget({
-        kind: 'direct',
-        multiaddress: `/ip4/127.0.0.1/tcp/9090/p2p/${REMOTE_PEER_ID_CID}`,
-        targetPeerId: canonicalPeerIdString(REMOTE_PEER_ID_CID),
-      }),
-    ).toBe(REMOTE_PEER_ID);
-  });
-
-  it('rejects missing explicit-connect target peer ids before probing', () => {
-    const fixture = buildCoordinator({
-      identity,
-      sendIdentityProbe: async () => {
-        throw new Error('probe should not run');
-      },
-    });
-
-    try {
-      fixture.coordinator.explicitConnectAdmissionTarget({
-        kind: 'direct',
-        multiaddress: '/ip4/127.0.0.1/tcp/9090',
-      });
-      throw new Error('expected explicit-connect target validation to fail');
-    } catch (err) {
-      expect(err).toMatchObject({ code: 'INVALID_PEER_ID' });
-    }
   });
 
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
@@ -210,6 +172,29 @@ describe('NetworkAdmissionCoordinator', () => {
 
     release(new TextEncoder().encode('{not json'));
     await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+  });
+
+  it('times out a caller wait with the connect timeout code without cancelling the shared probe', async () => {
+    let release!: (value: Uint8Array) => void;
+    const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    }));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { timeoutMs: 1 },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError', code: 'CONNECT_TIMEOUT' });
+
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    expect(sendIdentityProbe.mock.calls[0][2].signal).toBeUndefined();
+    release(new TextEncoder().encode('{not json'));
   });
 
   it('rejects malformed peer ids before probing', async () => {

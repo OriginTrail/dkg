@@ -33,7 +33,6 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     },
     networkAdmissionCoordinator: {
       enabled: true,
-      explicitConnectAdmissionTarget: vi.fn(() => PEER_ID),
       ensureAdmitted: vi.fn(async () => false),
     },
     log: { info: vi.fn() },
@@ -46,7 +45,6 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
 
 function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
   const admission = new NetworkAdmissionService({
-    networkId: 'network-a',
     selfPeerId: SELF_PEER_ID,
   });
   admission.markVerifiedSameNetwork(peerId);
@@ -86,12 +84,6 @@ describe('explicit connect network admission', () => {
         targetPeerId: PEER_ID,
       }),
       expect.any(Function),
-    );
-    expect(agent.networkAdmissionCoordinator.explicitConnectAdmissionTarget).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: 'direct',
-        targetPeerId: PEER_ID,
-      }),
     );
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,

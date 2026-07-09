@@ -68,14 +68,14 @@ async function buildAgent(opts: {
   return internals;
 }
 
-function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService): void {
+function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService, enabled = true): void {
   agent.networkAdmission = admission;
   agent.networkAdmissionCoordinator = {
     get enabled() {
-      return admission.enabled;
+      return enabled;
     },
-    isAcceptedPeer: (peerId) => admission.isAcceptedPeer(peerId),
-    verifiedSameNetworkPeerIds: () => admission.verifiedSameNetworkPeerIds(),
+    isAcceptedPeer: (peerId) => enabled ? admission.isAcceptedPeer(peerId) : true,
+    verifiedSameNetworkPeerIds: () => enabled ? admission.verifiedSameNetworkPeerIds() : new Set(),
   };
 }
 
@@ -173,9 +173,7 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       connected: [...foreign, ...sameNetwork],
       preferredACKPeerIds: [sameNetwork[1], foreign[0]],
     });
-    const admission = new NetworkAdmissionService({
-      networkId: 'active-network',
-    });
+    const admission = new NetworkAdmissionService();
     installAdmission(a, admission);
     admission.markVerifiedSameNetwork(sameNetwork[0]);
 

@@ -723,7 +723,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.peerResolver = peerResolver;
     this.networkAdmission = new NetworkAdmissionService({
-      networkId: this.config.networkIdentity?.networkId,
       selfPeerId: this.node.peerId.toString(),
     });
     this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
