@@ -92,6 +92,8 @@ export interface AutoUpdateConfig {
   checkIntervalMinutes?: number;
   /** Optional per-step build timeout overrides for the git-based update path. */
   buildTimeoutMs?: AutoUpdateBuildTimeouts;
+  /** Require signed tag verification when the git updater checks out tag refs. */
+  verifyTagSignature?: boolean;
   /**
    * Override how the daemon resolves "am I an npm-installed node or a
    * monorepo dev checkout?" under OT-RFC-41 §4.3 / Bundle B1d.

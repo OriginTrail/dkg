@@ -195,6 +195,7 @@ function restoreIo() {
 }
 
 import {
+  buildGitAutoUpdatePerformOptions,
   checkForNewCommitWithStatus,
   checkForUpdate,
   normalizeGitRefInput,
@@ -211,6 +212,13 @@ const AU: AutoUpdateConfig = {
 };
 
 describe('git auto-update ref normalization', () => {
+  it('preserves tag-signature verification when daemon git polling applies an update', () => {
+    expect(buildGitAutoUpdatePerformOptions({ verifyTagSignature: true }, 'abc123')).toEqual({
+      expectedCommit: 'abc123',
+      verifyTagSignature: true,
+    });
+  });
+
   it('normalizes bare branch values to full branch refs', () => {
     expect(normalizeGitRefInput('main')).toBe('refs/heads/main');
     expect(normalizeGitRefInput('release/v10')).toBe('refs/heads/release/v10');

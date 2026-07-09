@@ -290,6 +290,7 @@ import {
   type NpmVersionStatus,
   checkForNpmVersionUpdate,
   deriveUpdateCheckState,
+  type PerformUpdateOptions,
   type UpdateStatus,
   acquireUpdateLock,
   releaseUpdateLock,
@@ -404,6 +405,16 @@ import {
   type PromoteWorkerConfig,
   type PromoteWorkerSupervisor,
 } from './worker/async-promote-worker.js';
+
+export function buildGitAutoUpdatePerformOptions(
+  au: Pick<AutoUpdateConfig, "verifyTagSignature">,
+  expectedCommit: string,
+): Pick<PerformUpdateOptions, "expectedCommit" | "verifyTagSignature"> {
+  return {
+    expectedCommit,
+    verifyTagSignature: au.verifyTagSignature,
+  };
+}
 
 type MultiaddrLike = { toString: () => string };
 
@@ -2128,9 +2139,7 @@ export async function runDaemonInner(
         daemonState.isUpdating = true;
         let updateStatus: UpdateStatus = "failed";
         try {
-          updateStatus = await performUpdateWithStatus(au, log, {
-            expectedCommit: gitStatus.commit,
-          });
+          updateStatus = await performUpdateWithStatus(au, log, buildGitAutoUpdatePerformOptions(au, gitStatus.commit));
         } finally {
           daemonState.isUpdating = false;
         }
