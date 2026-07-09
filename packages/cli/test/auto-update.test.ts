@@ -1044,7 +1044,33 @@ describe('blue-green checkForUpdate', () => {
 
     expect(result).toBe(true);
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- --signed-release')).toBe(true);
+    const verifyCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'verify-tag');
+    expect(verifyCall?.args).toEqual(['verify-tag', '--', '--signed-release']);
+  });
+
+  it('preserves normal tag immutability when tag verification is disabled', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5') {
+        throw new Error('would clobber existing tag');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: false },
+      (msg) => { logCalls.push(msg); },
+    );
+
+    expect(result).toBe(false);
+    const allGitCalls = getExecFileCalls();
+    const fetchCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'fetch');
+    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5']);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.includes('+refs/tags/v9.0.5:refs/tags/v9.0.5'))).toBe(false);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
+    expect(logCalls.some((msg) => msg.includes('would clobber existing tag'))).toBe(true);
   });
 
   it('does not run git verify-tag for branch refs when tag verification is requested', async () => {

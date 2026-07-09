@@ -272,8 +272,6 @@ import {
 } from './http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -293,11 +291,11 @@ import {
   deriveUpdateCheckState,
   acquireUpdateLock,
   releaseUpdateLock,
-  resolveAutoUpdateGitRef,
   performUpdateWithStatus,
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
+import { isValidRef, parseTagName, resolveAutoUpdateGitRef } from '../auto-update-ref.js';
 import {
   chainResetWipe,
   detectBackendSwitch,

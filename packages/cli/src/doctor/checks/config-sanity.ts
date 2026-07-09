@@ -16,7 +16,7 @@
  */
 import { join } from 'node:path';
 import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
-import { parseTagName, resolveAutoUpdateGitRef } from '../../daemon/auto-update.js';
+import { parseTagName, resolveAutoUpdateGitRef } from '../../auto-update-ref.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
