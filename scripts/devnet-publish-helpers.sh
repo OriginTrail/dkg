@@ -46,11 +46,11 @@ _devnet_append_pending_assets() {
   merged=$(OLD="$DEVNET_PUBLISH_PENDING_ASSETS" NEW="$new_assets" node -e '
     const oldAssets = JSON.parse(process.env.OLD || "[]");
     const newAssets = JSON.parse(process.env.NEW || "[]");
-    console.log(JSON.stringify(oldAssets.concat(newAssets)));
+    process.stdout.write(JSON.stringify(oldAssets.concat(newAssets)));
   ')
   names=$(ASSETS="$merged" node -e '
     const assets = JSON.parse(process.env.ASSETS || "[]");
-    console.log(JSON.stringify(assets.map(a => a.name)));
+    process.stdout.write(JSON.stringify(assets.map(a => a.name)));
   ')
   _devnet_publish_persist_state "$DEVNET_PUBLISH_ALL_RESPONSES" "$DEVNET_PUBLISH_ROOT_ENTITIES" "$DEVNET_PUBLISH_NODE" "$names" "$merged"
 }
@@ -60,62 +60,77 @@ _devnet_append_pending_assets() {
 # `triplesWritten` assertions while exercising the named KA lifecycle path.
 devnet_create_shared_ka() {
   local node_id="$1" payload="$2" name_prefix="${3:-devnet-ka}" extra_fields="${4:-}"
-  local nonce plan count i asset body resp responses new_assets triples names roots
+  local nonce plan_file plan_meta count i asset body resp responses new_assets triples names roots
 
   _devnet_publish_init_state_file
   nonce="$(date +%s)-$$-${RANDOM:-0}"
-  plan=$(PAYLOAD="$payload" NAME_PREFIX="$name_prefix" EXTRA_FIELDS="$extra_fields" NONCE="$nonce" node -e '
-    const payload = JSON.parse(process.env.PAYLOAD);
-    const extra = process.env.EXTRA_FIELDS ? JSON.parse("{" + process.env.EXTRA_FIELDS + "}") : {};
-    const quads = Array.isArray(payload.quads) ? payload.quads : [];
-    const rootOf = (subject) => String(subject || "").split("/.well-known/genid/")[0];
-    const slug = (value) => String(value || "ka")
-      .toLowerCase()
-      .replace(/[^a-z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 48) || "ka";
-    const prefix = slug(process.env.NAME_PREFIX || "devnet-ka");
-    const roots = [...new Set(quads.map(q => rootOf(q.subject)).filter(Boolean))];
-    const effectiveRoots = roots.length > 0 ? roots : [prefix];
-    const preserveBatch = process.env.DEVNET_PUBLISH_PRESERVE_BATCH === "1";
-    const assetRoots = preserveBatch ? [effectiveRoots[0]] : effectiveRoots;
-    const assets = assetRoots.map((root, index) => {
-      const rootQuads = roots.length > 0
-        ? (preserveBatch ? quads : quads.filter(q => rootOf(q.subject) === root))
-        : quads;
-      const name = `${prefix}-${process.env.NONCE}-${index + 1}-${slug(root).slice(0, 24)}`;
-      return {
-        name,
-        root,
-        rootEntities: effectiveRoots,
-        preserveBatch,
-        ...(extra.subGraphName || payload.subGraphName ? { subGraphName: extra.subGraphName || payload.subGraphName } : {}),
-        quads: rootQuads,
-        body: {
+  plan_file="$(mktemp "${DEVNET_DIR:-/tmp}/devnet-create-plan.XXXXXX")" || return 1
+  if ! printf '%s' "$payload" | PLAN_FILE="$plan_file" NAME_PREFIX="$name_prefix" EXTRA_FIELDS="$extra_fields" NONCE="$nonce" node -e '
+    const fs = require("fs");
+    let input = "";
+    process.stdin.on("data", c => input += c);
+    process.stdin.on("end", () => {
+      const payload = JSON.parse(input);
+      const extra = process.env.EXTRA_FIELDS ? JSON.parse("{" + process.env.EXTRA_FIELDS + "}") : {};
+      const quads = Array.isArray(payload.quads) ? payload.quads : [];
+      const rootOf = (subject) => String(subject || "").split("/.well-known/genid/")[0];
+      const slug = (value) => String(value || "ka")
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 48) || "ka";
+      const prefix = slug(process.env.NAME_PREFIX || "devnet-ka");
+      const roots = [...new Set(quads.map(q => rootOf(q.subject)).filter(Boolean))];
+      const effectiveRoots = roots.length > 0 ? roots : [prefix];
+      const preserveBatch = process.env.DEVNET_PUBLISH_PRESERVE_BATCH === "1";
+      const assetRoots = preserveBatch ? [effectiveRoots[0]] : effectiveRoots;
+      const fd = fs.openSync(process.env.PLAN_FILE, "w");
+      try {
+        fs.writeSync(fd, JSON.stringify({
           contextGraphId: payload.contextGraphId,
-          name,
-          quads: rootQuads,
-          finalize: true,
-          alsoShareSwm: true,
-          ...(payload.subGraphName ? { subGraphName: payload.subGraphName } : {}),
-          ...extra,
-        },
-      };
+          totalQuads: quads.length,
+          count: assetRoots.length,
+        }) + "\n");
+        for (let index = 0; index < assetRoots.length; index++) {
+          const root = assetRoots[index];
+          const rootQuads = roots.length > 0
+            ? (preserveBatch ? quads : quads.filter(q => rootOf(q.subject) === root))
+            : quads;
+          const name = `${prefix}-${process.env.NONCE}-${index + 1}-${slug(root).slice(0, 24)}`;
+          fs.writeSync(fd, JSON.stringify({
+            name,
+            root,
+            rootEntities: preserveBatch ? effectiveRoots : [root],
+            preserveBatch,
+            ...(extra.subGraphName || payload.subGraphName ? { subGraphName: extra.subGraphName || payload.subGraphName } : {}),
+            body: {
+              contextGraphId: payload.contextGraphId,
+              name,
+              quads: rootQuads,
+              finalize: true,
+              alsoShareSwm: true,
+              ...(payload.subGraphName ? { subGraphName: payload.subGraphName } : {}),
+              ...extra,
+            },
+          }) + "\n");
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
     });
-    console.log(JSON.stringify({
-      contextGraphId: payload.contextGraphId,
-      totalQuads: quads.length,
-      assets,
-    }));
-  ')
+  '; then
+    rm -f "$plan_file"
+    return 1
+  fi
 
-  count=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).assets.length));')
+  IFS= read -r plan_meta < "$plan_file"
+  count=$(printf '%s' "$plan_meta" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).count));')
   responses='[]'
   new_assets='[]'
   i=0
   while [ "$i" -lt "$count" ]; do
-    asset=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).assets[Number(process.argv[1])])));' "$i")
-    body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).body)));')
+    asset=$(sed -n "$((i + 2))p" "$plan_file")
+    body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).body)));')
     resp=$(api_call "$node_id" POST /api/knowledge-assets "$body")
     if ! printf '%s' "$resp" | node -e '
       let d=""; process.stdin.on("data", c => d += c);
@@ -133,12 +148,16 @@ devnet_create_shared_ka() {
       });
     '; then
       printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
+      rm -f "$plan_file"
       return 1
     fi
-    responses=$(node -e 'const arr=JSON.parse(process.argv[1]); arr.push(JSON.parse(process.argv[2])); console.log(JSON.stringify(arr));' "$responses" "$resp")
-    new_assets=$(node -e '
-      const arr = JSON.parse(process.argv[1]);
-      const asset = JSON.parse(process.argv[2]);
+    responses=$(node -e 'const arr=JSON.parse(process.argv[1]); arr.push(JSON.parse(process.argv[2])); process.stdout.write(JSON.stringify(arr));' "$responses" "$resp")
+    new_assets=$(printf '%s' "$asset" | NEW_ASSETS="$new_assets" node -e '
+      let input = "";
+      process.stdin.on("data", c => input += c);
+      process.stdin.on("end", () => {
+      const arr = JSON.parse(process.env.NEW_ASSETS || "[]");
+      const asset = JSON.parse(input);
       arr.push({
         name: asset.name,
         root: asset.root,
@@ -146,26 +165,28 @@ devnet_create_shared_ka() {
         preserveBatch: Boolean(asset.preserveBatch),
         ...(asset.subGraphName ? { subGraphName: asset.subGraphName } : {}),
       });
-      console.log(JSON.stringify(arr));
-    ' "$new_assets" "$asset")
+      process.stdout.write(JSON.stringify(arr));
+      });
+    ')
     i=$((i + 1))
   done
 
   _devnet_append_pending_assets "$new_assets"
-  triples=$(printf '%s' "$plan" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).totalQuads));')
-  names=$(printf '%s' "$new_assets" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.stringify(JSON.parse(d).map(a=>a.name))));')
+  rm -f "$plan_file"
+  triples=$(printf '%s' "$plan_meta" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).totalQuads));')
+  names=$(printf '%s' "$new_assets" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).map(a=>a.name))));')
   roots=$(printf '%s' "$new_assets" | node -e '
     let d=""; process.stdin.on("data",c=>d+=c);
     process.stdin.on("end",()=>{
       const assets = JSON.parse(d);
-      console.log(JSON.stringify([...new Set(assets.flatMap(a => a.rootEntities || [a.root]))]));
+      process.stdout.write(JSON.stringify([...new Set(assets.flatMap(a => a.rootEntities || [a.root]))]));
     });
   ')
   node -e '
     const names = JSON.parse(process.argv[1]);
     const roots = JSON.parse(process.argv[2]);
     const responses = JSON.parse(process.argv[3]);
-    console.log(JSON.stringify({
+    process.stdout.write(JSON.stringify({
       triplesWritten: Number(process.argv[4]),
       shareOperationId: "knowledge-assets:" + names.join(","),
       names,
@@ -217,23 +238,23 @@ devnet_publish_load_state() {
   fi
   DEVNET_PUBLISH_ALL_RESPONSES=$(node -e "
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-    console.log(JSON.stringify(s.allResponses || []));
+    process.stdout.write(JSON.stringify(s.allResponses || []));
   " "$DEVNET_PUBLISH_STATE_FILE")
   DEVNET_PUBLISH_ROOT_ENTITIES=$(node -e "
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-    console.log(JSON.stringify(s.rootEntities || []));
+    process.stdout.write(JSON.stringify(s.rootEntities || []));
   " "$DEVNET_PUBLISH_STATE_FILE")
   DEVNET_PUBLISH_NODE=$(node -e "
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-    console.log(s.publishNode || '');
+    process.stdout.write(s.publishNode || '');
   " "$DEVNET_PUBLISH_STATE_FILE")
   DEVNET_PUBLISH_ASSET_NAMES=$(node -e "
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-    console.log(JSON.stringify(s.assetNames || []));
+    process.stdout.write(JSON.stringify(s.assetNames || []));
   " "$DEVNET_PUBLISH_STATE_FILE")
   DEVNET_PUBLISH_PENDING_ASSETS=$(node -e "
     const s = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
-    console.log(JSON.stringify(s.pendingAssets || []));
+    process.stdout.write(JSON.stringify(s.pendingAssets || []));
   " "$DEVNET_PUBLISH_STATE_FILE")
 }
 

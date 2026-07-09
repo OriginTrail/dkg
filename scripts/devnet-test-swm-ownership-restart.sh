@@ -10,8 +10,10 @@
 #   3. Node 1 is stopped, so the original owner is offline.
 #   4. Node 2 is restarted, clearing process-local publisher ownership maps
 #      while preserving its local store and without live owner help.
-#   5. Node 2 attempts to promote the same root. This must hard-fail from
-#      durable local SWM metadata, and must not overwrite SWM data or owner.
+#   5. Node 2 attempts to promote the same root. Current assertion-promote
+#      semantics treat cross-owner co-claims as advisory skips: the call may
+#      return HTTP 200, but it must promote zero rows, must not be publish-ready,
+#      and must not overwrite SWM data or owner.
 #
 # Preconditions:
 #   ./scripts/devnet.sh clean
@@ -388,22 +390,29 @@ wait_for_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_VALUE"
 wait_for_owner_meta "$ATTACKER_NODE" "$ROOT" "$OWNER_PEER"
 log "node $ATTACKER_NODE still has durable owner metadata after offline-owner restart"
 
-act "5. Cross-owner promote must fail from durable local metadata"
+act "5. Cross-owner promote must be blocked or skipped from durable local metadata"
 assertion_create_write_finalize "$ATTACKER_NODE" "$ATTACKER_ASSERTION" "$ROOT" "$ATTACKER_VALUE"
 
 PROMOTE_BODY=""
 PROMOTE_CODE=""
 api_capture "$ATTACKER_NODE" POST "/api/knowledge-assets/${ATTACKER_ASSERTION}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" PROMOTE_BODY PROMOTE_CODE
 if [ "$PROMOTE_CODE" -ge 200 ] && [ "$PROMOTE_CODE" -lt 300 ]; then
-  fail "cross-owner promote unexpectedly succeeded with HTTP $PROMOTE_CODE: $PROMOTE_BODY"
+  PROMOTED_COUNT=$(parse_json "$PROMOTE_BODY" '.promotedCount')
+  PUBLISH_READY=$(parse_json "$PROMOTE_BODY" '.publishReady')
+  [ "$PROMOTED_COUNT" = "0" ] \
+    || fail "cross-owner promote must not promote rows; got promotedCount=$PROMOTED_COUNT body=$PROMOTE_BODY"
+  [ "$PUBLISH_READY" = "false" ] \
+    || fail "cross-owner promote must not be publish-ready; got publishReady=$PUBLISH_READY body=$PROMOTE_BODY"
+  log "cross-owner promote was advisory-skipped with promotedCount=0 publishReady=false"
+else
+  EXPECTED_ERROR="Cannot promote entity <${ROOT}>: owned by peer ${OWNER_PEER}, not by caller ${ATTACKER_PEER}."
+  case "$PROMOTE_BODY" in
+    *"$EXPECTED_ERROR"*) log "cross-owner promote failed with expected ownership error" ;;
+    *) fail "promote failed with unexpected body (HTTP $PROMOTE_CODE): $PROMOTE_BODY; expected '$EXPECTED_ERROR'" ;;
+  esac
 fi
-EXPECTED_ERROR="Cannot promote entity <${ROOT}>: owned by peer ${OWNER_PEER}, not by caller ${ATTACKER_PEER}."
-case "$PROMOTE_BODY" in
-  *"$EXPECTED_ERROR"*) log "cross-owner promote failed with expected ownership error" ;;
-  *) fail "promote failed with unexpected body (HTTP $PROMOTE_CODE): $PROMOTE_BODY; expected '$EXPECTED_ERROR'" ;;
-esac
 
-act "6. Failed promote left WM, SWM, and ownership metadata intact"
+act "6. Blocked/skipped promote left WM, SWM, and ownership metadata intact"
 ASSERTION_QUERY=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
 ASSERTION_CT=$(quads_count "$ASSERTION_QUERY")
 [ "$ASSERTION_CT" = "1" ] || fail "attacker WM assertion should still have 1 quad after failed promote, got '$ASSERTION_CT': $ASSERTION_QUERY"
@@ -419,4 +428,4 @@ OWNERS_AFTER="$(owner_values_on_node "$ATTACKER_NODE" "$ROOT")"
 [ "$OWNERS_AFTER" = "$OWNER_PEER" ] \
   || fail "owner metadata changed after failed promote; owners='$OWNERS_AFTER', expected '$OWNER_PEER'"
 
-log "PASS: durable SWM ownership blocks cross-author promote after restart while owner is offline"
+log "PASS: durable SWM ownership prevents cross-author overwrite after restart while owner is offline"

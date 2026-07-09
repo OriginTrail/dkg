@@ -1307,6 +1307,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<void> {
     if (data.length === 0) return;
     const ctx = createOperationContext('share');
+    // OT-RFC-49 WS-A defense-in-depth: the subscribe path is the primary
+    // strip choke point, but a stale/persisted/manual handler must still never
+    // be able to custody private ciphertext while the strip is enabled.
+    if (this.swmHostModeStripCiphertext()) {
+      this.log.debug(
+        ctx,
+        `LU-11: dropping chunked envelope on cg=${contextGraphId} from=${fromPeerId}: ` +
+        `private-ciphertext strip is ON (OT-RFC-49 WS-A)`,
+      );
+      return;
+    }
     let envelope: GossipEnvelopeMsg | undefined;
     try {
       envelope = decodeGossipEnvelope(data);

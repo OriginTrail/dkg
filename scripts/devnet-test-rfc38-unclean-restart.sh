@@ -240,7 +240,7 @@ while [ "$BATCH_START" -lt "$WRITES_COUNT" ]; do
       const entity = "urn:urr:" + stamp + "/t-" + i;
       quads.push({ subject: entity, predicate: "http://schema.org/note", object: "\"" + filler + "\"", graph: "" });
     }
-    console.log(JSON.stringify({ contextGraphId: cgId, quads }));
+    process.stdout.write(JSON.stringify({ contextGraphId: cgId, quads }));
   ')
   W=$(devnet_create_shared_ka "$CURATOR_NODE" "$PAYLOAD")
   GOT=$(parse_json "$W" '.triplesWritten')
