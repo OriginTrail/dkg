@@ -73,6 +73,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  type AdmissionCheckOptions,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
@@ -149,7 +150,7 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
-import { NetworkAdmissionCoordinator } from './p2p/network-admission-coordinator.js';
+import { NetworkAdmissionCoordinator, NetworkAdmissionRejectedError } from './p2p/network-admission-coordinator.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -742,10 +743,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     this.router = new ProtocolRouter(this.node, {
       peerResolver,
-      isPeerAccepted: (peerId, _protocolId, _direction) =>
+      isPeerAccepted: (
+        peerId: string,
+        _protocolId: string,
+        _direction: 'inbound' | 'outbound',
+        options?: AdmissionCheckOptions,
+      ) =>
         this.networkAdmissionCoordinator.ensureAdmitted(
           peerId,
           createOperationContext('connect'),
+          options,
         ),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
@@ -2914,6 +2921,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return plan.eligibleContextGraphIds;
   }
 
+  async ensurePeerAdmittedForRecovery(
+    this: DKGAgent,
+    peerId: string,
+    ctx: OperationContext,
+    label: string,
+  ): Promise<boolean> {
+    if (this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) return true;
+    if (this.networkAdmissionCoordinator.isRejectedPeer(peerId)) return false;
+    try {
+      return await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.log.warn(ctx, `${label} admission probe failed for ${peerId.slice(-8)}: ${message}`);
+      return false;
+    }
+  }
+
   /**
    * Event-driven retry path for the libp2p identify race that otherwise
    * leaves a peer permanently in `skippedNoSyncPeers`. libp2p emits
@@ -2930,7 +2954,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   handlePeerUpdateForSyncRetry(this: DKGAgent, peerId: string, protocols: readonly string[]): void {
     if (peerId === this.node.libp2p.peerId.toString()) return;
-    if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
     // identify — a core peer whose identify completed late was never
@@ -2953,16 +2976,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.skippedNoSyncPeers.has(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
-    this.skippedNoSyncPeers.delete(peerId);
     const ctx = createOperationContext('sync');
     const shortPeer = peerId.slice(-8);
-    this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
-    setTimeout(() => {
-      this.trySyncFromPeer(peerId).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
-      });
-    }, 0);
+    void (async () => {
+      const admitted = await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Peer:update sync retry');
+      if (!admitted) return;
+      if (!this.skippedNoSyncPeers.has(peerId)) return;
+      this.skippedNoSyncPeers.delete(peerId);
+      this.log.info(ctx, `Peer ${shortPeer} now advertises sync protocol — retrying sync-on-connect`);
+      setTimeout(() => {
+        this.trySyncFromPeer(peerId).catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Sync retry after peer:update failed for ${shortPeer}: ${message}`);
+        });
+      }, 0);
+    })();
   }
 
   /**
@@ -2988,7 +3016,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.pruneSyncReconcilerState(now);
     for (const pid of this.node.libp2p.getPeers()) {
       const peerId = pid.toString();
-      if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) continue;
+      if (this.networkAdmissionCoordinator.isRejectedPeer(peerId)) continue;
       if (this.syncingPeers.has(peerId)) continue;
       const lastOk = this.lastSuccessfulSyncAt.get(peerId);
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
@@ -3013,6 +3041,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
         this.syncReconcilerBackoff.delete(peerId);
       }
+      if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
       const shortPeer = peerId.slice(-8);
       this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
       this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe)
@@ -3267,7 +3296,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async maybeDialGossipSender(this: DKGAgent, peerIdStr: string): Promise<void> {
     const selfPeerId = this.node.libp2p.peerId.toString();
     if (peerIdStr === selfPeerId) return;
-    if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerIdStr)) return;
+    if (this.networkAdmissionCoordinator.isRejectedPeer(peerIdStr)) return;
 
     // Already connected → nothing to do.
     const connected = this.node.libp2p.getPeers().some(p => p.toString() === peerIdStr);
@@ -3944,12 +3973,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     await this.primeCatchupConnections();
 
+    const connectedPeers = [...new Map(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    const admittedConnectedPeers: Array<{ toString(): string }> = [];
+    for (const peer of connectedPeers) {
+      if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
+        admittedConnectedPeers.push(peer);
+      }
+    }
     const orderedPeers = this.selectCatchupPeers(
-      [...new Map(
-        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-      ).values()].filter((peer) =>
-        this.networkAdmissionCoordinator.isAcceptedPeer(peer.toString()),
-      ),
+      admittedConnectedPeers,
       preferredPeerId,
       isPrivateContextGraph,
     );
@@ -4453,9 +4487,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async ensurePeerConnected(this: DKGAgent, peerId: string): Promise<void> {
     await ensurePeerConnectedAtom(this.node.libp2p as any, this.discovery, peerId);
     if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, createOperationContext('connect'))) return;
-    const error = new Error(`Peer ${peerId} is not admitted for the active DKG network`);
-    (error as any).code = 'NETWORK_ADMISSION_REJECTED';
-    throw error;
+    throw new NetworkAdmissionRejectedError(peerId);
   }
 
   async waitForSyncProtocol(this: DKGAgent, pid: { toString(): string }): Promise<boolean> {

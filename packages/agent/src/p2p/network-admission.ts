@@ -80,6 +80,13 @@ export class NetworkAdmissionService {
     return this.verifiedPeerIds.has(normalized);
   }
 
+  isRejectedPeer(peerId: string): boolean {
+    if (!this.enabled) return false;
+    const normalized = normalizePeerId(peerId);
+    if (!normalized) return true;
+    return this.quarantinedPeerIds.has(normalized);
+  }
+
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     if (!this.enabled) return new Set();
     return new Set(

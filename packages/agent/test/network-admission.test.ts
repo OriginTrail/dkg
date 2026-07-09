@@ -21,6 +21,7 @@ describe('NetworkAdmissionService', () => {
 
     expect(admission.isAcceptedPeer('self-peer')).toBe(true);
     expect(admission.isAcceptedPeer('unknown-peer')).toBe(false);
+    expect(admission.isRejectedPeer('unknown-peer')).toBe(false);
   });
 
   it('promotes verified same-network peers and excludes quarantined peers', () => {
@@ -33,6 +34,7 @@ describe('NetworkAdmissionService', () => {
 
     admission.quarantinePeer('verified-peer');
     expect(admission.isAcceptedPeer('verified-peer')).toBe(false);
+    expect(admission.isRejectedPeer('verified-peer')).toBe(true);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
 

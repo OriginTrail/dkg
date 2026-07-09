@@ -146,6 +146,7 @@ import {
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
+import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
 import {
@@ -1814,11 +1815,14 @@ export class AgentRegistryMethods extends DKGAgentBase {
     });
   }
 
-  async assertPeerAdmittedForExplicitConnect(this: DKGAgent, peerId: string, ctx: OperationContext): Promise<void> {
-    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx)) return;
-    const error = new Error(`Peer ${peerId} is not admitted for the active DKG network`);
-    (error as any).code = 'NETWORK_ADMISSION_REJECTED';
-    throw error;
+  async assertPeerAdmittedForExplicitConnect(
+    this: DKGAgent,
+    peerId: string,
+    ctx: OperationContext,
+    options?: NetworkAdmissionAttemptOptions,
+  ): Promise<void> {
+    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx, options)) return;
+    throw new NetworkAdmissionRejectedError(peerId);
   }
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
@@ -1905,13 +1909,20 @@ export class AgentRegistryMethods extends DKGAgentBase {
       throw error;
     }
 
+    const startedAt = Date.now();
+    const signal = AbortSignal.timeout(timeoutMs);
+    const remainingTimeoutMs = () => Math.max(0, timeoutMs - (Date.now() - startedAt));
+
     // Fast-path: already connected (e.g. via gossipsub mesh / mDNS / a
     // prior invite). Resolver step 1 would also short-circuit on this,
     // but the early return preserves the existing log message and skips
     // the rest of the resolution machinery entirely.
     const existing = this.node.libp2p.getConnections(peerId);
     if (existing.length > 0) {
-      await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx);
+      await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+        signal,
+        timeoutMs: remainingTimeoutMs(),
+      });
       this.log.info(ctx, `Already connected to ${peerIdStr}`);
       return;
     }
@@ -1922,9 +1933,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
     // final dial, so a slow DHT walk plus a slow dial could exceed the
     // caller's deadline by a wide margin. Using one signal threads the
     // remaining budget through both phases.
-    const startedAt = Date.now();
-    const signal = AbortSignal.timeout(timeoutMs);
-
     this.log.info(ctx, `Resolving ${peerIdStr} via PeerResolver...`);
     const addrs = await this.peerResolver.resolve(peerIdStr, {
       signal,
@@ -1989,7 +1997,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (error as any).code = 'DIAL_FAILED';
       throw error;
     }
-    await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx);
+    await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+      signal,
+      timeoutMs: remainingTimeoutMs(),
+    });
     this.log.info(ctx, `Connected to ${peerIdStr}`);
   }
 

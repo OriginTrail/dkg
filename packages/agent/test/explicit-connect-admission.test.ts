@@ -55,6 +55,7 @@ describe('explicit connect network admission', () => {
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
+      undefined,
     );
   });
 
@@ -83,6 +84,35 @@ describe('explicit connect network admission', () => {
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
+    );
+  });
+
+  it('rejects an already-connected peer-id connect when admission fails before success', async () => {
+    const agent = makeAgent({
+      node: {
+        peerId: '12D3KooWLocalExplicitConnectAdmissionTest11111111111',
+        libp2p: {
+          getConnections: vi.fn(() => [{ remotePeer: { toString: () => PEER_ID } }]),
+          dial: vi.fn(async () => undefined),
+        },
+      },
+    });
+
+    await expect(
+      AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
+
+    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
+      PEER_ID,
+      expect.objectContaining({ operationName: 'connect' }),
+      expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
+    );
+    expect(agent.peerResolver.resolve).not.toHaveBeenCalled();
+    expect(agent.node.libp2p.dial).not.toHaveBeenCalled();
+    expect(agent.log.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ operationName: 'connect' }),
+      expect.stringContaining('Already connected'),
     );
   });
 });

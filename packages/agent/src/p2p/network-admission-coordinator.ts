@@ -26,7 +26,7 @@ export interface NetworkAdmissionCoordinatorOptions {
   sendIdentityProbe: (
     peerId: string,
     data: Uint8Array,
-    options: { timeoutMs: number },
+    options: { timeoutMs: number; signal?: AbortSignal },
   ) => Promise<Uint8Array>;
   getConnections: () => Iterable<NetworkAdmissionConnection>;
   deletePeerFromPeerStore: (peerId: string) => Promise<void>;
@@ -36,6 +36,11 @@ export interface NetworkAdmissionCoordinatorOptions {
     warn(ctx: OperationContext, message: string): void;
   };
   probeTimeoutMs?: number;
+}
+
+export interface NetworkAdmissionAttemptOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface NetworkIdentityProtocolRegistrar {
@@ -48,6 +53,15 @@ export class NetworkAdmissionProbeError extends Error {
   constructor(peerId: string, reason: string) {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
+  }
+}
+
+export class NetworkAdmissionRejectedError extends Error {
+  readonly code = 'NETWORK_ADMISSION_REJECTED';
+
+  constructor(peerId: string) {
+    super(`Peer ${peerId} is not admitted for the active DKG network`);
+    this.name = 'NetworkAdmissionRejectedError';
   }
 }
 
@@ -82,7 +96,13 @@ export class NetworkAdmissionCoordinator {
   }
 
   isAcceptedPeer(peerId: string): boolean {
+    if (!this.identity?.networkId) return true;
     return this.admission.isAcceptedPeer(peerId);
+  }
+
+  isRejectedPeer(peerId: string): boolean {
+    if (!this.identity?.networkId) return false;
+    return this.admission.isRejectedPeer(peerId);
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
@@ -113,22 +133,30 @@ export class NetworkAdmissionCoordinator {
     });
   }
 
-  async ensureAdmitted(remotePeer: string, ctx: OperationContext): Promise<boolean> {
+  async ensureAdmitted(
+    remotePeer: string,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions = {},
+  ): Promise<boolean> {
     if (!this.identity?.networkId) return true;
     if (this.admission.isAcceptedPeer(remotePeer)) return true;
 
     const existing = this.inFlight.get(remotePeer);
-    if (existing) return existing;
+    if (existing) return this.raceAdmissionSignal(existing, options.signal);
 
-    const promise = this.probePeer(remotePeer, ctx)
+    const promise = this.probePeer(remotePeer, ctx, options)
       .finally(() => {
         this.inFlight.delete(remotePeer);
       });
     this.inFlight.set(remotePeer, promise);
-    return promise;
+    return this.raceAdmissionSignal(promise, options.signal);
   }
 
-  private async probePeer(remotePeer: string, ctx: OperationContext): Promise<boolean> {
+  private async probePeer(
+    remotePeer: string,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions,
+  ): Promise<boolean> {
     const identity = this.identity;
     if (!identity?.networkId) return true;
 
@@ -140,11 +168,15 @@ export class NetworkAdmissionCoordinator {
     });
 
     let response: Uint8Array;
+    const timeoutMs = Math.min(this.probeTimeoutMs, options.timeoutMs ?? this.probeTimeoutMs);
+    if (options.signal?.aborted) {
+      throw abortErrorFromSignal(options.signal.reason);
+    }
     try {
       response = await this.sendIdentityProbe(
         remotePeer,
         new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs: this.probeTimeoutMs },
+        { timeoutMs, signal: options.signal },
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -174,6 +206,30 @@ export class NetworkAdmissionCoordinator {
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
     return false;
+  }
+
+  private raceAdmissionSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
+
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      const onAbort = () => {
+        cleanup();
+        reject(abortErrorFromSignal(signal.reason));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (err) => {
+          cleanup();
+          reject(err);
+        },
+      );
+    });
   }
 
   private async rejectPeer(remotePeer: string, ctx: OperationContext, reason: string): Promise<void> {
@@ -206,4 +262,11 @@ export class NetworkAdmissionCoordinator {
       this.log?.info(ctx, `Rejected peer ${shortPeer}: peerstore cleanup skipped/failed: ${message}`);
     }
   }
+}
+
+function abortErrorFromSignal(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  const error = new Error('Network admission aborted');
+  error.name = 'AbortError';
+  return error;
 }

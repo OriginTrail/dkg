@@ -469,6 +469,52 @@ describe('ProtocolRouter', () => {
       expect(admittedCalls).toEqual([['not-a-libp2p-peer-id', '/dkg/test/1.0.0', 'outbound']]);
       expect(dialCalls).toBe(0);
     });
+
+    it('bounds outbound admission with the caller send timeout before dialing', async () => {
+      let dialCalls = 0;
+      let admissionOptions: { signal?: AbortSignal; timeoutMs?: number } | undefined;
+      const node = {
+        libp2p: {
+          getConnections: () => {
+            throw new Error('getConnections should not be reached');
+          },
+          dialProtocol: async () => {
+            dialCalls += 1;
+            throw new Error('dialProtocol should not be reached');
+          },
+          handle: () => undefined,
+          unhandle: () => undefined,
+          peerStore: { get: async () => { throw new Error('NotFound'); } },
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: async (_peerId, _protocolId, _direction, options) => {
+          admissionOptions = options;
+          const signal = options?.signal;
+          if (!signal) throw new Error('missing admission signal');
+          await new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(signal.reason instanceof Error ? signal.reason : new Error('admission aborted')),
+              { once: true },
+            );
+          });
+          return true;
+        },
+      });
+
+      const startedAt = Date.now();
+      await expect(
+        router.send('not-a-libp2p-peer-id', '/dkg/test/1.0.0', new Uint8Array([1]), {
+          timeoutMs: 50,
+        }),
+      ).rejects.toThrow(/aborted|timeout|operation/i);
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(admissionOptions?.signal).toBeDefined();
+      expect(admissionOptions?.timeoutMs).toBe(50);
+      expect(dialCalls).toBe(0);
+    });
   });
 
   describe('send() node stop abort propagation', () => {

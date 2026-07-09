@@ -96,6 +96,13 @@ export interface SendOptions {
   signal?: AbortSignal;
 }
 
+export interface AdmissionCheckOptions {
+  /** Shared operation cancellation signal; admission must not outlive the caller. */
+  signal?: AbortSignal;
+  /** Remaining operation timeout for admission probes that need their own timer. */
+  timeoutMs?: number;
+}
+
 export interface ProtocolRouterOptions {
   maxReadBytes?: number;
   /**
@@ -136,6 +143,7 @@ export interface ProtocolRouterOptions {
     peerId: string,
     protocolId: string,
     direction: 'inbound' | 'outbound',
+    options?: AdmissionCheckOptions,
   ) => boolean | Promise<boolean>;
   admissionExemptProtocols?: Iterable<string>;
 }
@@ -204,9 +212,10 @@ export class ProtocolRouter {
     peerId: string,
     protocolId: string,
     direction: 'inbound' | 'outbound',
+    options?: AdmissionCheckOptions,
   ): Promise<void> {
     if (!this.isPeerAccepted || this.admissionExemptProtocols.has(protocolId)) return;
-    const accepted = await this.isPeerAccepted(peerId, protocolId, direction);
+    const accepted = await this.isPeerAccepted(peerId, protocolId, direction, options);
     if (accepted) return;
     throw new Error(
       `peer ${peerId.slice(-8)} is not admitted for ${direction} protocol ${protocolId}`,
@@ -354,7 +363,9 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
-        await this.requirePeerAccepted(remote.toString(), logicalProtocolId, 'inbound');
+        await this.requirePeerAccepted(remote.toString(), logicalProtocolId, 'inbound', {
+          signal: handlerSignal,
+        });
         const responseData = await handler(requestData, wrappedPeerId, { signal: handlerSignal });
         if (handlerSignal?.aborted) throw asAbortError(handlerSignal.reason);
         return responseData;
@@ -430,7 +441,9 @@ export class ProtocolRouter {
       try {
         const remotePeer = connection.remotePeer.toString();
         const requestData = await readAllWithSignal(stream, limit, handlerSignal);
-        await this.requirePeerAccepted(remotePeer, protocolId, 'inbound');
+        await this.requirePeerAccepted(remotePeer, protocolId, 'inbound', {
+          signal: handlerSignal,
+        });
         const peerId = {
           toString: () => remotePeer,
           toBytes: () => connection.remotePeer.toMultihash().bytes,
@@ -561,7 +574,16 @@ export class ProtocolRouter {
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
     const parallelPaths = Math.max(1, Math.floor(opts.parallelPaths ?? 1));
-    await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound');
+    const overallStartedAt = Date.now();
+    const overallDeadline = AbortSignal.timeout(timeoutMs);
+    const stopSignal = this.node.stopSignal;
+    const budgetSignal = composeAbortSignals(overallDeadline, opts.signal) ?? overallDeadline;
+    const overallSignal = composeAbortSignals(budgetSignal, stopSignal) ?? budgetSignal;
+    if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
+    await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', {
+      signal: overallSignal,
+      timeoutMs,
+    });
 
     // Pooled overlay short-circuit. When `enablePooling(protocolId)`
     // has been called for this logical protocol AND the peer hasn't
@@ -586,13 +608,6 @@ export class ProtocolRouter {
     // fallback honors. The shared signal aborts BOTH the pool
     // attempt and any one-shot retry as soon as the overall budget
     // is exhausted.
-    const overallStartedAt = Date.now();
-    const overallDeadline = AbortSignal.timeout(timeoutMs);
-    const stopSignal = this.node.stopSignal;
-    const budgetSignal = composeAbortSignals(overallDeadline, opts.signal) ?? overallDeadline;
-    const overallSignal = composeAbortSignals(budgetSignal, stopSignal) ?? budgetSignal;
-    if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
-
     const overlay = this.pooledByLogical.get(protocolId);
     const memoizedVariant = this.peerWireVariantFor(peerIdStr, protocolId);
     if (overlay && memoizedVariant !== 'one-shot') {

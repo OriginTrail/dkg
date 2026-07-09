@@ -11,10 +11,12 @@ const identity = {
 };
 
 function buildCoordinator(input: {
-  sendIdentityProbe: () => Promise<Uint8Array>;
+  sendIdentityProbe: (...args: any[]) => Promise<Uint8Array>;
+  identity?: typeof identity;
+  probeTimeoutMs?: number;
 }) {
   const admission = new NetworkAdmissionService({
-    networkId: identity.networkId,
+    networkId: input.identity?.networkId ?? identity.networkId,
     selfPeerId: SELF_PEER_ID,
   });
   const close = vi.fn();
@@ -23,7 +25,7 @@ function buildCoordinator(input: {
   const cleanupRejectedPeerState = vi.fn();
   const coordinator = new NetworkAdmissionCoordinator({
     admission,
-    identity,
+    identity: input.identity,
     selfPeerId: SELF_PEER_ID,
     sign: async () => new Uint8Array(),
     sendIdentityProbe: input.sendIdentityProbe,
@@ -34,6 +36,7 @@ function buildCoordinator(input: {
     }],
     deletePeerFromPeerStore,
     cleanupRejectedPeerState,
+    ...(input.probeTimeoutMs !== undefined ? { probeTimeoutMs: input.probeTimeoutMs } : {}),
   });
 
   return {
@@ -47,8 +50,22 @@ function buildCoordinator(input: {
 }
 
 describe('NetworkAdmissionCoordinator', () => {
+  it('accepts every peer synchronously when network identity is disabled', () => {
+    const fixture = buildCoordinator({
+      identity: undefined,
+      sendIdentityProbe: async () => {
+        throw new Error('probe should not run');
+      },
+    });
+
+    expect(fixture.coordinator.enabled).toBe(false);
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
+  });
+
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
     const fixture = buildCoordinator({
+      identity,
       sendIdentityProbe: async () => {
         throw new Error('stream timeout');
       },
@@ -58,6 +75,8 @@ describe('NetworkAdmissionCoordinator', () => {
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
 
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
     expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
     expect(fixture.admission.snapshot().verifiedPeerIds).toEqual([]);
     expect(fixture.cleanupRejectedPeerState).not.toHaveBeenCalled();
@@ -68,6 +87,7 @@ describe('NetworkAdmissionCoordinator', () => {
 
   it('keeps unreadable probe responses retryable instead of quarantining the peer', async () => {
     const fixture = buildCoordinator({
+      identity,
       sendIdentityProbe: async () => new TextEncoder().encode('{not json'),
     });
 
@@ -80,8 +100,33 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.deletePeerFromPeerStore).not.toHaveBeenCalled();
   });
 
+  it('passes caller cancellation and remaining timeout into identity probes', async () => {
+    const callerSignal = AbortSignal.timeout(5_000);
+    let seenOptions: { timeoutMs: number; signal?: AbortSignal } | undefined;
+    const fixture = buildCoordinator({
+      identity,
+      probeTimeoutMs: 3_000,
+      sendIdentityProbe: async (_peerId, _data, options) => {
+        seenOptions = options;
+        return new TextEncoder().encode('{not json');
+      },
+    });
+
+    await expect(
+      fixture.coordinator.ensureAdmitted(
+        REMOTE_PEER_ID,
+        createOperationContext('connect'),
+        { signal: callerSignal, timeoutMs: 100 },
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+
+    expect(seenOptions).toMatchObject({ timeoutMs: 100 });
+    expect(seenOptions?.signal).toBe(callerSignal);
+  });
+
   it('quarantines peers with a parsed but mismatched network identity proof', async () => {
     const fixture = buildCoordinator({
+      identity,
       sendIdentityProbe: async () => new TextEncoder().encode(JSON.stringify({
         version: 1,
         peerId: REMOTE_PEER_ID,
@@ -97,6 +142,7 @@ describe('NetworkAdmissionCoordinator', () => {
     ).resolves.toBe(false);
 
     expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([REMOTE_PEER_ID]);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(true);
     expect(fixture.cleanupRejectedPeerState).toHaveBeenCalledWith(REMOTE_PEER_ID);
     expect(fixture.close).toHaveBeenCalledTimes(1);
     expect(fixture.deletePeerFromPeerStore).toHaveBeenCalledWith(REMOTE_PEER_ID);
