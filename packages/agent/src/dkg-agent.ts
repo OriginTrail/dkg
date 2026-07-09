@@ -114,6 +114,7 @@ import {
   KA_ID_PRED, RESERVED_UAL_PRED,
   type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams, type LiftAuthorityProof, type LiftTransitionType,
   type ACKCollectorDeps,
+  type ACKTransportFactory,
   type LiftRequest, type LiftRequestAuthorSeal,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
@@ -341,7 +342,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
-  type DKGAgentACKTransport,
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
@@ -430,7 +430,6 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
-  DKGAgentACKTransport,
   DKGAgentACKTransportOptions,
   ImportedArtifactByteStore,
 };
@@ -1722,7 +1721,7 @@ export class DKGAgent extends DKGAgentBase {
 
   public createACKTransportFactory(
     options: DKGAgentACKTransportOptions = {},
-  ): () => DKGAgentACKTransport {
+  ): ACKTransportFactory {
     const timeoutMs = options.sendTimeoutMs ?? this.config.storageAckTiming.sendTimeoutMs;
     return () => ({
       publisherPeerId: this.peerId,

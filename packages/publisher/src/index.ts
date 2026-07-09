@@ -77,6 +77,10 @@ export {
   type ACKCollectionResult,
 } from './ack-collector.js';
 export {
+  type ACKTransport,
+  type ACKTransportFactory,
+} from './ack-transport.js';
+export {
   selectACKCandidatePeers,
   type ACKCandidatePeerSelectionInput,
 } from './ack-peer-selection.js';
