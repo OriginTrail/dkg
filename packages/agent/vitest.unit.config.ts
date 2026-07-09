@@ -44,6 +44,7 @@ export default defineConfig({
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
+      "test/ka-lifecycle-asset-ual-timeout.test.ts",
       "test/v10-ack-provider-wiring.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",

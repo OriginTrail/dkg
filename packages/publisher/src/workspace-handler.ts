@@ -52,6 +52,9 @@ export type WorkspaceAssetUalResolver = (
   input: { agentAddress: string; kaNumber: string },
 ) => string | undefined | Promise<string | undefined>;
 
+const WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
+const WORKSPACE_ASSET_UAL_TIMEOUT = Symbol('workspace-asset-ual-timeout');
+
 type SharedMemoryLifecycleValue = string | number | bigint | (() => string | number | bigint | undefined);
 
 export interface SharedMemoryLifecycleLogOptions {
@@ -1426,10 +1429,26 @@ export class SharedMemoryHandler {
     }
     if (normalizedKaNumber < 0n) return undefined;
     try {
-      return await this.assetUalForKaIdentity({
-        agentAddress: normalizedAgentAddress,
-        kaNumber: normalizedKaNumber.toString(),
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<typeof WORKSPACE_ASSET_UAL_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(WORKSPACE_ASSET_UAL_TIMEOUT), WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS);
+        timer.unref?.();
       });
+      const assetUal = await Promise.race([
+        Promise.resolve(this.assetUalForKaIdentity({
+          agentAddress: normalizedAgentAddress,
+          kaNumber: normalizedKaNumber.toString(),
+        })).finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+      if (assetUal === WORKSPACE_ASSET_UAL_TIMEOUT) {
+        this.log.warn(
+          ctx,
+          `SWM assetUal derivation exceeded ${WORKSPACE_ASSET_UAL_RESOLVE_TIMEOUT_MS}ms; continuing without lifecycle assetUal`,
+        );
+        return undefined;
+      }
+      return assetUal;
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       this.log.warn(ctx, `SWM assetUal derivation failed: ${reason}`);

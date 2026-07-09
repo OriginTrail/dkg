@@ -1,6 +1,8 @@
 import {
   assertSafeIri,
   contextGraphSharedMemoryUri,
+  MemoryLayer,
+  parseContextGraphLayerUri,
   sparqlString,
   type PublishIntentMsg,
 } from '@origintrail-official/dkg-core';
@@ -12,11 +14,6 @@ export interface StorageAckLifecycleAssetUalInput {
   store: TripleStore;
   chain: ChainAdapter;
   intent: PublishIntentMsg;
-}
-
-interface StorageAckLifecycleSwmIdentity {
-  agentAddress: string;
-  kaNumber: bigint;
 }
 
 export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(
@@ -54,12 +51,17 @@ export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(
   `, { source: 'agent.storageAckLifecycleAssetUal' });
   if (result.type !== 'bindings') return undefined;
 
-  const identities = new Map<string, StorageAckLifecycleSwmIdentity>();
+  const identities = new Map<string, { agentAddress: string; kaNumber: bigint }>();
   for (const row of result.bindings) {
     const graphUri = normalizeBindingIri(row.g);
     if (!graphUri) continue;
-    const identity = parseStorageAckLifecycleSwmIdentity(graphUri, baseSwmGraph);
-    if (!identity) continue;
+    const identity = parseContextGraphLayerUri(graphUri);
+    if (
+      !identity ||
+      identity.layer !== MemoryLayer.SharedWorkingMemory ||
+      identity.contextGraphId !== swmGraphId ||
+      identity.subGraphName !== subGraphName
+    ) continue;
     const key = `${identity.agentAddress.toLowerCase()}/${identity.kaNumber.toString()}`;
     identities.set(key, identity);
   }
@@ -70,28 +72,6 @@ export async function resolveStorageAckLifecycleAssetUalFromLocalSwm(
     agentAddress: identity.agentAddress,
     kaNumber: identity.kaNumber,
   });
-}
-
-export function parseStorageAckLifecycleSwmIdentity(
-  graphUri: string,
-  baseSwmGraph: string,
-): StorageAckLifecycleSwmIdentity | undefined {
-  const prefix = `${baseSwmGraph}/`;
-  if (!graphUri.startsWith(prefix)) return undefined;
-  const relative = graphUri.slice(prefix.length);
-  if (relative.startsWith('staging/')) return undefined;
-  const segments = relative.split('/');
-  if (segments.length !== 2) return undefined;
-
-  const [agentAddress, kaNumberRaw] = segments;
-  if (
-    !/^0x[0-9a-fA-F]{40}$/.test(agentAddress) ||
-    !/^\d+$/.test(kaNumberRaw)
-  ) return undefined;
-  return {
-    agentAddress,
-    kaNumber: BigInt(kaNumberRaw),
-  };
 }
 
 function normalizeBindingIri(value: string | undefined): string | undefined {

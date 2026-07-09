@@ -4,6 +4,7 @@ import {
   TRUST_LEVEL_PREDICATE,
   TrustLevel,
   TypedEventBus,
+  encodeWorkspacePublishRequest,
   generateEd25519Keypair,
   DKG_ENTITY,
   DKG_ROOT_ENTITY_LEGACY,
@@ -11,6 +12,7 @@ import {
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   DKGPublisher,
+  SharedMemoryHandler,
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
 } from '../src/index.js';
@@ -417,6 +419,41 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
+  });
+});
+
+describe('SharedMemoryHandler lifecycle UAL derivation', () => {
+  it('does not block SWM apply when the log-only asset UAL resolver stalls', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      assetUalForKaIdentity: () => new Promise<string>(() => {}),
+    });
+    const msg = encodeWorkspacePublishRequest({
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: new TextEncoder().encode(
+        `<urn:test:root:one> <http://schema.org/name> "value" <${CONTEXT_GRAPH_URI}> .`,
+      ),
+      manifest: [{ rootEntity: 'urn:test:root:one', privateTripleCount: 0 }],
+      publisherPeerId: '12D3KooWPeer',
+      shareOperationId: 'op-lifecycle-timeout',
+      timestampMs: Date.now(),
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      kaNumber: '7',
+    });
+
+    const outcome = await Promise.race([
+      handler.handle(msg, '12D3KooWPeer'),
+      new Promise<'timed-out'>((resolve) => setTimeout(() => resolve('timed-out'), 250)),
+    ]);
+
+    expect(outcome).not.toBe('timed-out');
+    expect(outcome).toMatchObject({
+      applied: true,
+      cgId: CONTEXT_GRAPH,
+      shareOperationId: 'op-lifecycle-timeout',
+      publisherPeerId: '12D3KooWPeer',
+      insertedTriples: 1,
+    });
   });
 });
 

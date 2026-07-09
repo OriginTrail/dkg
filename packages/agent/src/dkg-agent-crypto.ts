@@ -216,6 +216,7 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
+
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   ensureWorkspaceEncryptionKey,
@@ -381,6 +382,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+
+const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
@@ -2283,7 +2286,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     }
     await this.saveSwmSenderKeyState();
 
-    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(decrypted.plaintext);
+    const assetUal = await this.resolveKaLifecycleAssetUalFromWorkspacePlaintext(decrypted.plaintext, ctx);
     if (assetUal) {
       logKaLifecycleEvent(this.log, ctx, {
         assetUal,
@@ -2320,19 +2323,36 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return decrypted.plaintext;
   }
 
-  async resolveKaLifecycleAssetUalFromWorkspacePlaintext(this: DKGAgent, plaintext: Uint8Array): Promise<string | undefined> {
+  async resolveKaLifecycleAssetUalFromWorkspacePlaintext(this: DKGAgent, plaintext: Uint8Array, ctx?: OperationContext): Promise<string | undefined> {
     try {
       const request = decodeWorkspacePublishRequest(plaintext);
-      return this.resolveKaLifecycleAssetUalFromIdentity(request.agentAddress, request.kaNumber);
+      return this.resolveKaLifecycleAssetUalFromIdentity(request.agentAddress, request.kaNumber, ctx);
     } catch {
       return undefined;
     }
   }
 
-  async resolveKaLifecycleAssetUalFromIdentity(this: DKGAgent, agentAddress?: string, kaNumber?: string): Promise<string | undefined> {
+  async resolveKaLifecycleAssetUalFromIdentity(this: DKGAgent, agentAddress?: string, kaNumber?: string, ctx?: OperationContext): Promise<string | undefined> {
     if (!agentAddress || !kaNumber) return undefined;
     try {
-      return await resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
+        timer = setTimeout(() => resolve(TIMEOUT_SENTINEL), KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS);
+        timer.unref?.();
+      });
+      const result = await Promise.race([
+        resolveAssetUalFromKaIdentity(this.chain, { agentAddress, kaNumber })
+          .finally(() => { if (timer) clearTimeout(timer); }),
+        timeout,
+      ]);
+      if (result === TIMEOUT_SENTINEL) {
+        this.log.warn(
+          ctx ?? createOperationContext('share'),
+          `KA lifecycle assetUal derivation exceeded ${KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS}ms; continuing without lifecycle assetUal`,
+        );
+        return undefined;
+      }
+      return result;
     } catch {
       return undefined;
     }
