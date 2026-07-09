@@ -94,15 +94,18 @@ export class EndpointStickiness {
     // idx < 0: preferred no longer configured (pool rebind dropped it).
     // idx === 0: preferred IS the primary — canonical already tries it first.
     if (idx <= 0) return canonical;
-    // The TTL re-probe is a READ-recovery mechanism: it periodically re-tries the
-    // configured primary so a recovered primary resumes serving READS. It must NOT
-    // redirect a nonce-critical populate — a primary can be transport-healthy while
-    // still behind the block/txpool state that advanced the signer nonce, so
-    // populating there would sign a stale/duplicate nonce. A `nonceWrite` therefore
-    // keeps its populate-proven backend past the TTL; writes return to the primary
-    // only once a READ re-probe CLEARS the preference on primary recovery (or the
-    // backend fails, see recordFailure).
-    if (intent !== 'nonceWrite' && this.cfg.now() >= pref.primaryProbeDueAt) {
+    // The TTL re-probe is a READ-recovery mechanism (only `stickyRead`): it
+    // periodically re-tries the configured primary so a recovered primary resumes
+    // serving reads. It must NOT redirect ANY write — a primary can be
+    // transport-healthy while still behind the block/txpool state that advanced the
+    // signer nonce, so (a) a `nonceWrite` populate there would sign a stale/duplicate
+    // nonce, and (b) a `write` broadcast/receipt there would split a backup-signed tx
+    // across endpoints and a lagging primary could reject the backup's nonce
+    // terminally before the loop reaches the backup. Writes therefore keep the
+    // write-proven backend past the TTL; they return to the primary only once a READ
+    // re-probe CLEARS the preference on primary recovery (or the backend fails, see
+    // recordFailure).
+    if (intent === 'stickyRead' && this.cfg.now() >= pref.primaryProbeDueAt) {
       // Re-probe the configured primary this op; schedule the next re-probe one TTL
       // out so we don't re-stall on it again until then.
       this.state = { ...pref, primaryProbeDueAt: this.cfg.now() + this.cfg.ttlMs };

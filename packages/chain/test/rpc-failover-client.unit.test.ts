@@ -821,6 +821,33 @@ describe('RpcFailoverClient — endpoint stickiness (Mechanism B)', () => {
     expect(primary.read.calls).toHaveLength(0);
   });
 
+  it('AC-29: past the TTL, a WRITE (broadcast) stays on the write-proven backend — NOT re-probed to the primary (which could reject the backup-signed nonce terminally) (round-11 🔴)', async () => {
+    let clock = 0;
+    const p0: any = {}; const p1: any = {};
+    const populateOrder: string[] = [];
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    // populate: primary 429s, backup ok → write-proven backup.
+    const contract = { connect: (s: any) => ({ doWrite: { populateTransaction: () => { const w = s.boundTo === p0 ? 'primary' : 'backup'; populateOrder.push(w); return w === 'primary' ? Promise.reject(retryable429()) : Promise.resolve({ to: '0xTO', data: '0x' }); } } }) } as any;
+    // broadcast: primary throws a NON-RETRYABLE nonce error (would terminate the loop if tried first); backup ok.
+    const nonceTooHigh = () => { const e: any = new Error('nonce too high'); e.code = 'CALL_EXCEPTION'; return e; };
+    p0.broadcastTransaction = recorder(async () => { throw nonceTooHigh(); });
+    p1.broadcastTransaction = recorder(async () => undefined);
+    const client = makeClient([p0, p1], STICKY_URLS, signPopulated as SignPopulatedFn, { enabled: true, ttlMs: 30_000, now: () => clock });
+
+    clock = 0;
+    await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'w'); // establish write-proven backup
+    expect(populateOrder).toEqual(['primary', 'backup']);
+
+    // Past the TTL, broadcast the backup-signed tx. It must try the BACKUP first
+    // (where the tx was signed / nonce is consistent), NOT re-probe the primary
+    // (which is behind and rejects the nonce with a NON-retryable error the broadcast
+    // loop would treat as terminal, never reaching the backup).
+    clock = 40_000;
+    await client.broadcast('0xS', '0xH', 'w');
+    expect(p1.broadcastTransaction.calls).toHaveLength(1); // backup FIRST, succeeded
+    expect(p0.broadcastTransaction.calls).toHaveLength(0); // primary NOT re-probed. (Bug: primary throws terminally.)
+  });
+
   it('AC-10: a populateAndSign failover primes the preferred for the following read (the 4th loop establishes too)', async () => {
     const p0 = { read: recorder(async () => { throw retryable429(); }) };
     const p1 = { read: recorder(async () => 'BACKUP-READ') };
