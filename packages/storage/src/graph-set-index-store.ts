@@ -14,7 +14,7 @@ export type GraphSetMutationSource =
   | 'query';
 
 type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
-type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
+type PendingFullRefreshSource = 'deleteByPattern' | 'query' | 'update';
 
 export type GraphSetMutationEvent =
   | {
@@ -154,6 +154,9 @@ export class GraphSetIndexStore implements TripleStore {
   async hasGraph(graphUri: string): Promise<boolean> {
     if (!this.enabled) {
       return this.inner.hasGraph(graphUri);
+    }
+    if (this.pendingFullRefresh) {
+      return (await this.ensureGraphSet()).has(graphUri);
     }
     const hasGraph = await this.inner.hasGraph(graphUri);
     const indexed = this.graphs?.has(graphUri);

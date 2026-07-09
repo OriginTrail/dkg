@@ -81,7 +81,7 @@ class MutationHookStore extends CountingStore {
   constructor(
     inner: TripleStore,
     private readonly hooks: {
-      onQuery?: (input: MutationHookInput) => Promise<QueryResult | void> | QueryResult | void;
+      onQuery?: (input: MutationHookInput) => Promise<QueryResult | undefined> | QueryResult | undefined;
       onUpdate?: (input: MutationHookInput) => Promise<void> | void;
     },
   ) {
@@ -91,7 +91,8 @@ class MutationHookStore extends CountingStore {
   async query(sparql: string): Promise<QueryResult> {
     if (this.hooks.onQuery) {
       const seq = this.querySeq++;
-      return (await this.hooks.onQuery({ sparql, seq, inner: this.inner })) ?? emptyBindings();
+      const result = await this.hooks.onQuery({ sparql, seq, inner: this.inner });
+      if (result !== undefined) return result;
     }
     return super.query(sparql);
   }
@@ -191,6 +192,35 @@ describe('GraphSetIndexStore', () => {
     });
   });
 
+  it('preserves deferred mutation source when hasGraph reads before listGraphs', async () => {
+    const graph = 'did:dkg:context-graph:has-before-list';
+    const counting = new CountingStore(new OxigraphStore());
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, { onMutation: (event) => events.push(event) });
+    await store.insert([q(graph)]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await store.deleteByPattern({ predicate: 'urn:p' });
+    expect(counting.listGraphsCalls).toBe(1);
+
+    await expect(store.hasGraph(graph)).resolves.toBe(false);
+    expect(counting.listGraphsCalls).toBe(2);
+    await expect(store.listGraphs()).resolves.toEqual([]);
+    expect(counting.listGraphsCalls).toBe(2);
+    expect(events).toContainEqual({
+      type: 'graph-set-revalidated',
+      added: [],
+      removed: [graph],
+      source: 'deleteByPattern',
+    });
+    expect(events).not.toContainEqual({
+      type: 'graph-removed',
+      graph,
+      source: 'revalidate',
+    });
+  });
+
   it('revalidates after the configured interval to discover out-of-contract writers', async () => {
     let now = 1_000;
     const inner = new OxigraphStore();
@@ -271,6 +301,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner }) => {
         await inner.insert([q(graph)]);
+        return emptyBindings();
       },
     });
     const events: GraphSetMutationEvent[] = [];
@@ -304,6 +335,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner }) => {
         await inner.insert([q(graph)]);
+        return emptyBindings();
       },
     });
     const store = new GraphSetIndexStore(counting);
@@ -317,6 +349,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner, seq }) => {
         await inner.insert([q(`did:dkg:context-graph:seq-${seq}`)]);
+        return emptyBindings();
       },
     });
     const events: GraphSetMutationEvent[] = [];
@@ -359,6 +392,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner, seq }) => {
         await inner.insert([q(`did:dkg:context-graph:seq-${seq}`)]);
+        return emptyBindings();
       },
     });
     const store = new GraphSetIndexStore(counting, { revalidateMs: 100_000, now: () => now });
@@ -417,6 +451,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner }) => {
         await inner.deleteByPattern({ graph });
+        return emptyBindings();
       },
     });
     const events: GraphSetMutationEvent[] = [];
@@ -468,6 +503,7 @@ describe('GraphSetIndexStore', () => {
     const counting = new MutationHookStore(new OxigraphStore(), {
       onQuery: async ({ inner }) => {
         await inner.insert([q('did:dkg:context-graph:mixed-query')]);
+        return emptyBindings();
       },
       onUpdate: async ({ inner, seq }) => {
         await inner.insert([q(`did:dkg:context-graph:update-${seq}`)]);
