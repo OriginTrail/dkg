@@ -450,6 +450,43 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'autoUpdate.buildTimeoutMs')).toBeUndefined();
   });
 
+  it('warns when git tag-signature verification is enabled for a branch ref', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: true,
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    const warning = findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature');
+    expect(warning).toBeDefined();
+    expect(warning!.severity).toBe('warning');
+    expect(warning!.message).toContain('refs/heads/main');
+  });
+
+  it('does not warn when git tag-signature verification targets a tag ref', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            ref: 'refs/tags/v10.0.8',
+            verifyTagSignature: true,
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
+  });
+
   it('errors on checkIntervalMinutes < 1', async () => {
     const deps = makeDeps({
       fs: { '/test/.dkg/config.json': JSON.stringify({ autoUpdate: { checkIntervalMinutes: 0 } }) },

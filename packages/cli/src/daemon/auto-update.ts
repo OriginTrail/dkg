@@ -1243,7 +1243,7 @@ async function _performUpdateInner(
 
   try {
     const maybeTag = parseTagName(ref);
-    const fetchRef = maybeTag ? `${ref}:${ref}` : ref;
+    const fetchRef = maybeTag ? `+${ref}:${ref}` : ref;
     const fetchStartedAt = Date.now();
     log(
       `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,

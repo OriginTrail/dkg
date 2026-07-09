@@ -110,6 +110,19 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
       });
     }
 
+    if (gitMode && au.verifyTagSignature === true) {
+      const resolvedRef = normalizeAutoUpdateRefForDoctor(au);
+      if (!resolvedRef.startsWith('refs/tags/')) {
+        findings.push({
+          check: 'config-sanity',
+          severity: 'warning',
+          message: `autoUpdate.verifyTagSignature is inert for non-tag ref: ${JSON.stringify(resolvedRef)}`,
+          advisory: "Git tag-signature verification only applies to refs/tags/*. Set autoUpdate.ref to a signed tag ref, or set verifyTagSignature to false so the config does not imply branch updates are signature-verified.",
+          subject: 'autoUpdate.verifyTagSignature',
+        });
+      }
+    }
+
     const checkIntervalMinutes = au.checkIntervalMinutes;
     if (checkIntervalMinutes !== undefined) {
       const n = typeof checkIntervalMinutes === 'number' ? checkIntervalMinutes : Number(checkIntervalMinutes);
@@ -136,4 +149,14 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
   }
 
   return findings;
+}
+
+function normalizeAutoUpdateRefForDoctor(au: Record<string, unknown>): string {
+  const rawRef = typeof au.ref === 'string'
+    ? au.ref
+    : typeof au.branch === 'string'
+      ? au.branch
+      : 'main';
+  const trimmed = rawRef.trim() || 'main';
+  return trimmed.startsWith('refs/') ? trimmed : `refs/heads/${trimmed}`;
 }

@@ -2108,6 +2108,12 @@ export async function runDaemonInner(
         `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
           `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
       );
+      if (au.verifyTagSignature && !parseTagName(watchedRef)) {
+        log(
+          `Auto-update (git): WARNING verifyTagSignature=true is inert for non-tag ref "${watchedRef}". ` +
+            'Git tag-signature verification only applies to refs/tags/*; use a signed tag ref or disable verifyTagSignature.',
+        );
+      }
 
       const runCheck = async () => {
         const gitStatus = await checkForNewCommitWithStatus(au, log);
