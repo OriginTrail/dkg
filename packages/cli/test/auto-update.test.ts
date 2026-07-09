@@ -197,10 +197,12 @@ function restoreIo() {
 import {
   checkForNewCommitWithStatus,
   checkForUpdate,
+  formatAutoUpdateTagVerificationWarning,
   normalizeGitRefInput,
   performUpdate,
   performNpmUpdate,
   resolveAutoUpdateGitRef,
+  resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
 
 const AU: AutoUpdateConfig = {
@@ -232,6 +234,62 @@ describe('git auto-update ref normalization', () => {
     expect(() => normalizeGitRefInput('main; rm -rf /')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('--upload-pack=/tmp/pwn')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('refs/heads/')).toThrow(/invalid branch\/ref/);
+  });
+
+  it('plans signed tag verification and the matching force-fetch ref in one place', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: true,
+      fetchRef: '+refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toBeNull();
+  });
+
+  it('plans branch verification as inert and formats the daemon startup warning', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/heads/main',
+      tagName: null,
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/heads/main',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toContain(
+      'verifyTagSignature=true is inert for non-tag ref "refs/heads/main"',
+    );
+  });
+
+  it('normalizes non-boolean plan verification values to disabled', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: 'false' as any,
+    });
+
+    expect(plan.verifyTagSignature).toBe(false);
+    expect(plan.shouldVerifyTagSignature).toBe(false);
+    expect(plan.fetchRef).toBe('refs/tags/v10.0.8');
   });
 });
 

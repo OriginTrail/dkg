@@ -295,7 +295,7 @@ import {
   performNpmUpdate,
   performNpmUpdateEdge,
 } from './auto-update.js';
-import { isValidRef, parseTagName, resolveAutoUpdateGitRef } from '../auto-update-ref.js';
+import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2091,8 +2091,10 @@ export async function runDaemonInner(
     const checkIntervalMs = au.checkIntervalMinutes * 60_000;
     let watchedRef = "";
     let watchedRepo = "";
+    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
     try {
-      watchedRef = resolveAutoUpdateGitRef(au);
+      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
+      watchedRef = watchedRefPlan.ref;
       watchedRepo = repoToFetchUrl(au.repo);
     } catch (err: any) {
       log(
@@ -2106,12 +2108,8 @@ export async function runDaemonInner(
         `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
           `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
       );
-      if (au.verifyTagSignature && !parseTagName(watchedRef)) {
-        log(
-          `Auto-update (git): WARNING verifyTagSignature=true is inert for non-tag ref "${watchedRef}". ` +
-            'Git tag-signature verification only applies to refs/tags/*; use a signed tag ref or disable verifyTagSignature.',
-        );
-      }
+      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
+      if (verificationWarning) log(verificationWarning);
 
       const runCheck = async () => {
         const gitStatus = await checkForNewCommitWithStatus(au, log);

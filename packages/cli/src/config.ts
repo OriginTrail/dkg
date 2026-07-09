@@ -19,6 +19,7 @@ import {
   STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
+import { normalizeAutoUpdateVerifyTagSignature } from './auto-update-ref.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -1236,7 +1237,13 @@ export function resolveAutoUpdateConfig(
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
   const source = cfg?.source ?? net?.source;
   const channel = cfg?.channel ?? net?.channel;
-  const verifyTagSignature = cfg?.verifyTagSignature ?? net?.verifyTagSignature;
+  const cfgHasVerifyTagSignature = !!cfg && Object.prototype.hasOwnProperty.call(cfg, 'verifyTagSignature');
+  const netHasVerifyTagSignature = !!net && Object.prototype.hasOwnProperty.call(net, 'verifyTagSignature');
+  const verifyTagSignature = cfgHasVerifyTagSignature
+    ? normalizeAutoUpdateVerifyTagSignature(cfg?.verifyTagSignature)
+    : netHasVerifyTagSignature
+      ? normalizeAutoUpdateVerifyTagSignature(net?.verifyTagSignature)
+      : undefined;
 
   // Merge build timeouts per-key so operators can override one step (e.g.
   // `contracts` on slow ARM hosts) without re-specifying the rest.

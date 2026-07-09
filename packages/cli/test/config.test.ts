@@ -716,6 +716,30 @@ describe('resolveAutoUpdateConfig', () => {
 
     expect(resolved?.verifyTagSignature).toBe(false);
   });
+
+  it('normalizes non-boolean persisted tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'false',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
+  });
 });
 
 describe('resolveChainConfig (field-level merge)', () => {

@@ -44,7 +44,7 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
-import { parseTagName, resolveAutoUpdateGitRef } from '../auto-update-ref.js';
+import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
   DAEMON_EXIT_CODE_RESTART,
@@ -1154,15 +1154,20 @@ async function _performUpdateInner(
     }
   }
 
-  let ref = "";
+  let refPlan;
   try {
-    ref = resolveAutoUpdateGitRef(au, opts.refOverride);
+    refPlan = resolveAutoUpdateGitRefPlan(au, {
+      refOverride: opts.refOverride,
+      ...(Object.prototype.hasOwnProperty.call(opts, 'verifyTagSignature')
+        ? { verifyTagSignature: opts.verifyTagSignature }
+        : {}),
+    });
   } catch (err: any) {
     log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
     return "failed";
   }
+  const ref = refPlan.ref;
   const gitEnv = gitCommandEnv(au);
-  const verifyTagSignature = opts.verifyTagSignature ?? au.verifyTagSignature;
 
   const latestCommit = opts.expectedCommit?.trim()
     || await resolveRemoteCommitSha(au.repo, ref, log, gitEnv);
@@ -1209,15 +1214,13 @@ async function _performUpdateInner(
   }
 
   try {
-    const maybeTag = parseTagName(ref);
-    const fetchRef = maybeTag && verifyTagSignature ? `+${ref}:${ref}` : ref;
     const fetchStartedAt = Date.now();
     log(
       `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
     );
     await execFileAsync(
       "git",
-      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, fetchRef],
+      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, refPlan.fetchRef],
       {
         cwd: targetDir,
         encoding: "utf-8",
@@ -1225,8 +1228,8 @@ async function _performUpdateInner(
         env: gitEnv,
       },
     );
-    if (verifyTagSignature && maybeTag) {
-      await execFileAsync("git", ["verify-tag", "--", maybeTag], {
+    if (refPlan.shouldVerifyTagSignature && refPlan.tagName) {
+      await execFileAsync("git", ["verify-tag", "--", refPlan.tagName], {
         cwd: targetDir,
         encoding: "utf-8",
         timeout: 30_000,

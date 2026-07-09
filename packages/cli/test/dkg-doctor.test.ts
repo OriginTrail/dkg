@@ -487,6 +487,23 @@ describe('config-sanity check (§4.7.2)', () => {
     expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
   });
 
+  it('does not warn for non-boolean persisted tag-signature values', async () => {
+    const deps = makeDeps({
+      fs: {
+        '/test/.dkg/config.json': JSON.stringify({
+          autoUpdate: {
+            source: 'git',
+            repo: 'https://github.com/OriginTrail/dkg.git',
+            branch: 'main',
+            verifyTagSignature: 'false',
+          },
+        }),
+      },
+    });
+    const findings = await runConfigSanityCheck(deps);
+    expect(findings.find((f) => f.subject === 'autoUpdate.verifyTagSignature')).toBeUndefined();
+  });
+
   it('errors on checkIntervalMinutes < 1', async () => {
     const deps = makeDeps({
       fs: { '/test/.dkg/config.json': JSON.stringify({ autoUpdate: { checkIntervalMinutes: 0 } }) },

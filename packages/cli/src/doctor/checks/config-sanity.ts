@@ -16,7 +16,10 @@
  */
 import { join } from 'node:path';
 import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
-import { parseTagName, resolveAutoUpdateGitRef } from '../../auto-update-ref.js';
+import {
+  formatAutoUpdateTagVerificationWarning,
+  resolveAutoUpdateGitRefPlan,
+} from '../../auto-update-ref.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
@@ -111,21 +114,23 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
       });
     }
 
-    if (gitMode && au.verifyTagSignature === true) {
-      let resolvedRef: string | null = null;
+    if (gitMode) {
+      let verificationWarning: string | null = null;
       try {
-        resolvedRef = resolveAutoUpdateGitRef({
+        const refPlan = resolveAutoUpdateGitRefPlan({
           branch: typeof au.branch === 'string' ? au.branch : 'main',
           ...(typeof au.ref === 'string' ? { ref: au.ref } : {}),
+          verifyTagSignature: au.verifyTagSignature,
         });
+        verificationWarning = formatAutoUpdateTagVerificationWarning(refPlan);
       } catch {
-        resolvedRef = null;
+        verificationWarning = null;
       }
-      if (resolvedRef && !parseTagName(resolvedRef)) {
+      if (verificationWarning) {
         findings.push({
           check: 'config-sanity',
           severity: 'warning',
-          message: `autoUpdate.verifyTagSignature is inert for non-tag ref: ${JSON.stringify(resolvedRef)}`,
+          message: verificationWarning.replace(/^Auto-update \(git\): WARNING /, ''),
           advisory: "Git tag-signature verification only applies to refs/tags/*. Set autoUpdate.ref to a signed tag ref, or set verifyTagSignature to false so the config does not imply branch updates are signature-verified.",
           subject: 'autoUpdate.verifyTagSignature',
         });
