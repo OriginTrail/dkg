@@ -13,6 +13,7 @@ import {
   computeGossipSigningPayload,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  STORAGE_ACK_MAX_STAGING_BYTES,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import {
@@ -69,6 +70,59 @@ async function sealForQuads(quads: Quad[], contextGraphId: string | bigint) {
 
 function q(s: string, p: string, o: string, g = ''): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
+}
+
+const nquadsEncoder = new TextEncoder();
+
+function serializePublicQuad(quad: Quad): string {
+  return `<${quad.subject}> <${quad.predicate}> ${
+    quad.object.startsWith('"') ? quad.object : `<${quad.object}>`
+  } <${quad.graph}> .`;
+}
+
+function encodedPublicByteLength(quads: Quad[]): number {
+  return nquadsEncoder.encode(quads.map(serializePublicQuad).join('\n')).length;
+}
+
+function buildPublicQuadsWithByteSize(targetBytes: number): Quad[] {
+  const quads: Quad[] = [];
+  const maxSafeLiteralBytes = 50_000;
+
+  for (let i = 0; i < 1_000; i++) {
+    const subject = `urn:test:oversized-swm:${i}`;
+    const predicate = 'http://schema.org/description';
+    const emptyLine = serializePublicQuad({
+      subject,
+      predicate,
+      object: '""',
+      graph: '',
+    });
+    const currentBytes = encodedPublicByteLength(quads);
+    const separatorBytes = quads.length === 0 ? 0 : 1;
+    const bytesNeededInsideLiteral =
+      targetBytes - currentBytes - separatorBytes - nquadsEncoder.encode(emptyLine).length;
+    const literalBytes =
+      bytesNeededInsideLiteral >= 0 && bytesNeededInsideLiteral <= maxSafeLiteralBytes
+        ? bytesNeededInsideLiteral
+        : maxSafeLiteralBytes;
+
+    quads.push({
+      subject,
+      predicate,
+      object: `"${'x'.repeat(literalBytes)}"`,
+      graph: '',
+    });
+
+    const size = encodedPublicByteLength(quads);
+    if (size >= targetBytes) {
+      if (size !== targetBytes) {
+        throw new Error(`oversized SWM fixture byte-size drift: expected ${targetBytes}, got ${size}`);
+      }
+      return quads;
+    }
+  }
+
+  throw new Error(`failed to build public quads with byte size ${targetBytes}`);
 }
 
 async function signWorkspaceMessage(
@@ -442,6 +496,41 @@ describe('Workspace: publishFromSharedMemory', () => {
 
     const decoded = new TextDecoder().decode(receivedStagingQuads!);
     expect(decoded).toContain(`<${ENTITY}> <http://schema.org/name> "Inline From SWM"`);
+  });
+
+  it('omits staging quads for over-limit internal public SWM first ACK attempts', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
+    const selectedQuads = buildPublicQuadsWithByteSize(targetBytes);
+    expect(encodedPublicByteLength(selectedQuads)).toBe(targetBytes);
+
+    await publisher.share(
+      CONTEXT_GRAPH,
+      selectedQuads.map((quad) => ({ ...quad, graph: '' })),
+      { publisherPeerId: 'peer-oversized-inline' },
+    );
+
+    let receivedParams: V10ACKProviderParams | undefined;
+    const stopAfterCapture = new Error('stop after over-limit ACK capture');
+    const v10ACKProvider: V10ACKProvider = async (params: V10ACKProviderParams) => {
+      receivedParams = params;
+      throw stopAfterCapture;
+    };
+
+    await expect(
+      publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+        precomputedAttestation: await sealForQuads(selectedQuads, CONTEXT_GRAPH),
+        v10ACKProvider,
+      }),
+    ).rejects.toThrow(stopAfterCapture.message);
+
+    expect(receivedParams).toBeDefined();
+    const params = receivedParams!;
+    expect(params.ackMode.kind).toBe('public');
+    if (params.ackMode.kind !== 'public') {
+      throw new Error(`expected public ACK mode, got ${params.ackMode.kind}`);
+    }
+    expect(params.publicByteSize).toBe(BigInt(targetBytes));
+    expect(params.stagingQuads).toBeUndefined();
   });
 
   it('enshrine with rootEntities filter only enshrines those entities', async () => {
