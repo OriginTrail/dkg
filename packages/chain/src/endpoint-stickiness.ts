@@ -61,6 +61,22 @@ export interface StickinessConfig {
   onEstablished?: (rpcUrl: string) => void;
 }
 
+/**
+ * One failover pass's ordering + outcome bookkeeping, bundled by
+ * {@link EndpointStickiness.attempts} so a loop can't accidentally pass a
+ * mismatched (canonical, intent) to `order` vs `recordSuccess`/`recordFailure`.
+ */
+export interface StickyAttempt<T extends StickyEndpoint> {
+  /** Preferred-first iteration order for THIS op. Computed ONCE (order() may
+   *  re-arm the TTL re-probe — it must run exactly once per loop entry). */
+  readonly ordered: T[];
+  /** Record that `endpoint` served attempt `i` (0-based; triedFirst = i === 0). */
+  recordSuccess(endpoint: T, i: number): void;
+  /** Record that `endpoint` FAILED the attempt (real error → failover); de-prefers
+   *  it if it is the current preferred. */
+  recordFailure(endpoint: T): void;
+}
+
 export class EndpointStickiness {
   private state: StickyState = { kind: 'none' };
 
@@ -69,6 +85,23 @@ export class EndpointStickiness {
   /** Whether a preference is currently active (test/introspection helper). */
   hasPreference(): boolean {
     return this.state.kind === 'preferred';
+  }
+
+  /**
+   * Bundle one failover pass's ordering + outcome bookkeeping for `intent` over
+   * `canonical` into a {@link StickyAttempt}. `ordered` is computed ONCE here
+   * (order() may re-arm the re-probe TTL — it must not run twice per loop entry);
+   * the two closures capture the SAME canonical + intent, so a loop no longer
+   * hand-threads them across three separate `order`/`recordSuccess`/`recordFailure`
+   * calls (and can't drift them apart). Pure façade over the primitives below.
+   */
+  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T> {
+    const ordered = this.order(canonical, intent);
+    return {
+      ordered,
+      recordSuccess: (endpoint, i) => this.recordSuccess(endpoint, canonical, intent, i === 0),
+      recordFailure: (endpoint) => this.recordFailure(endpoint, intent),
+    };
   }
 
   /**

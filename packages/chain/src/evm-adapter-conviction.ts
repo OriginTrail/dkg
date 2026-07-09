@@ -40,6 +40,43 @@ const PCA_NULLABLE_LOOKUP_METHODS = new Set<string>([
   'eth_getBlockByNumber',
 ]);
 
+type PcaReadStrategy = 'tipTransparent' | 'tipNullableTransparent' | 'stickyNullable' | 'sticky';
+
+/**
+ * Classify a PCA proxy read by (method, params) into its endpoint-freshness +
+ * nullability strategy — pure and total over {@link PcaRpcMethod}. Lifting the
+ * routing rules out of `requestPublishingConvictionRpc` keeps the transport
+ * dispatch declarative. The tip block-tag POSITION differs by method:
+ * `eth_getBlockByNumber` → params[0]; `eth_call` → params[1] (params[0] is the
+ * call object, and an OMITTED tag defaults to `latest`). A concrete hex block is
+ * NOT tip.
+ *   - `tipTransparent`         — `eth_blockNumber` (never null) or a latest-family
+ *     `eth_call` (reads current contract state a lagging backend would stale):
+ *     canonical-fresh, preference-transparent, non-nullable.
+ *   - `tipNullableTransparent` — a latest-family `eth_getBlockByNumber`: tip
+ *     (transparent) BUT nullable — a lagging/partially-synced primary can return
+ *     null for a block a backup already has, so fail over on null before returning.
+ *   - `stickyNullable`         — receipt / tx / a CONCRETE block: prefer the
+ *     endpoint that already observed it, but a `null` ("not here yet") fails over
+ *     rather than terminating the lookup or reinforcing a preference.
+ *   - `sticky`                 — `eth_call` at a concrete block / `eth_chainId`: a
+ *     null-ish answer is a valid result that can't change, so plain sticky.
+ */
+function classifyPcaRead(method: PcaRpcMethod, params: readonly unknown[]): PcaReadStrategy {
+  const isLatestFamilyTag = (t: unknown): boolean => typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
+  if (method === 'eth_blockNumber'
+    || (method === 'eth_call' && (params[1] === undefined || isLatestFamilyTag(params[1])))) {
+    return 'tipTransparent';
+  }
+  if (method === 'eth_getBlockByNumber' && isLatestFamilyTag(params[0])) {
+    return 'tipNullableTransparent';
+  }
+  if (PCA_NULLABLE_LOOKUP_METHODS.has(method)) {
+    return 'stickyNullable';
+  }
+  return 'sticky';
+}
+
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
   identityId?: unknown;
@@ -797,48 +834,15 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
     await this.init();
     const label = `pca rpc ${method}`;
-
-    // TRUE tip read → preference-TRANSPARENT: a lagging sticky backend would give a
-    // stale head / stale contract state. The tip block-tag position differs by
-    // method: `eth_getBlockByNumber` → params[0] (a concrete block is NOT tip);
-    // `eth_call` → params[1] (params[0] is the call object, and an OMITTED tag
-    // defaults to `latest`, so a no-tag / latest-family eth_call is tip-sensitive
-    // too — it reads current contract state that a lagging backend would stale).
     const send = (provider: ethers.JsonRpcProvider) => provider.send(method, params);
-    const isLatestFamilyTag = (t: unknown): boolean =>
-      typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
-    // The tip block-tag position differs by method: `eth_getBlockByNumber` →
-    // params[0]; `eth_call` → params[1] (params[0] is the call object; an omitted
-    // tag defaults to `latest`). A concrete hex block is NOT tip.
-    const isBlockByNumberTip = method === 'eth_getBlockByNumber' && isLatestFamilyTag(params[0]);
-
-    // NON-nullable tip reads → preference-TRANSPARENT: `eth_blockNumber` (a number,
-    // never null) and a latest-family `eth_call` (reads current contract state a
-    // lagging backend would stale; a null-ish result is itself a valid answer).
-    if (method === 'eth_blockNumber'
-      || (method === 'eth_call' && (params[1] === undefined || isLatestFamilyTag(params[1])))) {
-      return this.readTipProvider(label, send);
+    // Route by the (method, params) endpoint-freshness + nullability strategy (see
+    // classifyPcaRead). `tipNullableTransparent` keeps the `skipPreferred` opt-out —
+    // transport plumbing owned HERE in the single dispatch, not spelled at a caller.
+    switch (classifyPcaRead(method, params)) {
+      case 'tipTransparent':         return this.readTipProvider(label, send);
+      case 'tipNullableTransparent': return this.readProviderRetryingNull(label, send, { skipPreferred: true });
+      case 'stickyNullable':         return this.readProviderRetryingNull(label, send);
+      default:                       return this.readProvider(label, send); // 'sticky'
     }
-
-    // A latest-family `eth_getBlockByNumber` (finalized / safe / latest) is tip
-    // (canonical-fresh, no stale-tip pin) BUT still NULLABLE — a lagging/partially
-    // synced primary can return null for a block a backup already has — so it is
-    // transparent AND fails over on null before returning null.
-    if (isBlockByNumberTip) {
-      return this.readProviderRetryingNull(label, send, { skipPreferred: true });
-    }
-
-    // Nullable reconciliation read (receipt / tx / a CONCRETE block) → STICKY
-    // (prefer the endpoint that already observed the tx/block), BUT a `null` means
-    // "not here yet", not a definitive answer, so it must FAIL OVER (a lagging
-    // preferred backend can't hide an object another has) and must NOT reinforce a
-    // preference. The shared helper returns null only once EVERY endpoint lacks it.
-    if (PCA_NULLABLE_LOOKUP_METHODS.has(method)) {
-      return this.readProviderRetryingNull(label, send);
-    }
-
-    // eth_call at a concrete block / eth_chainId — plain sticky (a null-ish result
-    // is a valid answer that can't change).
-    return this.readProvider(label, send);
   }
 }
