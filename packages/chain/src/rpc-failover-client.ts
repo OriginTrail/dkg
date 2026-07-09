@@ -370,10 +370,10 @@ export class RpcFailoverClient {
     // ONLY if a prior populate proved it (else canonical primary-first = the
     // authoritative nonce source) — the nonce-staleness guard.
     const attempts = this.stickiness.attempts(canonical, 'nonceWrite');
-    const endpoints = attempts.map((a) => a.endpoint);
     let lastRetryable: unknown;
-    for (let i = 0; i < endpoints.length; i += 1) {
-      const endpoint = endpoints[i];
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      const endpoint = attempt.endpoint;
       try {
         await this.validateEndpointForAttempt(
           endpoint,
@@ -402,7 +402,7 @@ export class RpcFailoverClient {
             // provider — or for a non-retryable estimate error, where failover
             // can't help — fall back to ethers' own unbuffered estimate during
             // signing, leaving a breadcrumb so a recurring OOG isn't a mystery.
-            const hasMoreProviders = i < endpoints.length - 1;
+            const hasMoreProviders = i < attempts.length - 1;
             if (isRetryableRpcError(estErr) && hasMoreProviders) {
               throw estErr;
             }
@@ -421,14 +421,14 @@ export class RpcFailoverClient {
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.
-        attempts[i].recordSuccess();
+        attempt.recordSuccess();
         return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
         lastRetryable = err;
-        attempts[i].recordFailure(); // de-prefer a failed backend
-        if (i < endpoints.length - 1) {
-          noteRpcFailover(`${label} preparation`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
+        attempt.recordFailure(); // de-prefer a failed backend
+        if (i < attempts.length - 1) {
+          noteRpcFailover(`${label} preparation`, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
         }
       }
     }
@@ -474,10 +474,10 @@ export class RpcFailoverClient {
         try {
           const canonical = this.getEndpoints();
           const attempts = this.stickiness.attempts(canonical, 'write');
-          const endpoints = attempts.map((a) => a.endpoint);
           let lastRetryable: unknown;
-          for (let i = 0; i < endpoints.length; i += 1) {
-            const endpoint = endpoints[i];
+          for (let i = 0; i < attempts.length; i += 1) {
+            const attempt = attempts[i];
+            const endpoint = attempt.endpoint;
             const provider = endpoint.provider;
             span.addEvent('broadcast.attempt', { attempt: i + 1 });
             try {
@@ -493,7 +493,7 @@ export class RpcFailoverClient {
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-              attempts[i].recordSuccess();
+              attempt.recordSuccess();
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -501,7 +501,7 @@ export class RpcFailoverClient {
                 span.setAttribute('dkg.tx_hash', txHash);
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
-                attempts[i].recordSuccess();
+                attempt.recordSuccess();
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -509,9 +509,9 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
-              attempts[i].recordFailure(); // de-prefer a failed backend
-              if (i < endpoints.length - 1) {
-                noteRpcFailover(`${label} broadcast`, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
+              attempt.recordFailure(); // de-prefer a failed backend
+              if (i < attempts.length - 1) {
+                noteRpcFailover(`${label} broadcast`, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
               }
             }
           }
@@ -556,11 +556,11 @@ export class RpcFailoverClient {
         try {
           const canonical = this.getEndpoints();
           const attempts = this.stickiness.attempts(canonical, 'write');
-          const endpoints = attempts.map((a) => a.endpoint);
           let lastRetryable: unknown;
           let sawNonErrorResponse = false;
-          for (let i = 0; i < endpoints.length; i += 1) {
-            const endpoint = endpoints[i];
+          for (let i = 0; i < attempts.length; i += 1) {
+            const attempt = attempts[i];
+            const endpoint = attempt.endpoint;
             const provider = endpoint.provider;
             span.addEvent('receipt.attempt', { attempt: i + 1 });
             try {
@@ -582,7 +582,7 @@ export class RpcFailoverClient {
                 // it. A null "not mined yet" response is NOT a stickiness signal
                 // (no single winning endpoint), so we only note on a real
                 // receipt — the self-heal still polls every endpoint per tick.
-                attempts[i].recordSuccess();
+                attempt.recordSuccess();
                 return receipt;
               }
             } catch (err) {
@@ -591,9 +591,9 @@ export class RpcFailoverClient {
                 throw err;
               }
               lastRetryable = err;
-              attempts[i].recordFailure(); // de-prefer a failed backend
-              if (i < endpoints.length - 1) {
-                noteRpcFailover('receipt lookup', endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
+              attempt.recordFailure(); // de-prefer a failed backend
+              if (i < attempts.length - 1) {
+                noteRpcFailover('receipt lookup', endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
               }
             }
           }
@@ -642,25 +642,25 @@ export class RpcFailoverClient {
     isEmptyResult?: (value: unknown) => boolean,
   ): Promise<T> {
     // `canonical` = the configured order (index 0 = primary), used for the cap,
-    // the exhaustion aggregate, and the "which is the primary" check. `endpoints`
-    // = the per-op iteration order (preferred-first when sticky). Same members,
-    // possibly reordered — so the cap/exhaustion contract stays canonical while
-    // only the try-order changes.
+    // the exhaustion aggregate, and the "which is the primary" check. `attempts`
+    // = the per-op iteration order (preferred-first when sticky), each entry
+    // binding its endpoint + outcome recorders. Same members, possibly reordered —
+    // so the cap/exhaustion contract stays canonical while only the try-order changes.
     const canonical = this.getEndpoints();
     // A tip-sensitive read (skipPreferred) is 'transparentRead' (canonical order +
     // no state mutation); a normal read is 'stickyRead'.
     const intent: StickinessIntent = skipPreferred ? 'transparentRead' : 'stickyRead';
     const attempts = this.stickiness.attempts(canonical, intent);
-    const endpoints = attempts.map((a) => a.endpoint);
     const capMs = resolveCapMs(policy, canonical.length);
     let lastRetryable: unknown;
     let sawEmpty = false;
     let lastEmpty: T | undefined;
-    for (let i = 0; i < endpoints.length; i += 1) {
-      const endpoint = endpoints[i];
-      const isLast = i === endpoints.length - 1;
+    for (let i = 0; i < attempts.length; i += 1) {
+      const attempt = attempts[i];
+      const endpoint = attempt.endpoint;
+      const isLast = i === attempts.length - 1;
       try {
-        const attempt = (async () => {
+        const pending = (async () => {
           await this.validateEndpointForAttempt(
             endpoint,
             capMs,
@@ -669,8 +669,8 @@ export class RpcFailoverClient {
           return fn(endpoint.provider);
         })();
         const out = await (capMs == null
-          ? attempt
-          : withTimeout(attempt, capMs, `${label} via RPC #${i + 1}`));
+          ? pending
+          : withTimeout(pending, capMs, `${label} via RPC #${i + 1}`));
         if (isEmptyResult?.(out)) {
           // A BENIGN "no result on this endpoint (yet)" — a nullable read whose
           // endpoint hasn't imported the tx/block. This is NOT a transport failure:
@@ -681,14 +681,14 @@ export class RpcFailoverClient {
           lastEmpty = out;
           continue;
         }
-        attempts[i].recordSuccess();
+        attempt.recordSuccess();
         return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;
         lastRetryable = err;
-        attempts[i].recordFailure(); // de-prefer a failed backend
+        attempt.recordFailure(); // de-prefer a failed backend
         if (!isLast) {
-          noteRpcFailover(label, endpoints[i].rpcUrl, err, endpoints[i + 1].rpcUrl);
+          noteRpcFailover(label, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
         }
       }
     }
