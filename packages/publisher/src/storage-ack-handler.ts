@@ -1,5 +1,11 @@
-import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { loadSelectedSharedMemoryQuads, type SharedMemoryReadSelection } from '@origintrail-official/dkg-storage';
+import {
+  loadSelectedSharedMemoryQuads,
+  type SharedMemoryReadSelection,
+  type TripleStore,
+  type Quad,
+  type QueryOptions,
+  type StorePressureSnapshot,
+} from '@origintrail-official/dkg-storage';
 import type { EventBus, StorageACKDeclineCode, SubscriptionSource } from '@origintrail-official/dkg-core';
 import {
   decodePublishIntent,
@@ -120,11 +126,71 @@ function summarizeDeclineEntities(entities: readonly string[]): string {
  * a retryable decline and hand the publisher 6 pointless retries.
  */
 class StoreUnavailableError extends Error {
+  readonly cause: unknown;
+
   constructor(cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = 'StoreUnavailableError';
+    this.cause = cause;
     if (cause instanceof Error && cause.stack) this.stack = cause.stack;
   }
+}
+
+class ACKHandlerDeadlineAbortError extends Error {
+  constructor(deadlineMs: number, storePressure: string) {
+    super(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated; ${storePressure})`);
+    this.name = 'ACKHandlerDeadlineAbortError';
+  }
+}
+
+function isACKHandlerDeadlineAbort(err: unknown): boolean {
+  if (err instanceof ACKHandlerDeadlineAbortError) return true;
+  if (err instanceof StoreUnavailableError) return isACKHandlerDeadlineAbort(err.cause);
+  return false;
+}
+
+function isACKHandlerDeadlineAbortSignal(signal: AbortSignal | undefined): boolean {
+  return Boolean(signal?.aborted && isACKHandlerDeadlineAbort(signal.reason));
+}
+
+async function runWithDeadline<T>(
+  work: Promise<T>,
+  deadlineMs: number,
+  onDeadline: () => T,
+): Promise<T> {
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  let settled = false;
+  const trackedWork = work.finally(() => {
+    settled = true;
+  });
+  const deadline = new Promise<T>((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      resolve(onDeadline());
+    }, deadlineMs);
+    if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+  });
+
+  try {
+    const result = await Promise.race([trackedWork, deadline]);
+    if (timedOut) void work.catch(() => undefined);
+    return result;
+  } finally {
+    settled = true;
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+  }
+}
+
+function ackStoreOptions(source: string, signal?: AbortSignal): QueryOptions {
+  return { priority: 'ack', source, ...(signal ? { signal } : {}) };
+}
+
+function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined): string {
+  if (!snapshot) return 'storePressure=unavailable';
+  return `ackInflight=${snapshot.ackInflight} ackQueued=${snapshot.ackQueued} ` +
+    `normalQueued=${snapshot.normalQueued} backgroundQueued=${snapshot.backgroundQueued}`;
 }
 
 export interface StorageACKHandlerConfig {
@@ -314,6 +380,14 @@ export interface StorageACKHandlerConfig {
    * INVALID_SIGNATURE). Set to 0 to disable the deadline. Tests override it.
    */
   ackHandlerDeadlineMs?: number;
+  /**
+   * Optional store-pressure diagnostic provider for ACK deadline declines.
+   * Agents may inject a store-owned or wrapper-owned snapshot here; otherwise
+   * the handler asks the supplied TripleStore for its optional pressure
+   * capability. The handler deliberately does not read any storage adapter's
+   * process-global scheduler directly.
+   */
+  getStorePressure?: () => StorePressureSnapshot | undefined;
 }
 
 /**
@@ -358,6 +432,14 @@ export class StorageACKHandler {
     this.eventBus = eventBus;
   }
 
+  private getStorePressureSnapshot(): StorePressureSnapshot | undefined {
+    try {
+      return this.config.getStorePressure?.() ?? this.store.getPressureSnapshot?.();
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Encode a structured decline response. Used in place of `throw` for
    * the subset of failures that represent "I as a core legitimately
@@ -385,6 +467,9 @@ export class StorageACKHandler {
     // internal error strings (paths, worker state) stay off the network.
     options: { hookMessage?: string } = {},
   ): Uint8Array {
+    getMetrics().storageAckDeclinesTotal.add(1, {
+      reason: boundedDeclineCodeLabel(code),
+    });
     if (this.config.onDecline) {
       const details = {
         code,
@@ -470,10 +555,13 @@ export class StorageACKHandler {
   private async runStoreOpOrDecline<T>(
     cgId: string,
     op: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
     try {
       return { ok: true, value: await op() };
     } catch (err) {
+      if (isACKHandlerDeadlineAbort(err)) throw err;
+      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
   }
@@ -489,6 +577,7 @@ export class StorageACKHandler {
     cgId: string,
     catalogGraph: string,
     parsedCatalog: Quad[],
+    signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     // Malformed terms are a bad request, not a store outage — validate BEFORE
     // the store wrapper so they reset the stream instead of being mislabeled
@@ -497,15 +586,21 @@ export class StorageACKHandler {
     const result = await this.runStoreOpOrDecline(cgId, async () => {
       const catalogSubjects = new Set(parsedCatalog.map((q) => q.subject));
       for (const subject of catalogSubjects) {
-        await this.store.deleteByPattern({ graph: catalogGraph, subject });
+        await this.store.deleteByPattern(
+          { graph: catalogGraph, subject },
+          ackStoreOptions('storage-ack.persistCatalog.deleteByPattern', signal),
+        );
       }
-      await this.store.insert(parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })));
+      await this.store.insert(
+        parsedCatalog.map((q) => ({ ...q, graph: catalogGraph })),
+        ackStoreOptions('storage-ack.persistCatalog.insert', signal),
+      );
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.();
-    });
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistCatalog.flush', signal));
+    }, signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -519,21 +614,25 @@ export class StorageACKHandler {
     cgId: string,
     stagingGraphUri: string,
     parsed: Quad[],
+    signal?: AbortSignal,
   ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
     // Malformed terms are a bad request, not a store outage — validate BEFORE
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
-      await this.store.dropGraph(stagingGraphUri);
+      await this.store.dropGraph(
+        stagingGraphUri,
+        ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
+      );
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads);
+      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.();
-    });
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
+    }, signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -548,11 +647,14 @@ export class StorageACKHandler {
     cgId: string,
     graphUri: string,
     rootEntities: string[],
+    signal?: AbortSignal,
   ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
     try {
-      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities) };
+      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities, signal) };
     } catch (err) {
       if (err instanceof StoreUnavailableError) {
+        if (isACKHandlerDeadlineAbort(err)) throw err;
+        if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
         return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
       }
       throw err;
@@ -645,7 +747,7 @@ export class StorageACKHandler {
       }
       try {
         const result = await this.runHandlerWithDeadline(
-          this.handlePublishIntent(data, peerId),
+          (signal) => this.handlePublishIntent(data, peerId, signal),
           cgIdAttr,
         );
         const decoded = decodeStorageACK(result);
@@ -687,8 +789,8 @@ export class StorageACKHandler {
    * work has not produced a reply within `ackHandlerDeadlineMs` (default 15s,
    * below the publisher's 20s per-send timeout), resolve with a
    * `CORE_TEMPORARILY_UNAVAILABLE` decline so the publisher gets an actionable
-   * transient response instead of dead-air. The in-flight work is left to
-   * settle in the background — any staging it has already persisted is
+   * transient response instead of dead-air. The deadline aborts ACK store work
+   * through the per-invocation signal; any staging it already persisted is
    * idempotent, and a late resolve/reject is swallowed so it cannot surface as
    * an unhandled rejection once the deadline reply has been sent.
    *
@@ -697,36 +799,26 @@ export class StorageACKHandler {
    * the *slow* (non-throwing) case, which previously had no in-band signal.
    */
   private runHandlerWithDeadline = async (
-    work: Promise<Uint8Array>,
+    workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
   ): Promise<Uint8Array> => {
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
-    if (deadlineMs <= 0) return work;
+    if (deadlineMs <= 0) return workFactory();
 
-    // Swallow a late rejection from work when the deadline wins (see jsdoc).
-    // When work WINS the race it still rejects through `Promise.race` below,
-    // so real handler errors are unaffected by this no-op handler.
-    void work.catch(() => {});
+    const abortController = new AbortController();
+    const work = workFactory(abortController.signal);
 
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<Uint8Array>((resolve) => {
-      deadlineTimer = setTimeout(() => {
-        resolve(
-          this.declineTemporarilyUnavailable(
-            cgIdForDecline ?? '',
-            'ack handler deadline exceeded',
-            new Error(`ACK handler exceeded ${deadlineMs}ms (store slow / saturated)`),
-          ),
-        );
-      }, deadlineMs);
-      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    return runWithDeadline(work, deadlineMs, () => {
+      const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
+      const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
+      const decline = this.declineTemporarilyUnavailable(
+        cgIdForDecline ?? '',
+        'ack handler deadline exceeded',
+        deadlineError,
+      );
+      abortController.abort(deadlineError);
+      return decline;
     });
-
-    try {
-      return await Promise.race([work, deadline]);
-    } finally {
-      if (deadlineTimer) clearTimeout(deadlineTimer);
-    }
   };
 
   /**
@@ -734,7 +826,11 @@ export class StorageACKHandler {
    * so the public entry point is a thin `withSpan` wrapper; the logic here
    * is byte-for-byte the pre-instrumentation behaviour.
    */
-  private handlePublishIntent = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  private handlePublishIntent = async (
+    data: Uint8Array,
+    _peerId: PeerId,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -886,7 +982,7 @@ export class StorageACKHandler {
       // rather than bucketing us as no_response after a stream reset.
       const catalogGraph = contextGraphCatalogUri(cgId);
       assertSafeIri(catalogGraph);
-      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog);
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
       if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
@@ -1044,7 +1140,7 @@ export class StorageACKHandler {
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
       const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
-      const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed);
+      const persistedStaging = await this.persistStagingOrDecline(cgId, stagingGraphUri, parsed, signal);
       if (!persistedStaging.ok) return persistedStaging.decline;
       swmQuads = parsed;
 
@@ -1067,7 +1163,7 @@ export class StorageACKHandler {
       // the handler and reset the stream. `loadSWMOrDecline` translates a
       // store-op failure (and ONLY that — assertSafeIri malformed-request
       // throws still propagate + reset) into the transient decline.
-      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, intent.rootEntities);
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, intent.rootEntities, signal);
       if (!loadedSWM.ok) return loadedSWM.decline;
       swmQuads = loadedSWM.quads;
 
@@ -1294,7 +1390,7 @@ export class StorageACKHandler {
       // Malformed request — handleUpdateIntent will throw + reset below.
     }
     return this.runHandlerWithDeadline(
-      this.handleUpdateIntent(data, peerId),
+      (signal) => this.handleUpdateIntent(data, peerId, signal),
       cgIdForDecline,
     );
   };
@@ -1305,7 +1401,11 @@ export class StorageACKHandler {
    * shared ACK deadline; the logic here is byte-for-byte the pre-deadline
    * behaviour.
    */
-  private handleUpdateIntent = async (data: Uint8Array, _peerId: PeerId): Promise<Uint8Array> => {
+  private handleUpdateIntent = async (
+    data: Uint8Array,
+    _peerId: PeerId,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> => {
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -1459,7 +1559,7 @@ export class StorageACKHandler {
         // as the publish handler's catalog persist (shared helper).
         const catalogGraph = contextGraphCatalogUri(cgId);
         assertSafeIri(catalogGraph);
-        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog);
+        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
         if (!persistedCatalog.ok) return persistedCatalog.decline;
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
@@ -1499,7 +1599,7 @@ export class StorageACKHandler {
       // failure inside loadSWMQuads becomes a transient decline instead of a
       // stream reset (malformed-request assertSafeIri throws still propagate
       // + reset).
-      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, []);
+      const loadedSWM = await this.loadSWMOrDecline(cgId, swmGraphUri, [], signal);
       if (!loadedSWM.ok) return loadedSWM.decline;
       const swmQuads = loadedSWM.quads;
       if (swmQuads.length === 0) {
@@ -1644,7 +1744,11 @@ export class StorageACKHandler {
     });
   };
 
-  private async loadSWMQuads(graphUri: string, rootEntities: string[]): Promise<Quad[]> {
+  private async loadSWMQuads(
+    graphUri: string,
+    rootEntities: string[],
+    signal?: AbortSignal,
+  ): Promise<Quad[]> {
     assertSafeIri(graphUri);
     for (const entity of rootEntities) {
       assertSafeIri(entity);
@@ -1671,6 +1775,12 @@ export class StorageACKHandler {
       rootEntities.length === 0 ? 'all' : { rootEntities };
     try {
       return await loadSelectedSharedMemoryQuads(this.store, graphUri, selection, {
+        queryOptions: ackStoreOptions(
+          rootEntities.length === 0
+            ? 'storage-ack.loadSWMQuads.constructAll'
+            : 'storage-ack.loadSWMQuads.constructEntity',
+          signal,
+        ),
         quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
       });
     } catch (err) {

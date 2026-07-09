@@ -19,7 +19,7 @@ import {
   TypedEventBus,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 // 2026-07-07 Gnosis mainnet dead-air fix, SLOW-store variant. The existing
@@ -34,8 +34,9 @@ import { ethers } from 'ethers';
 const TEST_CHAIN_ID = 31337n;
 const TEST_KAV10_ADDR = '0x000000000000000000000000000000000000c10a';
 const contextGraphId = '42';
+const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 
-function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
+function makeQuad(s: string, p: string, o: string, g = swmGraph): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
 }
 
@@ -59,6 +60,23 @@ function storeWithHangingQuery(base: OxigraphStore): TripleStore {
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
+}
+
+function nonExternalHangingStore(): TripleStore {
+  return {
+    queryCancellation: 'interruptible',
+    insert: async () => {},
+    delete: async () => {},
+    deleteByPattern: async () => 0,
+    query: () => new Promise<never>(() => {}),
+    hasGraph: async () => false,
+    createGraph: async () => {},
+    dropGraph: async () => {},
+    listGraphs: async () => [],
+    deleteBySubjectPrefix: async () => 0,
+    countQuads: async () => 0,
+    close: async () => {},
+  };
 }
 
 async function createHandler(
@@ -148,6 +166,125 @@ describe('StorageACKHandler — ack-handler deadline (slow-store dead-air fix)',
       code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
       contextGraphId,
     });
+  });
+
+  it('deadline diagnostics do not read the external scheduler for a non-external mock store', async () => {
+    const onDecline = vi.fn();
+    const handler = await createHandler(
+      nonExternalHangingStore(),
+      { onDecline, ackHandlerDeadlineMs: 50 },
+    );
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(onDecline).toHaveBeenCalledOnce();
+    const details = onDecline.mock.calls[0]?.[0];
+    expect(details).toMatchObject({
+      code: STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
+      contextGraphId,
+    });
+    expect(details.message).toContain('storePressure=unavailable');
+    expect(details.message).not.toContain('ackInflight=0');
+    expect(details.message).not.toContain('ackQueued=0');
+  });
+
+  it('deadline diagnostics can use an injected store-pressure provider', async () => {
+    const onDecline = vi.fn();
+    const handler = await createHandler(
+      nonExternalHangingStore(),
+      {
+        onDecline,
+        ackHandlerDeadlineMs: 50,
+        getStorePressure: () => ({
+          ackInflight: 2,
+          normalInflight: 3,
+          backgroundInflight: 4,
+          ackQueued: 5,
+          normalQueued: 6,
+          backgroundQueued: 7,
+          maxConcurrent: 8,
+          ackReservedSlots: 1,
+          backgroundReservedSlots: 1,
+        }),
+      },
+    );
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(onDecline).toHaveBeenCalledOnce();
+    expect(onDecline.mock.calls[0]?.[0].message).toContain(
+      'ackInflight=2 ackQueued=5 normalQueued=6 backgroundQueued=7',
+    );
+  });
+
+  it('aborts in-flight ACK store work when the deadline wins', async () => {
+    const onDecline = vi.fn();
+    let seenSignal: AbortSignal | undefined;
+    let abortMessage = '';
+    const store: TripleStore = {
+      ...nonExternalHangingStore(),
+      query: (_sparql: string, options?: QueryOptions) => new Promise<never>((_resolve, reject) => {
+        expect(options?.priority).toBe('ack');
+        seenSignal = options?.signal;
+        options?.signal?.addEventListener('abort', () => {
+          const reason = options.signal?.reason;
+          abortMessage = reason instanceof Error ? reason.message : String(reason ?? '');
+          reject(reason instanceof Error ? reason : new Error(abortMessage));
+        }, { once: true });
+      }),
+    };
+    const handler = await createHandler(store, { onDecline, ackHandlerDeadlineMs: 50 });
+
+    const response = await handler.handler(publishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+    expect(seenSignal?.aborted).toBe(true);
+    expect(abortMessage).toContain('ACK handler exceeded 50ms');
+    expect(onDecline).toHaveBeenCalledOnce();
+  });
+
+  it('suppresses a late abort rejection after the deadline decline wins', async () => {
+    const onDecline = vi.fn();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    let sawAbort = false;
+    const store: TripleStore = {
+      ...nonExternalHangingStore(),
+      query: (_sparql: string, options?: QueryOptions) => new Promise<never>((_resolve, reject) => {
+        expect(options?.priority).toBe('ack');
+        options?.signal?.addEventListener('abort', () => {
+          sawAbort = true;
+          setTimeout(() => reject(new Error('late abort rejection')), 0);
+        }, { once: true });
+      }),
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const handler = await createHandler(store, { onDecline, ackHandlerDeadlineMs: 50 });
+      const response = await handler.handler(publishIntent(), fakePeerId);
+      const decoded = decodeStorageACK(response);
+
+      expect(isStorageACKDecline(decoded)).toBe(true);
+      expect(decoded.declineMessage).toBe('ack handler deadline exceeded');
+      expect(sawAbort).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(unhandled).toEqual([]);
+      expect(onDecline).toHaveBeenCalledOnce();
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('a healthy fast handler is unaffected by the deadline (returns its real reply)', async () => {

@@ -135,6 +135,20 @@ export interface DkgMetrics {
   ackVerifyTotal: Counter;
   /** outcome={ack|decline|reset}, decline_code?, chain_id */
   ackHandlerTotal: Counter;
+  /** reason={fixed enum/known label} */
+  storageAckDeclinesTotal: Counter;
+  /** ms; operation={query|insert|dropGraph|flush|...} */
+  storageAckQueueWaitMs: Histogram;
+  /** ms; operation, outcome={ok|error} */
+  storageAckStoreOpDurationMs: Histogram;
+  /** queue_depth sample for ACK-priority store work */
+  storageAckPriorityQueueDepth: Histogram;
+  /** inflight sample for ACK-priority store work */
+  storageAckInflight: Histogram;
+  /** queue_depth sample for background/normal store work competing with ACK */
+  syncBackgroundQueueDepth: Histogram;
+  /** process-local sync inflight sample */
+  syncGlobalInflight: Histogram;
   /** rpc_method, outcome={ok|error|timeout}, retryable, chain_id */
   chainRpcTotal: Counter;
   /** rpc_method (bounded known JSON-RPC set, else 'other'), chain_id — RAW
@@ -172,6 +186,31 @@ function buildMetrics(): DkgMetrics {
     ackPeerTotal: meter.createCounter('dkg.ack.peer.total', { description: 'Per-peer ACK request results' }),
     ackVerifyTotal: meter.createCounter('dkg.ack.verify.total', { description: 'ACK identity verification results' }),
     ackHandlerTotal: meter.createCounter('dkg.ack.handler.total', { description: 'Inbound storage-ACK handler outcomes' }),
+    storageAckDeclinesTotal: meter.createCounter('dkg.storage_ack.declines_total', {
+      description: 'Inbound StorageACK declines by bounded reason',
+    }),
+    storageAckQueueWaitMs: meter.createHistogram('dkg.storage_ack.queue_wait_ms', {
+      unit: 'ms',
+      description: 'StorageACK priority-store queue wait',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storageAckStoreOpDurationMs: meter.createHistogram('dkg.storage_ack.store_op_duration_ms', {
+      unit: 'ms',
+      description: 'StorageACK priority-store operation wall-time',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storageAckPriorityQueueDepth: meter.createHistogram('dkg.storage_ack.priority_queue_depth', {
+      description: 'Sampled ACK-priority store queue depth',
+    }),
+    storageAckInflight: meter.createHistogram('dkg.storage_ack.inflight', {
+      description: 'Sampled ACK-priority store inflight count',
+    }),
+    syncBackgroundQueueDepth: meter.createHistogram('dkg.sync.background_queue_depth', {
+      description: 'Sampled non-ACK store queue depth',
+    }),
+    syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
+      description: 'Sampled process-local sync inflight count',
+    }),
     chainRpcTotal: meter.createCounter('dkg.chain.rpc.total', { description: 'Chain RPC calls by method/outcome' }),
     chainRpcRequestsTotal: meter.createCounter('dkg.chain.rpc.requests.total', {
       description: 'Raw JSON-RPC client requests by method (provider billing unit)',

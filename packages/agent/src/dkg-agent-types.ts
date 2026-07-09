@@ -929,6 +929,16 @@ export interface DKGAgentConfig {
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
+  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  syncReconcilerEnabled?: boolean;
+  /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
+  syncOnConnectEnabled?: boolean;
+  /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
+  durableSyncEnabled?: boolean;
+  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  syncGlobalMaxInflight?: number;
+  /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
+  storageAckHandlerDeadlineMs?: number;
   /**
    * When false, durable sync skips the large system `agents/_meta` graph while
    * still syncing `agents` data as the phonebook. Defaults to false on every

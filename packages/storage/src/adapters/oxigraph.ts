@@ -276,13 +276,15 @@ export class OxigraphStore implements TripleStore {
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 
-  async hasGraph(graphUri: string): Promise<boolean> {
+  async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
+    throwIfAborted(options?.signal);
     const matches = this.store.match(
       null,
       null,
       null,
       oxigraph.namedNode(graphUri),
     );
+    throwIfAborted(options?.signal);
     return matches.length > 0;
   }
 
