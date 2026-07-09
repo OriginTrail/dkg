@@ -620,21 +620,22 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const prefix = `did:dkg:context-graph:${contextGraphId}`;
-    // ASK is cheap on Oxigraph; the FILTER keeps us inside this CG's
-    // namespace and excludes `_meta` / `_shared_memory_meta` bookkeeping
-    // which is written even for declaration-only discoveries.
-    const sparql = `ASK WHERE {
-      GRAPH ?g { ?s ?p ?o }
-      FILTER(STRSTARTS(STR(?g), "${prefix}"))
-      FILTER(!STRENDS(STR(?g), "/_meta"))
-      FILTER(!STRENDS(STR(?g), "/_shared_memory_meta"))
-    }`;
-    const result = await this.store.query(sparql, {
-      signal: options.signal,
-      source: 'agent.contextGraphHasLocalContent',
-    });
-    if (result.type === 'boolean') return result.value;
-    return result.type === 'bindings' && result.bindings.length > 0;
+    // A3 (O(store) relief): the old `ASK { GRAPH ?g {?s ?p ?o} FILTER(STRSTARTS(?g,…)) }`
+    // was a full-store scan — its worst case (no content) iterated every quad to
+    // prove absence, exactly the case this probe hits most. The named-graph
+    // index only tracks graphs that hold ≥1 quad, so "has local content"
+    // reduces to "is there a non-bookkeeping graph under this CG's prefix",
+    // answerable from the fast index (O(#graphs)) with no store scan. Excludes
+    // `_meta` / `_shared_memory_meta` bookkeeping, written even for
+    // declaration-only discoveries. Advisory + fail-safe: callers
+    // (`probeContextGraphWritePreflight`) treat a failure as UNKNOWN, never a
+    // hard deny.
+    const cgGraphs = this.store.listGraphsByPrefix
+      ? await this.store.listGraphsByPrefix(prefix, { signal: options.signal })
+      : (await this.store.listGraphs({ signal: options.signal })).filter((g) => g.startsWith(prefix));
+    return cgGraphs.some(
+      (g) => !g.endsWith('/_meta') && !g.endsWith('/_shared_memory_meta'),
+    );
   }
 
   async probeContextGraphWritePreflight(

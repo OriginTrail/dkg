@@ -38,7 +38,7 @@ import {
   WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
 } from '../src/daemon/http-utils.js';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
-import { OxigraphWorkerStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphWorkerStore, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -172,6 +172,57 @@ afterAll(async () => {
 });
 
 describe('probeContextGraphWritePreflight — store-failure resilience (real probe, real closed store)', () => {
+  it('detects local content from indexed graph names while ignoring bookkeeping-only graphs', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const listGraphsByPrefix = store.listGraphsByPrefix?.bind(store);
+    expect(typeof listGraphsByPrefix).toBe('function');
+    const prefixCalls: string[] = [];
+    store.listGraphsByPrefix = async (prefix, options) => {
+      prefixCalls.push(prefix);
+      return listGraphsByPrefix!(prefix, options);
+    };
+    const metaOnly = 'local-content-meta-only';
+    const withContent = 'local-content-data';
+    try {
+      await store.insert([
+        {
+          subject: 'urn:meta',
+          predicate: 'urn:p',
+          object: '"meta"',
+          graph: `${contextGraphDataGraphUri(metaOnly)}/_meta`,
+        },
+        {
+          subject: 'urn:shared-meta',
+          predicate: 'urn:p',
+          object: '"shared-meta"',
+          graph: `${contextGraphDataGraphUri(metaOnly)}/_shared_memory_meta`,
+        },
+        {
+          subject: 'urn:task',
+          predicate: 'urn:p',
+          object: '"task"',
+          graph: `${contextGraphDataGraphUri(withContent)}/tasks`,
+        },
+        {
+          subject: 'urn:context-entry',
+          predicate: 'urn:p',
+          object: '"context"',
+          graph: `${contextGraphDataGraphUri(withContent)}/context/1`,
+        },
+      ]);
+      const harness = agentHarness(store, new Map());
+
+      await expect(harness.contextGraphHasLocalContent(metaOnly)).resolves.toBe(false);
+      await expect(harness.contextGraphHasLocalContent(withContent)).resolves.toBe(true);
+      expect(prefixCalls).toEqual([
+        contextGraphDataGraphUri(metaOnly),
+        contextGraphDataGraphUri(withContent),
+      ]);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('survives a closed store: keeps in-memory subscription state, flags storeUnavailable, reports store facts as UNKNOWN', async () => {
     const harness = agentHarness(
       closedStore,

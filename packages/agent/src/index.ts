@@ -118,6 +118,7 @@ export {
   InvalidContentError,
   StaleSenderKeyTargetError,
   type DKGAgentConfig,
+  type DKGAgentACKTransportOptions,
   type ContextGraphSub,
   type PublishOpts,
   type PublishAsyncContent,
@@ -222,6 +223,6 @@ export { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/ma
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.
 // `parseBooleanEnv` is part of the shipped public surface (#1526) — keep it
-// exported. The serve-side policy (`shouldWithholdAgentsDurableMeta` + its
-// predicate factory) stays internal; only the in-agent lifecycle + tests use it.
+// exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
+// internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';

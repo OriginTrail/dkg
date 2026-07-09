@@ -77,6 +77,10 @@ export {
   type ACKCollectionResult,
 } from './ack-collector.js';
 export {
+  type ACKTransport,
+  type ACKTransportFactory,
+} from './ack-transport.js';
+export {
   selectACKCandidatePeers,
   type ACKCandidatePeerSelectionInput,
 } from './ack-peer-selection.js';
@@ -93,6 +97,8 @@ export {
 } from './ack-errors.js';
 export {
   StorageACKHandler,
+  ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
+  DEFAULT_ACK_HANDLER_DEADLINE_MS,
   type StorageAckDecision,
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
@@ -101,6 +107,14 @@ export {
   createStorageAckLifecycleObserver,
   type StorageAckLifecycleObserverOptions,
 } from './storage-ack-lifecycle-observer.js';
+export {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
+  type StorageAckTimingInput,
+} from './storage-ack-timing.js';
 export {
   withSignerRegistrationCache,
   SIGNER_REGISTRATION_CACHE_TTL_MS,

@@ -33,6 +33,7 @@ import type {
   LiftTransitionType,
   LiftAuthorityProof,
   SharedMemoryPublicSnapshotStorageConfig,
+  StorageAckTiming,
   CursorPersistence as ChainEventCursorPersistence,
 } from '@origintrail-official/dkg-publisher';
 import type { ApprovalPolicy, ChainAdapter, ContextGraphRegistryScanCursorStore } from '@origintrail-official/dkg-chain';
@@ -1042,6 +1043,22 @@ export interface DKGAgentConfig {
    * tests to drive the background re-resolution path deterministically.
    */
   storageAckRegistrationRetryMs?: number;
+  /**
+   * Resolved StorageACK timing policy. Prefer this single object over the
+   * legacy loose aliases below so the handler deadline and publisher send
+   * timeout are treated as one invariant.
+   */
+  storageAckTiming?: StorageAckTiming;
+  /**
+   * @deprecated Use `storageAckTiming.handlerDeadlineMs`. Kept as a
+   * compatibility alias and normalized by `DKGAgent.create`.
+   */
+  ackHandlerDeadlineMs?: number;
+  /**
+   * @deprecated Use `storageAckTiming.sendTimeoutMs`. Kept as a compatibility
+   * alias and normalized by `DKGAgent.create`.
+   */
+  ackSendTimeoutMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */
@@ -1210,3 +1227,13 @@ export interface DKGAgentConfig {
     outboxStore: ProtocolOutboxStore;
   };
 }
+
+export interface DKGAgentACKTransportOptions {
+  sendTimeoutMs?: number;
+  log?: (message: string) => void;
+}
+
+export type ResolvedDKGAgentConfig =
+  Omit<DKGAgentConfig, 'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'> & {
+    storageAckTiming: StorageAckTiming;
+  };

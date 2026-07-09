@@ -3,9 +3,10 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, OperationContext } from '@origintrail-official/dkg-core';
 import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, sharedMemoryReadBothFilter, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, loadSelectedSharedMemoryQuads } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { skolemizeByEntity } from './auto-partition.js';
+import { withKeyedLocks } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import { canonicalPublishPayload } from './canonical-publish-payload.js';
 import {
@@ -1119,23 +1120,8 @@ export class DKGPublisher implements Publisher {
     return undefined;
   }
 
-  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
-    const uniqueKeys = [...new Set(keys)].sort();
-    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
-    let resolve!: () => void;
-    const gate = new Promise<void>(r => { resolve = r; });
-    for (const k of uniqueKeys) {
-      this.writeLocks.set(k, gate);
-    }
-    await predecessor;
-    try {
-      return await fn();
-    } finally {
-      resolve();
-      for (const k of uniqueKeys) {
-        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
-      }
-    }
+  private withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
   /**
@@ -1614,41 +1600,14 @@ export class DKGPublisher implements Publisher {
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
 
-    let sparql: string;
-    if (selection === 'all') {
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } ${sharedMemoryReadBothFilter(swmGraph)} }`;
-    } else {
-      const roots = [...new Set(
-        selection.rootEntities
-          .map((r) => String(r).trim())
-          .filter((r) => isSafeIri(r)),
-      )];
-      if (roots.length === 0) {
-        const hadInput = selection.rootEntities.length > 0;
-        throw new Error(
-          hadInput
-            ? `No valid rootEntities provided (all ${selection.rootEntities.length} entries failed IRI validation)`
-            : `No rootEntities provided for context graph ${contextGraphId}`,
-        );
-      }
-      const values = roots.map((r) => `<${r}>`).join(' ');
-      sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-        GRAPH ?g {
-          VALUES ?root { ${values} }
-          ?s ?p ?o .
-          FILTER(
-            ?s = ?root
-            || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-          )
-        }
-        ${sharedMemoryReadBothFilter(swmGraph)}
-      }`;
-    }
-
-    const result = await this.store.query(sparql);
-    const quads: Quad[] = result.type === 'quads'
-      ? result.quads.filter((q) => !isSwmMerkleExcludedQuad(q))
-      : [];
+    const quads = await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
+      quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
+      rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
+        hadInput
+          ? `No valid rootEntities provided (all ${inputCount} entries failed IRI validation)`
+          : `No rootEntities provided for context graph ${contextGraphId}`
+      ),
+    });
 
     if (quads.length === 0) {
       throw new Error(`No quads in shared memory for context graph ${contextGraphId} matching selection`);

@@ -7,6 +7,7 @@ import {
   Logger,
   createOperationContext,
 } from '@origintrail-official/dkg-core';
+import { withKeyedLocks } from './keyed-lock.js';
 
 const log = new Logger('AgentRegistryMetaRetention');
 
@@ -24,6 +25,64 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
   if (/[<>"{}|^`\\\s]/.test(graphIri)) {
     throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
   }
+}
+
+// Per-INDIVIDUAL-root serialization (#1533/#1534 review). Two concurrent
+// agents/_meta writes whose root sets INTERSECT each insert a fresh record and then
+// prune "every record for these roots but mine" — and
+// `pruneSupersededAgentRegistryMeta` deletes by ANY matching member root, not by the
+// root-set shape. Run UNSERIALIZED they delete each other's just-inserted record and
+// a shared root ends with ZERO `_meta` rows. So we serialize at the SAME granularity
+// as the prune's blast radius (one lock key per individual root) via the gate-based
+// {@link withKeyedLocks} helper: writes sharing a root serialize, writes over
+// disjoint roots stay concurrent. Per-root — not the incidental single-root heartbeat
+// shape — because the direct-protocol receive handler does not enforce singleton
+// agents-CG writes.
+//
+// The lock domain is scoped PER STORE (not module-global): two independent handlers
+// backed by different `TripleStore`s must not falsely serialize on a shared agents
+// root, and test/runtime isolation must not depend on hidden global state. A WeakMap
+// lets a discarded store's locks be GC'd. In production there is a single main store,
+// so this is behaviour-identical — the scoping just removes the hidden coupling.
+const _agentMetaLocksByStore = new WeakMap<TripleStore, Map<string, Promise<void>>>();
+
+function agentMetaLocksFor(store: TripleStore): Map<string, Promise<void>> {
+  let locks = _agentMetaLocksByStore.get(store);
+  if (!locks) {
+    locks = new Map<string, Promise<void>>();
+    _agentMetaLocksByStore.set(store, locks);
+  }
+  return locks;
+}
+
+/**
+ * Extract the roots a record covers from its own quads — the single source of truth
+ * for {@link insertBoundedAgentRegistryMeta}'s lock keys and prune scope (so neither
+ * can drift from the inserted record). Every root a record encodes has a bare
+ * `<recordUal> dkg:rootEntity <root>` member row, emitted per root by BOTH metadata
+ * generators (`generateTentativeMetadata`/`generateConfirmedFullMetadata` →
+ * `entityMemberQuads`), so filtering those captures exactly the record's roots.
+ *
+ * THROWS if the record encodes no such rows. On the agents path an empty root set
+ * means the record has no lock/prune domain — taking no locks and pruning nothing
+ * would SILENTLY opt out of the retention invariant this helper owns, so we fail
+ * loudly (a programmer error / malformed record, caught before any write, like the
+ * `recordUal`-subject guard). The accepted predicate is `dkg:rootEntity`
+ * (DKG_ROOT_ENTITY_LEGACY) — the canonical bare-member predicate the generators emit.
+ */
+function deriveCoveredRootsOrThrow(recordUal: string, metadataQuads: Quad[]): string[] {
+  const roots = [...new Set(
+    metadataQuads
+      .filter((q) => q.subject === recordUal && q.predicate === DKG_ROOT_ENTITY_LEGACY)
+      .map((q) => q.object),
+  )];
+  if (roots.length === 0) {
+    throw new Error(
+      `insertBoundedAgentRegistryMeta: metadataQuads encode no <${recordUal}> ` +
+        `<${DKG_ROOT_ENTITY_LEGACY}> <root> member rows — the record has no lock/prune domain`,
+    );
+  }
+  return roots;
 }
 
 /**
@@ -49,41 +108,86 @@ function assertSafeGraphIriForSparql(graphIri: string): void {
  *     timeout cleanup never registers). Boundedness is only degraded for one
  *     round; the next heartbeat re-prunes.
  *
+ * Concurrency: calls are serialized per individual root (a per-process mutex) so
+ * two writes sharing any root — identical OR overlapping sets — can't
+ * insert-then-prune each other down to zero records; writes for disjoint roots run
+ * concurrently.
+ *
  * For non-agents CGs the prune is a no-op (see
  * {@link pruneSupersededAgentRegistryMeta}), so this is just the insert.
  *
+ * SINGLE SOURCE OF TRUTH (#1534 review): the lock keys and the prune scope are
+ * DERIVED from `metadataQuads` (the roots the record actually encodes), NOT taken as
+ * a parallel `rootEntities` argument. That makes it impossible for a caller to drift
+ * the pruned/locked domain away from the inserted record — e.g. a caller that
+ * pre-filters some roots out of the metadata could otherwise pass the wider,
+ * unfiltered set and have the prune evict a root the record does not cover, zeroing
+ * it (the invariant this bound protects).
+ *
  * @param opts.recordUal REQUIRED — the UAL of the record in `metadataQuads`. It
  *   is both the record being inserted and the one protected from the prune, so
- *   it MUST equal the `<ual>` subject of `metadataQuads` (a drift would let the
- *   prune delete the just-inserted record).
+ *   it MUST be a subject of `metadataQuads`; this is ENFORCED (throws) on the
+ *   agents path, because a drift (insert A, protect B) would let the prune delete
+ *   the just-inserted record.
  */
 export async function insertBoundedAgentRegistryMeta(opts: {
   store: TripleStore;
   contextGraphId: string;
   metaGraph: string;
-  rootEntities: readonly string[];
   recordUal: string;
   metadataQuads: Quad[];
 }): Promise<void> {
-  const { store, contextGraphId, metaGraph, rootEntities, recordUal, metadataQuads } = opts;
-  // Insert FIRST so a prune failure can never leave the agent with no record.
-  // An insert failure PROPAGATES (caller aborts; nothing durable changed).
-  await store.insert(metadataQuads);
-  // The record is now durable, so a prune failure MUST NOT abort the caller's
-  // downstream lifecycle registration — swallow it with a loud warn and let the
-  // next heartbeat re-prune. `recordUal` protects the row we just wrote.
-  try {
-    await pruneSupersededAgentRegistryMeta({
-      store, contextGraphId, metaGraph, rootEntities, keepUal: recordUal,
-    });
-  } catch (err) {
-    log.warn(
-      createOperationContext('system'),
-      `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
-        `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
-        `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+  const { store, contextGraphId, metaGraph, recordUal, metadataQuads } = opts;
+
+  // Non-agents CGs never prune (see pruneSupersededAgentRegistryMeta), so there
+  // is no self-deletion race and no protected-record contract — just insert.
+  if (!isAgentRegistryContextGraph(contextGraphId)) {
+    await store.insert(metadataQuads);
+    return;
+  }
+
+  // Programmer-error boundary (#1533): `recordUal` is the record the prune
+  // protects, so it MUST be the record we're inserting. A drift (insert A, protect
+  // B) would let the prune delete the just-inserted A. Fail loudly rather than
+  // silently corrupt. (Agents path only — non-agents don't prune.)
+  if (!metadataQuads.some((q) => q.subject === recordUal)) {
+    throw new Error(
+      `insertBoundedAgentRegistryMeta: recordUal <${recordUal}> is not a subject of metadataQuads`,
     );
   }
+
+  // Derive the roots THIS record covers from its own quads — the single source of
+  // truth for the lock keys and the prune scope, so neither can drift from the
+  // inserted record. Fails loudly if the record encodes no roots (see
+  // {@link deriveCoveredRootsOrThrow}).
+  const coveredRoots = deriveCoveredRootsOrThrow(recordUal, metadataQuads);
+
+  // Serialize insert+prune per individual root, scoped to THIS store (see the note on
+  // _agentMetaLocksByStore): any two writes sharing a root (identical OR overlapping
+  // sets, e.g. {X} vs {X,Y}) serialize so they can't insert-then-prune each other down
+  // to zero records; writes for disjoint roots stay concurrent. The locks span
+  // insert→prune and are released only after the prune try/catch.
+  const lockKeys = coveredRoots.map((root) => `${contextGraphId}:${root}`);
+  await withKeyedLocks(agentMetaLocksFor(store), lockKeys, async () => {
+    // Insert FIRST so a prune failure can never leave the agent with no record.
+    // An insert failure PROPAGATES (caller aborts; nothing durable changed).
+    await store.insert(metadataQuads);
+    // The record is now durable, so a prune failure MUST NOT abort the caller's
+    // downstream lifecycle registration — swallow it with a loud warn and let the
+    // next heartbeat re-prune. `recordUal` protects the row we just wrote.
+    try {
+      await pruneSupersededAgentRegistryMeta({
+        store, contextGraphId, metaGraph, rootEntities: coveredRoots, keepUal: recordUal,
+      });
+    } catch (err) {
+      log.warn(
+        createOperationContext('system'),
+        `agents/_meta bound skipped this round for context graph "${contextGraphId}": the prune ` +
+          `failed after a successful insert (${err instanceof Error ? err.message : String(err)}). ` +
+          `The record is live; boundedness is degraded for one round — the next heartbeat re-prunes.`,
+      );
+    }
+  });
 }
 
 /**

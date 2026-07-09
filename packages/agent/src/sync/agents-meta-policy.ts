@@ -6,7 +6,9 @@
 //   - shouldWithholdAgentsDurableMeta — SERVE-side opt-OUT (should the responder withhold it?)
 // Both are pure functions (env passed IN, never read here) so the precedence is
 // unit-testable in isolation and neither the responder nor the requester carries
-// daemon config policy.
+// daemon config policy. The daemon lifecycle builds the responder's serve-skip
+// predicate inline by calling `shouldWithholdAgentsDurableMeta` directly with a fresh
+// `process.env.DKG_SERVE_AGENTS_META` read at its wiring boundary.
 
 import { isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
 
@@ -76,18 +78,4 @@ export function shouldWithholdAgentsDurableMeta(
 ): boolean {
   if (!isAgentRegistryContextGraph(contextGraphId)) return false;
   return parseBooleanEnv(serveEnvValue) !== true;
-}
-
-/**
- * Build the responder's injected `shouldWithholdDurableMeta` predicate (#1233),
- * wired into `registerSyncHandler` at the daemon lifecycle call site. The
- * returned predicate reads `DKG_SERVE_AGENTS_META` FRESH on every call — so
- * flipping the env takes effect on the next sync request with no node restart
- * (runtime-hot) — and delegates the decision to the pure
- * `shouldWithholdAgentsDurableMeta` resolver. Lives here (not on the lifecycle
- * mixin) so the serve-skip policy is fully contained in this module.
- */
-export function createAgentsDurableMetaWithholdPredicate(): (contextGraphId: string) => boolean {
-  return (contextGraphId) =>
-    shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META);
 }

@@ -2,10 +2,12 @@ import { join } from 'node:path';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import { EVMChainAdapter, NoChainAdapter, mergeRpcUsageWindows, type ChainAdapter, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, type Ed25519Keypair } from '@origintrail-official/dkg-core';
-import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { ACKCollector, AsyncLiftRunner, DKGPublisher, FileWorkspacePublicSnapshotStore, TripleStoreAsyncLiftPublisher, wrapAsRpcPreconditionIfApplicable, type ACKTransport, type ACKTransportFactory, type AsyncLiftPublishExecutionInput, type AsyncLiftPublisher, type AsyncLiftPublisherConfig, type AsyncLiftPublisherRecoveryResult, type LiftJobBroadcast, type LiftJobIncluded, type PublishOptions, type V10ACKProviderParams, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
 import { loadPublisherWallets } from './publisher-wallets.js';
+
+export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
 export interface PublisherRuntime {
   readonly runner: AsyncLiftRunner;
@@ -25,14 +27,6 @@ export interface PublisherRuntimeWallet {
 export interface PublisherInspector {
   readonly publisher: AsyncLiftPublisher;
   readonly stop: () => Promise<void>;
-}
-
-interface ACKTransportFactory {
-  publisherPeerId: string;
-  gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
-  sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
-  getConnectedCorePeers: (protocol?: string) => string[];
-  log?: (message: string) => void;
 }
 
 type PublishEncryptionFactory = (publishOptions: PublishOptions) =>
@@ -59,7 +53,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
     chainId?: string;
   };
   log: (message: string) => void;
-  ackTransportFactory?: () => ACKTransportFactory;
+  ackTransportFactory?: ACKTransportFactory;
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
   knowledgeAssetVmPublishPreflight?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishPreflight'];
@@ -112,7 +106,7 @@ interface PublisherRuntimeBaseArgs {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
-  ackTransportFactory?: () => ACKTransportFactory;
+  ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
@@ -204,7 +198,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   errorBackoffMs?: number;
   maxRetries?: number;
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
-  ackTransportFactory?: () => ACKTransportFactory;
+  ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishExecutor?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishExecutor'];
@@ -389,7 +383,7 @@ function logPublisherWalletAttribution(
 
 function createV10ACKProviderForPublisher(
   publisher: DKGPublisher,
-  transport?: ACKTransportFactory,
+  transport?: ACKTransport,
 ): PublishOptions['v10ACKProvider'] | undefined {
   if (!transport) return undefined;
   const chain = (publisher as unknown as {

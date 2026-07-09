@@ -347,7 +347,7 @@ import {
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
-  type DKGAgentConfig,
+  type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
@@ -915,7 +915,7 @@ export class DKGAgentBase {
   // re-submitting `ensureProfile()` while a prior one may still be settling on
   // chain — which would risk a duplicate profile / double-stake.
   protected profileProvisioningInFlight = false;
-  protected readonly config: DKGAgentConfig;
+  protected readonly config: ResolvedDKGAgentConfig;
   protected started = false;
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
@@ -1404,7 +1404,7 @@ export class DKGAgentBase {
   protected _pendingSkillAcl: SkillAclCheck | null = null;
 
   protected constructor(
-    config: DKGAgentConfig,
+    config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
     node: DKGNode,
     store: TripleStore,

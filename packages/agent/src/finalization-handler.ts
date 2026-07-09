@@ -1,7 +1,6 @@
 import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  sharedMemoryReadBothFilter,
   contextGraphDataUri, contextGraphMetaUri,
   contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
   DKGEvent, Logger, createOperationContext,
@@ -13,7 +12,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -487,31 +486,29 @@ export class FinalizationHandler {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
 
-    const values = safeRoots.map(r => `<${r}>`).join(' ');
     // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
     // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
     // not the bare bucket. Reading only the bucket made every replica report
     // "no shared memory data … peer missed SWM sharing" on finalization, so
     // the published KA was never materialized into VM on subscribed peers
     // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
+    //
+    // A3 (O(store) relief): bind the read to the exact SWM graph set up front
+    // via the fast named-graph index (`resolveSharedMemoryReadGraphs` →
+    // `listGraphsByPrefix`) instead of an unbounded `GRAPH ?g` +
+    // `sharedMemoryReadBothFilter` STRSTARTS filter, which scans EVERY quad in
+    // EVERY graph on RocksDB and starves finalization/ACK under load. The
+    // resolved set is exactly what that filter matched (bucket + `${bucket}/`
+    // minus `${bucket}/staging/`). Merkle-critical but FAIL-SAFE: if the index
+    // ever omitted a graph the recompute would MISMATCH and this KA is rejected
+    // (retried on a later round), never accepted with corrupt data.
     // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
     // fidelity for the merkle recompute, and so the same logical triple
     // present in BOTH the bucket and a per-KA graph collapses to one
     // (a constructed graph is a set).
-    const sparql = `CONSTRUCT { ?s ?p ?o } WHERE {
-      GRAPH ?g {
-        VALUES ?root { ${values} }
-        ?s ?p ?o .
-        FILTER(
-          ?s = ?root
-          || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/"))
-        )
-      }
-      ${sharedMemoryReadBothFilter(sharedMemoryGraph)}
-    }`;
-
-    const result = await this.store.query(sparql, { source: 'agent.finalization.sharedMemorySlice' });
-    return result.type === 'quads' ? result.quads : [];
+    return loadSelectedSharedMemoryQuads(this.store, sharedMemoryGraph, { rootEntities: safeRoots }, {
+      querySource: 'agent.finalization.sharedMemorySlice',
+    });
   }
 
   private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {
@@ -1532,11 +1529,15 @@ export class FinalizationHandler {
     // NOTE: the agents CG is always-tentative and never confirms on-chain, so in
     // practice this promotion is not reached for it (see report); this is a
     // defensive, lifecycle-preserving bound that keeps the invariant robust.
+    // The bound derives its lock + prune roots from `metaQuads` itself, so the
+    // dropped zero-public-triple roots (the `continue` above) are naturally excluded
+    // from the prune — it can only evict superseded records for roots THIS record
+    // covers, never zero a root the record omits. (Previously this call passed a
+    // separate rootEntities list, which risked exactly that drift.)
     await insertBoundedAgentRegistryMeta({
       store: this.store,
       contextGraphId,
       metaGraph: `did:dkg:context-graph:${contextGraphId}/_meta`,
-      rootEntities,
       recordUal: ual,
       metadataQuads: metaQuads,
     });

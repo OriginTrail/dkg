@@ -26,6 +26,7 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validatePublishRequest } from './validation.js';
+import { withKeyedLocks } from './keyed-lock.js';
 import { generateOwnershipQuads, generateSubGraphRegistration } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { storeWorkspaceOperationPublicQuads } from './workspace-resolution.js';
@@ -790,23 +791,8 @@ export class SharedMemoryHandler {
     };
   }
 
-  private async withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
-    const uniqueKeys = [...new Set(keys)].sort();
-    const predecessor = Promise.all(uniqueKeys.map(k => this.writeLocks.get(k) ?? Promise.resolve()));
-    let resolve!: () => void;
-    const gate = new Promise<void>(r => { resolve = r; });
-    for (const k of uniqueKeys) {
-      this.writeLocks.set(k, gate);
-    }
-    await predecessor;
-    try {
-      return await fn();
-    } finally {
-      resolve();
-      for (const k of uniqueKeys) {
-        if (this.writeLocks.get(k) === gate) this.writeLocks.delete(k);
-      }
-    }
+  private withWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+    return withKeyedLocks(this.writeLocks, keys, fn);
   }
 
   /**

@@ -12,6 +12,13 @@ import {
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
+import {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
+} from '@origintrail-official/dkg-publisher';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -709,6 +716,15 @@ export interface DkgConfig {
    */
   maxConnections?: number;
   /**
+   * C1: StorageACK timing tunables. Resolved by `resolveStorageAckTiming()` so
+   * defaults, partial overrides, and the handler-vs-send safety margin are
+   * enforced at the CLI config boundary before daemon/agent wiring consumes it.
+   */
+  storageAck?: {
+    handlerDeadlineMs?: number;
+    sendTimeoutMs?: number;
+  };
+  /**
    * V10 Random Sampling prover (core-only). When the node is `core`
    * AND has an on-chain identity, the agent automatically schedules
    * `RandomSamplingProver.tick()` on `tickIntervalMs`. Edge nodes
@@ -864,6 +880,14 @@ const DEFAULT_CONFIG: DkgConfig = {
   apiPort: 9200,
   listenPort: 0,
   nodeRole: 'edge',
+};
+
+export {
+  resolveStorageAckTiming,
+  STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+  STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS,
+  STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  type StorageAckTiming,
 };
 
 /** Resolve context graphs from config. */

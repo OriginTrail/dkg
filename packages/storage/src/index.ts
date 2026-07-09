@@ -40,7 +40,18 @@ export {
   type SparqlHttpQueryOptions,
   type SparqlHttpSlowQueryEvent,
 } from './adapters/sparql-http.js';
-export { ContextGraphManager, GraphManager } from './graph-manager.js';
+export {
+  ContextGraphManager,
+  GraphManager,
+  loadSelectedSharedMemoryQuads,
+  loadSelectedVerifiableMemoryQuads,
+  resolveSharedMemoryReadGraphs,
+  resolveVerifiableMemoryReadGraphs,
+  type LoadSelectedSharedMemoryQuadsOptions,
+  type LoadSelectedVerifiableMemoryQuadsOptions,
+  type NonEmptyGraphList,
+  type SharedMemoryReadSelection,
+} from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 
 // Side-effect: register built-in adapters
