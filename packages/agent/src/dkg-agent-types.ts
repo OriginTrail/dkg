@@ -1037,6 +1037,26 @@ export interface DKGAgentConfig {
    * tests to drive the background re-resolution path deterministically.
    */
   storageAckRegistrationRetryMs?: number;
+  /**
+   * C1: wall-clock deadline (ms) for a single StorageACK-handler invocation on
+   * a CORE. When omitted, the handler derives its default from the publisher's
+   * per-send timeout (DEFAULT_SEND_TIMEOUT_MS 20s − 5s margin = 15s). Under
+   * store saturation the 15s default converts a slow-but-working store into a
+   * `CORE_TEMPORARILY_UNAVAILABLE` decline; operators of large-store cores can
+   * raise this so the ACK write completes instead of bailing. MUST be paired
+   * with a matching increase in `ackSendTimeoutMs` on publishers — a higher
+   * core deadline has no effect if publishers still abandon the send at 20s.
+   */
+  ackHandlerDeadlineMs?: number;
+  /**
+   * C1: per-send P2P timeout (ms) the PUBLISHER applies to each StorageACK
+   * request round. When omitted, falls back to DEFAULT_SEND_TIMEOUT_MS (20s).
+   * Raise this in lockstep with cores' `ackHandlerDeadlineMs` (keep the core
+   * deadline below the send timeout by ~5s) so the publisher waits long enough
+   * for a slow-store core to return a real ACK/decline instead of timing the
+   * send out as a transport failure.
+   */
+  ackSendTimeoutMs?: number;
   /** Pre-built chain adapter (for testing). If provided, chainConfig is ignored. */
   chainAdapter?: ChainAdapter;
   /** Private key for the V10 ACK signer. When omitted, falls back to chainConfig.operationalKeys[0]. */

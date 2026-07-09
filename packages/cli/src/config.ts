@@ -702,6 +702,20 @@ export interface DkgConfig {
    */
   maxConnections?: number;
   /**
+   * C1: StorageACK timing tunables. Raise these TOGETHER under store
+   * saturation. A core operator raises `handlerDeadlineMs` so a slow-but-
+   * working store completes the ACK write instead of declining
+   * `CORE_TEMPORARILY_UNAVAILABLE` at the 15s default; a publisher operator
+   * raises `sendTimeoutMs` in lockstep (keep the deadline ~5s below it) so the
+   * publisher waits for the reply instead of timing the send out as a transport
+   * error. Defaults: deadline 15s (derived from the 20s send timeout − 5s),
+   * sendTimeout 20s. Leave unset for stock behaviour.
+   */
+  storageAck?: {
+    handlerDeadlineMs?: number;
+    sendTimeoutMs?: number;
+  };
+  /**
    * V10 Random Sampling prover (core-only). When the node is `core`
    * AND has an on-chain identity, the agent automatically schedules
    * `RandomSamplingProver.tick()` on `tickIntervalMs`. Edge nodes

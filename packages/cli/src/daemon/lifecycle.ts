@@ -1573,6 +1573,9 @@ export async function runDaemonInner(
     randomSamplingWalPath: config.randomSampling?.walPath,
     randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    // C1: operator-tunable StorageACK timing (core deadline + publisher send).
+    ackHandlerDeadlineMs: config.storageAck?.handlerDeadlineMs,
+    ackSendTimeoutMs: config.storageAck?.sendTimeoutMs,
     syncCheckpointStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,

@@ -1644,7 +1644,14 @@ export class DKGAgent extends DKGAgentBase {
       // sits on top; queued counts as a per-peer failure that the
       // collector handles via its existing retry-then-skip path.
       sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        // C1: let the publisher wait longer for a slow-store core to answer the
+        // ACK round (undefined → messenger's DEFAULT_SEND_TIMEOUT_MS 20s). Pair
+        // with a raised `ackHandlerDeadlineMs` on cores so the core's deadline
+        // stays ~5s below this and returns a real ACK/decline instead of a
+        // transport timeout.
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
+          timeoutMs: this.config.ackSendTimeoutMs,
+        });
         if (!sendResult.delivered) {
           throw new Error(`substrate queued (transport): ${sendResult.error}`);
         }
@@ -1802,7 +1809,14 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data);
+        // C1: let the publisher wait longer for a slow-store core to answer the
+        // ACK round (undefined → messenger's DEFAULT_SEND_TIMEOUT_MS 20s). Pair
+        // with a raised `ackHandlerDeadlineMs` on cores so the core's deadline
+        // stays ~5s below this and returns a real ACK/decline instead of a
+        // transport timeout.
+        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
+          timeoutMs: this.config.ackSendTimeoutMs,
+        });
         if (!sendResult.delivered) {
           throw new Error(`substrate queued (transport): ${sendResult.error}`);
         }
