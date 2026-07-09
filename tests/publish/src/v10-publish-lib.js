@@ -298,8 +298,11 @@ export function defineChainPublishSuite(config) {
         let vmGetSuccess = 0, vmGetFail = 0;
         let queryRemoteSuccess = 0, queryRemoteFail = 0;
 
-        // durations record EVERY attempt (success or fail) so the average is the
-        // real operation latency and never spuriously 0.
+        // durations record ONLY SUCCESSFUL operations — a failed attempt's
+        // latency is time-to-error (timeouts, refused sockets), not operation
+        // speed, and averaging it in fabricates an "avg publish time" even on
+        // 0%-success runs. With zero successes the average is null and the DB
+        // row stores SQL NULL, so Grafana shows "No data" instead of a number.
         const publishDurations = [];
         const queryDurations = [];
         const vmGetDurations = [];
@@ -407,13 +410,12 @@ export function defineChainPublishSuite(config) {
               sample.forEach((u) => console.log(`      ${u}`));
             }
             publishSuccess++;
+            publishDurations.push(Date.now() - pubStart);
           } catch (error) {
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             console.log(`❌ Publish failed | No UAL`);
             failedAssets.push(`KA #${i + 1} (Publish failed)`);
             publishFail++;
-          } finally {
-            publishDurations.push(Date.now() - pubStart);
           }
 
           // Reads are RUN-SPECIFIC when the publish succeeded — they target THIS
@@ -440,12 +442,11 @@ export function defineChainPublishSuite(config) {
             assert.ok(queryHasData(result), 'Query returned empty results');
             console.log(`✅ Query succeeded`);
             querySuccess++;
+            queryDurations.push(Date.now() - queryStart);
           } catch (error) {
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (Query failed)`);
             queryFail++;
-          } finally {
-            queryDurations.push(Date.now() - queryStart);
           }
 
           // ── 3. VM GET — get THIS KA's root entity triples from local VM ──────
@@ -464,12 +465,11 @@ export function defineChainPublishSuite(config) {
             assert.ok(queryHasData(result), 'VM GET returned empty results');
             console.log(`✅ VM GET succeeded`);
             vmGetSuccess++;
+            vmGetDurations.push(Date.now() - vmGetStart);
           } catch (error) {
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (VM GET failed)`);
             vmGetFail++;
-          } finally {
-            vmGetDurations.push(Date.now() - vmGetStart);
           }
 
           // ── 4. Query Remote (sync) — read the KA back from a PEER by UAL ────
@@ -489,19 +489,20 @@ export function defineChainPublishSuite(config) {
             assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${readUal} from ${remoteNode.name}`);
             console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
             queryRemoteSuccess++;
+            queryRemoteDurations.push(Date.now() - remoteStart);
           } catch (error) {
             await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
             failedAssets.push(`KA #${i + 1} (Query Remote (sync) failed)`);
             queryRemoteFail++;
-          } finally {
-            queryRemoteDurations.push(Date.now() - remoteStart);
           }
         }
 
-        const avgPublishMs = mean(publishDurations);
-        const avgQueryMs = mean(queryDurations);
-        const avgVmGetMs = mean(vmGetDurations);
-        const avgQueryRemoteMs = mean(queryRemoteDurations);
+        // null (not 0) when nothing succeeded — "0s avg" would read as instant
+        // success and the DB/Grafana layer needs NULL to show "No data".
+        const avgPublishMs = publishDurations.length ? mean(publishDurations) : null;
+        const avgQueryMs = queryDurations.length ? mean(queryDurations) : null;
+        const avgVmGetMs = vmGetDurations.length ? mean(vmGetDurations) : null;
+        const avgQueryRemoteMs = queryRemoteDurations.length ? mean(queryRemoteDurations) : null;
 
         console.log(`\n──────────── Summary for ${name} ────────────`);
         if (failedAssets.length > 0) {
@@ -531,10 +532,10 @@ export function defineChainPublishSuite(config) {
           query_success_rate: safeRate(querySuccess, queryFail),
           publisher_get_success_rate: safeRate(vmGetSuccess, vmGetFail),                 // VM GET
           non_publisher_get_success_rate: safeRate(queryRemoteSuccess, queryRemoteFail),   // Query Remote (sync)
-          average_publish_time: (avgPublishMs / 1000).toFixed(2),
-          average_query_time: (avgQueryMs / 1000).toFixed(2),
-          average_publisher_get_time: (avgVmGetMs / 1000).toFixed(2),
-          average_non_publisher_get_time: (avgQueryRemoteMs / 1000).toFixed(2),
+          average_publish_time: avgPublishMs === null ? null : (avgPublishMs / 1000).toFixed(2),
+          average_query_time: avgQueryMs === null ? null : (avgQueryMs / 1000).toFixed(2),
+          average_publisher_get_time: avgVmGetMs === null ? null : (avgVmGetMs / 1000).toFixed(2),
+          average_non_publisher_get_time: avgQueryRemoteMs === null ? null : (avgQueryRemoteMs / 1000).toFixed(2),
           time_stamp: new Date().toISOString(),
         };
         const summaryFileName = `summary_${name.replace(/\s+/g, '_')}.json`;

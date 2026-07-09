@@ -90,6 +90,9 @@ export function safeRate(success, fail) {
 }
 
 export function formatDuration(ms) {
+  // null/undefined = no successful operations to average — say so instead of
+  // printing a zero that reads like an instant success.
+  if (ms === null || ms === undefined) return 'n/a (no successful ops)';
   if (!ms || isNaN(ms)) return '0.00 ms';
   // Sub-second durations (e.g. local SPARQL queries are a few ms) would round
   // to "0.00 seconds" — show them in ms so no number is lost.

@@ -100,7 +100,6 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
           ),
         ]);
         const publishEnd = performance.now();
-        publishDurations.push(publishEnd - publishStart);
 
         assert.ok(result);
         if (result.status !== 'confirmed') {
@@ -124,6 +123,7 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
         const cgWarn = result.httpStatus === 207 ? ` | ⚠️ CG-binding failed (contextGraphError) but minted on-chain` : '';
         console.log(`✅ Published KA #${kaNumber}${ualInfo} | kaId: ${kaId} | status: ${result.status} | KAs: ${kasCreated}${txInfo}${cgWarn}`);
         publishSuccess++;
+        publishDurations.push(publishEnd - publishStart); // successful ops only
         if (!firstSuccessfulRootEntity) firstSuccessfulRootEntity = rootEntity;
       } catch (error) {
         await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
@@ -152,7 +152,6 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
           ),
         ]);
         const aqEnd = performance.now();
-        assetQueryDurations.push(aqEnd - aqStart);
 
         assert.ok(aqResult?.result, 'Asset Query returned no result');
         const bindings = aqResult.result.bindings || aqResult.result;
@@ -160,6 +159,7 @@ describe('DKG v10 Publish/Query Lifecycle', function () {
         assert.ok(hasData, `Asset Query returned empty results for ${rootEntity}`);
         console.log(`✅ Asset Query succeeded`);
         assetQuerySuccess++;
+        assetQueryDurations.push(aqEnd - aqStart); // successful ops only
       } catch (error) {
         await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
         failedAssets.push(`KA #${kaNumber} (Asset Query failed — kaId: ${kaId})`);
@@ -183,11 +183,11 @@ SELECT ?s ?name ?description WHERE {
           ),
         ]);
         const queryEnd = performance.now();
-        queryDurations.push(queryEnd - queryStart);
 
         assert.ok(queryResult?.result, 'Global Query returned no result');
         console.log(`✅ Global Query succeeded`);
         querySuccess++;
+        queryDurations.push(queryEnd - queryStart); // successful ops only
       } catch (error) {
         await logError(error, NODE_NAME, step, errorStats, kaNumber, { baseUrl: DKG_API_URL });
         failedAssets.push(`KA #${kaNumber} (Global Query failed — kaId: ${kaId})`);
@@ -211,13 +211,14 @@ SELECT ?s ?name ?description WHERE {
       }
     }
 
-    // ---- Compute averages ----
+    // ---- Compute averages (successful ops only; null when none succeeded so
+    // the DB stores NULL and Grafana shows "No data", never a fabricated 0) ----
     const avgPublishMs = publishDurations.length > 0
-      ? publishDurations.reduce((a, b) => a + b, 0) / publishDurations.length : 0;
+      ? publishDurations.reduce((a, b) => a + b, 0) / publishDurations.length : null;
     const avgQueryMs = queryDurations.length > 0
-      ? queryDurations.reduce((a, b) => a + b, 0) / queryDurations.length : 0;
+      ? queryDurations.reduce((a, b) => a + b, 0) / queryDurations.length : null;
     const avgAssetQueryMs = assetQueryDurations.length > 0
-      ? assetQueryDurations.reduce((a, b) => a + b, 0) / assetQueryDurations.length : 0;
+      ? assetQueryDurations.reduce((a, b) => a + b, 0) / assetQueryDurations.length : null;
 
     // ---- Print summary ----
     console.log(`\n──────────── Summary for ${NODE_NAME} ────────────`);
@@ -245,11 +246,13 @@ SELECT ?s ?name ?description WHERE {
       publish_success_rate: safeRate(publishSuccess, publishFail),
       query_success_rate: safeRate(querySuccess, queryFail),
       publisher_get_success_rate: safeRate(assetQuerySuccess, assetQueryFail),
-      non_publisher_get_success_rate: '0.00',
-      average_publish_time: (avgPublishMs / 1000).toFixed(3),
-      average_query_time: (avgQueryMs / 1000).toFixed(3),
-      average_publisher_get_time: (avgAssetQueryMs / 1000).toFixed(3),
-      average_non_publisher_get_time: '0.000',
+      // this spec never runs the remote-get op — null (not 0) so it can't drag
+      // dashboard averages down as a fake 0%-in-0s data point
+      non_publisher_get_success_rate: null,
+      average_publish_time: avgPublishMs === null ? null : (avgPublishMs / 1000).toFixed(3),
+      average_query_time: avgQueryMs === null ? null : (avgQueryMs / 1000).toFixed(3),
+      average_publisher_get_time: avgAssetQueryMs === null ? null : (avgAssetQueryMs / 1000).toFixed(3),
+      average_non_publisher_get_time: null,
       time_stamp: new Date().toISOString(),
     };
 
