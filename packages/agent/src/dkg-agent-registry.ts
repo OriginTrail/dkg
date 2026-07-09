@@ -151,7 +151,11 @@ import {
   NetworkAdmissionRejectedError,
   type NetworkAdmissionAttemptOptions,
 } from './p2p/network-admission-coordinator.js';
-import { MultiaddrPeerTargetParseError, parseMultiaddrConnectTarget } from './p2p/multiaddr-peer-target.js';
+import {
+  MultiaddrPeerTargetParseError,
+  parseMultiaddrConnectTarget,
+  type MultiaddrConnectTarget,
+} from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import {
   createCGMemberEnumerator,
@@ -402,6 +406,18 @@ function pcaRegisteredProbe(
 ): (() => Promise<boolean>) | null {
   const read = chain.isPublishingConvictionAgent;
   return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
+
+function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: boolean): MultiaddrConnectTarget {
+  try {
+    return parseMultiaddrConnectTarget(multiaddress, { requireTargetPeerId: admissionEnabled });
+  } catch (err) {
+    if (!admissionEnabled) throw err;
+    throw new NetworkAdmissionInvalidPeerIdError(
+      err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
@@ -1831,18 +1847,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    let connectTarget: ReturnType<typeof parseMultiaddrConnectTarget>;
-    try {
-      connectTarget = parseMultiaddrConnectTarget(multiaddress, {
-        requireTargetPeerId: this.networkAdmissionCoordinator.enabled,
-      });
-    } catch (err) {
-      if (!this.networkAdmissionCoordinator.enabled) throw err;
-      throw new NetworkAdmissionInvalidPeerIdError(
-        err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    const connectTarget = parseExplicitConnectTarget(
+      multiaddress,
+      this.networkAdmissionCoordinator.enabled,
+    );
     const targetPeerId = connectTarget.targetPeerId;
     await connectToMultiaddr(
       this.node.libp2p as any,

@@ -123,7 +123,8 @@ describe('NetworkAdmissionCoordinator', () => {
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
 
     expect(seenOptions).toMatchObject({ timeoutMs: 3_000 });
-    expect(seenOptions?.signal).toBeUndefined();
+    expect(seenOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(seenOptions?.signal).not.toBe(callerSignal);
   });
 
   it('canonicalizes peer ids before probing and sharing in-flight admission attempts', async () => {
@@ -167,7 +168,8 @@ describe('NetworkAdmissionCoordinator', () => {
     await Promise.resolve();
 
     expect(sendIdentityProbe).toHaveBeenCalledOnce();
-    expect(sendIdentityProbe.mock.calls[0][2].signal).toBeUndefined();
+    expect(sendIdentityProbe.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
+    expect(sendIdentityProbe.mock.calls[0][2].signal).not.toBe(firstAbort.signal);
     firstAbort.abort(new Error('caller cancelled'));
     await expect(first).rejects.toThrow('caller cancelled');
 
@@ -175,8 +177,9 @@ describe('NetworkAdmissionCoordinator', () => {
     await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
   });
 
-  it('times out a caller wait with the connect timeout code without cancelling the shared probe', async () => {
+  it('times out a caller wait with the connect timeout code and aborts an unobserved probe', async () => {
     let release!: (value: Uint8Array) => void;
+    let probeSignal: AbortSignal | undefined;
     const sendIdentityProbe = vi.fn(async () => new Promise<Uint8Array>((resolve) => {
       release = resolve;
     }));
@@ -194,8 +197,13 @@ describe('NetworkAdmissionCoordinator', () => {
     ).rejects.toMatchObject({ name: 'AbortError', code: 'CONNECT_TIMEOUT' });
 
     expect(sendIdentityProbe).toHaveBeenCalledOnce();
-    expect(sendIdentityProbe.mock.calls[0][2].signal).toBeUndefined();
+    probeSignal = sendIdentityProbe.mock.calls[0][2].signal;
+    expect(probeSignal).toBeInstanceOf(AbortSignal);
+    expect(probeSignal?.aborted).toBe(true);
     release(new TextEncoder().encode('{not json'));
+    await Promise.resolve();
+    expect(fixture.admission.snapshot().quarantinedPeerIds).toEqual([]);
+    expect(fixture.admission.snapshot().verifiedPeerIds).toEqual([]);
   });
 
   it('rejects malformed peer ids before probing', async () => {

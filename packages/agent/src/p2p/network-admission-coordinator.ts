@@ -48,6 +48,13 @@ export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
 }
 
+interface InFlightAdmissionAttempt {
+  controller: AbortController;
+  promise: Promise<boolean>;
+  waiters: number;
+  settled: boolean;
+}
+
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
 
@@ -86,7 +93,7 @@ export class NetworkAdmissionCoordinator {
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
-  private readonly inFlight = new Map<string, Promise<boolean>>();
+  private readonly inFlight = new Map<string, InFlightAdmissionAttempt>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -158,17 +165,26 @@ export class NetworkAdmissionCoordinator {
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return this.raceAdmissionAttempt(existing, options);
 
-    const promise = this.probePeer(remotePeerId, ctx)
+    const controller = new AbortController();
+    const attempt: InFlightAdmissionAttempt = {
+      controller,
+      waiters: 0,
+      settled: false,
+      promise: Promise.resolve(false),
+    };
+    attempt.promise = this.probePeer(remotePeerId, ctx, controller.signal)
       .finally(() => {
-        this.inFlight.delete(remotePeerId);
+        attempt.settled = true;
+        if (this.inFlight.get(remotePeerId) === attempt) this.inFlight.delete(remotePeerId);
       });
-    this.inFlight.set(remotePeerId, promise);
-    return this.raceAdmissionAttempt(promise, options);
+    this.inFlight.set(remotePeerId, attempt);
+    return this.raceAdmissionAttempt(attempt, options);
   }
 
   private async probePeer(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
+    signal: AbortSignal,
   ): Promise<boolean> {
     const identity = this.identity;
     if (!this.enabled) return true;
@@ -184,17 +200,19 @@ export class NetworkAdmissionCoordinator {
     });
 
     let response: Uint8Array;
+    if (signal.aborted) throw abortErrorFromSignal(signal.reason);
     try {
       response = await this.sendIdentityProbe(
         remotePeer,
         new TextEncoder().encode(JSON.stringify(request)),
-        { timeoutMs: this.probeTimeoutMs },
+        { timeoutMs: this.probeTimeoutMs, signal },
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
+    if (signal.aborted) throw abortErrorFromSignal(signal.reason);
 
     let claimed: unknown;
     try {
@@ -220,17 +238,21 @@ export class NetworkAdmissionCoordinator {
     return false;
   }
 
-  private raceAdmissionAttempt<T>(promise: Promise<T>, options: NetworkAdmissionAttemptOptions): Promise<T> {
+  private raceAdmissionAttempt(attempt: InFlightAdmissionAttempt, options: NetworkAdmissionAttemptOptions): Promise<boolean> {
     const signal = options.signal;
     const timeoutMs = options.timeoutMs;
-    if (!signal && timeoutMs === undefined) return promise;
     if (signal?.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
+    attempt.waiters += 1;
 
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<boolean>((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
         if (timeout) clearTimeout(timeout);
         signal?.removeEventListener('abort', onAbort);
+        attempt.waiters = Math.max(0, attempt.waiters - 1);
+        if (attempt.waiters === 0 && !attempt.settled) {
+          attempt.controller.abort(admissionTimeoutError(timeoutMs ?? this.probeTimeoutMs));
+        }
       };
       const onAbort = () => {
         cleanup();
@@ -243,7 +265,7 @@ export class NetworkAdmissionCoordinator {
           reject(admissionTimeoutError(timeoutMs));
         }, Math.max(0, timeoutMs));
       }
-      promise.then(
+      attempt.promise.then(
         (value) => {
           cleanup();
           resolve(value);

@@ -1,10 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
-  canonicalTargetPeerIdFromMultiaddr,
   parseMultiaddrConnectTarget,
   peerIdsFromMultiaddrs,
-  targetPeerIdFromMultiaddr,
 } from '../src/p2p/multiaddr-peer-target.js';
 
 const TARGET_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -23,14 +21,13 @@ describe('multiaddr peer targets', () => {
     const addr = `/ip4/127.0.0.1/tcp/4001/p2p/${RELAY_PEER_ID}/p2p-circuit/p2p/${TARGET_PEER_ID}`;
 
     expect([...peerIdsFromMultiaddrs([addr])]).toEqual([RELAY_PEER_ID, TARGET_PEER_ID]);
-    expect(targetPeerIdFromMultiaddr(addr)).toBe(TARGET_PEER_ID);
+    expect(parseMultiaddrConnectTarget(addr)).toMatchObject({ targetPeerId: TARGET_PEER_ID });
   });
 
   it('canonicalizes alternate-encoded target peer ids at parse time', () => {
     const cidPeerId = peerIdFromString(TARGET_PEER_ID).toCID().toString();
     const addr = `/ip4/127.0.0.1/tcp/4001/p2p/${cidPeerId}`;
 
-    expect(canonicalTargetPeerIdFromMultiaddr(addr)).toBe(TARGET_PEER_ID);
     expect(parseMultiaddrConnectTarget(addr)).toEqual({
       kind: 'direct',
       multiaddress: addr,
@@ -52,9 +49,6 @@ describe('multiaddr peer targets', () => {
   });
 
   it('requires a target peer for circuit multiaddrs', () => {
-    expect(targetPeerIdFromMultiaddr(
-      `/ip4/127.0.0.1/tcp/4001/p2p/${RELAY_PEER_ID}/p2p-circuit`,
-    )).toBeUndefined();
     expect(() => parseMultiaddrConnectTarget(
       `/ip4/127.0.0.1/tcp/4001/p2p/${RELAY_PEER_ID}/p2p-circuit`,
     )).toThrow('Circuit multiaddr missing target peer id');

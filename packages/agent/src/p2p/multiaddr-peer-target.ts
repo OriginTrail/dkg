@@ -41,16 +41,6 @@ export function peerIdsFromMultiaddr(addr: string): string[] {
   return parseMultiaddrStructure(addr).peerIds;
 }
 
-export function targetPeerIdFromMultiaddr(addr: string): string | undefined {
-  const structure = parseMultiaddrStructure(addr);
-  return targetPeerIdFromStructure(structure);
-}
-
-export function canonicalTargetPeerIdFromMultiaddr(addr: string): CanonicalPeerId | undefined {
-  const raw = targetPeerIdFromMultiaddr(addr);
-  return raw ? canonicalTargetPeerId(raw) : undefined;
-}
-
 export function parseMultiaddrConnectTarget(
   addr: string,
   options: MultiaddrConnectTargetParseOptions = {},
