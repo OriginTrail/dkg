@@ -93,7 +93,13 @@ export class EndpointStickiness {
    * (order() may re-arm the re-probe TTL — it must not run twice per loop entry);
    * the two closures capture the SAME canonical + intent, so a loop no longer
    * hand-threads them across three separate `order`/`recordSuccess`/`recordFailure`
-   * calls (and can't drift them apart). Pure façade over the primitives below.
+   * calls (and can't drift them apart).
+   *
+   * This is the SOLE public API for DRIVING a failover pass — `order`,
+   * `recordSuccess`, and `recordFailure` are `private` below precisely so the
+   * mismatched-(canonical, intent) hand-threaded path this bundle prevents is not
+   * merely discouraged but unavailable. (`hasPreference` stays public as a
+   * read-only introspection helper; it can't cause drift.)
    */
   attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T> {
     const ordered = this.order(canonical, intent);
@@ -114,7 +120,7 @@ export class EndpointStickiness {
    * When the re-probe deadline has passed this op probes the primary first AND
    * re-arms the deadline `+ttlMs` (at most one primary re-stall per TTL).
    */
-  order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
+  private order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
     if (intent === 'transparentRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') {
       return canonical;
     }
@@ -166,7 +172,7 @@ export class EndpointStickiness {
    *     or silently re-point; `source` = 'write' for a populate, else 'read'. A
    *     later populate on the SAME preferred upgrades 'read'→'write'.
    */
-  recordSuccess<T extends StickyEndpoint>(
+  private recordSuccess<T extends StickyEndpoint>(
     endpoint: T,
     canonical: T[],
     intent: StickinessIntent,
@@ -226,7 +232,7 @@ export class EndpointStickiness {
    * null continues the loop without a failover), so a healthy-but-empty backup
    * stays preferred.
    */
-  recordFailure<T extends StickyEndpoint>(endpoint: T, intent: StickinessIntent): void {
+  private recordFailure<T extends StickyEndpoint>(endpoint: T, intent: StickinessIntent): void {
     if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
     if (this.state.kind === 'preferred' && this.state.url === endpoint.rpcUrl) {
       this.state = { kind: 'none' };

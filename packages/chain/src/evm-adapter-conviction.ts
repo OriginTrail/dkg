@@ -838,11 +838,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     // Route by the (method, params) endpoint-freshness + nullability strategy (see
     // classifyPcaRead). `tipNullableTransparent` keeps the `skipPreferred` opt-out —
     // transport plumbing owned HERE in the single dispatch, not spelled at a caller.
-    switch (classifyPcaRead(method, params)) {
+    // Exhaustive over PcaReadStrategy: the `never` tail turns a future strategy that
+    // forgets to pick a transport into a COMPILE error, not a silent `readProvider`.
+    const strategy = classifyPcaRead(method, params);
+    switch (strategy) {
       case 'tipTransparent':         return this.readTipProvider(label, send);
       case 'tipNullableTransparent': return this.readProviderRetryingNull(label, send, { skipPreferred: true });
       case 'stickyNullable':         return this.readProviderRetryingNull(label, send);
-      default:                       return this.readProvider(label, send); // 'sticky'
+      case 'sticky':                 return this.readProvider(label, send);
     }
+    const _exhaustive: never = strategy;
+    throw new Error(`unreachable PCA read strategy: ${String(_exhaustive)}`);
   }
 }

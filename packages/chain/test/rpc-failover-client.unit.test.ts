@@ -46,7 +46,7 @@ import {
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
-import { _resetRpcFailoverStatsForTest, getRpcFailoverStats } from '../src/rpc-failover-log.js';
+import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
