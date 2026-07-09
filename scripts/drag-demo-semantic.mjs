@@ -52,7 +52,7 @@ async function ask(question, retrieval, maxKas) {
   await publish('hooli', [['urn:supplier:hooli', 'http://schema.org/name', '"Hooli Materials"'], ['urn:supplier:hooli', 'http://ex/note', '"raw-material purity deviations led to rejected shipments"']]);
   await publish('globex', [['urn:supplier:globex', 'http://schema.org/name', '"Globex Logistics"'], ['urn:supplier:globex', 'http://ex/note', '"consistently on-time delivery; top-rated partner"']]);
   await publish('acme', [['urn:supplier:acme', 'http://schema.org/name', '"Acme Foods"'], ['urn:supplier:acme', 'http://ex/note', '"expanded product line; strong customer satisfaction"']]);
-  await publish('review', [['urn:report:review', 'http://schema.org/title', '"early-2026 vendor quality review"'], ['urn:report:review', 'http://ex/coversVendor', '<urn:supplier:initech>']]);
+  await publish('review', [['urn:report:review', 'http://schema.org/title', '"early-2026 vendor quality review"'], ['urn:report:review', 'http://ex/coversVendor', 'urn:supplier:initech']]);
   console.log(`  ${c.g('✓')} 5 KAs published to ${c.c(CG)}. FAILURES = ${c.y('initech, hooli')}; distractors = globex, acme.`);
 
   const Q = 'which suppliers were flagged in the audit, and why?';

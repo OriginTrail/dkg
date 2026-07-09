@@ -54,7 +54,7 @@ async function publish(name: string, triples: Array<[string, string, string]>): 
 }
 
 const A = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const ref = (x: string) => `<${NS}${x}>`;
+const ref = (x: string) => `${NS}${x}`;
 const T = (s: string, p: string, o: string): [string, string, string] => [NS + s, p.startsWith('http') ? p : NS + p, o];
 const RULES_N3 =
   `@prefix code: <${NS}>. @prefix log: <http://www.w3.org/2000/10/swap/log#>. @prefix list: <http://www.w3.org/2000/10/swap/list#>. ` +

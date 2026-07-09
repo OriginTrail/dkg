@@ -75,7 +75,7 @@ const escLit = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   // convention — they round-trip to bare in the stored triples); literals quoted.
   // The authoring agent is recorded as a queryable FACT (code:author), as in the
   // article's "/decisions graph with the author's identity".
-  const ref = (x) => `<${NS}${x}>`;
+  const ref = (x) => `${NS}${x}`;
   const T = (s, p, o) => [NS + s, p.startsWith('http') ? p : NS + p, o];
   const A = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   // One KA per concern, with DISTINCT rootEntities (a KA's subjects are its root
