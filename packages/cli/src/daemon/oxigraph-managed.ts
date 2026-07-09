@@ -36,6 +36,8 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 /** Default loopback bind port. Override via `store.options.port`. */
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
+const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
+
 /** Same port validation as {@link planManagedOxigraph} — shared with status. */
 export function resolveManagedOxigraphPort(
   options: Record<string, unknown> | undefined,
@@ -54,6 +56,12 @@ function resolvePositiveIntegerOption(
   return typeof value === 'number' && Number.isInteger(value) && value > 0
     ? value
     : undefined;
+}
+
+function resolveManagedQueryClientTimeoutMs(queryTimeoutS: number | undefined): number | undefined {
+  return queryTimeoutS === undefined
+    ? undefined
+    : queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS;
 }
 
 interface StoreConfigLike {
@@ -166,7 +174,12 @@ export function planManagedOxigraph(
     backend: 'sparql-http',
     // managedByDkg lets chain-reset wipe DROP ALL on the local RocksDB
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
-    options: { managedByDkg: true },
+    options: {
+      managedByDkg: true,
+      ...(queryTimeoutS === undefined
+        ? {}
+        : { timeout: resolveManagedQueryClientTimeoutMs(queryTimeoutS) }),
+    },
   };
   if (graphSetIndex !== undefined) {
     storeConfigTemplate.graphSetIndex = graphSetIndex;
