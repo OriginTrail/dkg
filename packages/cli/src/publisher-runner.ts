@@ -27,7 +27,7 @@ export interface PublisherInspector {
   readonly stop: () => Promise<void>;
 }
 
-interface ACKTransportFactory {
+export interface ACKTransportFactory {
   publisherPeerId: string;
   gossipPublish: (topic: string, data: Uint8Array) => Promise<void>;
   sendP2P: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;

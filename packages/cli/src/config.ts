@@ -7,11 +7,16 @@ import type { DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import {
   blueGreenSlotEntryPoint,
   blueGreenSlotReady,
+  DEFAULT_SEND_TIMEOUT_MS,
   findPackageRepoDir,
   isDkgMonorepoRoot,
   resolveDkgConfigHome,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
+import {
+  ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
+  DEFAULT_ACK_HANDLER_DEADLINE_MS,
+} from '@origintrail-official/dkg-publisher';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -702,14 +707,9 @@ export interface DkgConfig {
    */
   maxConnections?: number;
   /**
-   * C1: StorageACK timing tunables. Raise these TOGETHER under store
-   * saturation. A core operator raises `handlerDeadlineMs` so a slow-but-
-   * working store completes the ACK write instead of declining
-   * `CORE_TEMPORARILY_UNAVAILABLE` at the 15s default; a publisher operator
-   * raises `sendTimeoutMs` in lockstep (keep the deadline ~5s below it) so the
-   * publisher waits for the reply instead of timing the send out as a transport
-   * error. Defaults: deadline 15s (derived from the 20s send timeout − 5s),
-   * sendTimeout 20s. Leave unset for stock behaviour.
+   * C1: StorageACK timing tunables. Resolved by `resolveStorageAckTiming()` so
+   * defaults, partial overrides, and the handler-vs-send safety margin are
+   * enforced at the CLI config boundary before daemon/agent wiring consumes it.
    */
   storageAck?: {
     handlerDeadlineMs?: number;
@@ -872,6 +872,50 @@ const DEFAULT_CONFIG: DkgConfig = {
   listenPort: 0,
   nodeRole: 'edge',
 };
+
+export interface StorageAckTiming {
+  handlerDeadlineMs: number;
+  sendTimeoutMs: number;
+}
+
+export const STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS = DEFAULT_SEND_TIMEOUT_MS;
+export const STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS = DEFAULT_ACK_HANDLER_DEADLINE_MS;
+export const STORAGE_ACK_TIMING_SAFETY_MARGIN_MS = ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS;
+
+function requirePositiveSafeIntegerMs(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`${label} must be a positive safe integer number of milliseconds`);
+  }
+  return value as number;
+}
+
+export function resolveStorageAckTiming(storageAck?: DkgConfig['storageAck'] | null): StorageAckTiming {
+  if (storageAck != null && (typeof storageAck !== 'object' || Array.isArray(storageAck))) {
+    throw new Error('storageAck must be an object with optional handlerDeadlineMs/sendTimeoutMs fields');
+  }
+  const handlerOverride = requirePositiveSafeIntegerMs(
+    storageAck?.handlerDeadlineMs,
+    'storageAck.handlerDeadlineMs',
+  );
+  const sendOverride = requirePositiveSafeIntegerMs(
+    storageAck?.sendTimeoutMs,
+    'storageAck.sendTimeoutMs',
+  );
+  const handlerDeadlineMs = handlerOverride ?? STORAGE_ACK_HANDLER_DEADLINE_DEFAULT_MS;
+  const sendTimeoutMs = sendOverride ?? Math.max(
+    STORAGE_ACK_SEND_TIMEOUT_DEFAULT_MS,
+    handlerDeadlineMs + STORAGE_ACK_TIMING_SAFETY_MARGIN_MS,
+  );
+  if (sendTimeoutMs - handlerDeadlineMs < STORAGE_ACK_TIMING_SAFETY_MARGIN_MS) {
+    throw new Error(
+      `storageAck.sendTimeoutMs must be at least ${STORAGE_ACK_TIMING_SAFETY_MARGIN_MS}ms ` +
+      `greater than storageAck.handlerDeadlineMs ` +
+      `(got handlerDeadlineMs=${handlerDeadlineMs}, sendTimeoutMs=${sendTimeoutMs})`,
+    );
+  }
+  return { handlerDeadlineMs, sendTimeoutMs };
+}
 
 /** Resolve context graphs from config. */
 export function resolveContextGraphs(config: DkgConfig): string[] {

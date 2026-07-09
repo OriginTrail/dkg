@@ -29,6 +29,7 @@ import {
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveStorageAckTiming,
 } from '../src/config.js';
 
 describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
@@ -73,6 +74,33 @@ describe('sharedHomeInitGate (dkg init shared ~/.dkg opt-in — issue #960 round
 
   it('non-interactive, no --yes → refuse (cannot ask; must not silently overwrite)', () => {
     expect(sharedHomeInitGate({ yes: false, isTty: false })).toBe('refuse');
+  });
+});
+
+describe('resolveStorageAckTiming', () => {
+  it('returns the stock 15s handler deadline and 20s send timeout when unset', () => {
+    expect(resolveStorageAckTiming()).toEqual({
+      handlerDeadlineMs: 15_000,
+      sendTimeoutMs: 20_000,
+    });
+  });
+
+  it('normalizes a raised handler-only deadline by preserving the 5s send margin', () => {
+    expect(resolveStorageAckTiming({ handlerDeadlineMs: 55_000 })).toEqual({
+      handlerDeadlineMs: 55_000,
+      sendTimeoutMs: 60_000,
+    });
+  });
+
+  it('rejects explicitly misaligned handler/send pairs', () => {
+    expect(() => resolveStorageAckTiming({
+      handlerDeadlineMs: 60_000,
+      sendTimeoutMs: 30_000,
+    })).toThrow(/storageAck\.sendTimeoutMs must be at least 5000ms greater/);
+  });
+
+  it('rejects malformed storageAck blocks instead of silently defaulting', () => {
+    expect(() => resolveStorageAckTiming('60000' as any)).toThrow(/storageAck must be an object/);
   });
 });
 

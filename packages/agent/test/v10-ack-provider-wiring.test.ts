@@ -38,6 +38,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
 // Codex review feedback: the chain package exports the verifier
 // result type as `VerifyACKIdentityResult`; `ACKVerifyResult` is the
 // publisher-side mirror (same shape, different export site).
@@ -49,6 +50,7 @@ import { DKGAgent } from '../src/index.js';
  * inspect the exact deps the agent wired. Cleared in `beforeEach`.
  */
 const capturedAckCollectorDeps: unknown[] = [];
+const capturedStorageACKHandlerConfigs: unknown[] = [];
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -71,6 +73,17 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
         throw new Error('CapturingACKCollector.collect should not be invoked in wiring tests');
       }
     },
+    StorageACKHandler: class CapturingStorageACKHandler {
+      constructor(_store: unknown, config: unknown) {
+        capturedStorageACKHandlerConfigs.push(config);
+      }
+      async handler(): Promise<Uint8Array> {
+        return new Uint8Array();
+      }
+      async updateHandler(): Promise<Uint8Array> {
+        return new Uint8Array();
+      }
+    },
   };
 });
 
@@ -79,6 +92,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
  * constructor. We only assert on the two verifier callbacks here.
  */
 interface ACKCollectorDepsCapture {
+  sendP2P?: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
   verifyIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
   verifyIdentityDetailed?: (
     recoveredAddress: string,
@@ -98,8 +112,10 @@ interface ACKCollectorDepsCapture {
  */
 interface ProviderInternals {
   createV10ACKProvider(cgId: string): unknown;
+  createV10UpdateACKProvider(cgId: string): unknown;
   router: unknown;
   gossip: unknown;
+  messenger: unknown;
   chain: MockChainAdapter & {
     verifyACKIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
     verifyACKIdentityDetailed?: (
@@ -110,11 +126,12 @@ interface ProviderInternals {
   node: { libp2p: { getPeers(): unknown[] } };
 }
 
-async function bootProviderAgent(): Promise<{ agent: DKGAgent; internals: ProviderInternals }> {
+async function bootProviderAgent(options: Record<string, unknown> = {}): Promise<{ agent: DKGAgent; internals: ProviderInternals }> {
   const chain = new MockChainAdapter();
   const agent = await DKGAgent.create({
     name: 'ACKProviderWiringTest',
     chainAdapter: chain,
+    ...options,
   });
   const internals = agent as unknown as ProviderInternals;
   // The guards at the top of `createV10ACKProvider` only check
@@ -139,6 +156,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
   beforeEach(() => {
     capturedAckCollectorDeps.length = 0;
+    capturedStorageACKHandlerConfigs.length = 0;
   });
 
   afterEach(async () => {
@@ -232,5 +250,55 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       42n,
     );
     expect(verdict).toBe(false);
+  });
+
+  it('passes ackSendTimeoutMs through publish and update ACK provider sendP2P closures', async () => {
+    const boot = await bootProviderAgent({ ackSendTimeoutMs: 60_000 });
+    agent = boot.agent;
+    const internals = boot.internals;
+    const response = new Uint8Array([9]);
+    const sendReliable = vi.fn(async () => ({
+      delivered: true,
+      response,
+    }));
+    const payload = new Uint8Array([1, 2, 3]);
+    internals.messenger = { sendReliable };
+
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    await expect(publishDeps.sendP2P!('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);
+
+    internals.createV10UpdateACKProvider('test-cg');
+    const updateDeps = capturedAckCollectorDeps[1] as ACKCollectorDepsCapture;
+    await expect(updateDeps.sendP2P!('peer-b', '/dkg/test/storage-update-ack', payload)).resolves.toEqual(response);
+
+    expect(sendReliable).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
+      timeoutMs: 60_000,
+    });
+    expect(sendReliable).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
+      timeoutMs: 60_000,
+    });
+  });
+
+  it('passes ackHandlerDeadlineMs into StorageACKHandler construction during core startup', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+
+    agent = await DKGAgent.create({
+      name: 'ACKHandlerDeadlineWiringTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      ackHandlerDeadlineMs: 55_000,
+    });
+    await agent.start();
+
+    expect(capturedStorageACKHandlerConfigs).toContainEqual(
+      expect.objectContaining({ ackHandlerDeadlineMs: 55_000 }),
+    );
   });
 });

@@ -93,6 +93,8 @@ export {
 } from './ack-errors.js';
 export {
   StorageACKHandler,
+  ACK_HANDLER_DEADLINE_SAFETY_MARGIN_MS,
+  DEFAULT_ACK_HANDLER_DEADLINE_MS,
   type StorageACKHandlerConfig,
 } from './storage-ack-handler.js';
 export {

@@ -112,6 +112,7 @@ import {
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   KA_ID_PRED, RESERVED_UAL_PRED,
   type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams, type LiftAuthorityProof, type LiftTransitionType,
+  type ACKCollectorDeps,
   type LiftRequest, type LiftRequestAuthorSeal,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
@@ -1610,6 +1611,18 @@ export class DKGAgent extends DKGAgentBase {
     });
   }
 
+  private createACKSendP2P(): ACKCollectorDeps['sendP2P'] {
+    return async (peerId: string, protocol: string, data: Uint8Array) => {
+      const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
+        timeoutMs: this.config.ackSendTimeoutMs,
+      });
+      if (!sendResult.delivered) {
+        throw new Error(`substrate queued (transport): ${sendResult.error}`);
+      }
+      return sendResult.response;
+    };
+  }
+
   /**
    * Create a V10 ACK provider callback for the publisher.
    * Uses ACKCollector to broadcast PublishIntent and collect StorageACKs
@@ -1638,25 +1651,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      // rc.9 PR-11: ACKCollector now routes through messenger.send
-      // Reliable so /dkg/10.0.1/storage-ack gets envelope wrap +
-      // sender-side idempotency. ACKCollector's own MAX_RETRIES=3 loop
-      // sits on top; queued counts as a per-peer failure that the
-      // collector handles via its existing retry-then-skip path.
-      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        // C1: let the publisher wait longer for a slow-store core to answer the
-        // ACK round (undefined → messenger's DEFAULT_SEND_TIMEOUT_MS 20s). Pair
-        // with a raised `ackHandlerDeadlineMs` on cores so the core's deadline
-        // stays ~5s below this and returns a real ACK/decline instead of a
-        // transport timeout.
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
-          timeoutMs: this.config.ackSendTimeoutMs,
-        });
-        if (!sendResult.delivered) {
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
-        }
-        return sendResult.response;
-      },
+      sendP2P: this.createACKSendP2P(),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
@@ -1808,20 +1803,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: async (peerId: string, protocol: string, data: Uint8Array) => {
-        // C1: let the publisher wait longer for a slow-store core to answer the
-        // ACK round (undefined → messenger's DEFAULT_SEND_TIMEOUT_MS 20s). Pair
-        // with a raised `ackHandlerDeadlineMs` on cores so the core's deadline
-        // stays ~5s below this and returns a real ACK/decline instead of a
-        // transport timeout.
-        const sendResult = await this.messenger.sendReliable(peerId, protocol, data, {
-          timeoutMs: this.config.ackSendTimeoutMs,
-        });
-        if (!sendResult.delivered) {
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
-        }
-        return sendResult.response;
-      },
+      sendP2P: this.createACKSendP2P(),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
