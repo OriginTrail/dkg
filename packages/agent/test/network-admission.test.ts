@@ -5,6 +5,7 @@ import {
   peerIdsFromMultiaddrs,
   targetPeerIdFromMultiaddr,
 } from '../src/p2p/network-admission.js';
+import { canonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const VERIFIED_PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -15,7 +16,7 @@ describe('NetworkAdmissionService', () => {
   it('allows all peers when no active network identity is configured', () => {
     const admission = new NetworkAdmissionService();
 
-    expect(admission.isAcceptedPeer('peer-a')).toBe(true);
+    expect(admission.isAcceptedPeer(canonicalPeerIdString(UNKNOWN_PEER_ID))).toBe(true);
     expect(admission.snapshot().enabled).toBe(false);
   });
 
@@ -25,11 +26,9 @@ describe('NetworkAdmissionService', () => {
       selfPeerId: SELF_PEER_ID,
     });
 
-    expect(admission.isAcceptedPeer(SELF_PEER_ID)).toBe(true);
-    expect(admission.isAcceptedPeer(UNKNOWN_PEER_ID)).toBe(false);
-    expect(admission.isRejectedPeer(UNKNOWN_PEER_ID)).toBe(false);
-    expect(admission.isAcceptedPeer('not-a-peer-id')).toBe(false);
-    expect(admission.isRejectedPeer('not-a-peer-id')).toBe(true);
+    expect(admission.isAcceptedPeer(canonicalPeerIdString(SELF_PEER_ID))).toBe(true);
+    expect(admission.isAcceptedPeer(canonicalPeerIdString(UNKNOWN_PEER_ID))).toBe(false);
+    expect(admission.isRejectedPeer(canonicalPeerIdString(UNKNOWN_PEER_ID))).toBe(false);
   });
 
   it('promotes verified same-network peers and excludes quarantined peers', () => {
@@ -37,13 +36,13 @@ describe('NetworkAdmissionService', () => {
       networkId: 'network-a',
     });
 
-    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID_CID);
-    expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(true);
+    admission.markVerifiedSameNetwork(canonicalPeerIdString(VERIFIED_PEER_ID_CID));
+    expect(admission.isAcceptedPeer(canonicalPeerIdString(VERIFIED_PEER_ID))).toBe(true);
     expect([...admission.verifiedSameNetworkPeerIds()].sort()).toEqual([VERIFIED_PEER_ID]);
 
-    admission.quarantinePeer(VERIFIED_PEER_ID_CID);
-    expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(false);
-    expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
+    admission.quarantinePeer(canonicalPeerIdString(VERIFIED_PEER_ID_CID));
+    expect(admission.isAcceptedPeer(canonicalPeerIdString(VERIFIED_PEER_ID))).toBe(false);
+    expect(admission.isRejectedPeer(canonicalPeerIdString(VERIFIED_PEER_ID))).toBe(true);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
 

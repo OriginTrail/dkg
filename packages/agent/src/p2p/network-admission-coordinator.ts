@@ -4,14 +4,14 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionService } from './network-admission.js';
+import { NetworkAdmissionService, targetPeerIdFromMultiaddr } from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
-import { canonicalPeerIdString } from './peer-id.js';
+import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionConnection {
   remotePeer: { toString(): string };
@@ -107,16 +107,30 @@ export class NetworkAdmissionCoordinator {
 
   isAcceptedPeer(peerId: string): boolean {
     if (!this.identity?.networkId) return true;
-    return this.admission.isAcceptedPeer(peerId);
+    const canonicalPeerId = tryCanonicalAdmissionPeerId(peerId);
+    return canonicalPeerId ? this.admission.isAcceptedPeer(canonicalPeerId) : false;
   }
 
   isRejectedPeer(peerId: string): boolean {
     if (!this.identity?.networkId) return false;
-    return this.admission.isRejectedPeer(peerId);
+    const canonicalPeerId = tryCanonicalAdmissionPeerId(peerId);
+    return canonicalPeerId ? this.admission.isRejectedPeer(canonicalPeerId) : true;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     return this.admission.verifiedSameNetworkPeerIds();
+  }
+
+  targetPeerIdForExplicitConnect(multiaddress: string): string | undefined {
+    const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
+    if (!this.enabled) return targetPeerId;
+    if (!targetPeerId) {
+      throw new NetworkAdmissionInvalidPeerIdError(
+        '<missing>',
+        'connect multiaddr must include a target /p2p/<peerId> for network admission',
+      );
+    }
+    return canonicalAdmissionPeerId(targetPeerId);
   }
 
   filterAcceptedPeerIds(peerIds: Iterable<string>): string[] {
@@ -164,7 +178,7 @@ export class NetworkAdmissionCoordinator {
   }
 
   private async probePeer(
-    remotePeer: string,
+    remotePeer: CanonicalPeerId,
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions,
   ): Promise<boolean> {
@@ -243,14 +257,14 @@ export class NetworkAdmissionCoordinator {
     });
   }
 
-  private async rejectPeer(remotePeer: string, ctx: OperationContext, reason: string): Promise<void> {
+  private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {
     this.admission.quarantinePeer(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
   }
 
-  private async disconnectAndForgetPeer(remotePeer: string, ctx: OperationContext): Promise<void> {
+  private async disconnectAndForgetPeer(remotePeer: CanonicalPeerId, ctx: OperationContext): Promise<void> {
     const shortPeer = remotePeer.slice(-8);
     const connections = [...this.getConnections()]
       .filter((conn) => conn.remotePeer.toString() === remotePeer);
@@ -282,10 +296,18 @@ function abortErrorFromSignal(reason: unknown): Error {
   return error;
 }
 
-function canonicalAdmissionPeerId(peerId: string): string {
+function canonicalAdmissionPeerId(peerId: string): CanonicalPeerId {
   try {
     return canonicalPeerIdString(peerId);
   } catch (err) {
     throw new NetworkAdmissionInvalidPeerIdError(peerId, err instanceof Error ? err.message : String(err));
+  }
+}
+
+function tryCanonicalAdmissionPeerId(peerId: string): CanonicalPeerId | null {
+  try {
+    return canonicalAdmissionPeerId(peerId);
+  } catch {
+    return null;
   }
 }

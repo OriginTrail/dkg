@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
 import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -11,13 +12,31 @@ describe('connectToMultiaddr', () => {
   it('dials direct multiaddrs without circuit expansion', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);
-    const connections = [{ remotePeer: { toString: () => '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' } }];
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const connections = [{ remotePeer: { toString: () => peerId } }];
 
     await connectToMultiaddr({
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    }, `/ip4/127.0.0.1/tcp/9090/p2p/${peerId}`);
+
+    expect(dial.calls).toHaveLength(1);
+    expect(merge.calls).toEqual([]);
+  });
+
+  it('confirms direct CID-form target peer ids against canonical connections', async () => {
+    const dial = recorder(async () => undefined);
+    const merge = recorder(async () => undefined);
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const cidPeerId = peerIdFromString(peerId).toCID().toString();
+    const connections = [{ remotePeer: { toString: () => peerId } }];
+
+    await connectToMultiaddr({
+      getConnections: () => connections as any,
+      dial,
+      peerStore: { merge },
+    }, `/ip4/127.0.0.1/tcp/9090/p2p/${cidPeerId}`);
 
     expect(dial.calls).toHaveLength(1);
     expect(merge.calls).toEqual([]);

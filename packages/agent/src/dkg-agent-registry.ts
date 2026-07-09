@@ -148,8 +148,6 @@ import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatu
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
-import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
-import { canonicalPeerIdString } from './p2p/peer-id.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -1828,23 +1826,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
-    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
-      const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
-      (error as any).code = 'INVALID_PEER_ID';
-      throw error;
-    }
-    if (this.networkAdmissionCoordinator.enabled && targetPeerId) {
-      try {
-        canonicalPeerIdString(targetPeerId);
-      } catch (err) {
-        const error = new Error(
-          `Invalid target /p2p/<peerId> for network admission: ${err instanceof Error ? err.message : String(err)}`,
-        );
-        (error as any).code = 'INVALID_PEER_ID';
-        throw error;
-      }
-    }
+    const targetPeerId = this.networkAdmissionCoordinator.targetPeerIdForExplicitConnect(multiaddress);
     await connectToMultiaddr(
       this.node.libp2p as any,
       multiaddress,

@@ -994,11 +994,13 @@ jobs:
 
   # ------------------------------------------------------------------
   # Tornado static analysis lane — Slither + Aderyn + solhint, all
-  # SARIF-uploading to GitHub Code Scanning. INFORMATIONAL ONLY for
-  # the first phase: every step is `continue-on-error: true` so the
-  # job stays green regardless of findings, while the Security tab
-  # accumulates the baseline. A future PR will flip Slither to
-  # `fail-on: high` once we've triaged the existing finding set.
+  # SARIF-uploading to GitHub Code Scanning. Findings remain
+  # INFORMATIONAL ONLY for the first phase: scanner runs are
+  # `continue-on-error: true` so the job stays green regardless of
+  # findings, while the Security tab accumulates the baseline. Tool
+  # bootstrap smoke checks stay gating so scanner coverage cannot
+  # disappear silently. A future PR will flip Slither to `fail-on: high`
+  # once we've triaged the existing finding set.
   #
   # Triggers:
   #   * pull_request : runs only when the `changes` filter detects
@@ -1104,6 +1106,19 @@ jobs:
           category: slither
 
       # ------- Aderyn -------
+      - name: Verify Aderyn bootstrap
+        working-directory: packages/evm-module
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm exec aderyn --version; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
       - name: Run Aderyn (SARIF)
         # Aderyn auto-detects Hardhat from hardhat.config.ts and uses
         # the artifacts produced by the compile step above. Output

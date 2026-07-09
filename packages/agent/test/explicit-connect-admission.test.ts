@@ -12,6 +12,7 @@ vi.mock('../src/p2p/peer-connect.js', () => peerConnectMocks);
 import { AgentRegistryMethods } from '../src/dkg-agent-registry.js';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
+import { canonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 const PEER_ID = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
 const PEER_ID_CID = peerIdFromString(PEER_ID).toCID().toString();
@@ -33,6 +34,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     },
     networkAdmissionCoordinator: {
       enabled: true,
+      targetPeerIdForExplicitConnect: vi.fn(() => PEER_ID),
       ensureAdmitted: vi.fn(async () => false),
     },
     log: { info: vi.fn() },
@@ -48,7 +50,7 @@ function admittedCoordinator(peerId: string): NetworkAdmissionCoordinator {
     networkId: 'network-a',
     selfPeerId: SELF_PEER_ID,
   });
-  admission.markVerifiedSameNetwork(peerId);
+  admission.markVerifiedSameNetwork(canonicalPeerIdString(peerId));
   return new NetworkAdmissionCoordinator({
     admission,
     identity: { networkId: 'network-a' },
@@ -85,7 +87,9 @@ describe('explicit connect network admission', () => {
   });
 
   it('rejects network-scoped multiaddrs without a target peer id before dialing', async () => {
-    const agent = makeAgent();
+    const agent = makeAgent({
+      networkAdmissionCoordinator: admittedCoordinator(PEER_ID),
+    });
 
     await expect(
       AgentRegistryMethods.prototype.connectTo.call(agent, '/ip4/127.0.0.1/tcp/9090'),
@@ -95,14 +99,15 @@ describe('explicit connect network admission', () => {
   });
 
   it('rejects malformed multiaddr target peer ids before dialing', async () => {
-    const agent = makeAgent();
+    const agent = makeAgent({
+      networkAdmissionCoordinator: admittedCoordinator(PEER_ID),
+    });
 
     await expect(
       AgentRegistryMethods.prototype.connectTo.call(agent, '/ip4/127.0.0.1/tcp/9090/p2p/not-a-peer-id'),
     ).rejects.toMatchObject({ code: 'INVALID_PEER_ID' });
 
     expect(peerConnectMocks.connectToMultiaddr).not.toHaveBeenCalled();
-    expect(agent.networkAdmissionCoordinator.ensureAdmitted).not.toHaveBeenCalled();
   });
 
   it('accepts alternate-encoded target peer ids through the admission boundary', async () => {

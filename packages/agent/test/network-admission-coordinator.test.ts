@@ -65,6 +65,42 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
   });
 
+  it('canonicalizes explicit-connect target peer ids at the admission boundary', () => {
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => {
+        throw new Error('probe should not run');
+      },
+    });
+
+    expect(
+      fixture.coordinator.targetPeerIdForExplicitConnect(
+        `/ip4/127.0.0.1/tcp/9090/p2p/${REMOTE_PEER_ID_CID}`,
+      ),
+    ).toBe(REMOTE_PEER_ID);
+  });
+
+  it('rejects malformed explicit-connect target peer ids before probing', () => {
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe: async () => {
+        throw new Error('probe should not run');
+      },
+    });
+
+    for (const multiaddr of [
+      '/ip4/127.0.0.1/tcp/9090',
+      '/ip4/127.0.0.1/tcp/9090/p2p/not-a-peer-id',
+    ]) {
+      try {
+        fixture.coordinator.targetPeerIdForExplicitConnect(multiaddr);
+        throw new Error('expected explicit-connect target validation to fail');
+      } catch (err) {
+        expect(err).toMatchObject({ code: 'INVALID_PEER_ID' });
+      }
+    }
+  });
+
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
     const fixture = buildCoordinator({
       identity,

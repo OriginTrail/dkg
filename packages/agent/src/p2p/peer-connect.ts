@@ -38,13 +38,14 @@ export async function connectToMultiaddr(
 
   if (!multiaddress.includes('/p2p-circuit/p2p/')) {
     debugLog?.(`Dialing direct invite multiaddr: ${multiaddress}`);
+    const directPeerId = multiaddress.includes('/p2p/') ? multiaddress.split('/p2p/').pop() : undefined;
+    const directTargetPeerId = directPeerId ? await canonicalPeerIdString(directPeerId) : undefined;
     await libp2p.dial(multiaddr(multiaddress));
-    const directPeerId = multiaddress.split('/p2p/').pop();
-    if (directPeerId) {
-      const connected = await waitForPeerConnection(libp2p, directPeerId);
-      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directPeerId}`);
+    if (directTargetPeerId) {
+      const connected = await waitForPeerConnection(libp2p, directTargetPeerId);
+      debugLog?.(`Direct invite connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${directTargetPeerId}`);
       if (!connected) {
-        throw new Error(`Direct target peer ${directPeerId} not observed before timeout`);
+        throw new Error(`Direct target peer ${directTargetPeerId} not observed before timeout`);
       }
     }
     return;
@@ -59,15 +60,21 @@ export async function connectToMultiaddr(
 
   const { peerIdFromString } = await import('@libp2p/peer-id');
   const targetPid = peerIdFromString(targetPeerId);
-  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${targetPeerId}`);
+  const canonicalTargetPeerId = targetPid.toString();
+  debugLog?.(`Merging circuit target multiaddr into peerStore: targetPeer=${canonicalTargetPeerId}`);
   await libp2p.peerStore.merge(targetPid, { multiaddrs: [multiaddr(multiaddress)] });
-  debugLog?.(`Dialing final circuit target peer: ${targetPeerId}`);
+  debugLog?.(`Dialing final circuit target peer: ${canonicalTargetPeerId}`);
   await libp2p.dial(targetPid);
-  const connected = await waitForPeerConnection(libp2p, targetPeerId);
-  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${targetPeerId}`);
+  const connected = await waitForPeerConnection(libp2p, canonicalTargetPeerId);
+  debugLog?.(`Circuit target connection ${connected ? 'confirmed' : 'not observed before timeout'} for peer ${canonicalTargetPeerId}`);
   if (!connected) {
-    throw new Error(`Circuit target peer ${targetPeerId} not observed before timeout`);
+    throw new Error(`Circuit target peer ${canonicalTargetPeerId} not observed before timeout`);
   }
+}
+
+async function canonicalPeerIdString(peerId: string): Promise<string> {
+  const { peerIdFromString } = await import('@libp2p/peer-id');
+  return peerIdFromString(peerId).toString();
 }
 
 export async function ensurePeerConnected(

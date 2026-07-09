@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
+import { canonicalPeerIdString, tryCanonicalPeerIdString } from '../src/p2p/peer-id.js';
 
 type AgentInternals = {
   node: {
@@ -74,7 +75,10 @@ function installAdmission(agent: AgentInternals, admission: NetworkAdmissionServ
     get enabled() {
       return admission.enabled;
     },
-    isAcceptedPeer: (peerId) => admission.isAcceptedPeer(peerId),
+    isAcceptedPeer: (peerId) => {
+      const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+      return canonicalPeerId ? admission.isAcceptedPeer(canonicalPeerId) : false;
+    },
     verifiedSameNetworkPeerIds: () => admission.verifiedSameNetworkPeerIds(),
   };
 }
@@ -177,11 +181,11 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       networkId: 'active-network',
     });
     installAdmission(a, admission);
-    admission.markVerifiedSameNetwork(sameNetwork[0]);
+    admission.markVerifiedSameNetwork(canonicalPeerIdString(sameNetwork[0]));
 
     expect(a.getACKCandidatePeers()).toEqual([sameNetwork[0]]);
 
-    admission.markVerifiedSameNetwork(sameNetwork[1]);
+    admission.markVerifiedSameNetwork(canonicalPeerIdString(sameNetwork[1]));
     expect(a.getACKCandidatePeers()).toEqual([sameNetwork[1], sameNetwork[0]]);
   });
 

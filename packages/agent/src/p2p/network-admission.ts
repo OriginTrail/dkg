@@ -1,4 +1,4 @@
-import { tryCanonicalPeerIdString } from './peer-id.js';
+import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionOptions {
   networkId?: string;
@@ -46,47 +46,39 @@ export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set
  */
 export class NetworkAdmissionService {
   private readonly networkId?: string;
-  private readonly selfPeerId?: string;
-  private readonly verifiedPeerIds = new Set<string>();
-  private readonly quarantinedPeerIds = new Set<string>();
+  private readonly selfPeerId?: CanonicalPeerId;
+  private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
+  private readonly quarantinedPeerIds = new Set<CanonicalPeerId>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
-    this.selfPeerId = options.selfPeerId ? normalizePeerId(options.selfPeerId) ?? undefined : undefined;
+    this.selfPeerId = options.selfPeerId ? canonicalPeerIdString(options.selfPeerId) : undefined;
   }
 
   get enabled(): boolean {
     return Boolean(this.networkId);
   }
 
-  markVerifiedSameNetwork(peerId: string): void {
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return;
-    this.verifiedPeerIds.add(normalized);
-    this.quarantinedPeerIds.delete(normalized);
+  markVerifiedSameNetwork(peerId: CanonicalPeerId): void {
+    this.verifiedPeerIds.add(peerId);
+    this.quarantinedPeerIds.delete(peerId);
   }
 
-  quarantinePeer(peerId: string): void {
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return;
-    this.quarantinedPeerIds.add(normalized);
-    this.verifiedPeerIds.delete(normalized);
+  quarantinePeer(peerId: CanonicalPeerId): void {
+    this.quarantinedPeerIds.add(peerId);
+    this.verifiedPeerIds.delete(peerId);
   }
 
-  isAcceptedPeer(peerId: string): boolean {
+  isAcceptedPeer(peerId: CanonicalPeerId): boolean {
     if (!this.enabled) return true;
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return false;
-    if (normalized === this.selfPeerId) return true;
-    if (this.quarantinedPeerIds.has(normalized)) return false;
-    return this.verifiedPeerIds.has(normalized);
+    if (peerId === this.selfPeerId) return true;
+    if (this.quarantinedPeerIds.has(peerId)) return false;
+    return this.verifiedPeerIds.has(peerId);
   }
 
-  isRejectedPeer(peerId: string): boolean {
+  isRejectedPeer(peerId: CanonicalPeerId): boolean {
     if (!this.enabled) return false;
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return true;
-    return this.quarantinedPeerIds.has(normalized);
+    return this.quarantinedPeerIds.has(peerId);
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
@@ -104,8 +96,4 @@ export class NetworkAdmissionService {
       quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
     };
   }
-}
-
-function normalizePeerId(peerId: string): string | null {
-  return tryCanonicalPeerIdString(peerId);
 }
