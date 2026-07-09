@@ -142,6 +142,7 @@ export {
 export { GossipSubManager, type GossipMessageHandler } from './gossipsub-manager.js';
 export { PeerDiscoveryManager } from './discovery.js';
 export {
+  DEFAULT_GENESIS_ID,
   getGenesisQuads,
   computeNetworkId,
   getGenesisRaw,

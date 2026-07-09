@@ -13,30 +13,25 @@ describe('NetworkAdmissionService', () => {
     expect(admission.snapshot().enabled).toBe(false);
   });
 
-  it('fails unknown and configured seed peers closed when network identity is configured', () => {
+  it('fails unknown peers closed when network identity is configured', () => {
     const admission = new NetworkAdmissionService({
       networkId: 'network-a',
       selfPeerId: 'self-peer',
-      trustedPeerIds: ['trusted-peer'],
     });
 
     expect(admission.isAcceptedPeer('self-peer')).toBe(true);
-    expect(admission.isAcceptedPeer('trusted-peer')).toBe(false);
     expect(admission.isAcceptedPeer('unknown-peer')).toBe(false);
   });
 
   it('promotes verified same-network peers and excludes quarantined peers', () => {
     const admission = new NetworkAdmissionService({
       networkId: 'network-a',
-      trustedPeerIds: ['trusted-peer'],
     });
 
     admission.markVerifiedSameNetwork('verified-peer');
     expect([...admission.verifiedSameNetworkPeerIds()].sort()).toEqual(['verified-peer']);
 
-    admission.quarantinePeer('trusted-peer');
     admission.quarantinePeer('verified-peer');
-    expect(admission.isAcceptedPeer('trusted-peer')).toBe(false);
     expect(admission.isAcceptedPeer('verified-peer')).toBe(false);
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });

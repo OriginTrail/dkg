@@ -1815,7 +1815,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
   }
 
   async assertPeerAdmittedForExplicitConnect(this: DKGAgent, peerId: string, ctx: OperationContext): Promise<void> {
-    if (await this.verifyPeerNetworkAdmission(peerId, ctx)) return;
+    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx)) return;
     const error = new Error(`Peer ${peerId} is not admitted for the active DKG network`);
     (error as any).code = 'NETWORK_ADMISSION_REJECTED';
     throw error;
@@ -1824,7 +1824,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
     const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
-    if (this.networkAdmission.enabled && !targetPeerId) {
+    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
       const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
       (error as any).code = 'INVALID_PEER_ID';
       throw error;

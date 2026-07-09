@@ -128,9 +128,9 @@ export interface ProtocolRouterOptions {
    * before inbound application handler dispatch, including pooled handlers.
    *
    * Use `admissionExemptProtocols` for narrow pre-admission protocols such as
-   * a network-identity probe. The hook should be side-effect-free and fast; it
-   * may return a Promise when the caller fronts it with an async admission
-   * registry.
+   * a network-identity probe. The hook may be async: production admission can
+   * distinguish an unknown peer from a rejected peer by running an exempt proof
+   * before the app protocol is failed.
    */
   isPeerAccepted?: (
     peerId: string,
@@ -429,8 +429,8 @@ export class ProtocolRouter {
       const handlerSignal = handlerSignalScope.signal;
       try {
         const remotePeer = connection.remotePeer.toString();
-        await this.requirePeerAccepted(remotePeer, protocolId, 'inbound');
         const requestData = await readAllWithSignal(stream, limit, handlerSignal);
+        await this.requirePeerAccepted(remotePeer, protocolId, 'inbound');
         const peerId = {
           toString: () => remotePeer,
           toBytes: () => connection.remotePeer.toMultihash().bytes,

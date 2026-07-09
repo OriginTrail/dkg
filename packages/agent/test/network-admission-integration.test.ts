@@ -3,6 +3,42 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 describe('network admission integration', () => {
+  it('admits a real explicit connect to a peer on the same network identity', async () => {
+    const local = await DKGAgent.create({
+      name: 'AdmissionIntegrationSameLocal',
+      listenPort: 0,
+      store: new OxigraphStore(),
+      networkIdentity: {
+        genesisId: 'v9-testnet',
+        networkId: 'network-a',
+        chainId: 'chain:1',
+      },
+    });
+    const remote = await DKGAgent.create({
+      name: 'AdmissionIntegrationSameRemote',
+      listenPort: 0,
+      store: new OxigraphStore(),
+      networkIdentity: {
+        genesisId: 'v9-testnet',
+        networkId: 'network-a',
+        chainId: 'chain:1',
+      },
+    });
+
+    try {
+      await local.start();
+      await remote.start();
+      const remoteAddr = remote.multiaddrs.find((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+      expect(remoteAddr).toBeDefined();
+
+      await expect(local.connectTo(remoteAddr!)).resolves.toBeUndefined();
+      expect(local.networkAdmission.snapshot().verifiedPeerIds).toContain(remote.peerId);
+    } finally {
+      await local.stop().catch(() => {});
+      await remote.stop().catch(() => {});
+    }
+  }, 15000);
+
   it('rejects a real explicit connect to a peer on a different network identity', async () => {
     const local = await DKGAgent.create({
       name: 'AdmissionIntegrationLocal',

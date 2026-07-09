@@ -22,7 +22,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  DEFAULT_GENESIS_ID, getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
@@ -731,7 +731,7 @@ export class DKGAgent extends DKGAgentBase {
     const eventBus = new TypedEventBus();
     const keypair = wallet.keypair;
 
-    const genesisId = config.genesisId;
+    const genesisId = config.genesisId ?? DEFAULT_GENESIS_ID;
 
     // Load genesis knowledge into the store (idempotent)
     await DKGAgent.loadGenesis(store, genesisId);
@@ -740,7 +740,7 @@ export class DKGAgent extends DKGAgentBase {
       networkId: await computeNetworkId(genesisId),
       chainId: chain.chainId !== 'none' ? chain.chainId : undefined,
     };
-    const resolvedConfig: DKGAgentConfig = { ...config, networkIdentity };
+    const resolvedConfig: ResolvedDKGAgentConfig = { ...config, genesisId, networkIdentity };
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
@@ -1716,8 +1716,8 @@ export class DKGAgent extends DKGAgentBase {
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
-      verifiedSameNetworkPeerIds: this.networkAdmission.enabled
-        ? this.networkAdmission.verifiedSameNetworkPeerIds()
+      verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
+        ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
@@ -1764,7 +1764,7 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     return async (peerId: string, protocol: string, data: Uint8Array) => {
-      if (!this.networkAdmission.isAcceptedPeer(peerId)) {
+      if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
       return send(peerId, protocol, data);

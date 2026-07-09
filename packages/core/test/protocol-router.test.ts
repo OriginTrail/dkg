@@ -132,7 +132,7 @@ describe('ProtocolRouter', () => {
       }
     }
 
-    it('rejects non-admitted inbound peers before reading request bytes', async () => {
+    it('rejects non-admitted inbound peers after reading bounded request bytes but before handler dispatch', async () => {
       let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
       let handlerCalls = 0;
       const admittedCalls: Array<[string, string, 'inbound' | 'outbound']> = [];
@@ -165,9 +165,49 @@ describe('ProtocolRouter', () => {
 
       expect(admittedCalls).toEqual([[REMOTE_PEER, PROTOCOL, 'inbound']]);
       expect(handlerCalls).toBe(0);
-      expect(stream.reads).toBe(0);
+      expect(stream.reads).toBe(2);
       expect(stream.sent).toBeNull();
       expect(stream.aborted?.message).toMatch(/handler error/);
+    });
+
+    it('awaits async inbound admission before dispatching the handler', async () => {
+      let inbound: ((stream: FakeInboundStream, connection: unknown) => Promise<void>) | null = null;
+      let admitted = false;
+      let handlerCalls = 0;
+      const node = {
+        libp2p: {
+          handle: (_protocol: string, handler: (stream: FakeInboundStream, connection: unknown) => Promise<void>) => {
+            inbound = handler;
+          },
+          unhandle: () => undefined,
+        },
+      } as unknown as DKGNode;
+      const router = new ProtocolRouter(node, {
+        isPeerAccepted: async () => {
+          await Promise.resolve();
+          admitted = true;
+          return true;
+        },
+      });
+      router.register(PROTOCOL, async (data) => {
+        expect(admitted).toBe(true);
+        handlerCalls += 1;
+        return data;
+      });
+
+      const request = new Uint8Array([0x42]);
+      const stream = new FakeInboundStream([request]);
+      await inbound!(stream, {
+        remotePeer: {
+          toString: () => REMOTE_PEER,
+          toMultihash: () => ({ bytes: new Uint8Array([1, 2, 3]) }),
+        },
+      });
+
+      expect(handlerCalls).toBe(1);
+      expect(stream.reads).toBe(2);
+      expect(stream.sent).toEqual(request);
+      expect(stream.aborted).toBeNull();
     });
 
     it('allows exempt inbound protocols before admission', async () => {

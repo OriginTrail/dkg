@@ -21,6 +21,11 @@ type AgentInternals = {
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   networkAdmission: NetworkAdmissionService;
+  networkAdmissionCoordinator: {
+    enabled: boolean;
+    isAcceptedPeer(peerId: string): boolean;
+    verifiedSameNetworkPeerIds(): ReadonlySet<string>;
+  };
   lastKnownRequiredACKs?: number;
   getACKCandidatePeers: (protocol?: string) => string[];
   handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
@@ -53,6 +58,17 @@ async function buildAgent(opts: {
   for (const id of opts.confirmedCores) internals.knownCorePeerIds.add(id);
   internals.lastKnownRequiredACKs = opts.lastKnownRequiredACKs;
   return internals;
+}
+
+function installAdmission(agent: AgentInternals, admission: NetworkAdmissionService): void {
+  agent.networkAdmission = admission;
+  agent.networkAdmissionCoordinator = {
+    get enabled() {
+      return admission.enabled;
+    },
+    isAcceptedPeer: (peerId) => admission.isAcceptedPeer(peerId),
+    verifiedSameNetworkPeerIds: () => admission.verifiedSameNetworkPeerIds(),
+  };
 }
 
 describe('getACKCandidatePeers — confirmed peers first with stale-metadata fallback (#1093 / #1482)', () => {
@@ -149,15 +165,15 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       connected: [...foreign, ...sameNetwork],
       preferredACKPeerIds: ['trusted-relay', foreign[0]],
     });
-    a.networkAdmission = new NetworkAdmissionService({
+    const admission = new NetworkAdmissionService({
       networkId: 'active-network',
-      trustedPeerIds: ['trusted-relay'],
     });
-    a.networkAdmission.markVerifiedSameNetwork('same-network-core');
+    installAdmission(a, admission);
+    admission.markVerifiedSameNetwork('same-network-core');
 
     expect(a.getACKCandidatePeers()).toEqual(['same-network-core']);
 
-    a.networkAdmission.markVerifiedSameNetwork('trusted-relay');
+    admission.markVerifiedSameNetwork('trusted-relay');
     expect(a.getACKCandidatePeers()).toEqual(['trusted-relay', 'same-network-core']);
   });
 

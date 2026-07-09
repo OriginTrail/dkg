@@ -1,12 +1,10 @@
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
-  trustedPeerIds?: Iterable<string>;
 }
 
 export interface NetworkAdmissionSnapshot {
   enabled: boolean;
-  trustedPeerIds: string[];
   verifiedPeerIds: string[];
   quarantinedPeerIds: string[];
 }
@@ -47,26 +45,16 @@ export function peerIdsFromMultiaddrs(addrs: readonly string[] | undefined): Set
 export class NetworkAdmissionService {
   private readonly networkId?: string;
   private readonly selfPeerId?: string;
-  private readonly trustedPeerIds = new Set<string>();
   private readonly verifiedPeerIds = new Set<string>();
   private readonly quarantinedPeerIds = new Set<string>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
     this.selfPeerId = options.selfPeerId;
-    for (const peerId of options.trustedPeerIds ?? []) {
-      this.trustPeer(peerId);
-    }
   }
 
   get enabled(): boolean {
     return Boolean(this.networkId);
-  }
-
-  trustPeer(peerId: string): void {
-    const normalized = normalizePeerId(peerId);
-    if (!normalized) return;
-    this.trustedPeerIds.add(normalized);
   }
 
   markVerifiedSameNetwork(peerId: string): void {
@@ -103,7 +91,6 @@ export class NetworkAdmissionService {
   snapshot(): NetworkAdmissionSnapshot {
     return {
       enabled: this.enabled,
-      trustedPeerIds: [...this.trustedPeerIds].sort(),
       verifiedPeerIds: [...this.verifiedPeerIds].sort(),
       quarantinedPeerIds: [...this.quarantinedPeerIds].sort(),
     };

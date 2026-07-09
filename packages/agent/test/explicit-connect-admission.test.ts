@@ -25,9 +25,11 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     peerResolver: {
       resolve: vi.fn(async () => [DIRECT_MULTIADDR]),
     },
-    networkAdmission: { enabled: true },
+    networkAdmissionCoordinator: {
+      enabled: true,
+      ensureAdmitted: vi.fn(async () => false),
+    },
     log: { info: vi.fn() },
-    verifyPeerNetworkAdmission: vi.fn(async () => false),
     ...overrides,
   };
   agent.assertPeerAdmittedForExplicitConnect =
@@ -50,7 +52,7 @@ describe('explicit connect network admission', () => {
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
 
     expect(peerConnectMocks.connectToMultiaddr).toHaveBeenCalledOnce();
-    expect(agent.verifyPeerNetworkAdmission).toHaveBeenCalledWith(
+    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
     );
@@ -78,7 +80,7 @@ describe('explicit connect network admission', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(agent.node.libp2p.dial).toHaveBeenCalledOnce();
-    expect(agent.verifyPeerNetworkAdmission).toHaveBeenCalledWith(
+    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
     );

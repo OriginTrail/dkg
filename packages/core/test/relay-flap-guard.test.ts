@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RelayFlapGuard, buildActiveRelayDiscoveryFilter, buildRelayFlapConnectionGater, parseCircuitRelayPeerIds } from '../src/relay-flap-guard.js';
+import { RelayFlapGuard, buildRelayFlapConnectionGater } from '../src/relay-flap-guard.js';
 
 const RELAY_A = '12D3KooWRelayA';
 const RELAY_B = '12D3KooWRelayB';
@@ -23,24 +23,6 @@ function recordShortBurst(g: RelayFlapGuard, relayPeerId = RELAY_A, remotePeerId
   expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 10 }).enteredQuarantine).toBe(false);
   expect(g.recordRelayedClose({ relayPeerId, remotePeerId, durationMs: 50, now: 20 }).enteredQuarantine).toBe(true);
 }
-
-describe('parseCircuitRelayPeerIds', () => {
-  it('extracts relay and remote peer ids from a circuit address', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit/p2p/${REMOTE_A}`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: REMOTE_A });
-  });
-
-  it('extracts only the relay peer id from reservation-style circuit addresses', () => {
-    expect(
-      parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit`),
-    ).toEqual({ relayPeerId: RELAY_A, remotePeerId: undefined });
-  });
-
-  it('does not classify direct addresses as relayed paths', () => {
-    expect(parseCircuitRelayPeerIds(`/ip4/1.2.3.4/tcp/9090/p2p/${REMOTE_A}`)).toBeNull();
-  });
-});
 
 describe('RelayFlapGuard', () => {
   it('quarantines the exact relay/remote pair after repeated short relayed closes', () => {
@@ -172,35 +154,4 @@ describe('buildRelayFlapConnectionGater (libp2p wiring)', () => {
     expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_B })).toBe(false);
   });
 
-  it('denies circuit-relay paths through relays outside the active network allowlist', () => {
-    const gater = buildRelayFlapConnectionGater(
-      guard(),
-      () => {},
-      { activeRelayPeerIds: new Set([RELAY_A]) },
-    );
-
-    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_A}/p2p-circuit/p2p/${REMOTE_A}`)).toBe(false);
-    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit/p2p/${REMOTE_A}`)).toBe(true);
-    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${RELAY_B}/p2p-circuit`)).toBe(true);
-    expect(gater.denyDialMultiaddr(`/ip4/1.2.3.4/tcp/9090/p2p/${REMOTE_A}`)).toBe(false);
-
-    expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_A }, { toString: () => REMOTE_A })).toBe(false);
-    expect(gater.denyInboundRelayedConnection({ toString: () => RELAY_B }, { toString: () => REMOTE_A })).toBe(true);
-  });
-});
-
-describe('buildActiveRelayDiscoveryFilter', () => {
-  it('suppresses non-active relay discoveries and still de-duplicates active relays', () => {
-    const filter = buildActiveRelayDiscoveryFilter(new Set([RELAY_A]));
-    expect(filter).toBeDefined();
-    const active = { toString: () => RELAY_A };
-    const foreign = { toString: () => RELAY_B };
-
-    expect(filter!.has(foreign)).toBe(true);
-    expect(filter!.has(active)).toBe(false);
-    filter!.add(active);
-    expect(filter!.has(active)).toBe(true);
-    filter!.remove(active);
-    expect(filter!.has(active)).toBe(false);
-  });
 });

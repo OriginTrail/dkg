@@ -21,7 +21,9 @@ import type { ConnectionTransport, DKGNodeConfig } from './types.js';
 import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
-import { RelayFlapGuard, parseCircuitRelayPeerIds, buildRelayFlapConnectionGater, buildActiveRelayDiscoveryFilter } from './relay-flap-guard.js';
+import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
+import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
+import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
 
 export interface DKGServices extends Record<string, unknown> {
   dht: KadDHT;
@@ -874,7 +876,11 @@ export class DKGNode {
     const activeNetworkRelayPeerIds = this.config.networkIdentity
       ? new Set(usableRelayCandidates.map(({ peerId }) => peerId.toString()))
       : undefined;
-    const activeRelayDiscoveryFilter = buildActiveRelayDiscoveryFilter(activeNetworkRelayPeerIds);
+    const activeRelayNetworkPolicy = buildActiveRelayNetworkPolicy(
+      activeNetworkRelayPeerIds,
+      (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+    );
+    const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
 
     // TCP keepAlive helps prevent idle relay connections from being dropped by
     // middleboxes or remote timeouts (common cause of ECONNRESET).
@@ -1111,7 +1117,7 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayFlapConnectionGater(activeNetworkRelayPeerIds),
+      connectionGater: this.createRelayConnectionGater(activeRelayNetworkPolicy?.connectionGater),
       connectionManager: {
         minConnections: 0,
         // Core Nodes scale this with relayServerCapacity (default
@@ -1472,16 +1478,23 @@ export class DKGNode {
     }
   }
 
-  private createRelayFlapConnectionGater(activeNetworkRelayPeerIds?: ReadonlySet<string>): ConnectionGater {
+  private createRelayConnectionGater(activeRelayGater?: RelayedConnectionGater): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
     // is unit-tested (relay-flap-guard.test.ts) — a hook arg-shape or plumbing
     // regression fails a test instead of silently leaving the guard inert.
-    return buildRelayFlapConnectionGater(
+    const flapGater = buildRelayFlapConnectionGater(
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
-      { activeRelayPeerIds: activeNetworkRelayPeerIds },
-    ) as ConnectionGater;
+    );
+    return {
+      denyInboundRelayedConnection: (relay, remotePeer) =>
+        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
+        flapGater.denyInboundRelayedConnection(relay, remotePeer),
+      denyDialMultiaddr: (multiaddr) =>
+        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
+        flapGater.denyDialMultiaddr(multiaddr),
+    } as ConnectionGater;
   }
 
   /**

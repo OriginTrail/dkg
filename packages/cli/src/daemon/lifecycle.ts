@@ -1969,8 +1969,6 @@ export async function runDaemonInner(
             chainBase: publisherChainBase,
             ackTransportFactory: agent.createACKTransportFactory({
               sendTimeoutMs: storageAckTiming.sendTimeoutMs,
-              // to the prior `agent.router.send` path — `/dkg/10.0.0/*`
-              // through) → `ProtocolRouter.send`. The wiring matters at
               log,
             }),
             publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
