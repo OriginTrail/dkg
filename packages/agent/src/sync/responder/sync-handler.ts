@@ -25,6 +25,11 @@ import {
   serializeResponderRows,
   SyncRowSnapshotLimitError,
 } from './graph-plan.js';
+import {
+  createSyncResponderSnapshotBudget,
+  SyncRowSnapshotBudgetError,
+  type SyncResponderSnapshotBudgetOptions,
+} from './snapshot-budget.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -78,6 +83,8 @@ interface RegisterSyncHandlerParams {
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
+  /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
+  snapshotBudget?: SyncResponderSnapshotBudgetOptions;
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
@@ -88,6 +95,10 @@ const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
 export const SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT = 64;
+export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT = 500_000;
+export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT = 256 * 1024 * 1024;
+export const SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT = 250_000;
+export const SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT = 128 * 1024 * 1024;
 
 class SyncResponderBusyError extends Error {
   constructor(message: string) {
@@ -247,19 +258,29 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     shouldWithholdDurableMeta,
     logWarn,
     logDebug,
+    snapshotBudget,
   } = params;
   const graphListMemo = createResponderGraphListMemo(store);
+  const responderSnapshotBudget = createSyncResponderSnapshotBudget(snapshotBudget ?? {
+    maxRows: SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    maxBytesEstimate: SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    maxSnapshotRows: SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+    maxSnapshotBytesEstimate: SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+  });
   const durableDataRowsMemo = createResponderSyncRowListMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+    { phase: 'durable_data', budget: responderSnapshotBudget },
   );
   const durableMetaRowsMemo = createResponderSyncRowListMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
+    { phase: 'durable_meta', budget: responderSnapshotBudget },
   );
   const swmRowsMemo = createResponderSyncRowListMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+    { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
   const syncSessionTokens = new Map<string, SyncSessionTokenEntry>();
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
@@ -560,6 +581,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         throw new QuietRetryableHandlerError(
           `sync responder snapshot limit exceeded (active=${err.activeEntries}/${err.maxEntries})`,
         );
+      }
+      if (err instanceof SyncRowSnapshotBudgetError) {
+        getMetrics().syncResponseTotal.add(1, { outcome: 'limit' });
+        span.setAttribute('dkg.sync_response_outcome', 'limit');
+        logWarn(
+          createOperationContext('sync'),
+          `Sync responder snapshot memory budget for "${contextGraphId}" from peer ${peerId} ` +
+          `(phase=${phase}, workspace=${isWorkspace}, reason=${err.reason}, rows=${err.rows}, ` +
+          `bytesEstimate=${err.bytesEstimate}, key=${err.key})`,
+        );
+        throw new QuietRetryableHandlerError(err.message);
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;
