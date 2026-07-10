@@ -230,6 +230,163 @@ describe('DKGQueryEngine', () => {
     });
   });
 
+  // ───────────────────────────────────────────────────────────────────
+  // #1596: the strict `shared-working-memory` view over a large public CG
+  // fans out to ~1,424 named graphs. The previous multi-graph wrapper emitted
+  // one `{ GRAPH <g> { … } } UNION …` branch per graph — a ~1,424-branch union
+  // tree that makes the oxigraph-server planner blow up and drop the socket
+  // ("fetch failed"). The read must now be a SINGLE `VALUES ?g { … } GRAPH ?g
+  // { … }` query, with the injected graph variable hidden behind a sub-SELECT
+  // so `SELECT *` and cross-graph DISTINCT keep their UNION-form semantics.
+  describe('#1596 multi-graph SWM view uses one VALUES block, not per-graph UNION', () => {
+    const SWM_CG = 'swm-1596';
+    const swmGraph = (addr: string, n: number) =>
+      `did:dkg:context-graph:${SWM_CG}/_shared_memory/${addr}/${n}`;
+
+    // A store that records every SPARQL string the engine sends, then delegates.
+    class RecordingStore extends OxigraphStore {
+      queries: string[] = [];
+      async query(sparql: string, options?: Parameters<OxigraphStore['query']>[1]) {
+        this.queries.push(sparql);
+        return super.query(sparql, options);
+      }
+    }
+
+    let recStore: RecordingStore;
+    let recEngine: DKGQueryEngine;
+
+    beforeEach(() => {
+      recStore = new RecordingStore();
+      recEngine = new DKGQueryEngine(recStore);
+    });
+
+    const swmQuery = (sparql: string) =>
+      recEngine.query(sparql, { contextGraphId: SWM_CG, view: 'shared-working-memory' });
+
+    const multiGraphQuery = () =>
+      recStore.queries.find((s) => s.includes('VALUES ?__dkgViewGraph'));
+
+    it('collapses N SWM graphs into one VALUES/GRAPH query and reads every triple', async () => {
+      const quads: Quad[] = [];
+      for (let i = 0; i < 6; i++) {
+        const g = swmGraph('0xowner', i);
+        quads.push(q(`urn:swm:s${i}`, 'http://ex.org/p', `"v${i}"`, g));
+        quads.push(q(`urn:swm:s${i}`, 'http://ex.org/o', `"w${i}"`, g));
+      }
+      await recStore.insert(quads);
+      recStore.queries.length = 0; // ignore any graph-discovery from insert
+
+      const result = await swmQuery('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
+      expect(result.bindings).toHaveLength(12); // all rows, across all 6 graphs
+
+      // The multi-graph read is ONE VALUES-scoped query, never a per-graph UNION.
+      const multi = multiGraphQuery();
+      expect(multi).toBeDefined();
+      expect(multi).toContain('GRAPH ?__dkgViewGraph {');
+      expect(multi).toContain(swmGraph('0xowner', 0));
+      expect(
+        recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s)),
+      ).toBe(false);
+    });
+
+    it('preserves COUNT(*) aggregate semantics over the graph set', async () => {
+      const quads: Quad[] = [];
+      for (let i = 0; i < 5; i++) {
+        quads.push(q(`urn:c:s${i}`, 'http://ex.org/p', `"v${i}"`, swmGraph('0xc', i)));
+      }
+      await recStore.insert(quads);
+
+      const result = await swmQuery('SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o }');
+      const count = Number(String(result.bindings[0]['count']).match(/^"?(\d+)"?/)?.[1]);
+      expect(count).toBe(5);
+      expect(multiGraphQuery()).toBeDefined(); // still the VALUES form
+    });
+
+    it('cross-graph DISTINCT dedupes an identical triple present in two graphs', async () => {
+      await recStore.insert([
+        q('urn:dup:s', 'http://ex.org/p', '"same"', swmGraph('0xd', 1)),
+        q('urn:dup:s', 'http://ex.org/p', '"same"', swmGraph('0xd', 2)),
+      ]);
+
+      const all = await swmQuery('SELECT ?s ?p ?o WHERE { ?s ?p ?o }');
+      expect(all.bindings).toHaveLength(2); // once per graph, like the UNION form
+
+      const distinct = await swmQuery('SELECT DISTINCT ?s ?p ?o WHERE { ?s ?p ?o }');
+      expect(distinct.bindings).toHaveLength(1); // deduped across graphs
+    });
+
+    it('SELECT * does not leak the injected graph variable', async () => {
+      await recStore.insert([
+        q('urn:star:s', 'http://ex.org/p', '"v"', swmGraph('0xe', 1)),
+        q('urn:star:s', 'http://ex.org/o', '"w"', swmGraph('0xe', 2)),
+      ]);
+
+      const star = await swmQuery('SELECT * WHERE { ?s ?p ?o }');
+      expect(star.bindings.length).toBeGreaterThanOrEqual(2);
+      for (const b of star.bindings) {
+        expect(Object.keys(b).sort()).toEqual(['o', 'p', 's']);
+        expect(Object.keys(b)).not.toContain('__dkgViewGraph');
+      }
+    });
+
+    it('SELECT * over a var-less (all-constant) body never leaks the sentinel', async () => {
+      // A var-less WHERE body offers nowhere to hide the injected graph
+      // variable, so `wrapWithGraphValues` declines and the read falls back to
+      // the union/per-graph form (which binds no graph variable). The sentinel
+      // must not appear as a result column.
+      await recStore.insert([
+        q('urn:cx', 'urn:cp', 'urn:co', swmGraph('0xf', 1)),
+        q('urn:cx', 'urn:cp', 'urn:co', swmGraph('0xf', 2)),
+      ]);
+
+      const star = await swmQuery('SELECT * WHERE { <urn:cx> <urn:cp> <urn:co> }');
+      for (const b of star.bindings) {
+        expect(Object.keys(b)).not.toContain('__dkgViewGraph');
+      }
+      // The var-less body must NOT have been emitted as the bare VALUES form
+      // that would project the sentinel.
+      expect(multiGraphQuery()).toBeUndefined();
+    });
+
+    // #1599 review: the VALUES fast path changed execution for EVERY multi-graph
+    // query form with a locatable WHERE block, but only SELECT was covered above.
+    // CONSTRUCT and ASK are part of the engine contract and have had shape
+    // regressions before (#789), so pin them through the new VALUES path too —
+    // without an inner UNION (which would divert to the per-graph fallback).
+    it('CONSTRUCT over the SWM view uses the VALUES path and keeps the quad shape', async () => {
+      const quads: Quad[] = [];
+      for (let i = 0; i < 4; i++) {
+        quads.push(q(`urn:cq:s${i}`, 'http://ex.org/p', `"v${i}"`, swmGraph('0xcq', i)));
+      }
+      await recStore.insert(quads);
+      recStore.queries.length = 0;
+
+      const result = await swmQuery('CONSTRUCT { ?s <urn:out> ?o } WHERE { ?s <http://ex.org/p> ?o }');
+      // Graph-shaped result preserved (not silently flattened to bindings).
+      expect(result.quads).toBeDefined();
+      expect((result.quads ?? []).map((qd) => qd.subject).sort())
+        .toEqual(['urn:cq:s0', 'urn:cq:s1', 'urn:cq:s2', 'urn:cq:s3']);
+      expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
+      // ...and it went through the ONE VALUES query, never a per-graph UNION.
+      expect(multiGraphQuery()).toBeDefined();
+      expect(recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s))).toBe(false);
+    });
+
+    it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
+      await recStore.insert([
+        q('urn:aq:s', 'http://ex.org/p', '"present"', swmGraph('0xaq', 2)),
+      ]);
+      recStore.queries.length = 0;
+
+      const hit = await swmQuery('ASK WHERE { ?s <http://ex.org/p> "present" }');
+      expect(hit.bindings).toEqual([{ result: 'true' }]);
+      expect(multiGraphQuery()).toBeDefined();
+
+      const miss = await swmQuery('ASK WHERE { ?s <http://ex.org/p> "absent" }');
+      expect(miss.bindings).toEqual([{ result: 'false' }]);
+    });
+  });
+
   it('queries across all contextGraphs', async () => {
     // Add data to another context graph
     await store.insert([

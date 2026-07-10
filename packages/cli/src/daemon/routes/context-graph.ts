@@ -1496,12 +1496,24 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // the sync protocol enforces access on the remote side regardless.
     const localAllowed = await agent.getContextGraphAllowedAgents(contextGraphId).catch(() => [] as string[]);
     if (localAllowed.length > 0) {
-      const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-      const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
-      if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
-        return jsonResponse(res, 403, {
-          error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
-        });
+      // Issue #1596 / #865: an explicit `accessPolicy="public"` ALWAYS wins over
+      // the allowlist. On a public CG the allowlist gates PUBLISHERS, not
+      // subscribers/readers, so an allowlist entry must not turn a public CG
+      // into invite-only-to-join. Defer to the resolver's `isPrivateContextGraph`
+      // (the single source of truth) so this route can never re-drift from the
+      // resolver rule. Fail CLOSED on a read error (keep the gate) — the remote
+      // sync protocol is the real enforcement, and a public CG's `_meta` is
+      // already local here (we just read its allowlist from it), so the policy
+      // read is reliable in practice.
+      const isPrivate = await agent.isPrivateContextGraph(contextGraphId).catch(() => true);
+      if (isPrivate) {
+        const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+        const isEthAddress = callerAddr && /^0x[0-9a-fA-F]{40}$/.test(callerAddr);
+        if (isEthAddress && !localAllowed.some((a: string) => a.toLowerCase() === callerAddr.toLowerCase())) {
+          return jsonResponse(res, 403, {
+            error: `Your agent (${callerAddr}) is not on the allowlist for this curated project. Ask the curator to invite you first.`,
+          });
+        }
       }
     }
 
