@@ -708,17 +708,24 @@ function queryOptionsFromUpdateOptions(options?: UpdateOptions): QueryOptions | 
  * no `instanceof`/cast/decorator-order assumption at the call site.
  */
 export function asChangelogReader(store: unknown): ChangelogReader | null {
-  if (store instanceof ChangelogStore) return store;
-  // Duck-type so a further wrapper that forwards the API still resolves.
-  const s = store as Partial<ChangelogReader> | null | undefined;
-  if (
-    s &&
-    typeof s.readChanges === 'function' &&
-    typeof s.headSeq === 'function' &&
-    typeof s.clearReconcileFlag === 'function' &&
-    typeof s.needsReconcile === 'boolean'
-  ) {
-    return s as ChangelogReader;
+  // Follow `.innerStore` so a wrapper AROUND the ChangelogStore still resolves.
+  // The daemon's store is `createListContextGraphsCacheInvalidatingStore(...)`
+  // (dkg-agent-base.ts), a hand-rolled forwarder that exposes `.innerStore` but
+  // does NOT forward the changelog API — so a direct check misses it even when
+  // the changelog is enabled. The depth bound guards a pathological/cyclic chain.
+  let s = store as (Partial<ChangelogReader> & { innerStore?: unknown }) | null | undefined;
+  for (let depth = 0; s && depth < 8; depth++) {
+    if (s instanceof ChangelogStore) return s;
+    if (
+      typeof s.changelogHead === 'function' &&
+      typeof s.readChanges === 'function' &&
+      typeof s.headSeq === 'function' &&
+      typeof s.clearReconcileFlag === 'function' &&
+      typeof s.needsReconcile === 'boolean'
+    ) {
+      return s as ChangelogReader;
+    }
+    s = s.innerStore as typeof s;
   }
   return null;
 }
