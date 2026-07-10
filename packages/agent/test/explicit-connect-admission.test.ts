@@ -89,7 +89,7 @@ describe('explicit connect network admission', () => {
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
-      undefined,
+      { bypassBackoff: true },
     );
   });
 
@@ -144,7 +144,11 @@ describe('explicit connect network admission', () => {
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
-      expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
+      expect.objectContaining({
+        bypassBackoff: true,
+        signal: expect.any(AbortSignal),
+        timeoutMs: expect.any(Number),
+      }),
     );
   });
 
@@ -166,7 +170,11 @@ describe('explicit connect network admission', () => {
     expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
-      expect.objectContaining({ signal: expect.any(AbortSignal), timeoutMs: expect.any(Number) }),
+      expect.objectContaining({
+        bypassBackoff: true,
+        signal: expect.any(AbortSignal),
+        timeoutMs: expect.any(Number),
+      }),
     );
     expect(agent.peerResolver.resolve).not.toHaveBeenCalled();
     expect(agent.node.libp2p.dial).not.toHaveBeenCalled();

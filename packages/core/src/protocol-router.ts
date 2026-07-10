@@ -1584,7 +1584,6 @@ export function isProtocolUnsupportedError(err: unknown): boolean {
     msg.includes('protocol selection failed') ||
     msg.includes('could not negotiate') ||
     msg.includes('unsupported protocol') ||
-    msg.includes('protocol not supported') ||
     msg.includes('protocol mismatch')
   );
 }

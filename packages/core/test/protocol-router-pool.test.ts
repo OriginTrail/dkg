@@ -309,7 +309,6 @@ describe('ProtocolRouter pooled overlay', () => {
     expect(isProtocolUnsupportedError(new Error('protocol selection failed: foo'))).toBe(true);
     expect(isProtocolUnsupportedError(new Error('Could not negotiate /dkg/10.0.2/message'))).toBe(true);
     expect(isProtocolUnsupportedError(new Error('Unsupported protocol'))).toBe(true);
-    expect(isProtocolUnsupportedError(new Error('protocol not supported'))).toBe(true);
     expect(isProtocolUnsupportedError(new Error('Protocol mismatch'))).toBe(true);
     expect(isProtocolUnsupportedError(new Error('ECONNRESET'))).toBe(false);
     expect(isProtocolUnsupportedError(new Error('no valid addresses'))).toBe(false);

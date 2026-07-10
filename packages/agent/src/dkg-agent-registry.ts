@@ -1859,7 +1859,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       (message) => this.log.info(ctx, message),
     );
     if (targetPeerId) {
-      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx);
+      await this.assertPeerAdmittedForExplicitConnect(targetPeerId, ctx, { bypassBackoff: true });
     }
   }
 
@@ -1940,6 +1940,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const existing = this.node.libp2p.getConnections(peerId);
     if (existing.length > 0) {
       await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+        bypassBackoff: true,
         signal,
         timeoutMs: remainingTimeoutMs(),
       });
@@ -2018,6 +2019,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
       throw error;
     }
     await this.assertPeerAdmittedForExplicitConnect(peerIdStr, ctx, {
+      bypassBackoff: true,
       signal,
       timeoutMs: remainingTimeoutMs(),
     });
