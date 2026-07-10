@@ -44,7 +44,17 @@ export interface NetworkAdmissionAttemptOptions {
   timeoutMs?: number;
 }
 
-type NetworkAdmissionAttemptKind = 'automatic' | 'explicit-connect';
+interface NetworkAdmissionAttemptPolicy {
+  probeRetrySuppression: 'respect' | 'bypass';
+}
+
+const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
+  probeRetrySuppression: 'respect',
+};
+
+const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
+  probeRetrySuppression: 'bypass',
+};
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -214,7 +224,12 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'automatic', options);
+    return this.ensureAdmittedWithPolicy(
+      remotePeer,
+      ctx,
+      AUTOMATIC_ADMISSION_POLICY,
+      options,
+    );
   }
 
   async ensureExplicitConnectAdmitted(
@@ -222,13 +237,18 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'explicit-connect', options);
+    return this.ensureAdmittedWithPolicy(
+      remotePeer,
+      ctx,
+      EXPLICIT_CONNECT_ADMISSION_POLICY,
+      options,
+    );
   }
 
-  private async ensureAdmittedForAttempt(
+  private async ensureAdmittedWithPolicy(
     remotePeer: string,
     ctx: OperationContext,
-    attemptKind: NetworkAdmissionAttemptKind,
+    policy: NetworkAdmissionAttemptPolicy,
     options: NetworkAdmissionAttemptOptions,
   ): Promise<boolean> {
     if (!this.enabled) return true;
@@ -240,14 +260,8 @@ export class NetworkAdmissionCoordinator {
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
 
-    const backoff = attemptKind === 'explicit-connect'
-      ? undefined
-      : this.admission.getRetryableProbeBackoff(remotePeerId);
-    if (backoff) {
-      throw new NetworkAdmissionProbeError(
-        remotePeerId,
-        `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
-      );
+    if (policy.probeRetrySuppression === 'respect') {
+      this.assertProbeNotSuppressed(remotePeerId);
     }
 
     const attempt = new InFlightAdmissionAttempt(
@@ -259,6 +273,16 @@ export class NetworkAdmissionCoordinator {
     );
     this.inFlight.set(remotePeerId, attempt);
     return attempt.wait(options);
+  }
+
+  private assertProbeNotSuppressed(remotePeerId: CanonicalPeerId): void {
+    const backoff = this.admission.getRetryableProbeBackoff(remotePeerId);
+    if (backoff) {
+      throw new NetworkAdmissionProbeError(
+        remotePeerId,
+        `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
+      );
+    }
   }
 
   private async probePeer(
