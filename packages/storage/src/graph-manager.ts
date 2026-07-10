@@ -22,6 +22,64 @@ const CG_PREFIX = 'did:dkg:context-graph:';
 export type NonEmptyGraphList = [string, ...string[]];
 export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
 
+/**
+ * Per-KA identity window used to PRUNE the SWM under-graph read set to the
+ * single author + kaNumber range a call site already knows it wants. The
+ * `agentAddress`/`kaNumber` pair is the identifying half of a KA's UAL, so a
+ * bound admits exactly the per-KA under-graphs
+ * `…/_shared_memory/{addr}/{n}` (and the 5-segment sub-graph shape
+ * `…/{sub}/_shared_memory/{addr}/{n}`) with `addr ≡ᵢ agentAddress` and
+ * `startNumber ≤ n ≤ endNumber`.
+ *
+ * Both numbers are the LOW-96 per-author KA number, NOT a packed `kaId`
+ * (`packKnowledgeAssetIdFromIdentity` shifts the address into the high bits) —
+ * callers must unpack before deriving a bound, or every real graph is excluded.
+ *
+ * This is a PURE ACCELERATOR: it narrows a graph SET, never the CONSTRUCT body,
+ * and non-parsing / bucket graphs are always kept (fail-open). Correctness of a
+ * bounded read therefore reduces to "same graph set ⇒ same quads", and any call
+ * site that narrows a merkle-gated read MUST widen to the unbounded read on an
+ * empty-or-mismatch result before it defers.
+ */
+export interface SwmKaGraphBound {
+  agentAddress: string;
+  startNumber: bigint;
+  endNumber: bigint;
+}
+
+const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SWM_CHILD_KA_NUMBER = /^\d+$/;
+
+/**
+ * Identify `graph` as a per-KA child of THIS shared-memory `bucketGraph`, or
+ * return undefined so the caller keeps it (fail-open).
+ *
+ * Deliberately bucket-RELATIVE. The only shape a bound is allowed to prune is
+ * exactly `${bucketGraph}/{0x…40hex}/{decimal}`, so we strip the bucket prefix and
+ * require precisely those two segments. Every other suffix — `_meta`, blob and
+ * snapshot graphs, and deeper descendants such as
+ * `${bucketGraph}/_verifiable_memory/{addr}/{n}` — simply fails to match and stays
+ * in the read set. Using the general `parseContextGraphLayerUri` here instead would
+ * accept unrelated layer shapes and force reconstruction checks to rule them back
+ * out; the relative parser makes the contract the code's shape rather than a
+ * comment's claim. Works unchanged for a sub-graph bucket, since the prefix we
+ * strip is whatever bucket the caller is reading.
+ */
+function parseBoundableSwmChildGraph(
+  bucketGraph: string,
+  graph: string,
+): { agentAddress: string; kaNumber: bigint } | undefined {
+  const prefix = `${bucketGraph}/`;
+  if (!graph.startsWith(prefix)) return undefined;
+  const segments = graph.slice(prefix.length).split('/');
+  if (segments.length !== 2) return undefined;
+  const [agentAddress, kaNumberRaw] = segments;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || !SWM_CHILD_KA_NUMBER.test(kaNumberRaw)) {
+    return undefined;
+  }
+  return { agentAddress, kaNumber: BigInt(kaNumberRaw) };
+}
+
 export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
@@ -86,19 +144,71 @@ async function listGraphsByPrefix(
  * written by a DIFFERENT process to a SHARED oxigraph-server within the
  * revalidate interval; there an under-read is still FAIL-SAFE on merkle-gated
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
+ *
+ * This resolver is COMPLETE and therefore safe everywhere, including the
+ * merkle-defining publish reads and the StorageACK decline lanes. Pruning lives in
+ * `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the package's
+ * public surface — read its contract before reaching for it.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
   bucketGraph: string,
   options?: QueryOptions,
 ): Promise<NonEmptyGraphList> {
+  return resolveSwmReadGraphs(store, bucketGraph, options, undefined);
+}
+
+/**
+ * Resolve the SWM read set pruned to one author's per-KA under-graphs.
+ *
+ * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`: the
+ * result is a STRICT SUBSET of the complete read set, and INV-1 is refuted under
+ * root recurrence, so a bounded resolution can omit graphs the on-chain merkle root
+ * commits to. Only `loadKaBoundedSharedMemoryQuads` may call this, and only because
+ * its own caller (`FinalizationHandler.loadSwmSliceWithFallback`) owns the widen.
+ * Never build a `VALUES ?g` from this and hash or decline on the result.
+ *
+ * Pruning is FAIL-OPEN: an under-graph is dropped ONLY when it is positively a
+ * per-KA child of THIS bucket (`parseBoundableSwmChildGraph`) AND its author or
+ * kaNumber falls outside the bound. Any other shape — `_meta`, blob, snapshot,
+ * deeper descendants, anything future — is KEPT, so a bound can never silently
+ * under-read a graph it does not understand. The bucket is always in the set.
+ */
+export async function resolveKaBoundedSharedMemoryReadGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  bound: SwmKaGraphBound,
+  options?: QueryOptions,
+): Promise<NonEmptyGraphList> {
+  return resolveSwmReadGraphs(store, bucketGraph, options, bound);
+}
+
+async function resolveSwmReadGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  options: QueryOptions | undefined,
+  bound: SwmKaGraphBound | undefined,
+): Promise<NonEmptyGraphList> {
   assertSafeIri(bucketGraph);
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
+  const boundAddress = bound?.agentAddress.toLowerCase();
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
-    if (isSafeIri(graph)) out.add(graph);
+    if (!isSafeIri(graph)) continue;
+    if (bound) {
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
+      if (
+        child &&
+        (child.agentAddress.toLowerCase() !== boundAddress ||
+          child.kaNumber < bound.startNumber ||
+          child.kaNumber > bound.endNumber)
+      ) {
+        continue;
+      }
+    }
+    out.add(graph);
   }
   return [...out] as NonEmptyGraphList;
 }
@@ -108,12 +218,109 @@ export async function resolveSharedMemoryReadGraphs(
  * `resolveSharedMemoryReadGraphs`. This keeps merkle-sensitive SWM selection
  * policy in one place while allowing call sites to inject their small
  * differences, such as query source tags or post-query bookkeeping filters.
+ *
+ * This function reads the COMPLETE SWM graph set and is safe to use anywhere,
+ * including the merkle-DEFINING publish reads and the StorageACK decline lanes.
+ * There is deliberately no way to prune the graph set from here — see
+ * `loadKaBoundedSharedMemoryQuads` for that, and read its contract first.
  */
 export async function loadSelectedSharedMemoryQuads(
   store: TripleStore,
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, undefined);
+}
+
+/**
+ * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
+ *
+ * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`. The
+ * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
+ * reads, and INV-1 — "a root's quads live only under its own KA number" — is
+ * REFUTED under root recurrence, so this read can legitimately miss quads the
+ * on-chain merkle root commits to. The only safe caller is
+ * `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen; this is a
+ * module-internal primitive it builds on, kept exported only so the graph-set
+ * behaviour can be unit-tested directly.
+ */
+export async function loadKaBoundedSharedMemoryQuads(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+}
+
+/** Query-source tags for the three read lanes a bounded slice can take. */
+export interface SwmSliceSourceTags {
+  /** the initial narrowed read, when a bound is supplied */
+  bounded: QueryOptions['source'];
+  /** an unbounded re-read after an empty or mismatched bounded read */
+  widened: QueryOptions['source'];
+  /** the initial read when no bound is supplied */
+  unbounded: QueryOptions['source'];
+}
+
+/**
+ * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then WIDEN
+ * to the complete read on an empty-or-mismatched result before returning (#1549).
+ * This owns the two-step protocol that `loadKaBoundedSharedMemoryQuads` requires,
+ * so callers cannot hold a pruned `Quad[]` without the widen.
+ *
+ * `accept` is the caller's completeness predicate — e.g. a merkle recompute — that
+ * returns the accepted quads or `null` on mismatch. It decides both when a bounded
+ * read is "good enough" and what the caller ultimately consumes; storage stays
+ * agnostic to merkle. It is built lazily via `createAccept` and invoked at most
+ * once (only when there are quads), so a genuine no-data read triggers no extra
+ * caller-side work. The widen fires at most once.
+ *
+ * With no bound this is a single complete read (safe by construction). With a
+ * bound the result is exactly what the unbounded read would have produced on any
+ * input — never accept→defer, sometimes defer→accept under recurrence.
+ */
+export async function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  sources: SwmSliceSourceTags,
+  createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { querySource: source });
+
+  let quads = kaGraphBound
+    ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+        querySource: sources.bounded,
+      })
+    : await readComplete(sources.unbounded);
+  let widened = false;
+
+  if (kaGraphBound && quads.length === 0) {
+    quads = await readComplete(sources.widened);
+    widened = true;
+  }
+  if (quads.length === 0) return { quads, accepted: null };
+
+  const accept = await createAccept();
+  let accepted = accept(quads);
+  if (kaGraphBound && !widened && !accepted) {
+    quads = await readComplete(sources.widened);
+    accepted = accept(quads);
+  }
+  return { quads, accepted };
+}
+
+async function loadSharedMemoryQuadsInternal(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+  kaGraphBound: SwmKaGraphBound | undefined,
 ): Promise<Quad[]> {
   let innerGraphPattern: string;
   if (selection === 'all') {
@@ -146,7 +353,9 @@ export async function loadSelectedSharedMemoryQuads(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  const swmGraphs = kaGraphBound
+    ? await resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, kaGraphBound, queryOptions)
+    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
