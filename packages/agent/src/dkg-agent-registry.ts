@@ -146,9 +146,16 @@ import {
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
-import { NetworkAdmissionRejectedError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
+import {
+  NetworkAdmissionRejectedError,
+  NetworkAdmissionInvalidPeerIdError,
+  type NetworkAdmissionAttemptOptions,
+} from './p2p/network-admission-coordinator.js';
+import {
+  MultiaddrPeerTargetParseError,
+  parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget,
+} from './p2p/multiaddr-peer-target.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
-import { targetPeerIdFromMultiaddr } from './p2p/network-admission.js';
 import {
   createCGMemberEnumerator,
   type CGMemberEnumerator,
@@ -398,6 +405,20 @@ function pcaRegisteredProbe(
 ): (() => Promise<boolean>) | null {
   const read = chain.isPublishingConvictionAgent;
   return typeof read === 'function' ? () => read.call(chain, accountId, agent) : null;
+}
+
+function parseExplicitConnectTarget(multiaddress: string, admissionEnabled: boolean) {
+  try {
+    return parseMultiaddrExplicitConnectTarget(multiaddress, {
+      requireTargetPeerId: admissionEnabled,
+    });
+  } catch (err) {
+    if (!admissionEnabled) throw err;
+    throw new NetworkAdmissionInvalidPeerIdError(
+      err instanceof MultiaddrPeerTargetParseError ? err.rawTarget ?? '<missing>' : '<missing>',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 export class AgentRegistryMethods extends DKGAgentBase {
@@ -1827,15 +1848,14 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   async connectTo(this: DKGAgent, multiaddress: string): Promise<void> {
     const ctx = createOperationContext('connect');
-    const targetPeerId = targetPeerIdFromMultiaddr(multiaddress);
-    if (this.networkAdmissionCoordinator.enabled && !targetPeerId) {
-      const error = new Error('Connect multiaddr must include a target /p2p/<peerId> for network admission');
-      (error as any).code = 'INVALID_PEER_ID';
-      throw error;
-    }
+    const connectTarget = parseExplicitConnectTarget(
+      multiaddress,
+      this.networkAdmissionCoordinator.enabled,
+    );
+    const targetPeerId = connectTarget.targetPeerId;
     await connectToMultiaddr(
       this.node.libp2p as any,
-      multiaddress,
+      connectTarget,
       (message) => this.log.info(ctx, message),
     );
     if (targetPeerId) {
