@@ -24,7 +24,9 @@ import {
   type Attributes,
   type SpanContext,
   type Counter,
+  type Gauge,
   type Histogram,
+  type UpDownCounter,
 } from '@opentelemetry/api';
 
 const TRACER_NAME = '@origintrail-official/dkg';
@@ -118,8 +120,36 @@ export function activeSpanContext(): SpanContext | undefined {
 const OP_DURATION_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
 /** Duration buckets (ms) for chain RPC histograms (faster floor). */
 const RPC_DURATION_BUCKETS = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 120000];
+/** Retained/process bytes from 1 MiB through 4 GiB. */
+const BYTE_BUCKETS = [
+  1024 * 1024,
+  4 * 1024 * 1024,
+  16 * 1024 * 1024,
+  32 * 1024 * 1024,
+  64 * 1024 * 1024,
+  128 * 1024 * 1024,
+  256 * 1024 * 1024,
+  512 * 1024 * 1024,
+  1024 * 1024 * 1024,
+  2 * 1024 * 1024 * 1024,
+  4 * 1024 * 1024 * 1024,
+];
+const QUAD_COUNT_BUCKETS = [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
+const PAGE_COUNT_BUCKETS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
 
 export interface DkgMetrics {
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapUsedBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapTotalBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processHeapLimitBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processRssBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processExternalBytes: Gauge;
+  /** bytes; boundary and phase are bounded sync lifecycle enums */
+  processArrayBuffersBytes: Gauge;
   /** outcome={tentative|confirmed|failed|error}, source={direct|swm}, chain_id
    *  (`error` = the publish flow threw before producing a status). */
   publishTotal: Counter;
@@ -149,6 +179,24 @@ export interface DkgMetrics {
   syncBackgroundQueueDepth: Histogram;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
+  /** currently retained responder snapshots; phase is a bounded enum */
+  syncResponderSnapshots: UpDownCounter;
+  /** currently retained responder snapshot rows; phase is a bounded enum */
+  syncResponderSnapshotRows: UpDownCounter;
+  /** estimated bytes retained by responder snapshots; phase is a bounded enum */
+  syncResponderSnapshotBytesEstimate: UpDownCounter;
+  /** phase, reason={lru|expired|limit_rejected} */
+  syncResponderSnapshotEvictionsTotal: Counter;
+  /** ms; phase, outcome={completed|error} */
+  syncResponderSnapshotLoadDurationMs: Histogram;
+  /** quads retained at requester phase completion; phase and outcome are bounded enums */
+  syncRequesterAccumulatedQuads: Histogram;
+  /** estimated bytes retained at requester phase completion; phase and outcome are bounded enums */
+  syncRequesterAccumulatedBytes: Histogram;
+  /** response pages consumed by a requester phase; phase and outcome are bounded enums */
+  syncRequesterPageCount: Histogram;
+  /** ms; phase and outcome are bounded enums */
+  syncRequesterPhaseDurationMs: Histogram;
   /** rpc_method, outcome={ok|error|timeout}, retryable, chain_id */
   chainRpcTotal: Counter;
   /** rpc_method (bounded known JSON-RPC set, else 'other'), chain_id — RAW
@@ -178,6 +226,24 @@ export interface DkgMetrics {
 function buildMetrics(): DkgMetrics {
   const meter = metrics.getMeter(METER_NAME);
   return {
+    processHeapUsedBytes: meter.createGauge('process.heap_used_bytes', {
+      unit: 'By', description: 'Current V8 heap bytes sampled at bounded sync lifecycle checkpoints',
+    }),
+    processHeapTotalBytes: meter.createGauge('process.heap_total_bytes', {
+      unit: 'By', description: 'Current V8 allocated heap bytes sampled at bounded sync lifecycle checkpoints',
+    }),
+    processHeapLimitBytes: meter.createGauge('process.heap_limit_bytes', {
+      unit: 'By', description: 'Current V8 heap size limit sampled at bounded sync lifecycle checkpoints',
+    }),
+    processRssBytes: meter.createGauge('process.rss_bytes', {
+      unit: 'By', description: 'Current process resident set size sampled at bounded sync lifecycle checkpoints',
+    }),
+    processExternalBytes: meter.createGauge('process.external_bytes', {
+      unit: 'By', description: 'Current V8 external memory sampled at bounded sync lifecycle checkpoints',
+    }),
+    processArrayBuffersBytes: meter.createGauge('process.array_buffers_bytes', {
+      unit: 'By', description: 'Current V8 ArrayBuffer memory sampled at bounded sync lifecycle checkpoints',
+    }),
     publishTotal: meter.createCounter('dkg.publish.total', { description: 'Publish operations by outcome/source' }),
     publishDuration: meter.createHistogram('dkg.publish.duration', {
       unit: 'ms', description: 'Publish wall-time', advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
@@ -210,6 +276,40 @@ function buildMetrics(): DkgMetrics {
     }),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
+    }),
+    syncResponderSnapshots: meter.createUpDownCounter('dkg.sync.responder.snapshots', {
+      description: 'Currently retained sync responder snapshots',
+    }),
+    syncResponderSnapshotRows: meter.createUpDownCounter('dkg.sync.responder.snapshot_rows', {
+      description: 'Currently retained rows in sync responder snapshots',
+    }),
+    syncResponderSnapshotBytesEstimate: meter.createUpDownCounter('dkg.sync.responder.snapshot_bytes_estimate', {
+      unit: 'By', description: 'Estimated bytes retained by sync responder snapshots',
+    }),
+    syncResponderSnapshotEvictionsTotal: meter.createCounter('dkg.sync.responder.snapshot_evictions_total', {
+      description: 'Sync responder snapshot removals caused by pressure, expiry, or admission limits',
+    }),
+    syncResponderSnapshotLoadDurationMs: meter.createHistogram('dkg.sync.responder.snapshot_load_duration_ms', {
+      unit: 'ms',
+      description: 'Sync responder full-snapshot materialization duration',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    syncRequesterAccumulatedQuads: meter.createHistogram('dkg.sync.requester.accumulated_quads', {
+      description: 'Requester quads retained at sync phase completion',
+      advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
+    }),
+    syncRequesterAccumulatedBytes: meter.createHistogram('dkg.sync.requester.accumulated_bytes', {
+      unit: 'By', description: 'Estimated requester quad bytes retained at sync phase completion',
+      advice: { explicitBucketBoundaries: BYTE_BUCKETS },
+    }),
+    syncRequesterPageCount: meter.createHistogram('dkg.sync.requester.page_count', {
+      description: 'Pages consumed by a requester sync phase',
+      advice: { explicitBucketBoundaries: PAGE_COUNT_BUCKETS },
+    }),
+    syncRequesterPhaseDurationMs: meter.createHistogram('dkg.sync.requester.phase_duration_ms', {
+      unit: 'ms',
+      description: 'Requester sync phase wall-time',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
     chainRpcTotal: meter.createCounter('dkg.chain.rpc.total', { description: 'Chain RPC calls by method/outcome' }),
     chainRpcRequestsTotal: meter.createCounter('dkg.chain.rpc.requests.total', {
