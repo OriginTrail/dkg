@@ -41,17 +41,10 @@ import {
 const PUBLISH_EPOCHS = Number(process.env.PUBLISH_EPOCHS || 2);
 const KA_COUNT = Number(process.env.TEST_KA_BATCHES || 10);
 const OP_TIMEOUT_MS = Number(process.env.V10_OP_TIMEOUT_MS || 6 * 60 * 1000);
-// 10.0.5 mainnet cores hang the sync publish HTTP response in the post-confirm
-// swm-share fanout: the publish CONFIRMS on-chain in ~1 min (node log:
-// "On-chain confirmed: UAL=...") but the response never arrives — observed on
-// all 4 mainnet cores 2026-07-10, every KA, 11-min client timeouts. So: wait a
-// BOUNDED time for the response, then VERIFY the real outcome by reading THIS
-// KA's root entity back from the node's Verifiable Memory. Data present ==
-// the publish objectively succeeded (count success, flag response_lost); data
-// absent after the verify window == real failure with the timeout as evidence.
-const PUBLISH_RESPONSE_TIMEOUT_MS = Number(process.env.V10_PUBLISH_RESPONSE_TIMEOUT_MS || 150 * 1000);
-const PUBLISH_VERIFY_TIMEOUT_MS = Number(process.env.V10_PUBLISH_VERIFY_TIMEOUT_MS || 240 * 1000);
-const PUBLISH_VERIFY_POLL_MS = 10 * 1000;
+// publish must outlast the node's ACK collection (~8 min worst case) so the
+// 207 with the node's real error (storage_ack_insufficient, ...) arrives
+// instead of a client-side timeout that hides it.
+const PUBLISH_TIMEOUT_MS = Math.max(OP_TIMEOUT_MS, Number(process.env.V10_PUBLISH_TIMEOUT_MS || 11 * 60 * 1000));
 
 // Context-graph provisioning. Publishing to Verifiable Memory needs the CG to be
 // registered on-chain. V10_CG_REGISTER=true registers a fresh CG (~100 TRAC on the
@@ -150,13 +143,13 @@ export function makeNodeClient(baseUrl, token) {
     // via alsoShareSwm/alsoPublishVm, and returns kaId/ual/txHash/authorAddress
     // with status "vm-confirmed". We map that back to the old response shape so
     // the summary/report code stays unchanged.
-    publish: (contextGraphId, quads, name) =>
+    publish: (contextGraphId, quads) =>
       req(
         'POST',
         '/api/knowledge-assets',
         {
           contextGraphId,
-          name: name || `jenkins-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: `jenkins-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           quads,
           alsoShareSwm: true,
           alsoPublishVm: { publishEpochs: PUBLISH_EPOCHS },
@@ -170,10 +163,6 @@ export function makeNodeClient(baseUrl, token) {
       })),
     query: (sparql, contextGraphId, view = 'verifiable-memory') =>
       req('POST', '/api/query', { sparql, contextGraphId, view }).then((r) => r.data),
-    // named-KA descriptor (state + UAL once published) — used to recover the
-    // UAL when the publish response was lost to the swm-share response hang.
-    asset: (name, contextGraphId) =>
-      req('GET', `/api/knowledge-assets/${encodeURIComponent(name)}?contextGraphId=${encodeURIComponent(contextGraphId)}`).then((r) => r.data),
     // cross-node read: ask a PEER (by peerId) for a KA's triples. lookup is
     // { lookupType, ual } for ENTITY_BY_UAL (resolves a UAL → triples; works for
     // any node's KA) or { lookupType:'ENTITY_TRIPLES', entityUri } for an entity.
@@ -304,17 +293,7 @@ export function defineChainPublishSuite(config) {
             : `✅ present (length ${trimmedToken.length})`;
         console.log(`🔑 ${name} bearer token: ${tokenState}`);
 
-        // Log the node's version+commit — when publishes hang, the FIRST question
-        // is "which release is this node actually running?" (operator nodes may
-        // lag the npm mainnet tag), so put the answer in every build log.
-        try {
-          const st = await makeNodeClient(hostname, token).status();
-          console.log(`📟 ${name} node version: ${st.version}${st.commitShort ? ` (commit ${st.commitShort})` : ''}${st.distTag ? ` [${st.distTag}]` : ''}`);
-        } catch (error) {
-          console.log(`📟 ${name} node version: unreadable (${String(error.message).slice(0, 80)})`);
-        }
-
-        let publishSuccess = 0, publishFail = 0, publishRescued = 0;
+        let publishSuccess = 0, publishFail = 0;
         let querySuccess = 0, queryFail = 0;
         let vmGetSuccess = 0, vmGetFail = 0;
         let queryRemoteSuccess = 0, queryRemoteFail = 0;
@@ -390,16 +369,14 @@ export function defineChainPublishSuite(config) {
         for (let i = 0; i < KA_COUNT; i++) {
           console.log(`\nPublishing KA #${i + 1} on ${name}`);
           const { quads, rootEntity } = buildQuads(name, i + 1);
-          const kaName = `jenkins-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
           let ual = null;
-          let publishOk = false;
           let step = 'publish';
 
           // ── 1. publish (mint to Verifiable Memory) ─────────────────────────
           const pubStart = Date.now();
           try {
-            const result = await withTimeout(client.publish(contextGraphId, quads, kaName), 'publish', name, PUBLISH_RESPONSE_TIMEOUT_MS);
+            const result = await withTimeout(client.publish(contextGraphId, quads), 'publish', name, PUBLISH_TIMEOUT_MS);
             assert.ok(result, 'Publish returned no result');
             if (result.status !== 'confirmed') {
               // Test-side message stays SHORT; the node's own lifecycle error
@@ -432,52 +409,13 @@ export function defineChainPublishSuite(config) {
               console.log(`   ↳ first ${sample.length} child KA UAL(s):`);
               sample.forEach((u) => console.log(`      ${u}`));
             }
-            publishOk = true;
             publishSuccess++;
             publishDurations.push(Date.now() - pubStart);
           } catch (error) {
-            // Response lost (timeout / connection drop)? The node may still
-            // have confirmed the publish on-chain — 10.0.5 hangs the sync
-            // response in the post-confirm swm-share fanout. Read THIS KA's
-            // root entity back from the node's VM to learn the real outcome:
-            // present == success (flagged response-lost), absent == failure.
-            const responseLost = /Timeout after/.test(error?.message ?? '') || error?.network === true;
-            let rescued = false;
-            if (responseLost) {
-              console.log(`⏳ Publish response lost on ${name} — verifying the real outcome via VM read-back (up to ${Math.round(PUBLISH_VERIFY_TIMEOUT_MS / 1000)}s)…`);
-              const deadline = Date.now() + PUBLISH_VERIFY_TIMEOUT_MS;
-              while (Date.now() < deadline) {
-                try {
-                  const probe = await client.query(`SELECT ?p ?o WHERE { <${rootEntity}> ?p ?o } LIMIT 1`, contextGraphId, 'verifiable-memory');
-                  if (queryHasData(probe)) { rescued = true; break; }
-                } catch { /* transient read error — keep polling */ }
-                await sleep(PUBLISH_VERIFY_POLL_MS);
-              }
-            }
-            if (rescued) {
-              publishOk = true;
-              publishSuccess++;
-              publishRescued++;
-              // The lifecycle record can flip to `published` a beat after the
-              // VM data lands — retry the descriptor read briefly.
-              for (let attempt = 0; attempt < 3 && !ual; attempt++) {
-                try {
-                  const hist = await client.asset(kaName, contextGraphId);
-                  ual = hist?.publishedUal || hist?.ual || null;
-                  const rescuedAddr = hist?.publisherAddress || hist?.authorAddress;
-                  if (rescuedAddr) publisherAddresses.add(rescuedAddr);
-                } catch { /* descriptor read failed — remote read falls back to FALLBACK_UAL */ }
-                if (!ual) await sleep(5000);
-              }
-              // NOT pushed into publishDurations: the latency is dominated by
-              // our own response-wait, so the avg stays clean-response-only.
-              console.log(`✅ Published KA #${i + 1} — CONFIRMED via VM read-back after response loss (node response-hang bug) in ${formatDuration(Date.now() - pubStart)}${ual ? ` | UAL: ${ual}` : ' | UAL unrecovered'}`);
-            } else {
-              await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
-              console.log(`❌ Publish failed | No UAL`);
-              failedAssets.push(`KA #${i + 1} (Publish failed)`);
-              publishFail++;
-            }
+            await logError(error, name, step, errorStats, i + 1, { baseUrl: client.baseUrl });
+            console.log(`❌ Publish failed | No UAL`);
+            failedAssets.push(`KA #${i + 1} (Publish failed)`);
+            publishFail++;
           }
 
           // Reads are RUN-SPECIFIC when the publish succeeded — they target THIS
@@ -493,7 +431,7 @@ export function defineChainPublishSuite(config) {
           const queryStart = Date.now();
           try {
             let result;
-            if (publishOk) {
+            if (ual) {
               const sparql = `SELECT ?s ?name WHERE { ?s <http://schema.org/isPartOf> <${rootEntity}> ; <http://schema.org/name> ?name } LIMIT 5`;
               result = await readWithRetry('query', name, () => client.query(sparql, contextGraphId, 'verifiable-memory'));
             } else if (FALLBACK_UAL) {
@@ -516,7 +454,7 @@ export function defineChainPublishSuite(config) {
           const vmGetStart = Date.now();
           try {
             let result;
-            if (publishOk) {
+            if (ual) {
               const entitySparql = `SELECT ?p ?o WHERE { <${rootEntity}> ?p ?o } LIMIT 5`;
               result = await readWithRetry('VM GET', name, () => client.query(entitySparql, contextGraphId, 'verifiable-memory'));
             } else if (FALLBACK_UAL) {
@@ -544,18 +482,12 @@ export function defineChainPublishSuite(config) {
           const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
           const remoteStart = Date.now();
           try {
-            if (!readUal && !publishOk) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
+            if (!readUal) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
             const remotePeerId = await getPeerId(remoteNode);
             if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
-            // Run-specific even when the UAL could not be recovered (response
-            // lost, #1572): ask the peer for THIS KA's unique root entity
-            // directly — a pass proves this run's KA propagated cross-node.
-            const lookup = publishOk && !ual
-              ? { lookupType: 'ENTITY_TRIPLES', entityUri: rootEntity }
-              : { lookupType: 'ENTITY_BY_UAL', ual: readUal };
-            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, lookup));
-            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${lookup.ual || lookup.entityUri} from ${remoteNode.name}`);
-            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced${publishOk && !ual ? ', by entity URI' : ''})`);
+            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: readUal }));
+            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${readUal} from ${remoteNode.name}`);
+            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
             queryRemoteSuccess++;
             queryRemoteDurations.push(Date.now() - remoteStart);
           } catch (error) {
@@ -584,7 +516,7 @@ export function defineChainPublishSuite(config) {
         }
 
         globalStats[blockchainName][name] = {
-          publishSuccess, publishFail, publishRescued,
+          publishSuccess, publishFail,
           querySuccess, queryFail,
           vmGetSuccess, vmGetFail,
           queryRemoteSuccess, queryRemoteFail,
@@ -597,9 +529,6 @@ export function defineChainPublishSuite(config) {
           node_wallet: nodeWalletAddrs.join(', '),
           node_publisher_wallets: [...publisherAddresses].join(', '),
           publish_success_rate: safeRate(publishSuccess, publishFail),
-          // publishes whose HTTP response was lost to the 10.0.5 response-hang
-          // but were CONFIRMED via VM read-back (counted in the success rate)
-          publish_response_lost: publishRescued,
           query_success_rate: safeRate(querySuccess, queryFail),
           publisher_get_success_rate: safeRate(vmGetSuccess, vmGetFail),                 // VM GET
           non_publisher_get_success_rate: safeRate(queryRemoteSuccess, queryRemoteFail),   // Query Remote (sync)
@@ -622,27 +551,7 @@ export function defineChainPublishSuite(config) {
         const errorsFileName = `errors_${name.replace(/\s+/g, '_')}.json`;
         fs.writeFileSync(errorsFileName, JSON.stringify(errorData, null, 2));
         console.log(`✅ Saved errors to ${errorsFileName}`);
-
-        // Response-loss flag: consumed by the Jenkins pipeline to mark the
-        // build UNSTABLE while node bug OriginTrail/dkg#1572 is active.
-        // Appended (not truncated) — parallel node stages share the workspace.
-        if (publishRescued > 0) {
-          fs.appendFileSync('response_lost.flag', `${name}: ${publishRescued}\n`);
-        }
       }
-    });
-
-    // Runs AFTER the main test (summaries already written, Grafana import
-    // unaffected — the pipeline wraps stages in catchError(buildResult:
-    // 'SUCCESS')). Fails the STAGE whenever any publish response was lost,
-    // so node bug OriginTrail/dkg#1572 is impossible to overlook while the
-    // publish stats above still tell the true success story.
-    it('publish responses arrived in time (node bug OriginTrail/dkg#1572 inactive)', function () {
-      const lost = Object.values(globalStats[blockchainName] || {})
-        .reduce((s, st) => s + (st.publishRescued || 0), 0);
-      assert.equal(lost, 0,
-        `${lost} publish response(s) never arrived and were confirmed via VM read-back instead — ` +
-        `sync publish response hang (OriginTrail/dkg#1572) is active on this chain's cores`);
     });
 
     after(() => {
@@ -651,7 +560,7 @@ export function defineChainPublishSuite(config) {
         console.log(`\n🔗 Blockchain: ${blockchain}`);
         Object.entries(nodeStats).forEach(([nodeName, stats]) => {
           console.log(`  • ${nodeName}:`);
-          console.log(`    Publish:             ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%${stats.publishRescued ? ` (${stats.publishRescued} confirmed via VM read-back after response loss — node response-hang bug)` : ''}`);
+          console.log(`    Publish:             ✅ ${stats.publishSuccess} / ❌ ${stats.publishFail} -> ${safeRate(stats.publishSuccess, stats.publishFail)}%`);
           console.log(`    Query:               ✅ ${stats.querySuccess} / ❌ ${stats.queryFail} -> ${safeRate(stats.querySuccess, stats.queryFail)}%`);
           console.log(`    VM GET:             ✅ ${stats.vmGetSuccess} / ❌ ${stats.vmGetFail} -> ${safeRate(stats.vmGetSuccess, stats.vmGetFail)}%`);
           console.log(`    Query Remote (sync): ✅ ${stats.queryRemoteSuccess} / ❌ ${stats.queryRemoteFail} -> ${safeRate(stats.queryRemoteSuccess, stats.queryRemoteFail)}%`);
