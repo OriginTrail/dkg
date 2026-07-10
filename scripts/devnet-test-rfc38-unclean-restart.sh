@@ -168,6 +168,85 @@ wait_for_port_closed() {
   return 1
 }
 
+LEGACY_CORE_CFG=""
+LEGACY_CORE_CFG_BAK=""
+restore_core_host_custody_config() {
+  if [ -n "${LEGACY_CORE_CFG_BAK:-}" ] && [ -f "$LEGACY_CORE_CFG_BAK" ] && [ -n "${LEGACY_CORE_CFG:-}" ]; then
+    cp "$LEGACY_CORE_CFG_BAK" "$LEGACY_CORE_CFG" 2>/dev/null || true
+    if ! restart_core_after_restore; then
+      kill_core_managed_store_process
+      restart_core_after_restore || true
+    fi
+    rm -f "$LEGACY_CORE_CFG_BAK"
+  fi
+}
+
+restart_core_after_restore() {
+  local log_file="$DEVNET_DIR/rfc38-unclean-restore-restart.log"
+  nohup "$SCRIPT_DIR/devnet.sh" restart-node "$CORE_NODE" >"$log_file" 2>&1 < /dev/null
+}
+
+configure_core_legacy_host_custody() {
+  LEGACY_CORE_CFG="$(node_dir "$CORE_NODE")/config.json"
+  [ -f "$LEGACY_CORE_CFG" ] || fail "core config $LEGACY_CORE_CFG missing — bring up the devnet first"
+  LEGACY_CORE_CFG_BAK="$(mktemp "${TMPDIR:-/tmp}/rfc38-unclean-core-cfg-XXXXXX")"
+  cp "$LEGACY_CORE_CFG" "$LEGACY_CORE_CFG_BAK"
+  trap restore_core_host_custody_config EXIT INT TERM
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+    cfg.swmHostMode = Object.assign({}, cfg.swmHostMode, { enabled: true, stripCiphertext: false });
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+  ' "$LEGACY_CORE_CFG" || fail "could not edit core config to enable legacy host custody"
+  "$SCRIPT_DIR/devnet.sh" restart-node "$CORE_NODE" >/dev/null 2>&1 || warn "restart-node $CORE_NODE returned non-zero while enabling legacy host custody"
+  if ! wait_for_port_open "$CORE_NODE" 60; then
+    fail "core API never came back online after enabling legacy host custody"
+  fi
+  log "✓ core node $CORE_NODE running with swmHostMode.stripCiphertext=false for legacy host-custody recovery test"
+}
+
+core_managed_store_port() {
+  node -e '
+    const fs = require("fs");
+    try {
+      const cfg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const backend = cfg.store && cfg.store.backend;
+      if (backend !== "oxigraph-server") process.exit(0);
+      const port = cfg.store && cfg.store.options && cfg.store.options.port;
+      if (Number.isInteger(port) && port > 0) console.log(port);
+    } catch {
+      process.exit(0);
+    }
+  ' "$(node_dir "$CORE_NODE")/config.json"
+}
+
+kill_core_managed_store_process() {
+  local port
+  port=$(core_managed_store_port 2>/dev/null || true)
+  [ -n "$port" ] || return 0
+  local pids
+  pids=$(lsof -ti tcp:"$port" 2>/dev/null || true)
+  [ -n "$pids" ] || return 0
+  local node_path
+  node_path="$(node_dir "$CORE_NODE")"
+  for pid in $pids; do
+    local cmd
+    cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+    case "$cmd" in
+      *"$node_path/oxigraph"*|*"$node_path/oxigraph-data"*)
+        warn "killing orphaned managed Oxigraph server for node $CORE_NODE (pid=$pid port=$port)"
+        kill -9 "$pid" 2>/dev/null || true
+        ;;
+      *)
+        warn "refusing to kill process $pid on port $port; command does not belong to node $CORE_NODE: ${cmd:-<unknown>}"
+        ;;
+    esac
+  done
+}
+
+configure_core_legacy_host_custody
+
 CURATOR_AGENT=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 M1_AGENT=$(api_call "$M1_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 
@@ -283,43 +362,46 @@ EOF
 # ===========================================================================
 act "3. M1 first catchup — must catch M1 mid-batch before killing the core"
 # ===========================================================================
-# Codex PR #624 follow-up: previously this took a single snapshot
-# after a 2s sleep, accepting ANY count including 0 or already-
-# complete. If M1 had finished the catchup OR never even started
-# it, the kill in phase 4 didn't exercise the `lastHostCatchupSeqno`
-# resume path this test was supposed to cover — the post-restart
-# count check would still pass via gossip / a later round. Now:
-# we wait for the strict mid-batch state (0 < partial < target),
-# then kill. Fail loudly if catchup is either too fast (insufficient
-# data — increase WRITES_COUNT / WRITE_PAYLOAD_BYTES) or too slow
-# (catchup never engaged within 25s — gossip/auth regression).
+# Codex PR #624 follow-up originally waited for an externally visible
+# partial count (0 < count < target). On fast stores the catchup can apply
+# atomically enough that the count jumps from 0 to target, even though the
+# source was serving the large sync for many seconds. The unclean-restart
+# contract is the source crash while the pinned catchup request is in
+# flight, so gate on the M1 daemon log showing it is actively syncing this
+# CG from the pinned core, then kill immediately.
+FIRST_CATCHUP_OUT="$DEVNET_DIR/rfc38-unclean-first-catchup.out"
+FIRST_CATCHUP_ERR="$DEVNET_DIR/rfc38-unclean-first-catchup.err"
+rm -f "$FIRST_CATCHUP_OUT" "$FIRST_CATCHUP_ERR"
 api_call "$M1_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_ID", "peerId": "$CORE_PEER_ID" }
 EOF
-)" >/dev/null 2>&1 || true
+)" >"$FIRST_CATCHUP_OUT" 2>"$FIRST_CATCHUP_ERR" &
+FIRST_CATCHUP_PID=$!
 
-M1_PARTIAL=0
-# Sub-second poll — at rc.12 catchup speeds the mid-batch window can be
-# narrower than 1 s. ~200 iterations × 100 ms keeps the total budget at
-# the same ~25 s as the 1 s loop did, while raising the resolution by 10×.
-for _ in $(seq 1 200); do
-  M1_PARTIAL=$(count_triples "$M1_NODE")
-  M1_PARTIAL=${M1_PARTIAL:-0}
-  if [ "$M1_PARTIAL" -gt 0 ] && [ "$M1_PARTIAL" -lt "$WRITES_COUNT" ] 2>/dev/null; then
+M1_LOG="$(node_dir "$M1_NODE")/daemon.log"
+SYNC_STARTED=0
+for _ in $(seq 1 250); do
+  if grep -F "Syncing context graph \"$CG_ID\" from $CORE_PEER_ID" "$M1_LOG" >/dev/null 2>&1; then
+    SYNC_STARTED=1
     break
+  fi
+  if ! kill -0 "$FIRST_CATCHUP_PID" 2>/dev/null; then
+    FIRST_BODY=$(cat "$FIRST_CATCHUP_OUT" 2>/dev/null || true)
+    FIRST_ERR=$(cat "$FIRST_CATCHUP_ERR" 2>/dev/null || true)
+    fail "M1 catchup exited before the pinned core started serving $CG_ID. Response: ${FIRST_BODY:-<empty>} ${FIRST_ERR:-}"
   fi
   # macOS bash sleep accepts fractional seconds; gnu coreutils does too.
   sleep 0.1
 done
-log "M1 partial catchup count: $M1_PARTIAL (target mid-batch: 0 < partial < $WRITES_COUNT)"
-if [ "$M1_PARTIAL" -le 0 ]; then
-  fail "M1 catchup never progressed past 0 triples within 25s — auth / gossip / host-catchup is broken, the kill below would test the wrong path."
+[ "$SYNC_STARTED" = "1" ] || fail "M1 catchup did not start syncing $CG_ID from pinned core $CORE_PEER_ID within 25s"
+if ! kill -0 "$FIRST_CATCHUP_PID" 2>/dev/null; then
+  FIRST_BODY=$(cat "$FIRST_CATCHUP_OUT" 2>/dev/null || true)
+  fail "M1 catchup completed before the core could be killed mid-serve. Response: ${FIRST_BODY:-<empty>}"
 fi
-if [ "$M1_PARTIAL" -ge "$WRITES_COUNT" ]; then
-  fail "M1 catchup completed too quickly (count=$M1_PARTIAL ≥ $WRITES_COUNT). " \
-       "This test must kill the core MID-CATCHUP to exercise the lastHostCatchupSeqno resume path. " \
-       "Bump WRITES_COUNT and/or WRITE_PAYLOAD_BYTES so catchup paginates and the kill window opens."
-fi
+
+M1_PARTIAL=$(count_triples "$M1_NODE")
+M1_PARTIAL=${M1_PARTIAL:-0}
+log "M1 catchup in-flight; observed pre-kill count: $M1_PARTIAL (target final ≥ $WRITES_COUNT)"
 
 # ===========================================================================
 act "4. SIGKILL the core (unclean shutdown — no graceful close)"
@@ -340,6 +422,11 @@ kill -9 "$CORE_SUPERVISOR_PID" 2>/dev/null || warn "kill -9 supervisor returned 
 if [ -n "$CORE_INNER_PID" ] && [ "$CORE_INNER_PID" != "$CORE_SUPERVISOR_PID" ] && kill -0 "$CORE_INNER_PID" 2>/dev/null; then
   kill -9 "$CORE_INNER_PID" 2>/dev/null || true
 fi
+# The production-default devnet store for node1/node2 is daemon-managed
+# `oxigraph-server`. A SIGKILL of the daemon leaves that child orphaned and
+# still holding RocksDB's LOCK, which makes `restart-node` fail even though a
+# real host crash/power loss would have taken the whole process tree down.
+kill_core_managed_store_process
 # Codex PR #624 R2: hard-fail if the API never goes down. A respawn
 # or a kill that missed would otherwise let phase 6 pass against a
 # still-running core, defeating the unclean-restart contract.
@@ -347,6 +434,19 @@ if ! wait_for_port_closed "$CORE_NODE" 30; then
   fail "core port still open after 30s — kill did NOT take effect (supervisor respawn?). Can't validate unclean-restart recovery against a still-running daemon."
 fi
 log "✓ core forcibly stopped (port closed, supervisor + inner pid gone)"
+for _ in $(seq 1 30); do
+  if ! kill -0 "$FIRST_CATCHUP_PID" 2>/dev/null; then break; fi
+  sleep 1
+done
+if kill -0 "$FIRST_CATCHUP_PID" 2>/dev/null; then
+  warn "first catchup request still pending 30s after core kill; terminating client-side curl wrapper"
+  kill "$FIRST_CATCHUP_PID" 2>/dev/null || true
+fi
+set +e
+wait "$FIRST_CATCHUP_PID" >/dev/null 2>&1
+FIRST_CATCHUP_STATUS=$?
+set -e
+log "first in-flight catchup request exited after kill (status=$FIRST_CATCHUP_STATUS)"
 
 # ===========================================================================
 act "5. Restart the core (B2 orphan reconcile + B3 host-mode restore must fire)"

@@ -39,20 +39,29 @@ devnet_json_field() {
   "
 }
 
-_devnet_append_pending_assets() {
-  local new_assets="$1"
-  devnet_publish_load_state
-  local merged names
-  merged=$(OLD="$DEVNET_PUBLISH_PENDING_ASSETS" NEW="$new_assets" node -e '
-    const oldAssets = JSON.parse(process.env.OLD || "[]");
-    const newAssets = JSON.parse(process.env.NEW || "[]");
-    process.stdout.write(JSON.stringify(oldAssets.concat(newAssets)));
-  ')
-  names=$(ASSETS="$merged" node -e '
-    const assets = JSON.parse(process.env.ASSETS || "[]");
-    process.stdout.write(JSON.stringify(assets.map(a => a.name)));
-  ')
-  _devnet_publish_persist_state "$DEVNET_PUBLISH_ALL_RESPONSES" "$DEVNET_PUBLISH_ROOT_ENTITIES" "$DEVNET_PUBLISH_NODE" "$names" "$merged"
+_devnet_append_pending_assets_file() {
+  local assets_file="$1"
+  _devnet_publish_init_state_file
+  STATE_FILE="$DEVNET_PUBLISH_STATE_FILE" ASSETS_FILE="$assets_file" node -e '
+    const fs = require("fs");
+    const stateFile = process.env.STATE_FILE;
+    const state = fs.existsSync(stateFile)
+      ? JSON.parse(fs.readFileSync(stateFile, "utf8"))
+      : {};
+    const newAssets = fs.readFileSync(process.env.ASSETS_FILE, "utf8")
+      .split(/\n+/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const pendingAssets = (state.pendingAssets || []).concat(newAssets);
+    fs.writeFileSync(stateFile, JSON.stringify({
+      ...state,
+      allResponses: state.allResponses || [],
+      rootEntities: state.rootEntities || [],
+      publishNode: state.publishNode || "",
+      assetNames: pendingAssets.map((asset) => asset.name),
+      pendingAssets,
+    }));
+  '
 }
 
 # Create one or more named knowledge assets, seal them, and share them to SWM.
@@ -60,11 +69,19 @@ _devnet_append_pending_assets() {
 # `triplesWritten` assertions while exercising the named KA lifecycle path.
 devnet_create_shared_ka() {
   local node_id="$1" payload="$2" name_prefix="${3:-devnet-ka}" extra_fields="${4:-}"
-  local nonce plan_file plan_meta count i asset body resp responses new_assets triples names roots
+  local nonce plan_file responses_file assets_file count i asset body resp status
 
   _devnet_publish_init_state_file
   nonce="$(date +%s)-$$-${RANDOM:-0}"
   plan_file="$(mktemp "${DEVNET_DIR:-/tmp}/devnet-create-plan.XXXXXX")" || return 1
+  responses_file="$(mktemp "${DEVNET_DIR:-/tmp}/devnet-create-responses.XXXXXX")" || {
+    rm -f "$plan_file"
+    return 1
+  }
+  assets_file="$(mktemp "${DEVNET_DIR:-/tmp}/devnet-create-assets.XXXXXX")" || {
+    rm -f "$plan_file" "$responses_file"
+    return 1
+  }
   if ! printf '%s' "$payload" | PLAN_FILE="$plan_file" NAME_PREFIX="$name_prefix" EXTRA_FIELDS="$extra_fields" NONCE="$nonce" node -e '
     const fs = require("fs");
     let input = "";
@@ -119,20 +136,21 @@ devnet_create_shared_ka() {
       }
     });
   '; then
-    rm -f "$plan_file"
+    rm -f "$plan_file" "$responses_file" "$assets_file"
     return 1
   fi
 
-  IFS= read -r plan_meta < "$plan_file"
-  count=$(printf '%s' "$plan_meta" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).count));')
-  responses='[]'
-  new_assets='[]'
+  count=$(sed -n '1p' "$plan_file" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).count));')
   i=0
   while [ "$i" -lt "$count" ]; do
     asset=$(sed -n "$((i + 2))p" "$plan_file")
     body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).body)));')
-    resp=$(api_call "$node_id" POST /api/knowledge-assets "$body")
-    if ! printf '%s' "$resp" | node -e '
+    if ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
+      rm -f "$plan_file" "$responses_file" "$assets_file"
+      return 1
+    fi
+    if ! printf '%s' "$resp" | RESPONSES_FILE="$responses_file" node -e '
+      const fs = require("fs");
       let d=""; process.stdin.on("data", c => d += c);
       process.stdin.on("end", () => {
         try {
@@ -142,58 +160,63 @@ devnet_create_shared_ka() {
           if (j.publishReady !== true) process.exit(1);
           if (typeof j.shareOperationId !== "string" || j.shareOperationId.trim().length === 0) process.exit(1);
           if (Number(j.promotedCount || 0) <= 0) process.exit(1);
+          fs.appendFileSync(process.env.RESPONSES_FILE, JSON.stringify(j) + "\n");
         } catch {
           process.exit(1);
         }
       });
     '; then
       printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
-      rm -f "$plan_file"
+      rm -f "$plan_file" "$responses_file" "$assets_file"
       return 1
     fi
-    responses=$(node -e 'const arr=JSON.parse(process.argv[1]); arr.push(JSON.parse(process.argv[2])); process.stdout.write(JSON.stringify(arr));' "$responses" "$resp")
-    new_assets=$(printf '%s' "$asset" | NEW_ASSETS="$new_assets" node -e '
+    if ! printf '%s' "$asset" | ASSETS_FILE="$assets_file" node -e '
+      const fs = require("fs");
       let input = "";
       process.stdin.on("data", c => input += c);
       process.stdin.on("end", () => {
-      const arr = JSON.parse(process.env.NEW_ASSETS || "[]");
-      const asset = JSON.parse(input);
-      arr.push({
-        name: asset.name,
-        root: asset.root,
-        rootEntities: asset.rootEntities || [asset.root],
-        preserveBatch: Boolean(asset.preserveBatch),
-        ...(asset.subGraphName ? { subGraphName: asset.subGraphName } : {}),
+        const asset = JSON.parse(input);
+        fs.appendFileSync(process.env.ASSETS_FILE, JSON.stringify({
+          name: asset.name,
+          root: asset.root,
+          rootEntities: asset.rootEntities || [asset.root],
+          preserveBatch: Boolean(asset.preserveBatch),
+          ...(asset.subGraphName ? { subGraphName: asset.subGraphName } : {}),
+        }) + "\n");
       });
-      process.stdout.write(JSON.stringify(arr));
-      });
-    ')
+    '; then
+      rm -f "$plan_file" "$responses_file" "$assets_file"
+      return 1
+    fi
     i=$((i + 1))
   done
 
-  _devnet_append_pending_assets "$new_assets"
-  rm -f "$plan_file"
-  triples=$(printf '%s' "$plan_meta" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).totalQuads));')
-  names=$(printf '%s' "$new_assets" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).map(a=>a.name))));')
-  roots=$(printf '%s' "$new_assets" | node -e '
-    let d=""; process.stdin.on("data",c=>d+=c);
-    process.stdin.on("end",()=>{
-      const assets = JSON.parse(d);
-      process.stdout.write(JSON.stringify([...new Set(assets.flatMap(a => a.rootEntities || [a.root]))]));
-    });
-  ')
-  node -e '
-    const names = JSON.parse(process.argv[1]);
-    const roots = JSON.parse(process.argv[2]);
-    const responses = JSON.parse(process.argv[3]);
+  if ! _devnet_append_pending_assets_file "$assets_file"; then
+    rm -f "$plan_file" "$responses_file" "$assets_file"
+    return 1
+  fi
+  PLAN_FILE="$plan_file" RESPONSES_FILE="$responses_file" ASSETS_FILE="$assets_file" node -e '
+    const fs = require("fs");
+    const readJsonLines = (file) => fs.readFileSync(file, "utf8")
+      .split(/\n+/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const [meta] = readJsonLines(process.env.PLAN_FILE);
+    const responses = readJsonLines(process.env.RESPONSES_FILE);
+    const assets = readJsonLines(process.env.ASSETS_FILE);
+    const names = assets.map((asset) => asset.name);
+    const roots = [...new Set(assets.flatMap((asset) => asset.rootEntities || [asset.root]))];
     process.stdout.write(JSON.stringify({
-      triplesWritten: Number(process.argv[4]),
+      triplesWritten: Number(meta.totalQuads),
       shareOperationId: "knowledge-assets:" + names.join(","),
       names,
       rootEntities: roots,
       responses,
     }));
-  ' "$names" "$roots" "$responses" "$triples"
+  '
+  status=$?
+  rm -f "$plan_file" "$responses_file" "$assets_file"
+  return "$status"
 }
 
 # Publish statuses the devnet harness treats as success (matches devnet-test.sh).
@@ -377,6 +400,104 @@ const fs = require("fs"); const path = require("path");
   )
 }
 
+devnet_private_roots_for_published_root() {
+  local node="$1" cg="$2" root="$3"
+  local body resp
+
+  body=$(CG="$cg" ROOT="$root" node -e '
+    const cg = process.env.CG;
+    const root = process.env.ROOT;
+    const metaGraph = `did:dkg:context-graph:${cg}/_meta`;
+    const sparql = `
+      SELECT DISTINCT ?privateRoot WHERE {
+        GRAPH <${metaGraph}> {
+          ?ka <http://dkg.io/ontology/rootEntity> ?rootEntity ;
+              <http://dkg.io/ontology/privateMerkleRoot> ?privateRoot .
+          FILTER(STR(?rootEntity) = ${JSON.stringify(root)})
+        }
+      }
+    `;
+    process.stdout.write(JSON.stringify({ sparql }));
+  ')
+  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  printf '%s' "$resp" | node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d || "{}");
+        if (j.error) throw new Error(j.error);
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const roots = [];
+        for (const row of bindings) {
+          const cell = row?.privateRoot ?? row?.root;
+          let value = typeof cell === "object" && cell !== null && "value" in cell ? cell.value : cell;
+          value = String(value ?? "").split("^^")[0].replace(/^"|"$/g, "").trim();
+          const match = value.match(/^(?:0x)?([0-9a-fA-F]{64})$/);
+          if (match) roots.push("0x" + match[1].toLowerCase());
+        }
+        process.stdout.write(JSON.stringify([...new Set(roots)]));
+      } catch (err) {
+        console.error(`devnet_private_roots_for_published_root: ${err?.message || err}`);
+        process.exit(1);
+      }
+    });
+  '
+}
+
+devnet_catalog_quads_for_published_kc() {
+  local node="$1" cg="$2" kc="$3"
+  local body resp
+
+  body=$(CG="$cg" KC="$kc" node -e '
+    const cg = process.env.CG;
+    const kc = process.env.KC;
+    const metaGraph = `did:dkg:context-graph:${cg}/_meta`;
+    const cgDid = `did:dkg:context-graph:${cg}`;
+    const DKG = "http://dkg.io/ontology/";
+    const sparql = `
+      SELECT DISTINCT ?p ?o WHERE {
+        GRAPH <${metaGraph}> {
+          ?assertion <${DKG}publishedUal> ?publishedUal ;
+                     <${DKG}assertionGraph> ?assertionGraph .
+          ?ual <${DKG}batchId> ?batchId .
+          FILTER(STR(?publishedUal) = STR(?ual) && CONTAINS(STR(?batchId), ${JSON.stringify(kc)}))
+        }
+        GRAPH ?assertionGraph {
+          <${cgDid}> ?p ?o .
+        }
+      }
+      ORDER BY ?p ?o
+    `;
+    process.stdout.write(JSON.stringify({ sparql }));
+  ')
+  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  printf '%s' "$resp" | CG="$cg" node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d || "{}");
+        if (j.error) throw new Error(j.error);
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const subject = `did:dkg:context-graph:${process.env.CG}`;
+        const quads = [];
+        for (const row of bindings) {
+          const pCell = row?.p;
+          const oCell = row?.o;
+          const predicate = String((typeof pCell === "object" && pCell !== null && "value" in pCell) ? pCell.value : pCell ?? "");
+          const object = String((typeof oCell === "object" && oCell !== null && "value" in oCell) ? oCell.value : oCell ?? "");
+          if (predicate && object) quads.push({ subject, predicate, object, graph: "" });
+        }
+        process.stdout.write(JSON.stringify(quads));
+      } catch (err) {
+        console.error(`devnet_catalog_quads_for_published_kc: ${err?.message || err}`);
+        process.exit(1);
+      }
+    });
+  '
+}
+
 # Args: node cg quads_payload_json [metadata_node]
 # Verifies each published root entity against its KC merkleRoot via verify-batch.
 # verify-batch runs on `node` (often a late-joining/non-curator peer), but the
@@ -384,7 +505,7 @@ const fs = require("fs"); const path = require("path");
 # performed the publish — to avoid racing that peer's KC chain-sync.
 devnet_verify_each_published_root() {
   local node="$1" cg="$2" quads_payload="$3" meta_node="${4:-}"
-  local count i kc merkle body resp ok actual
+  local count i kc merkle root private_roots catalog_quads body resp ok actual
 
   devnet_publish_load_state
   [ -z "$meta_node" ] && meta_node="${DEVNET_PUBLISH_NODE:-$node}"
@@ -404,23 +525,37 @@ devnet_verify_each_published_root() {
   while [ "$i" -lt "$count" ]; do
     kc=$(devnet_publish_ka_id_at "$i")
     merkle=$(devnet_kc_merkle_root "$meta_node" "$kc")
-    body=$(QUADS_PAYLOAD="$quads_payload" ROOT_IDX="$i" ROOTS="$DEVNET_PUBLISH_ROOT_ENTITIES" CG="$cg" MERKLE="$merkle" KC="$kc" node -e '
+    root=$(ROOT_IDX="$i" ROOTS="$DEVNET_PUBLISH_ROOT_ENTITIES" node -e '
+      const roots = JSON.parse(process.env.ROOTS || "[]");
+      const idx = Number(process.env.ROOT_IDX);
+      process.stdout.write(String(roots[idx] || ""));
+    ')
+    private_roots="[]"
+    if [ -n "$root" ]; then
+      private_roots=$(devnet_private_roots_for_published_root "$meta_node" "$cg" "$root") || return 1
+    fi
+    catalog_quads=$(devnet_catalog_quads_for_published_kc "$meta_node" "$cg" "$kc") || return 1
+    body=$(QUADS_PAYLOAD="$quads_payload" ROOT_IDX="$i" ROOTS="$DEVNET_PUBLISH_ROOT_ENTITIES" PRIVATE_ROOTS="$private_roots" CATALOG_QUADS="$catalog_quads" CG="$cg" MERKLE="$merkle" KC="$kc" node -e '
       const genidPrefix = "/.well-known/genid/";
       const quadBelongsToRoot = (q, root) =>
         q.subject === root || q.subject.startsWith(root + genidPrefix);
       const roots = JSON.parse(process.env.ROOTS || "[]");
       const rootIdx = Number(process.env.ROOT_IDX);
       const payload = JSON.parse(process.env.QUADS_PAYLOAD);
+      const privateRoots = JSON.parse(process.env.PRIVATE_ROOTS || "[]");
+      const catalogQuads = JSON.parse(process.env.CATALOG_QUADS || "[]");
       let quads = payload.quads;
       if (roots.length > 0) {
         const root = roots[rootIdx];
         quads = quads.filter((q) => quadBelongsToRoot(q, root));
       }
+      quads = quads.concat(catalogQuads);
       console.log(JSON.stringify({
         contextGraphId: process.env.CG,
         expectedMerkleRoot: process.env.MERKLE,
         batchId: process.env.KC,
         quads,
+        ...(privateRoots.length ? { privateRoots } : {}),
       }));
     ')
     resp=$(api_call "$node" POST /api/shared-memory/verify-batch "$body")

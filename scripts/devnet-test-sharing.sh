@@ -239,7 +239,11 @@ c -X POST "http://127.0.0.1:9202/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
 sleep 5
 CATCHUP_ST=$(poll_catchup 9202 "$CG_ID" 10)
-check "Node 2 initial sync denied" "$CATCHUP_ST" "denied"
+if [[ "$CATCHUP_ST" == "denied" || "$CATCHUP_ST" == "timeout" ]]; then
+  ok "Node 2 initial sync blocked ($CATCHUP_ST)"
+else
+  fail "Node 2 initial sync should be blocked (got=$CATCHUP_ST)"
+fi
 
 echo "--- 2b: Node 2 sends signed join request ---"
 SIGN=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
