@@ -44,7 +44,17 @@ export interface NetworkAdmissionAttemptOptions {
   timeoutMs?: number;
 }
 
-type NetworkAdmissionProbeGate = (peerId: CanonicalPeerId) => void;
+interface NetworkAdmissionAttemptPolicy {
+  probeRetrySuppression: 'respect' | 'bypass';
+}
+
+const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
+  probeRetrySuppression: 'respect',
+};
+
+const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
+  probeRetrySuppression: 'bypass',
+};
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -214,11 +224,11 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedWithProbeGate(
+    return this.ensureAdmittedWithPolicy(
       remotePeer,
       ctx,
+      AUTOMATIC_ADMISSION_POLICY,
       options,
-      this.assertProbeNotSuppressed,
     );
   }
 
@@ -227,14 +237,19 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedWithProbeGate(remotePeer, ctx, options);
+    return this.ensureAdmittedWithPolicy(
+      remotePeer,
+      ctx,
+      EXPLICIT_CONNECT_ADMISSION_POLICY,
+      options,
+    );
   }
 
-  private async ensureAdmittedWithProbeGate(
+  private async ensureAdmittedWithPolicy(
     remotePeer: string,
     ctx: OperationContext,
+    policy: NetworkAdmissionAttemptPolicy,
     options: NetworkAdmissionAttemptOptions,
-    probeGate?: NetworkAdmissionProbeGate,
   ): Promise<boolean> {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
@@ -245,7 +260,9 @@ export class NetworkAdmissionCoordinator {
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
 
-    probeGate?.(remotePeerId);
+    if (policy.probeRetrySuppression === 'respect') {
+      this.assertProbeNotSuppressed(remotePeerId);
+    }
 
     const attempt = new InFlightAdmissionAttempt(
       this.probeTimeoutMs,
@@ -258,7 +275,7 @@ export class NetworkAdmissionCoordinator {
     return attempt.wait(options);
   }
 
-  private readonly assertProbeNotSuppressed: NetworkAdmissionProbeGate = (remotePeerId) => {
+  private assertProbeNotSuppressed(remotePeerId: CanonicalPeerId): void {
     const backoff = this.admission.getRetryableProbeBackoff(remotePeerId);
     if (backoff) {
       throw new NetworkAdmissionProbeError(
@@ -266,7 +283,7 @@ export class NetworkAdmissionCoordinator {
         `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
       );
     }
-  };
+  }
 
   private async probePeer(
     remotePeer: CanonicalPeerId,
