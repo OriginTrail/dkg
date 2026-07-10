@@ -34,6 +34,7 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -483,8 +484,11 @@ export class SparqlHttpStore implements TripleStore {
 
   private async listGraphsDirect(options?: QueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
+    // Index-read enumeration shared with OxigraphStore — see the rationale on
+    // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY (O(#graphs) vs the legacy O(#quads)
+    // scan; FILTER EXISTS preserves the non-empty-only contract).
     const r = await this.query(
-      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY,
       { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
     );
     return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];

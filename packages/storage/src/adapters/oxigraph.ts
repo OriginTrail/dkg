@@ -1,4 +1,5 @@
 import oxigraph from 'oxigraph';
+import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -300,9 +301,9 @@ export class OxigraphStore implements TripleStore {
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
-    const result = this.store.query(
-      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
-    );
+    // Index-read enumeration shared with SparqlHttpStore — see the rationale on
+    // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY.
+    const result = this.store.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY);
     throwIfAborted(options?.signal);
     if (typeof result === 'boolean' || typeof result === 'string') return [];
     if (!Array.isArray(result)) return [];
