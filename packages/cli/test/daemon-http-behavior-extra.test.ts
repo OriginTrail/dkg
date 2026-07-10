@@ -2145,3 +2145,138 @@ describe('CLI-13 / CLI-14 — shutdown signal exit codes & timer cleanup', () =>
     expect(dt).toBeLessThan(8_000);
   }, 120_000);
 });
+
+// Issue #1596: POST /api/subscribe must not 403 a caller off the allowlist when
+// the CG's explicit accessPolicy is "public". On a public CG the allowlist gates
+// PUBLISHERS, not subscribers, so an allowlist entry must not turn a public CG
+// into invite-only-to-join. An explicit-private CG must still 403. The route now
+// defers to the resolver's `isPrivateContextGraph` (the #865 single source of
+// truth) instead of gating on "allowlist non-empty" alone.
+describe('#1596 — subscribe allowlist gate respects explicit public accessPolicy', () => {
+  const CALLER = '0x0000000000000000000000000000000000000001';
+  const OTHER = '0x00000000000000000000000000000000000000ff';
+
+  async function subscribeWith(opts: {
+    isPrivate: boolean;
+    allowlist: string[];
+  }): Promise<{ status: number; subscribeCalled: boolean }> {
+    const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
+    const catchupTracker = {
+      jobs: new Map<string, any>(),
+      latestByContextGraph: new Map<string, string>(),
+    };
+    const previousCatchupRunner = daemonState.catchupRunner;
+    // Benign runner: the queued job runs fire-and-forget after the response and
+    // must not touch the mock agent in a way that throws.
+    daemonState.catchupRunner = {
+      run: async () => ({
+        connectedPeers: 0,
+        syncCapablePeers: 0,
+        peersTried: 0,
+        peersResponded: 0,
+        peersSucceeded: 0,
+        dataSynced: 0,
+        sharedMemorySynced: 0,
+        denied: false,
+        deniedPeers: 0,
+        diagnostics: {},
+      }),
+      close: async () => {},
+    } as any;
+
+    let subscribeCalled = false;
+    let routeServer: Server | null = null;
+    try {
+      routeServer = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const agent = {
+          getContextGraphAllowedAgents: async () => opts.allowlist,
+          isPrivateContextGraph: async () => opts.isPrivate,
+          getDefaultAgentAddress: () => CALLER,
+          getSubscribedContextGraphs: () => new Map(),
+          subscribeToContextGraph: () => {
+            subscribeCalled = true;
+          },
+          contextGraphHasLocalContent: async () => false,
+          markContextGraphSubscriptionState: () => {},
+          resolveAgentByToken: () => undefined,
+        };
+        await handleContextGraphRoutes({
+          req,
+          res,
+          agent,
+          publisherControl: {},
+          publisherRuntime: null,
+          config: {},
+          startedAt: Date.now(),
+          dashDb: {},
+          opWallets: {},
+          network: {},
+          tracker: {},
+          memoryManager: {},
+          bridgeAuthToken: undefined,
+          nodeVersion: 'test',
+          nodeCommit: 'test',
+          catchupTracker,
+          extractionRegistry: {},
+          fileStore: {},
+          extractionStatus: new Map(),
+          assertionImportLocks: new Map(),
+          vectorStore: {},
+          embeddingProvider: null,
+          validTokens: new Set(),
+          apiHost: '127.0.0.1',
+          apiPortRef: { value: 0 },
+          routePlugins: [],
+          url,
+          path: url.pathname,
+          requestToken: undefined,
+          requestAgentAddress: CALLER,
+        } as any);
+        if (!res.writableEnded) {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+      await new Promise<void>((resolve) => routeServer!.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('route test server did not bind to a TCP port');
+      }
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/api/context-graph/subscribe`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contextGraphId, includeSharedMemory: false }),
+        },
+      );
+      return { status: response.status, subscribeCalled };
+    } finally {
+      daemonState.catchupRunner = previousCatchupRunner;
+      if (routeServer) {
+        await new Promise<void>((resolve, reject) => {
+          routeServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+  }
+
+  it('does NOT 403 a non-allowlisted caller on an explicit-public CG', async () => {
+    const { status, subscribeCalled } = await subscribeWith({
+      isPrivate: false, // accessPolicy="public"
+      allowlist: [OTHER], // caller is NOT in it
+    });
+    expect(status).toBe(200);
+    expect(subscribeCalled).toBe(true);
+  });
+
+  it('still 403s a non-allowlisted caller on an explicit-private CG', async () => {
+    const { status, subscribeCalled } = await subscribeWith({
+      isPrivate: true, // accessPolicy="private" / curated
+      allowlist: [OTHER],
+    });
+    expect(status).toBe(403);
+    expect(subscribeCalled).toBe(false);
+  });
+});

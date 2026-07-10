@@ -595,8 +595,23 @@ export class DKGQueryEngine implements QueryEngine {
     if (graphs.length === 1) {
       return this.execAndNormalize(wrapWithGraph(sparql, graphs[0]));
     }
-    // Build a single union query so LIMIT/ORDER BY/DISTINCT/aggregates
-    // apply over the full dataset rather than per-graph.
+    // Prefer a single `VALUES ?g { … } GRAPH ?g { … }` query: it scopes the
+    // read to the named-graph set as ONE basic graph pattern iterated over a
+    // table, instead of one `{ GRAPH <g> { … } }` UNION branch per graph. A
+    // per-graph UNION over the ~1.4k SWM graphs of a large public context
+    // graph builds a ~1.4k-branch UnionNode that makes the oxigraph-server
+    // planner blow up and drop the socket ("fetch failed", issue #1596); the
+    // VALUES form plans in constant depth. LIMIT/ORDER BY/DISTINCT/aggregate
+    // semantics are preserved because those modifiers stay in the outer query
+    // around the injected block.
+    const valuesSparql = wrapWithGraphValues(sparql, graphs);
+    if (valuesSparql !== null) {
+      return this.execAndNormalize(valuesSparql);
+    }
+    // Residual shapes `wrapWithGraphValues` declines (an inner top-level
+    // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
+    // the original union / per-graph fallback so the #789 form-aware
+    // cross-graph merge below is preserved unchanged.
     const unionSparql = wrapWithGraphUnion(sparql, graphs);
     if (unionSparql !== null) {
       return this.execAndNormalize(unionSparql);
@@ -2429,6 +2444,133 @@ function wrapWithGraphUnion(sparql: string, graphUris: string[]): string | null 
     .map((g) => `{ GRAPH <${g}> { ${inner} } }`)
     .join(' UNION ');
   return `${before} ${unionBranches} ${after}`;
+}
+
+/** The graph variable `wrapWithGraphValues` injects. Double-underscore + a
+ *  view-specific name so a user query is astronomically unlikely to bind it;
+ *  a collision is nonetheless detected and declined (never silently clamped). */
+const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
+
+/**
+ * Wrap a query so it runs over a set of named graphs in ONE execution using a
+ * single `VALUES ?g { <g1> … } GRAPH ?g { inner }` block, instead of one
+ * `{ GRAPH <g> { inner } } UNION …` branch per graph.
+ *
+ * Why this exists (issue #1596): the per-graph UNION form (`wrapWithGraphUnion`)
+ * emits an N-branch UnionNode. At the ~1,424 SWM graphs of a large public
+ * context graph that is a ~257 KB query whose union tree makes the
+ * oxigraph-server query planner blow up and reset the connection ("fetch
+ * failed"). A single VALUES table is one basic graph pattern iterated over the
+ * graph list — constant plan depth — so it scales.
+ *
+ * Semantics are preserved. LIMIT/ORDER BY/DISTINCT/GROUP BY/aggregate all live
+ * in the outer query (the `before`/`after` slices) and reduce over the merged
+ * solution set exactly as the UNION form did. The one hazard is the injected
+ * graph variable leaking into the caller's projection: a bare `SELECT *` would
+ * expose `?__dkgViewGraph` as a mystery column, and cross-graph DISTINCT of an
+ * identical triple would split on the graph. Both are neutralised by scoping
+ * the VALUES+GRAPH block inside a sub-SELECT that projects ONLY the user's own
+ * variables (collected from `inner`), so the sentinel never escapes.
+ *
+ * Returns `null` (caller falls back to `wrapWithGraphUnion` / per-graph
+ * execution) when the WHERE block cannot be located, when `inner` carries a
+ * top-level UNION (kept on the #789 form-aware fallback so its behaviour and
+ * tests are untouched), when the user query already binds the sentinel, or
+ * when the WHERE body binds no user variable at all (a var-less body offers
+ * nowhere to hide the sentinel from a `SELECT *` projection).
+ */
+function wrapWithGraphValues(sparql: string, graphUris: string[]): string | null {
+  if (hasGraphClause(sparql)) return sparql;
+  if (graphUris.length === 0) return sparql;
+
+  const braceStart = findWhereBraceStart(sparql);
+  if (braceStart === -1) return null;
+  const braceEnd = findMatchingCloseBrace(sparql, braceStart);
+  if (braceEnd === -1) return null;
+
+  const before = sparql.slice(0, braceStart + 1);
+  const inner = sparql.slice(braceStart + 1, braceEnd);
+  const after = sparql.slice(braceEnd);
+
+  if (graphUris.length === 1) {
+    return `${before} GRAPH <${assertSafeIri(graphUris[0])}> { ${inner} } ${after}`;
+  }
+
+  // An inner top-level UNION stays on the per-graph fallback (#789): merging
+  // that shape across graphs is form-aware there, and this keeps that path and
+  // its tests unchanged. Same guard `wrapWithGraphUnion` uses.
+  if (/\bUNION\b/i.test(inner)) return null;
+
+  // Never clamp a variable the user actually uses — fall back instead.
+  const sentinelName = VIEW_GRAPH_SENTINEL.slice(1);
+  if (collectQueryVariables(sparql).some((v) => v.slice(1) === sentinelName)) {
+    return null;
+  }
+
+  const innerVars = collectQueryVariables(inner);
+  if (innerVars.length === 0) {
+    // Var-less WHERE body (all-constant triples, e.g. `SELECT * WHERE { <a>
+    // <b> <c> }`). We cannot hide the sentinel here: a sub-SELECT projecting
+    // the empty user-variable set is not legal SPARQL, and the bare form would
+    // let `SELECT *` project the injected `?__dkgViewGraph` (leaking the SWM
+    // graph IRI, which embeds a wallet address). Decline so the caller falls
+    // back to the union / per-graph path, which binds no graph variable. Such
+    // a query over many graphs is not a real view workload, so the fallback's
+    // cost is irrelevant.
+    return null;
+  }
+
+  const values = graphUris.map((g) => `<${assertSafeIri(g)}>`).join(' ');
+  const graphBlock = `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
+  // Hide the sentinel behind a sub-SELECT that re-exposes only the user's
+  // variables, so `SELECT *` and cross-graph DISTINCT behave as they did under
+  // the UNION form.
+  return `${before} { SELECT ${innerVars.join(' ')} WHERE { ${graphBlock} } } ${after}`;
+}
+
+/**
+ * Collect every distinct SPARQL variable (`?x` / `$x`, in first-seen order,
+ * sigil included) in a query fragment, skipping tokens inside line comments,
+ * string literals, and IRI refs. Reuses the same literal/comment/IRI-aware
+ * primitives as `collectGraphVariables` so a `?`/`$` inside a literal or IRI is
+ * never mistaken for a variable.
+ */
+function collectQueryVariables(sparql: string): string[] {
+  const variables: string[] = [];
+  const seen = new Set<string>();
+  const n = sparql.length;
+  let i = 0;
+
+  while (i < n) {
+    const ch = sparql[i];
+    if (ch === '#') {
+      while (i < n && sparql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipSparqlStringLiteral(sparql, i);
+      continue;
+    }
+    if (ch === '<') {
+      const end = skipSparqlIriRef(sparql, i);
+      i = end ?? i + 1;
+      continue;
+    }
+    if (ch === '?' || ch === '$') {
+      const variable = readSparqlVariable(sparql, i);
+      if (variable) {
+        if (!seen.has(variable)) {
+          seen.add(variable);
+          variables.push(variable);
+        }
+        i += variable.length;
+        continue;
+      }
+    }
+    i++;
+  }
+
+  return variables;
 }
 
 /**
