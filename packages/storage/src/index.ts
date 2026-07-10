@@ -54,6 +54,7 @@ export {
   ContextGraphManager,
   GraphManager,
   loadSelectedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
   loadSelectedVerifiableMemoryQuads,
   resolveSharedMemoryReadGraphs,
   resolveVerifiableMemoryReadGraphs,
@@ -61,6 +62,8 @@ export {
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type SharedMemoryReadSelection,
+  type SwmKaGraphBound,
+  type SwmSliceSourceTags,
 } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

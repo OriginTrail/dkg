@@ -4,6 +4,7 @@ import { computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity } from '@o
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
+import { appendInPlace } from './sync/append-in-place.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -152,7 +153,7 @@ export function verifySyncedData(
       const allQuadsForKC: Quad[] = [];
       for (const rootEntity of rootEntities) {
         const quads = partitioned.get(rootEntity) ?? [];
-        allQuadsForKC.push(...quads);
+        appendInPlace(allQuadsForKC, quads);
       }
 
       const privateRoots: Uint8Array[] = [];

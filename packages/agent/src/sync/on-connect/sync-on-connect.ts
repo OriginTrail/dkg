@@ -66,7 +66,7 @@ export class SyncOnConnectPostSyncError extends Error {
 
   constructor(remotePeer: string, originalError: unknown, options: { backoffEligible: boolean }) {
     const detail = originalError instanceof Error ? originalError.message : String(originalError);
-    super(`post-sync step failed for peer ${remotePeer.slice(-8)}: ${detail}`);
+    super(`post-sync step failed for peer ${remotePeer.slice(-8)}: ${detail}`, { cause: originalError });
     this.name = 'SyncOnConnectPostSyncError';
     this.originalError = originalError;
     this.backoffEligible = options.backoffEligible;

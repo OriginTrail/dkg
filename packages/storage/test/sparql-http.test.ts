@@ -12,8 +12,10 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
-/** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
+/** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
+/** The most recent listGraphs enumeration query the server received — asserted on to guard the query SHAPE (index-read, not the O(#quads) scan; dkg #1597). */
+let lastListGraphsQuery = '';
 
 function respondSelect(res: ServerResponse): void {
   if (res.writableEnded) return;
@@ -73,8 +75,9 @@ function startTestServer(): Promise<void> {
             }));
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             listGraphsHits++;
+            lastListGraphsQuery = decoded;
             respondListGraphs(res);
             return;
           }
@@ -181,7 +184,7 @@ describe('SparqlHttpStore (test server)', () => {
             respondSelect(res);
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             arrivals.push('listGraphs');
             listGraphRequests++;
             if (listGraphRequests <= backgroundSlots) {
@@ -429,9 +432,16 @@ describe('SparqlHttpStore (test server)', () => {
     expect(has).toBe(true);
   });
 
-  it('listGraphs returns graph URIs from SELECT DISTINCT ?g', async () => {
+  it('listGraphs returns graph URIs from the graph-index enumeration query', async () => {
+    lastListGraphsQuery = '';
     const graphs = await store.listGraphs();
     expect(graphs).toContain('http://ex.org/g1');
+    // Query SHAPE guard (dkg #1597 review): the adapter MUST issue the index-read
+    // form, not the O(#quads) scan and not bare `GRAPH ?g {}` (which over-lists
+    // emptied graphs). Fails if listGraphsDirect is reverted to the legacy query.
+    expect(lastListGraphsQuery).toContain('GRAPH ?g {}');
+    expect(lastListGraphsQuery).toMatch(/FILTER\s+EXISTS/i);
+    expect(lastListGraphsQuery).not.toMatch(/DISTINCT/i);
   });
 
   it('dropGraph sends DROP SILENT GRAPH to update endpoint', async () => {

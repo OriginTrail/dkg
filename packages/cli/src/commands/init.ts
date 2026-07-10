@@ -137,6 +137,11 @@ function pickPreservedAutoUpdateFields(
   if (!existingAutoUpdate) return {};
   const preserved: Partial<AutoUpdateConfig> = {};
   if (existingAutoUpdate.channel) preserved.channel = existingAutoUpdate.channel;
+  // Common rollout-jitter override (npm + git). Use `!== undefined` so an
+  // explicit `0` (jitter disabled) survives a rerun rather than being dropped
+  // and silently reverting to the network/interval default.
+  if (existingAutoUpdate.updateJitterMinutes !== undefined)
+    preserved.updateJitterMinutes = existingAutoUpdate.updateJitterMinutes;
   if (source === 'git') {
     for (const field of AUTO_UPDATE_GIT_ONLY_FIELDS) {
       const value = existingAutoUpdate[field as keyof AutoUpdateConfig];

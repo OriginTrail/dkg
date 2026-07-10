@@ -284,18 +284,12 @@ import {
   type NpmVersionResult,
   resolveLatestNpmVersion,
   compareSemver,
-  getCurrentCliVersion,
-  type NpmVersionStatus,
-  checkForNpmVersionUpdate,
-  checkForNewCommitWithStatus,
-  deriveUpdateCheckState,
   acquireUpdateLock,
   releaseUpdateLock,
-  performUpdateWithStatus,
-  performNpmUpdate,
-  performNpmUpdateEdge,
 } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
+import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -1572,6 +1566,8 @@ export async function runDaemonInner(
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
+    syncGlobalLimit: config.syncGlobalLimit,
+    syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
@@ -2111,39 +2107,23 @@ export async function runDaemonInner(
       const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
       if (verificationWarning) log(verificationWarning);
 
-      const runCheck = async () => {
-        const gitStatus = await checkForNewCommitWithStatus(au, log);
-        if (gitStatus.status === "error") {
-          log("Auto-update (git): update check failed.");
-          return;
-        }
-
-        daemonState.lastUpdateCheck.checkedAt = Date.now();
-        daemonState.lastUpdateCheck.upToDate = gitStatus.status === "up-to-date";
-        daemonState.lastUpdateCheck.channelTargetMissing = false;
-        daemonState.lastUpdateCheck.latestVersion = "";
-        daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
-
-        if (gitStatus.status !== "available" || !gitStatus.commit) return;
-
-        daemonState.isUpdating = true;
-        const updateStatus = await performUpdateWithStatus(au, log, {
-          expectedCommit: gitStatus.commit,
-        }).finally(() => {
-          daemonState.isUpdating = false;
-        });
-
-        if (updateStatus === "updated") {
-          log("Auto-update (git): update activated; exiting for supervised restart.");
-          await shutdown(DAEMON_EXIT_CODE_RESTART);
-          return;
-        }
-        if (updateStatus === "up-to-date") {
-          log("Auto-update (git): update skipped — node caught up before apply.");
-          return;
-        }
-        log("Auto-update (git): update failed.");
-      };
+      // Rollout jitter: hold off a per-node random delay between detecting an
+      // available commit and applying it, so a release never restarts the whole
+      // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
+      // created ONCE here so its single-flight guard holds across polling ticks.
+      const gate = createUpdateHoldoffGate({
+        jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+        isShuttingDown: () => shuttingDown,
+        setUpdating: (updating) => { daemonState.isUpdating = updating; },
+        log,
+      });
+      const runCheck = createGitUpdateRunCheck({
+        gate,
+        log,
+        lastUpdateCheck: daemonState.lastUpdateCheck,
+        au,
+        onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+      });
 
       setTimeout(runCheck, 15_000);
       updateInterval = setInterval(runCheck, checkIntervalMs);
@@ -2165,38 +2145,27 @@ export async function runDaemonInner(
       `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
     );
 
-    const runCheck = async () => {
-      const npmStatus = await checkForNpmVersionUpdate(log, allowPre, channel);
-      const derived = deriveUpdateCheckState(npmStatus);
-      if (derived) {
-        daemonState.lastUpdateCheck.checkedAt = Date.now();
-        daemonState.lastUpdateCheck.upToDate = derived.upToDate;
-        daemonState.lastUpdateCheck.channelTargetMissing = derived.channelTargetMissing;
-        // Always write (including '') so a prior "available" version does not
-        // linger after the target disappears or the node catches up.
-        daemonState.lastUpdateCheck.latestVersion = derived.latestVersion;
-        if (npmStatus.status === "no-target")
-          log(
-            `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
-          );
-      }
-      if (npmStatus.status !== "available" || !npmStatus.version) return;
-      if (!au) return; // version check only — no auto-apply when polling disabled
-
-      daemonState.isUpdating = true;
-      // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
-      const role = config.nodeRole ?? "edge";
-      const status = role === "edge"
-        ? await performNpmUpdateEdge(npmStatus.version, getCurrentCliVersion(), log)
-        : await performNpmUpdate(npmStatus.version, log);
-      const updated = status === "updated";
-      daemonState.isUpdating = false;
-      if (updated) {
-        log("Auto-update: update activated; exiting for supervised restart.");
-        await shutdown(DAEMON_EXIT_CODE_RESTART);
-        return;
-      }
-    };
+    // Rollout jitter (same rationale as the git path): stagger the fleet's
+    // restarts by holding off a per-node random delay before applying. The gate
+    // is null in version-check-only mode (au disabled) — detect + record only.
+    // Created ONCE so single-flight holds across polling ticks.
+    const gate = au
+      ? createUpdateHoldoffGate({
+          jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+          isShuttingDown: () => shuttingDown,
+          setUpdating: (updating) => { daemonState.isUpdating = updating; },
+          log,
+        })
+      : null;
+    const runCheck = createNpmUpdateRunCheck({
+      gate,
+      log,
+      lastUpdateCheck: daemonState.lastUpdateCheck,
+      allowPrerelease: allowPre,
+      channel,
+      nodeRole: config.nodeRole ?? "edge",
+      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+    });
 
     setTimeout(runCheck, 15_000);
     updateInterval = setInterval(runCheck, checkIntervalMs);

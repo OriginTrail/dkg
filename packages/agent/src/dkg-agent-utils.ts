@@ -17,6 +17,7 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
+import { appendInPlace } from './sync/append-in-place.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
   skolemizeByEntity,
@@ -344,7 +345,7 @@ export function verifySyncedData(
       const allQuadsForKC: Quad[] = [];
       for (const re of rootEntities) {
         const quads = partitioned.get(re) ?? [];
-        allQuadsForKC.push(...quads);
+        appendInPlace(allQuadsForKC, quads);
       }
 
       // Collect private merkle roots from KA metadata for this KC

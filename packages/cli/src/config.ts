@@ -90,6 +90,15 @@ export interface AutoUpdateConfig {
    * `resolveAutoUpdateConfig()` falls back to network -> 30 (minutes).
    */
   checkIntervalMinutes?: number;
+  /**
+   * Rollout jitter: on detecting an available update, hold off a per-node random
+   * 0..N-minute delay before building + restarting, so a release never restarts
+   * the whole fleet in one window (the bootstrap-storm trigger behind the
+   * 2026-07 beacon OOM incident). Omit to inherit; `resolveUpdateJitterMs()`
+   * falls back to the poll interval. 0 disables. Per-node env override:
+   * `DKG_UPDATE_JITTER_MINUTES`.
+   */
+  updateJitterMinutes?: number;
   /** Optional per-step build timeout overrides for the git-based update path. */
   buildTimeoutMs?: AutoUpdateBuildTimeouts;
   /** Require signed tag verification when the git updater checks out tag refs. */
@@ -161,6 +170,8 @@ export interface NetworkConfig {
     sshKeyPath?: string;
     sshCommand?: string;
     checkIntervalMinutes: number;
+    /** Network-level default for the auto-update rollout jitter (minutes). */
+    updateJitterMinutes?: number;
     buildTimeoutMs?: AutoUpdateBuildTimeouts;
     /** Network-level default for signed tag verification in git auto-update mode. */
     verifyTagSignature?: boolean;
@@ -587,8 +598,15 @@ export interface DkgConfig {
   syncOnConnectEnabled?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
-  /** Global cap for concurrent sync jobs. Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins. */
+  /**
+   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
+   */
   syncGlobalMaxInflight?: number;
+  /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
+  syncGlobalLimit?: number;
+  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  syncGlobalQueueLimit?: number;
   /** StorageACK handler deadline override in milliseconds. Env DKG_STORAGE_ACK_HANDLER_DEADLINE_MS wins. */
   storageAckHandlerDeadlineMs?: number;
   /**
@@ -1266,6 +1284,7 @@ export function resolveAutoUpdateConfig(
   const sshKeyPath = cfg?.sshKeyPath ?? net?.sshKeyPath;
   const sshCommand = cfg?.sshCommand ?? net?.sshCommand;
   const checkIntervalMinutes = cfg?.checkIntervalMinutes ?? net?.checkIntervalMinutes ?? 30;
+  const updateJitterMinutes = cfg?.updateJitterMinutes ?? net?.updateJitterMinutes;
   const source = cfg?.source ?? net?.source;
   const channel = cfg?.channel ?? net?.channel;
   const cfgHasVerifyTagSignature = !!cfg && Object.prototype.hasOwnProperty.call(cfg, 'verifyTagSignature');
@@ -1298,6 +1317,7 @@ export function resolveAutoUpdateConfig(
     ...(sshKeyPath ? { sshKeyPath } : {}),
     ...(sshCommand ? { sshCommand } : {}),
     checkIntervalMinutes,
+    ...(updateJitterMinutes !== undefined ? { updateJitterMinutes } : {}),
     ...(buildTimeoutMs ? { buildTimeoutMs } : {}),
     ...(source ? { source } : {}),
     ...(channel ? { channel } : {}),

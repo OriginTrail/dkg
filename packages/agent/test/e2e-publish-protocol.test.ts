@@ -87,6 +87,10 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       nodeRole: 'core',
+      // This suite owns GossipSub/finalization behavior. Receiver startup
+      // catch-up can add the same logical rows from the per-KA VM graph; the
+      // read-both bag-semantics issue is tracked separately in #1270.
+      syncOnConnectEnabled: false,
     });
     nodeC = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -95,6 +99,7 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP),
       nodeRole: 'core',
+      syncOnConnectEnabled: false,
     });
 
     await nodeA.start();
@@ -237,8 +242,10 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
 
   it('bootstraps 3 agents and a context graph', async () => {
     nodeA = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiA', listenPort: 0, skills: [], chainAdapter: chainA, nodeRole: 'core' });
-    nodeB = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP), nodeRole: 'core' });
-    nodeC = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiC', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP), nodeRole: 'core' });
+    // Keep receiver startup catch-up out of this GossipSub/finalization canary;
+    // duplicate logical rows across VM layouts are tracked separately in #1270.
+    nodeB = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiB', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP), nodeRole: 'core', syncOnConnectEnabled: false });
+    nodeC = await DKGAgent.create({ kaNumberAllocator: makeTestKaNumberAllocator(), name: 'DBMultiC', listenPort: 0, skills: [], chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP), nodeRole: 'core', syncOnConnectEnabled: false });
 
     await nodeA.start();
     await nodeB.start();

@@ -2,6 +2,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import { markSyncPeerResponded } from '../error-tags.js';
+import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
 import {
@@ -316,11 +317,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       }
 
       if (parsed.totalQuads === 0) {
-        if (parsed.quads.length > 0) allQuads.push(...parsed.quads);
+        if (parsed.quads.length > 0) appendInPlace(allQuads, parsed.quads);
         break;
       }
 
-      allQuads.push(...parsed.quads);
+      appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
 
       if (debugSyncProgress) {
