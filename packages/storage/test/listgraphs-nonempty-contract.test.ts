@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from '../src/adapters/graph-enumeration-query.js';
 
 /**
  * Regression for the sync-responder O(store) fix (listGraphs enumeration).
@@ -41,5 +42,21 @@ describe('OxigraphStore.listGraphs — non-empty-only contract (O(store) fix)', 
     } finally {
       await store.close();
     }
+  });
+});
+
+/**
+ * Query-SHAPE guard (dkg #1597 review). Both Oxigraph adapters (in-process and
+ * sparql-http) enumerate via NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY, so this
+ * single assertion fails if the shared query is reverted to the O(#quads)
+ * `SELECT DISTINCT ?g` scan (the livelock) OR relaxed to bare `GRAPH ?g {}`
+ * (which over-lists emptied-but-registered graphs).
+ */
+describe('non-empty named-graph enumeration query — shape guard', () => {
+  it('reads the graph index (GRAPH ?g {}), is non-empty-guarded (FILTER EXISTS), and is not the O(#quads) scan', () => {
+    const q = NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY;
+    expect(q).toContain('GRAPH ?g {}');        // index read, not a quad scan
+    expect(q).toMatch(/FILTER\s+EXISTS/i);      // non-empty-only contract (not bare)
+    expect(q).not.toMatch(/DISTINCT/i);         // not the legacy O(#quads) scan
   });
 });
