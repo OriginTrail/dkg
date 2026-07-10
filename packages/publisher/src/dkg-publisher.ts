@@ -38,7 +38,7 @@ import {
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph, awaitTailWithGrace, resolvePublishTailGraceMs } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -2580,28 +2580,44 @@ export class DKGPublisher implements Publisher {
     // Published triples must not linger in SWM; they live in LTM now.
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
-      if (graphPublish) {
-        await this.clearPublishedKnowledgeAssetSwm(
-          contextGraphId,
-          sharedMemoryScope,
-          options?.subGraphName,
-          ctx,
-          graphPublish.scope.ual,
-        );
-      } else {
-        const kaMap = skolemizeByEntity(quads);
-        await this.clearPublishedSwmRoots(
-          contextGraphId,
-          [...kaMap.keys()],
-          options?.subGraphName,
-          ctx,
-          sharedMemoryScope,
-        );
-      }
-      // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
-      // Default is false: unpublished entities stay in SWM for future publishes.
-      if (options?.clearSharedMemoryAfter === true) {
-        await this.clearRemainingSharedMemory(contextGraphId, options?.subGraphName, ctx);
+      // GH #1572: the cleanup sweep scales with the accumulated SWM graph and
+      // runs on the store queue with no deadline. Give it a bounded grace so a
+      // congested node can return the confirmed publish response promptly.
+      const swmCleanup = (async () => {
+        if (graphPublish) {
+          await this.clearPublishedKnowledgeAssetSwm(
+            contextGraphId,
+            sharedMemoryScope,
+            options?.subGraphName,
+            ctx,
+            graphPublish.scope.ual,
+          );
+        } else {
+          const kaMap = skolemizeByEntity(quads);
+          await this.clearPublishedSwmRoots(
+            contextGraphId,
+            [...kaMap.keys()],
+            options?.subGraphName,
+            ctx,
+            sharedMemoryScope,
+          );
+        }
+        // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
+        // Default is false: unpublished entities stay in SWM for future publishes.
+        if (options?.clearSharedMemoryAfter === true) {
+          await this.clearRemainingSharedMemory(contextGraphId, options?.subGraphName, ctx);
+        }
+      })();
+      const graceMs = resolvePublishTailGraceMs();
+      const outcome = await awaitTailWithGrace(graceMs, swmCleanup, (err) => {
+        if (err !== undefined) {
+          this.log.warn(ctx, `Detached SWM cleanup failed after confirmed publish (GH #1572): ${err instanceof Error ? err.message : String(err)}`);
+        } else {
+          this.log.info(ctx, 'Detached SWM cleanup completed after confirmed publish (GH #1572)');
+        }
+      });
+      if (outcome === 'detached') {
+        this.log.info(ctx, `SWM cleanup still running after ${graceMs}ms grace — continuing detached so the publish response is not delayed (GH #1572)`);
       }
     }
 
@@ -6236,7 +6252,7 @@ export class DKGPublisher implements Publisher {
   private async resolveAgentAddressForPeer(
     peerId: string, agentsGraph: string, dkgRegistry: string, RDF: string,
   ): Promise<string | null> {
-    // SPARQL string-literal escape: only `"` and `\` are special inside `"..."`.
+    // SPARQL string-literal escape: only `"` and `` are special inside `"..."`.
     const escaped = peerId.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     // GH #748 Codex rounds 2, 3, 5: resolve the agent address for a peer ID.
     // - Round 3: vocabulary is `https://dkg.network/ontology#` (the registry
