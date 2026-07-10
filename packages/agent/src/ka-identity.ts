@@ -12,6 +12,21 @@ export function packKnowledgeAssetIdFromIdentity(identity: KnowledgeAssetIdentit
   return (BigInt(ethers.getAddress(identity.agentAddress.toLowerCase())) << 96n) | BigInt(identity.kaNumber);
 }
 
+export interface UnpackedKnowledgeAssetId {
+  agentAddress: string;
+  kaNumber: bigint;
+}
+
+// Exact inverse of packKnowledgeAssetIdFromIdentity: high-160 bits are the agent
+// address, low-96 bits are the per-author KA number. The address is returned
+// lowercase (not checksummed), so callers MUST compare it case-insensitively.
+export function unpackKnowledgeAssetId(packed: bigint): UnpackedKnowledgeAssetId {
+  return {
+    agentAddress: `0x${(packed >> 96n).toString(16).padStart(40, '0')}`,
+    kaNumber: packed & ((1n << 96n) - 1n),
+  };
+}
+
 export async function resolveAssetUalFromKaIdentity(
   chain: AssetUalChain,
   identity: KnowledgeAssetIdentity,

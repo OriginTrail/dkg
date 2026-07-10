@@ -61,6 +61,7 @@ export {
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type SharedMemoryReadSelection,
+  type SwmKaGraphBound,
 } from './graph-manager.js';
 export { PrivateContentStore } from './private-store.js';
 

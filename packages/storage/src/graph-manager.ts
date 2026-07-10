@@ -12,6 +12,7 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
+  parseContextGraphLayerUri,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -22,10 +23,36 @@ const CG_PREFIX = 'did:dkg:context-graph:';
 export type NonEmptyGraphList = [string, ...string[]];
 export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
 
+/**
+ * Per-KA identity window used to PRUNE the SWM under-graph read set to the
+ * single author + kaNumber range a call site already knows it wants. The
+ * `agentAddress`/`kaNumber` pair is the identifying half of a KA's UAL, so a
+ * bound admits exactly the per-KA under-graphs
+ * `…/_shared_memory/{addr}/{n}` (and the 5-segment sub-graph shape
+ * `…/{sub}/_shared_memory/{addr}/{n}`) with `addr ≡ᵢ agentAddress` and
+ * `startNumber ≤ n ≤ endNumber`.
+ *
+ * Both numbers are the LOW-96 per-author KA number, NOT a packed `kaId`
+ * (`packKnowledgeAssetIdFromIdentity` shifts the address into the high bits) —
+ * callers must unpack before deriving a bound, or every real graph is excluded.
+ *
+ * This is a PURE ACCELERATOR: it narrows a graph SET, never the CONSTRUCT body,
+ * and non-parsing / bucket graphs are always kept (fail-open). Correctness of a
+ * bounded read therefore reduces to "same graph set ⇒ same quads", and any call
+ * site that narrows a merkle-gated read MUST widen to the unbounded read on an
+ * empty-or-mismatch result before it defers.
+ */
+export interface SwmKaGraphBound {
+  agentAddress: string;
+  startNumber: bigint;
+  endNumber: bigint;
+}
+
 export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
+  kaGraphBound?: SwmKaGraphBound;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
@@ -86,19 +113,42 @@ async function listGraphsByPrefix(
  * written by a DIFFERENT process to a SHARED oxigraph-server within the
  * revalidate interval; there an under-read is still FAIL-SAFE on merkle-gated
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
+ *
+ * `bound` (optional) narrows the under-graph set to a single author + kaNumber
+ * range — see `SwmKaGraphBound`. It is FAIL-OPEN: an under-graph is dropped
+ * ONLY when it parses as a per-KA layer URI AND its author/kaNumber falls
+ * outside the bound. A graph that does not parse (blob/`_meta`/snapshot or any
+ * future shape) is KEPT, so a bound can never silently under-read a graph it
+ * does not understand. The bucket graph is always part of the read contract.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
   bucketGraph: string,
   options?: QueryOptions,
+  bound?: SwmKaGraphBound,
 ): Promise<NonEmptyGraphList> {
   assertSafeIri(bucketGraph);
   const stagingPrefix = `${bucketGraph}/staging/`;
   const under = await listGraphsByPrefix(store, `${bucketGraph}/`, options);
   const out = new Set<string>([bucketGraph]);
+  const boundAddress = bound?.agentAddress.toLowerCase();
   for (const graph of under) {
     if (graph.startsWith(stagingPrefix)) continue;
-    if (isSafeIri(graph)) out.add(graph);
+    if (!isSafeIri(graph)) continue;
+    if (bound) {
+      // Fail-open: only a graph we can positively identify as a per-KA layer
+      // URI is eligible for exclusion; unparseable shapes are always read.
+      const parsed = parseContextGraphLayerUri(graph);
+      if (
+        parsed &&
+        (parsed.agentAddress.toLowerCase() !== boundAddress ||
+          parsed.kaNumber < bound.startNumber ||
+          parsed.kaNumber > bound.endNumber)
+      ) {
+        continue;
+      }
+    }
+    out.add(graph);
   }
   return [...out] as NonEmptyGraphList;
 }
@@ -146,7 +196,7 @@ export async function loadSelectedSharedMemoryQuads(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions, options.kaGraphBound);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
