@@ -1,6 +1,8 @@
-# StorageACK Priority Lane Full Devnet Receipt
+# StorageACK Priority Lane Pre-Fix Devnet Baseline
 
 Date: 2026-07-09
+
+Status: **Pre-fix baseline only.** This run used the merge-base commit before the fixes in this PR and is retained as failure evidence, not as post-fix validation.
 
 Worktree: `/private/tmp/dkg-v9-storageack-priority-lane`
 Branch: `codex/storageack-priority-lane`
