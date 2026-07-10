@@ -4,8 +4,9 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { runSyncOnConnect, SyncOnConnectPostSyncError } from '../src/sync/on-connect/sync-on-connect.js';
-import { SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
+import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -39,6 +40,49 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition was not met before timeout');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+function emptySyncPage(phase: string): SyncPageResult {
+  return {
+    quads: [],
+    bytesReceived: 0,
+    resumedFromOffset: 0,
+    nextOffset: 0,
+    checkpointKey: `checkpoint:${phase}`,
+    completed: true,
+    timedOut: false,
+  };
+}
+
+function stubDurableSyncExternalIo(agent: DKGAgent): void {
+  (agent as any).processDurableBatchInWorker = async () => ({
+    verifiedData: [],
+    verifiedMeta: [],
+    totalFetchedDataQuads: 0,
+    totalFetchedMetaQuads: 0,
+    rejectedKcs: 0,
+    emptyResponses: 1,
+    metaOnlyResponses: 0,
+    dataRejectedMissingMeta: 0,
+  });
 }
 
 function allowAllNetworkAdmission(agent: DKGAgent): void {
@@ -1145,42 +1189,36 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       name: 'ReconcilerLocalBackpressureRetry',
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 0,
+      syncSharedMemoryOnConnect: false,
     });
-    let releaseOccupiedSlot: (() => void) | undefined;
-    let occupiedSlot: Promise<void> | undefined;
+    const occupiedFetch = deferred<SyncPageResult>();
+    let fetchCalls = 0;
+    let occupiedSlot: Promise<unknown> | undefined;
     try {
       await agent.start();
       allowAllNetworkAdmission(agent);
+      stubDurableSyncExternalIo(agent);
+      (agent as any).fetchSyncPages = async (...args: unknown[]) => {
+        fetchCalls++;
+        if (fetchCalls === 1) return occupiedFetch.promise;
+        return emptySyncPage(String(args[4]));
+      };
 
       const peerA = freshPeerIdString();
+      const occupyingPeer = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
       (agent.node.libp2p as any).getPeers = recorder(
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
       (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
 
-      const policy = { limit: 1, queueLimit: 0 };
-      const ctx = createOperationContext('sync');
-      occupiedSlot = withGlobalSyncBackpressure(
-        { policy, ctx, label: 'occupied-slot' },
-        async () => new Promise<void>((resolve) => {
-          releaseOccupiedSlot = resolve;
-        }),
-      );
-      await flushMicrotasks();
+      occupiedSlot = (agent as any).syncFromPeerDetailed(occupyingPeer, ['occupied-cg']);
+      await waitFor(() => fetchCalls === 1);
 
-      const trySync = recorder(async (
-        _peerId: string,
-        onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
-      ) => {
-        await withGlobalSyncBackpressure(
-          { policy, ctx, label: 'sync-on-connect' },
-          async () => {
-            onSyncAccounting?.({ fresh: true, progress: true });
-          },
-        );
-        return 'synced' as const;
-      });
+      const origTrySync = (agent as any).trySyncFromPeer.bind(agent);
+      const trySync = recorder((...args: unknown[]) => origTrySync(...args));
       (agent as any).trySyncFromPeer = trySync;
 
       const outcome = await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(peerA, {
@@ -1191,32 +1229,38 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       expect(trySync.calls).toHaveLength(1);
       expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
 
-      releaseOccupiedSlot();
+      occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot;
-      releaseOccupiedSlot = undefined;
+      occupiedSlot = undefined;
 
       await (agent as any).reconcileSyncFromConnectedPeers();
-      await flushMicrotasks();
+      await waitFor(() => trySync.calls.length === 2);
 
       expect(trySync.calls).toHaveLength(2);
       expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
-      releaseOccupiedSlot?.();
+      occupiedFetch.resolve(emptySyncPage('meta'));
       await occupiedSlot?.catch(() => {});
       await agent.stop().catch(() => {});
     }
   });
 
-  it('propagates private-recovery queue pressure through sync-on-connect without peer backoff', async () => {
+  it('defers wrapped private shared-memory admission pressure without peer backoff', async () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerPrivateRecoveryBackpressure',
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
       syncContextGraphs: ['private-cg'],
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 0,
     });
+    let occupiedSlot: Promise<void> | undefined;
+    let releaseOccupiedSlot: (() => void) | undefined;
     try {
       await agent.start();
       allowAllNetworkAdmission(agent);
+      stubDurableSyncExternalIo(agent);
+      (agent as any).fetchSyncPages = async (...args: unknown[]) => emptySyncPage(String(args[4]));
 
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
@@ -1224,17 +1268,34 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         () => [...origGetPeers(), peerIdFromString(peerA)],
       );
       (agent as any).getPeerProtocols = recorder(async () => [PROTOCOL_SYNC]);
-      (agent as any).syncFromPeerDetailed = recorder(async () => 0);
-      (agent as any).refreshMetaSyncedFlags = recorder(async () => undefined);
+      let occupied = false;
+      (agent as any).refreshMetaSyncedFlags = recorder(async () => {
+        if (occupied) return;
+        occupied = true;
+        occupiedSlot = withGlobalSyncBackpressure(
+          {
+            policy: resolveSyncGlobalBackpressure((agent as any).config),
+            ctx: createOperationContext('sync'),
+            label: 'post-durable-occupied-slot',
+          },
+          async () => new Promise<void>((resolve) => {
+            releaseOccupiedSlot = resolve;
+          }),
+        );
+        await waitFor(() => releaseOccupiedSlot !== undefined);
+      });
       (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
       (agent as any).planSharedMemorySyncContextGraphs = recorder(async () => ({
         publicContextGraphIds: [],
         privateRecoverFromCurator: ['private-cg'],
         eligibleContextGraphIds: ['private-cg'],
       }));
-      const recoverContextGraphSwmFromPeer = recorder(async () => {
-        throw new SyncBackpressureBusyError('private recovery queue full');
-      });
+      const recoverContextGraphSwmFromPeer = recorder(async () => ({
+        insertedDataQuads: 0,
+        insertedMetaQuads: 0,
+        droppedDataTriples: 0,
+        completed: true,
+      }));
       (agent as any).recoverContextGraphSwmFromPeer = recoverContextGraphSwmFromPeer;
 
       const outcome = await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(peerA, {
@@ -1242,9 +1303,11 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         connectionKey: null,
       });
       expect(outcome).toBe('deferred-backpressure');
-      expect(recoverContextGraphSwmFromPeer.calls).toEqual([[peerA, 'private-cg']]);
+      expect(recoverContextGraphSwmFromPeer.calls).toEqual([]);
       expect((agent as any).syncReconcilerBackoff.has(peerA)).toBe(false);
     } finally {
+      releaseOccupiedSlot?.();
+      await occupiedSlot?.catch(() => {});
       await agent.stop().catch(() => {});
     }
   });

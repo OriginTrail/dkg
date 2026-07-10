@@ -14,11 +14,15 @@ const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 describe('sync global backpressure', () => {
   it('serializes concurrent sync work when global limit is 1 while non-sync work can proceed', async () => {
     const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 2,
+    });
     const events: string[] = [];
     let releaseFirst!: () => void;
 
     const first = withGlobalSyncBackpressure(
-      { policy: { limit: 1, queueLimit: 2 }, ctx, label: 'first' },
+      { policy, ctx, label: 'first' },
       async () => {
         events.push('first-start');
         await new Promise<void>((resolve) => {
@@ -30,7 +34,7 @@ describe('sync global backpressure', () => {
     await tick();
 
     const second = withGlobalSyncBackpressure(
-      { policy: { limit: 1, queueLimit: 2 }, ctx, label: 'second' },
+      { policy, ctx, label: 'second' },
       async () => {
         events.push('second-start');
       },
@@ -38,14 +42,14 @@ describe('sync global backpressure', () => {
     await tick();
 
     const third = withGlobalSyncBackpressure(
-      { policy: { limit: 1, queueLimit: 2 }, ctx, label: 'third' },
+      { policy, ctx, label: 'third' },
       async () => {
         events.push('third-start');
       },
     );
     await tick();
 
-    expect(getSyncBackpressureSnapshot({ limit: 1, queueLimit: 2 })).toEqual({
+    expect(getSyncBackpressureSnapshot(policy)).toEqual({
       inflight: 1,
       queued: 2,
       limit: 1,
@@ -68,12 +72,16 @@ describe('sync global backpressure', () => {
 
   it('rejects excess sync work instead of growing an unbounded queue', async () => {
     const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 1,
+    });
     const events: string[] = [];
     const logs: string[] = [];
     let releaseFirst!: () => void;
 
     const first = withGlobalSyncBackpressure(
-      { policy: { limit: 1, queueLimit: 1 }, ctx, label: 'first' },
+      { policy, ctx, label: 'first' },
       async () => {
         events.push('first-start');
         await new Promise<void>((resolve) => {
@@ -84,7 +92,7 @@ describe('sync global backpressure', () => {
     await tick();
 
     const second = withGlobalSyncBackpressure(
-      { policy: { limit: 1, queueLimit: 1 }, ctx, label: 'second' },
+      { policy, ctx, label: 'second' },
       async () => {
         events.push('second-start');
       },
@@ -93,7 +101,7 @@ describe('sync global backpressure', () => {
 
     await expect(withGlobalSyncBackpressure(
       {
-        policy: { limit: 1, queueLimit: 1 },
+        policy,
         ctx,
         label: 'third',
         logInfo: (_opCtx, message) => logs.push(message),
@@ -183,6 +191,43 @@ describe('sync global backpressure', () => {
         syncGlobalMaxInflight: 3,
         syncGlobalQueueLimit: 8,
       })).toEqual({ limit: undefined, queueLimit: undefined });
+    } finally {
+      if (oldMaxInflight === undefined) delete process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+      else process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT = oldMaxInflight;
+      if (oldLegacyLimit === undefined) delete process.env.DKG_SYNC_GLOBAL_LIMIT;
+      else process.env.DKG_SYNC_GLOBAL_LIMIT = oldLegacyLimit;
+      if (oldQueueLimit === undefined) delete process.env.DKG_SYNC_GLOBAL_QUEUE_LIMIT;
+      else process.env.DKG_SYNC_GLOBAL_QUEUE_LIMIT = oldQueueLimit;
+    }
+  });
+
+  it('normalizes invalid raw limits before exposing an executable policy', () => {
+    const oldMaxInflight = process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+    const oldLegacyLimit = process.env.DKG_SYNC_GLOBAL_LIMIT;
+    const oldQueueLimit = process.env.DKG_SYNC_GLOBAL_QUEUE_LIMIT;
+    try {
+      delete process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+      delete process.env.DKG_SYNC_GLOBAL_LIMIT;
+      delete process.env.DKG_SYNC_GLOBAL_QUEUE_LIMIT;
+
+      expect(resolveSyncGlobalBackpressure({
+        syncGlobalMaxInflight: Number.NaN,
+        syncGlobalLimit: 3,
+        syncGlobalQueueLimit: 1.5,
+      })).toEqual({ limit: 3, queueLimit: 6 });
+      expect(resolveSyncGlobalBackpressure({
+        syncGlobalMaxInflight: -1,
+        syncGlobalLimit: 4,
+        syncGlobalQueueLimit: -2,
+      })).toEqual({ limit: 4, queueLimit: 8 });
+
+      process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT = '1.5';
+      process.env.DKG_SYNC_GLOBAL_LIMIT = '5';
+      process.env.DKG_SYNC_GLOBAL_QUEUE_LIMIT = '-1';
+      expect(resolveSyncGlobalBackpressure({
+        syncGlobalMaxInflight: 3,
+        syncGlobalQueueLimit: 7,
+      })).toEqual({ limit: 5, queueLimit: 7 });
     } finally {
       if (oldMaxInflight === undefined) delete process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
       else process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT = oldMaxInflight;

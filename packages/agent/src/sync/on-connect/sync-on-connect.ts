@@ -1,4 +1,5 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { SyncBackpressureBusyError } from '../backpressure.js';
 
 interface SyncProgressSummary {
   insertedTriples: number;
@@ -71,6 +72,24 @@ export class SyncOnConnectPostSyncError extends Error {
     this.originalError = originalError;
     this.backoffEligible = options.backoffEligible;
   }
+}
+
+/**
+ * Local admission pressure is retryable node state, not a remote-peer failure.
+ * Keep direct and post-durable wrapped classification beside the wrapper type so
+ * lifecycle accounting has one canonical deferral decision.
+ */
+export function getSyncOnConnectLocalBackpressureError(
+  error: unknown,
+): SyncBackpressureBusyError | undefined {
+  if (error instanceof SyncBackpressureBusyError) return error;
+  if (
+    error instanceof SyncOnConnectPostSyncError
+    && error.originalError instanceof SyncBackpressureBusyError
+  ) {
+    return error.originalError;
+  }
+  return undefined;
 }
 
 function insertedTriples(result: SyncFromPeerResult): number {

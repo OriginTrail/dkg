@@ -13,10 +13,12 @@ export interface SyncGlobalBackpressureConfig {
   syncGlobalQueueLimit?: number;
 }
 
-export interface SyncGlobalBackpressurePolicy {
-  limit: number | undefined;
-  queueLimit: number | undefined;
-}
+declare const syncGlobalBackpressurePolicyBrand: unique symbol;
+
+export type SyncGlobalBackpressurePolicy = Readonly<(
+  | { limit: number; queueLimit: number }
+  | { limit: undefined; queueLimit: undefined }
+) & { [syncGlobalBackpressurePolicyBrand]: true }>;
 
 type Release = () => void;
 
@@ -71,7 +73,7 @@ function acquire(
 ): SyncBackpressureAdmission {
   const { limit } = policy;
   const queuedBefore = queue.length;
-  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
+  if (limit === undefined) {
     lastLimit = null;
     lastQueueLimit = null;
     return {
@@ -93,7 +95,7 @@ function acquire(
       release: Promise.resolve(releaseOnce),
     };
   }
-  if (typeof queueLimit === 'number' && queuedBefore >= queueLimit) {
+  if (queuedBefore >= queueLimit) {
     throw new SyncBackpressureBusyError(
       `Sync backpressure rejected ${label} `
         + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
@@ -165,13 +167,20 @@ export function resolveSyncGlobalBackpressure(
     ?? nonNegativeInteger(config.syncGlobalMaxInflight)
     ?? nonNegativeInteger(config.syncGlobalLimit)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
-  if (limit === 0) return { limit: undefined, queueLimit: undefined };
+  if (limit === 0) {
+    return Object.freeze({
+      limit: undefined,
+      queueLimit: undefined,
+    }) as SyncGlobalBackpressurePolicy;
+  }
 
-  const queueLimit = resolveNonNegativeIntegerSwitch(
-    config.syncGlobalQueueLimit,
-    'DKG_SYNC_GLOBAL_QUEUE_LIMIT',
-  ) ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
-  return { limit, queueLimit };
+  const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
+    ?? nonNegativeInteger(config.syncGlobalQueueLimit)
+    ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
+  return Object.freeze({
+    limit,
+    queueLimit,
+  }) as SyncGlobalBackpressurePolicy;
 }
 
 export function getSyncBackpressureSnapshot(
@@ -205,20 +214,20 @@ export async function withGlobalSyncBackpressure<T>(
     throw error;
   }
 
-  if (typeof limit === 'number' && admission.status === 'queued') {
+  if (limit !== undefined && admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}${typeof queueLimit === 'number' ? `/${queueLimit}` : ''})`,
+        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
     );
   }
   const release = await admission.release;
   try {
-    if (typeof limit === 'number') {
+    if (limit !== undefined) {
       options.logInfo?.(
         options.ctx,
         `Sync backpressure running ${options.label} `
-          + `(global inflight=${inflight}/${limit}, queued=${queue.length}${typeof queueLimit === 'number' ? `/${queueLimit}` : ''})`,
+          + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
       );
     }
     return await work();

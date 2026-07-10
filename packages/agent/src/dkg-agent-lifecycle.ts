@@ -221,14 +221,13 @@ import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './syn
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
+import { getSyncOnConnectLocalBackpressureError, runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
 import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
   resolveSyncGlobalBackpressure,
-  SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -610,6 +609,8 @@ type SharedMemorySyncContextGraphPlan = {
   eligibleContextGraphIds: string[];
 };
 
+const recoverContextGraphSwmFromPeerWork = Symbol('recoverContextGraphSwmFromPeerWork');
+
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
@@ -626,14 +627,6 @@ function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
 
 function durableSyncEnabled(config: DKGAgentConfig): boolean {
   return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
-}
-
-function asSyncBackpressureBusyError(err: unknown): SyncBackpressureBusyError | undefined {
-  if (err instanceof SyncBackpressureBusyError) return err;
-  if (err instanceof SyncOnConnectPostSyncError && err.originalError instanceof SyncBackpressureBusyError) {
-    return err.originalError;
-  }
-  return undefined;
 }
 
 function emptyDurableSyncResult(): DurableSyncResult {
@@ -2797,7 +2790,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       return outcome;
     } catch (err: unknown) {
-      const backpressureError = asSyncBackpressureBusyError(err);
+      const backpressureError = getSyncOnConnectLocalBackpressureError(err);
       if (backpressureError) {
         this.log.info(
           createOperationContext('sync'),
@@ -3774,14 +3767,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
             emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
           }
-        : await withGlobalSyncBackpressure(
-            {
-              policy: resolveSyncGlobalBackpressure(this.config),
-              ctx,
-              label: `shared-memory:${remotePeerId.slice(-8)}`,
-              logInfo: (opCtx, message) => this.log.info(opCtx, message),
-            },
-            () => runSharedMemorySync({
+        : await runSharedMemorySync({
               ctx,
               remotePeerId,
               contextGraphIds: publicContextGraphIds,
@@ -3829,14 +3815,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               logInfo: (opCtx, message) => this.log.info(opCtx, message),
               logWarn: (opCtx, message) => this.log.warn(opCtx, message),
               logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-            }),
-          );
+            });
 
       // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
       // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
       for (const contextGraphId of privateRecoverFromCurator) {
         try {
-          const r = await this.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+          const r = await this[recoverContextGraphSwmFromPeerWork](remotePeerId, contextGraphId);
           summary.insertedDataTriples += r.insertedDataQuads;
           summary.insertedMetaTriples += r.insertedMetaQuads;
           summary.insertedTriples += r.insertedDataQuads + r.insertedMetaQuads;
@@ -3862,7 +3847,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           }
         } catch (err) {
-          if (err instanceof SyncBackpressureBusyError) throw err;
           this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
           summary.failedPeers += 1;
           summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
@@ -3876,7 +3860,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return summary;
     };
 
-    return runSyncSingleFlight(this, singleFlightKey, runSync);
+    return runSyncSingleFlight(
+      this,
+      singleFlightKey,
+      () => withGlobalSyncBackpressure(
+        {
+          policy: resolveSyncGlobalBackpressure(this.config),
+          ctx,
+          label: `shared-memory:${remotePeerId.slice(-8)}`,
+          logInfo: (opCtx, message) => this.log.info(opCtx, message),
+        },
+        runSync,
+      ),
+    );
   }
 
   /**
@@ -3887,26 +3883,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * detects a full / cross-epoch gap; isolated from `runSharedMemorySync` so the
    * incremental path is untouched.
    */
-  async recoverContextGraphSwmFromPeer(this: DKGAgent,
+  async [recoverContextGraphSwmFromPeerWork](this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
   ): Promise<RecoverContextGraphSwmResult> {
     const ctx = createOperationContext('sync');
-    if (!durableSyncEnabled(this.config)) {
-      this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
-      return emptySwmRecoveryResult();
-    }
     const admission = await getSharedMemorySubGraphAdmission(
       this.store, contextGraphId, this.listSubGraphs(contextGraphId),
     );
-    return withGlobalSyncBackpressure(
-      {
-        policy: resolveSyncGlobalBackpressure(this.config),
-        ctx,
-        label: `swm-recovery:${remotePeerId.slice(-8)}`,
-        logInfo: (opCtx, message) => this.log.info(opCtx, message),
-      },
-      () => recoverContextGraphSwm({
+    return recoverContextGraphSwm({
         ctx,
         remotePeerId,
         contextGraphId,
@@ -4022,7 +4007,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
         logInfo: (opCtx, message) => this.log.info(opCtx, message),
         logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-      }),
+      });
+  }
+
+  async recoverContextGraphSwmFromPeer(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphId: string,
+  ): Promise<RecoverContextGraphSwmResult> {
+    const ctx = createOperationContext('sync');
+    if (!durableSyncEnabled(this.config)) {
+      this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
+      return emptySwmRecoveryResult();
+    }
+    return withGlobalSyncBackpressure(
+      {
+        policy: resolveSyncGlobalBackpressure(this.config),
+        ctx,
+        label: `swm-recovery:${remotePeerId.slice(-8)}`,
+        logInfo: (opCtx, message) => this.log.info(opCtx, message),
+      },
+      () => this[recoverContextGraphSwmFromPeerWork](remotePeerId, contextGraphId),
     );
   }
 

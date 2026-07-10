@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
+import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
@@ -102,11 +103,13 @@ function emptySyncPage(phase: string): SyncPageResult {
 
 async function createAgentWithSend(
   sendToPeer: (...args: unknown[]) => Promise<Uint8Array>,
+  backpressure?: { syncGlobalMaxInflight: number; syncGlobalQueueLimit: number },
 ): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'SyncFetchCoalescing',
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
+    ...backpressure,
   });
   (agent as any).messenger = { sendToPeer };
   (agent as any).buildSyncRequest = async () => new Uint8Array([1, 2, 3]);
@@ -292,7 +295,10 @@ describe('DKGAgent sync fetch coalescing', () => {
   it('joins concurrent direct durable syncs and clears the entry after settle', async () => {
     const firstMetaFetch = deferred<SyncPageResult>();
     let fetchCalls = 0;
-    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
     (agent as any).fetchSyncPages = async (...args: unknown[]) => {
       fetchCalls++;
       const phase = String(args[4]);
@@ -361,7 +367,10 @@ describe('DKGAgent sync fetch coalescing', () => {
   it('joins concurrent direct shared-memory syncs and clears the entry after settle', async () => {
     const firstMetaFetch = deferred<SyncPageResult>();
     let fetchCalls = 0;
-    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
     const sharedMemorySyncPlan = {
       eligibleContextGraphIds: ['coalesced-cg'],
       publicContextGraphIds: ['coalesced-cg'],
@@ -401,6 +410,86 @@ describe('DKGAgent sync fetch coalescing', () => {
       await expect(third).resolves.toMatchObject({ failedPeers: 0 });
       expect(fetchCalls).toBe(4);
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    {
+      name: 'private-only',
+      eligibleContextGraphIds: ['private-cg'],
+      publicContextGraphIds: [] as string[],
+      privateRecoverFromCurator: ['private-cg'],
+    },
+    {
+      name: 'mixed public/private',
+      eligibleContextGraphIds: ['public-cg', 'private-cg'],
+      publicContextGraphIds: ['public-cg'],
+      privateRecoverFromCurator: ['private-cg'],
+    },
+  ])('uses one global admission for $name shared-memory aggregation', async ({
+    eligibleContextGraphIds,
+    publicContextGraphIds,
+    privateRecoverFromCurator,
+  }) => {
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
+    (agent as any).listSubGraphs = async () => [];
+    (agent as any).fetchSyncPages = async (...args: unknown[]) => emptySyncPage(String(args[4]));
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      await expect((agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        eligibleContextGraphIds,
+        {
+          sharedMemorySyncPlan: {
+            eligibleContextGraphIds,
+            publicContextGraphIds,
+            privateRecoverFromCurator,
+          },
+        },
+      )).resolves.toMatchObject({ failedPeers: 0 });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('keeps standalone shared-memory recovery behind global admission', async () => {
+    const agent = await createAgentWithSend(
+      async () => new Uint8Array(0),
+      { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
+    );
+    const occupied = deferred<void>();
+    const holder = withGlobalSyncBackpressure(
+      {
+        policy: resolveSyncGlobalBackpressure((agent as any).config),
+        ctx: createOperationContext('sync'),
+        label: 'occupied-slot',
+      },
+      () => occupied.promise,
+    );
+    await flushMicrotasks();
+
+    try {
+      await expect(
+        agent.recoverContextGraphSwmFromPeer(PEER_A, 'private-cg'),
+      ).rejects.toThrow(SyncBackpressureBusyError);
+    } finally {
+      occupied.resolve();
+      await holder;
       await agent.stop().catch(() => {});
     }
   });
