@@ -46,6 +46,16 @@ export function resolveManagedOxigraphPort(
     : DEFAULT_OXIGRAPH_PORT;
 }
 
+/** Resolve an optional positive-integer startup readiness timeout. */
+export function resolveManagedOxigraphReadyTimeout(
+  options: Record<string, unknown> | undefined,
+): number | undefined {
+  const rawTimeout = options?.readyTimeoutMs;
+  return typeof rawTimeout === 'number' && Number.isSafeInteger(rawTimeout) && rawTimeout > 0
+    ? rawTimeout
+    : undefined;
+}
+
 interface StoreConfigLike {
   backend?: unknown;
   options?: Record<string, unknown>;
@@ -71,6 +81,8 @@ interface ConfigLike {
 export interface ManagedOxigraphPlan {
   /** Loopback bind port. */
   port: number;
+  /** Optional startup readiness timeout; undefined preserves the server default. */
+  readyTimeoutMs?: number;
   /** RocksDB data directory (`oxigraph serve --location`). */
   location: string;
   /** Directory the verified binary is cached in. */
@@ -115,6 +127,7 @@ export function planManagedOxigraph(
 
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
+  const readyTimeoutMs = resolveManagedOxigraphReadyTimeout(options);
   const location =
     typeof options.location === 'string' && options.location.trim()
       ? options.location
@@ -158,6 +171,7 @@ export function planManagedOxigraph(
 
   return {
     port,
+    readyTimeoutMs,
     location,
     cacheDir,
     storeConfigTemplate,
@@ -217,7 +231,7 @@ export async function startManagedOxigraph(
     location: plan.location,
     port: plan.port,
     log,
-    readyTimeoutMs: opts.readyTimeoutMs,
+    readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
     io: opts.serverIo,
   });
 
