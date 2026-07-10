@@ -104,6 +104,47 @@ export const RPC_ENDPOINT_SET_RETRIES = 1;
 
 export const RPC_ENDPOINT_SET_RETRY_BACKOFF_MS = 500;
 
+/**
+ * TTL (ms) for re-resolving the lazy `IdentityStorage` binding from the Hub
+ * inside `getIdentityStorage()`. Same rationale (and value) as
+ * `DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS`: the Hub rotation poller invalidates
+ * the binding the moment it observes an `IdentityStorage` rotation, so this TTL
+ * is only the backstop for a MISSED event (HTTP-only RPC, failed log scan) —
+ * small enough that a missed rotation still self-heals within ~5 min, large
+ * enough that identity reads/revalidations (RS wallet rotation, #1519) cost
+ * ZERO extra `Hub.getContractAddress` eth_calls in steady state. Before this
+ * backstop existed, `readIdentityIdFromStorage` forced a Hub re-resolution on
+ * EVERY identity read — ~8 idle eth_calls/min on a 5s prover tick.
+ */
+export const IDENTITY_STORAGE_HUB_REFRESH_MS = 5 * 60 * 1000;
+
+/**
+ * TTL (ms) between on-chain identity revalidations of a NON-PRIMARY wallet
+ * chosen by RS signer rotation (`nextRandomSamplingSigner`). The revalidation
+ * closes the out-of-band removal race (#1519), but running it on EVERY
+ * selection cost one `getIdentityId` eth_call per RS write attempt — ~14 idle
+ * eth_calls/min on a 5s prover tick with rotation enabled. A DEFINITIVE match
+ * is trusted for this window; an out-of-band removal that slips inside it is
+ * still caught at send time by `sendRandomSamplingTx`'s `ProfileDoesntExist`
+ * self-heal (evict + retry on the primary signer), so the window bounds only
+ * how long a doomed FIRST attempt can keep being selected, never fund loss.
+ * Matches `DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS` (~5 min self-heal cadence).
+ */
+export const RS_SIGNER_REVALIDATION_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * TTL (ms) for the NATIVE balance slot of the per-wallet funding cache when
+ * probed by a `native-only` selection (RS challenge/proof, relay, settle —
+ * `selectSigner({ funding: { kind: 'native-only' } })`). Those probes run on
+ * the prover tick (every ~5s when idle) across ALL operational wallets, move
+ * zero value, and the contract gives the real funding verdict at send time —
+ * so they tolerate a 60s-stale native reading. Publish selections
+ * (`native+trac`) keep the tighter `PUBLISHER_FUNDING_CACHE_TTL_MS` freshness
+ * for BOTH slots; a publisher-triggered native re-read re-stamps the shared
+ * slot, so RS freshness can only ever be BETTER than this TTL, never worse.
+ */
+export const NATIVE_ONLY_FUNDING_CACHE_TTL_MS = 60_000;
+
 export const ADMIN_KEY_PURPOSE = 1;
 
 export const OPERATIONAL_KEY_PURPOSE = 2;

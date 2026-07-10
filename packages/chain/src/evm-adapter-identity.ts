@@ -222,7 +222,12 @@ export class IdentityMethods extends EVMChainAdapterBase {
     // revert. Same-process only — an out-of-band removal (another instance /
     // admin tx) does not reach this set and heals on restart (the set re-seeds
     // to registered wallets); see `registeredOperationalAddresses`.
-    if (receipt.status === 1) this.registeredOperationalAddresses.delete(wallet.toLowerCase());
+    if (receipt.status === 1) {
+      this.registeredOperationalAddresses.delete(wallet.toLowerCase());
+      // Also drop the RS selection-time revalidation stamp — it vouched for a
+      // registration that no longer exists.
+      this.rsSignerRevalidatedAt.delete(wallet.toLowerCase());
+    }
     return {
       hash: receipt.hash,
       blockNumber: receipt.blockNumber,

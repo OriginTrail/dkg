@@ -59,7 +59,10 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.insert',
     });
-    const nquads = quads.map(quadToNQuad).join('\n') + '\n';
+    // ASCII-safe body: Blazegraph's N-Quads parser reads the request body
+    // byte-wise as ASCII (charset is ignored), so raw non-ASCII UTF-8 is
+    // corrupted to U+FFFD on write. See toBlazegraphAsciiSafeNQuads.
+    const nquads = quads.map((q) => toBlazegraphAsciiSafeNQuads(quadToNQuad(q))).join('\n') + '\n';
     const res = await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -181,10 +184,13 @@ export class BlazegraphStore implements TripleStore {
       // on stock Blazegraph) and rejects larger payloads with HTTP 400
       // "Unable to parse form content". The direct-POST body is not form
       // parsed, so large queries (e.g. CONSTRUCT/VALUES) are not capped.
+      // charset=utf-8 is REQUIRED: without it Jetty decodes the raw body as
+      // ISO-8859-1, so any non-ASCII character in the query (e.g. a literal
+      // in a pattern or FILTER) is mojibake'd server-side and never matches.
       const res = await fetch(this.url, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/sparql-query',
+          'Content-Type': 'application/sparql-query; charset=utf-8',
           Accept: 'application/sparql-results+json',
         },
         body: trimmed,
@@ -216,10 +222,11 @@ export class BlazegraphStore implements TripleStore {
   }
 
   private async queryConstruct(sparql: string, options?: QueryOptions): Promise<ConstructResult> {
+    // charset=utf-8: same ISO-8859-1 default-decode hazard as query()/update().
     const res = await fetch(this.url, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/sparql-query',
+        'Content-Type': 'application/sparql-query; charset=utf-8',
         Accept: 'text/x-nquads, application/n-quads',
       },
       body: sparql,
@@ -311,9 +318,14 @@ export class BlazegraphStore implements TripleStore {
     // HTTP 400 "Unable to parse form content" — which broke large publishes
     // (a publish issues a DELETE DATA / INSERT over the full quad set). The
     // raw body is not form parsed, so large updates succeed.
+    //
+    // charset=utf-8 is REQUIRED: without it Jetty decodes the raw body as
+    // ISO-8859-1 (the servlet-spec default), so any non-ASCII character in a
+    // DELETE DATA / INSERT DATA literal is mojibake'd server-side — deletes
+    // silently stop matching and inserts store corrupted values.
     const res = await this.runStoreWork(operation, options, async () => fetch(this.url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/sparql-update' },
+        headers: { 'Content-Type': 'application/sparql-update; charset=utf-8' },
         body: update,
         signal: options?.signal,
       }),
@@ -372,6 +384,76 @@ function quadToNQuad(q: DKGQuad): string {
   const o = formatTerm(q.object);
   const g = q.graph ? ` <${q.graph}>` : '';
   return `${s} ${p} ${o}${g} .`;
+}
+
+/**
+ * Make an assembled N-Quads line ASCII-safe for Blazegraph's bulk-insert
+ * endpoint. Verified against the stock `lyrasis/blazegraph:2.1.5` image (the
+ * image CI and the devnet run):
+ *
+ *  - The N-Quads parser reads the request body BYTE-wise as ASCII — the
+ *    Content-Type charset parameter is ignored — so raw non-ASCII UTF-8
+ *    (a 2-byte `é` as much as a 4-byte astral emoji) is replaced with U+FFFD
+ *    per byte before parsing: silent stored-value corruption. Downstream a
+ *    published KA carrying such a literal fails its storage-ACK merkle
+ *    recomputation (MERKLE_MISMATCH_IN_SWM) and the publish dies.
+ *  - Big-U escapes are ALSO broken: an in-range `\UXXXXXXXX` is truncated to
+ *    its low 16 bits on parse (\U0001F600 😀 → U+F600).
+ *  - The one encoding that round-trips every scalar, including the
+ *    supplementary plane, is `\uXXXX` per UTF-16 code unit, with astral chars
+ *    written as their surrogate pair (backslash-uD83D backslash-uDE00 for
+ *    U+1F600) — the exact Java-String form Blazegraph itself emits on
+ *    CONSTRUCT read-back.
+ *
+ * `\uXXXX` is a valid UCHAR in both IRIREF and STRING_LITERAL_QUOTED, so the
+ * transform is safe to apply to the whole line. Existing escape sequences are
+ * consumed pairwise (backslash parity), so a literal backslash followed by
+ * `U…` text (`\\U0001F600`) is never mis-rewritten.
+ */
+function toBlazegraphAsciiSafeNQuads(line: string): string {
+  let out = '';
+  for (let i = 0; i < line.length; i++) {
+    const code = line.charCodeAt(i);
+    if (code === 0x5c /* backslash */) {
+      // In-range \UXXXXXXXX → equivalent \uXXXX escape(s) Blazegraph parses
+      // correctly. Out-of-range \U (> U+10FFFF, unrepresentable) passes through.
+      if (line[i + 1] === 'U') {
+        const hex = line.slice(i + 2, i + 10);
+        if (/^[0-9A-Fa-f]{8}$/.test(hex)) {
+          const cp = parseInt(hex, 16);
+          if (cp <= 0x10ffff) {
+            out += escapeUtf16CodeUnits(String.fromCodePoint(cp));
+            i += 9;
+            continue;
+          }
+        }
+      }
+      // Any other escape: copy the pair verbatim so the escaped char is never
+      // re-inspected (preserves backslash parity for the \U check above).
+      out += line[i];
+      if (i + 1 < line.length) {
+        const nextCode = line.charCodeAt(i + 1);
+        out += nextCode >= 0x7f ? escapeUtf16CodeUnits(line[i + 1]) : line[i + 1];
+        i++;
+      }
+      continue;
+    }
+    if (code >= 0x7f) {
+      out += escapeUtf16CodeUnits(line[i]);
+      continue;
+    }
+    out += line[i];
+  }
+  return out;
+}
+
+/** `\uXXXX` escape per UTF-16 code unit (surrogate halves stay split). */
+function escapeUtf16CodeUnits(s: string): string {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    out += `\\u${s.charCodeAt(i).toString(16).toUpperCase().padStart(4, '0')}`;
+  }
+  return out;
 }
 
 function formatTerm(term: string): string {

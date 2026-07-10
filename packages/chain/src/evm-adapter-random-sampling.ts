@@ -101,6 +101,10 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
         enrichEvmError(err) === 'ProfileDoesntExist'
       ) {
         this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
+        // Drop the selection-time revalidation stamp too: the wallet just
+        // PROVED it no longer resolves to this identity, so a lingering stamp
+        // must not vouch for it if it is ever re-admitted within the TTL.
+        this.rsSignerRevalidatedAt.delete(signer.address.toLowerCase());
         this.clearIdentityIdForAddress(signer.address);
         return this.sendContractTransaction(contract, method, args, this.signer, label, opts);
       }

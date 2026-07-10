@@ -339,6 +339,74 @@ describe('WM → SWM → VM pipeline (single agent)', () => {
     expect(second.promotedCount).toBe(0);
   }, 30_000);
 
+  it('named publish is scoped to the named assertion: a replicated same-subject foreign share is neither bundled nor drained', async () => {
+    // Regression for the "named publish bundled all SWM content" class
+    // (v10-stress FINDINGS Bug 1 and its residual). The seal's `rootEntities`
+    // selection is SUBJECT-scoped but the SWM read used to span the whole
+    // bucket family (every per-KA `…/_shared_memory/{addr}/{number}` graph
+    // under the bucket — including gossip-REPLICATED shares from other
+    // authors). A replica share about the SAME entity therefore
+    // cross-contaminated a local named publish:
+    //   1. the payload bundled the replica's quads → recomputed merkle !=
+    //      the finalize-time seal → hard `expectedMerkleRoot mismatch`
+    //      ('tentative' / kaId 0 on older builds), and
+    //   2. the confirmed-publish drain deleted the replica's same-subject
+    //      copy from the SHARER's per-KA graph, silently un-replicating it —
+    //      the order-dependence class seen when minted/shared content
+    //      lingers in a shared devnet CG.
+    // The named publish path now scopes BOTH the payload read and the drain
+    // to the named KA's own per-KA SWM graph (+ the bare bucket). NB: two
+    // LOCAL names publishing the same rootEntity is a Rule-4 entity-
+    // exclusivity violation (update the existing kaId instead), so the
+    // legal co-residency modeled here is the replicated foreign share.
+    const agent = await createAgent('NamedScopeBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Named Scope E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const shared = `${ENTITY_BASE}:named-scope-shared`;
+
+    // A gossip-replicated share from ANOTHER author about the SAME entity,
+    // resident exactly where SharedMemoryHandler stores foreign shares: the
+    // sharer's own per-KA graph `…/_shared_memory/{addr}/{number}`.
+    const foreignSwmGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.SharedWorkingMemory,
+      '0x00000000000000000000000000000000000000bb',
+      7n,
+    );
+    await (agent as any).store.insert([
+      { subject: shared, predicate: 'http://schema.org/name', object: '"From replica"', graph: foreignSwmGraph },
+    ]);
+
+    // The LOCAL named assertion about the same entity.
+    await agent.assertion.create(CG_ID, 'named-scope');
+    await agent.assertion.write(CG_ID, 'named-scope', [
+      { subject: shared, predicate: 'http://schema.org/description', object: '"From local"' },
+    ]);
+    const promoted = await agent.assertion.promote(CG_ID, 'named-scope');
+    expect(promoted.publishReady).toBe(true);
+
+    // Publish by name. Pre-scoping, the bucket-family read bundled the
+    // replica's same-subject quad into the payload and the publish failed
+    // the seal-integrity preflight.
+    const pub = await agent.publishFromFinalizedAssertion(CG_ID, 'named-scope');
+    expect(pub.status).toBe('confirmed');
+    expect(pub.kaId).toBeDefined();
+
+    // The replica's copy survived the confirmed-publish drain…
+    const replicaKept = await (agent as any).store.query(
+      `ASK { GRAPH <${foreignSwmGraph}> { <${shared}> <http://schema.org/name> "From replica" } }`,
+    );
+    expect(replicaKept.type).toBe('boolean');
+    expect((replicaKept as { value: boolean }).value).toBe(true);
+    // …while the local assertion's own SWM copy was drained.
+    const localGone = await agent.query(
+      `SELECT ?d WHERE { <${shared}> <http://schema.org/description> ?d }`,
+      { contextGraphId: CG_ID, graphSuffix: '_shared_memory' },
+    );
+    expect(localGone.bindings).toHaveLength(0);
+  }, 40_000);
+
   it('selective promote does NOT auto-finalize (avoids the seal-all vs promote-subset merkleRoot mismatch)', async () => {
     // Regression for the #1004 review: auto-finalize seals the WHOLE assertion
     // (all root entities), but a SELECTIVE promote (opts.entities subset) ships

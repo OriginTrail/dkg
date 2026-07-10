@@ -27,7 +27,13 @@ import {
 } from '../src/chain-adapter.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
-import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
+import {
+  RPC_READ_STALL_TIMEOUT_MS,
+  IDENTITY_STORAGE_HUB_REFRESH_MS,
+  RS_SIGNER_REVALIDATION_TTL_MS,
+  PUBLISHER_FUNDING_CACHE_TTL_MS,
+  NATIVE_ONLY_FUNDING_CACHE_TTL_MS,
+} from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 
 // Isolate the process-wide RPC failover stats + dedup window before EVERY test
@@ -224,7 +230,29 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(a.readContract.calls[1][0]).toBe(identityStorage);
   });
 
-  it('identity cache misses refresh IdentityStorage so a missed Hub rotation cannot pin stale zero reads', async () => {
+  it('identity reads reuse the cached IdentityStorage binding — no Hub re-resolution per read', async () => {
+    // Idle-load fix for the #1516/#1519 wallet-rotation series: every identity
+    // read used to force `getIdentityStorage({ refresh: true })` — one
+    // `Hub.getContractAddress` eth_call per read, per RS selection once
+    // revalidation landed. Cache misses must now share the single lazy binding.
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const identityStorage = { target: '0x0000000000000000000000000000000000000101' };
+    a.initialized = true;
+    a.init = async () => { a.initialized = true; };
+    a.resolveContract = recorder(async () => identityStorage);
+    a.readContract = recorder(async () => 42n);
+
+    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
+    await expect(a.refreshIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+
+    expect(a.readContract.calls).toHaveLength(3); // one storage read per lookup…
+    expect(a.resolveContract.calls).toHaveLength(1); // …but a single Hub resolution
+    expect(a.contracts.identityStorage).toBe(identityStorage);
+  });
+
+  it('the IdentityStorage TTL backstop re-resolves after IDENTITY_STORAGE_HUB_REFRESH_MS so a missed Hub rotation cannot pin stale zero reads', async () => {
+    vi.useFakeTimers({ now: 0 });
     const a: any = new EVMChainAdapter(minimalConfig());
     const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
     const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
@@ -239,17 +267,24 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
       contract === oldIdentityStorage ? 0n : 42n
     ));
 
-    await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
-    expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+    try {
+      // Hub rotated out-of-band and the poller MISSED it: within the TTL the
+      // stale binding keeps serving reads (that is the accepted trade-off —
+      // the poller owns the fast path).
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(0n);
+      expect(a.contracts.identityStorage).toBe(oldIdentityStorage);
+      expect(a.resolveContract.calls).toHaveLength(1);
 
-    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
-    expect(a.contracts.identityStorage).toBe(newIdentityStorage);
-    expect(a.resolveContract.calls).toHaveLength(2);
-    expect(a.readContract.calls).toHaveLength(2);
-
-    await expect(a.getIdentityIdForAddress(ADDR2)).resolves.toBe(42n);
-    expect(a.resolveContract.calls).toHaveLength(2);
-    expect(a.readContract.calls).toHaveLength(2);
+      // Past the TTL the backstop re-resolves, observes the address change,
+      // and the fresh binding serves the read — no restart required.
+      vi.setSystemTime(IDENTITY_STORAGE_HUB_REFRESH_MS + 1);
+      await expect(a.getIdentityIdForAddress(ADDR)).resolves.toBe(42n);
+      expect(a.contracts.identityStorage).toBe(newIdentityStorage);
+      expect(a.resolveContract.calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('IdentityStorage Hub rotation invalidates cached identity ids and the lazy contract binding', async () => {
@@ -4152,6 +4187,113 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const chosen = await (a as any).nextRandomSamplingSigner();
       expect(chosen.address).toBe(walletB.address);
       expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+    });
+
+    // ── #1516/#1519 idle-load fix: the RS revalidation is TTL-bound per wallet
+    // and the identity read underneath reuses the cached IdentityStorage
+    // binding. These drive the REAL readIdentityIdFromStorage path (stubbed at
+    // resolveContract/readContract, the two RPC seams) so a reintroduced
+    // per-selection Hub refresh or per-selection storage read fails here.
+    function wireIdentityChain(a: any, idByAddr: Map<string, bigint>, fallbackId = 5n) {
+      const identityStorage = { target: '0x0000000000000000000000000000000000000201' };
+      a.resolveContract = recorder(async () => identityStorage);
+      a.readContract = recorder(async (_c: unknown, _label: string, method: string, addr?: unknown) => {
+        if (method === 'getIdentityId') return idByAddr.get(String(addr).toLowerCase()) ?? fallbackId;
+        throw new Error(`unexpected readContract method ${method}`);
+      });
+      const identityReadsFor = (address: string) =>
+        (a.readContract.calls as unknown[][]).filter((c) => String(c[3]).toLowerCase() === lc(address)).length;
+      return { identityStorage, identityReadsFor };
+    }
+
+    it('RS revalidation is TTL-bound: within the TTL ONE storage read and ZERO forced Hub re-resolutions; past it, revalidates again', async () => {
+      vi.useFakeTimers({ now: 1_000 });
+      try {
+        const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        registerPool(a);
+        nativeByAddr.set(lc(walletA.address), 0n); // primary gas-empty → walletB preferred
+        nativeByAddr.set(lc(walletB.address), ONE);
+        const { identityReadsFor } = wireIdentityChain(a, new Map()); // everyone resolves to identity 5
+
+        // Two consecutive selections inside the TTL: the first revalidates
+        // walletB (one getIdentityId read), the second trusts the stamp.
+        expect((await (a as any).nextRandomSamplingSigner()).address).toBe(walletB.address);
+        expect((await (a as any).nextRandomSamplingSigner()).address).toBe(walletB.address);
+        expect(identityReadsFor(walletB.address)).toBe(1);
+        // Exactly the single lazy IdentityStorage bind — the old code forced a
+        // Hub getContractAddress round-trip on EVERY revalidation.
+        expect((a as any).resolveContract.calls).toHaveLength(1);
+
+        // Past the TTL the stamp has expired → the selection revalidates again.
+        vi.setSystemTime(1_000 + RS_SIGNER_REVALIDATION_TTL_MS + 1);
+        expect((await (a as any).nextRandomSamplingSigner()).address).toBe(walletB.address);
+        expect(identityReadsFor(walletB.address)).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('RS revalidation past the TTL still evicts on a definitive mismatch (send-time backstop owns the in-window race)', async () => {
+      vi.useFakeTimers({ now: 1_000 });
+      try {
+        const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        registerPool(a);
+        nativeByAddr.set(lc(walletA.address), 0n);
+        nativeByAddr.set(lc(walletB.address), ONE);
+        const idByAddr = new Map<string, bigint>();
+        wireIdentityChain(a, idByAddr);
+
+        // First selection: revalidates walletB (matches identity 5), stamps it.
+        expect((await (a as any).nextRandomSamplingSigner()).address).toBe(walletB.address);
+
+        // Out-of-band re-registration to ANOTHER identity. Inside the TTL the
+        // stamp is trusted (sendRandomSamplingTx's ProfileDoesntExist self-heal
+        // is the send-time backstop for this window) — B stays selected.
+        idByAddr.set(lc(walletB.address), 99n);
+        expect((await (a as any).nextRandomSamplingSigner()).address).toBe(walletB.address);
+        expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(true);
+
+        // Past the TTL the revalidation RUNS, sees the mismatch, evicts B, and
+        // re-selects — falling back to the primary anchor.
+        vi.setSystemTime(1_000 + RS_SIGNER_REVALIDATION_TTL_MS + 1);
+        const chosen = await (a as any).nextRandomSamplingSigner();
+        expect(chosen.address).toBe(walletA.address);
+        expect((a as any).registeredOperationalAddresses.has(lc(walletB.address))).toBe(false);
+        expect((a as any).rsSignerRevalidatedAt.has(lc(walletB.address))).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('native-only funding probes reuse a native reading past the publisher TTL (60s RS vs untouched 15s publish)', async () => {
+      vi.useFakeTimers({ now: 1_000 });
+      try {
+        const { a, walletA, tokenWithSigner } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+        const getBalanceCalls = () => ((a as any).provider.getBalance as { calls: unknown[] }).calls.length;
+
+        await (a as any).getWalletFunding(walletA.address, { metrics: 'native-only' });
+        expect(getBalanceCalls()).toBe(1);
+        expect(tokenWithSigner.balanceOf.calls).toHaveLength(0); // native-only never reads TRAC
+
+        // 16s later: stale for a publisher (15s TTL) but fresh for RS (60s TTL).
+        vi.setSystemTime(1_000 + PUBLISHER_FUNDING_CACHE_TTL_MS + 1_000);
+        await (a as any).getWalletFunding(walletA.address, { metrics: 'native-only' });
+        expect(getBalanceCalls()).toBe(1); // RS reused the 16s-old native reading
+
+        // A publish probe at the same instant still re-reads — its 15s
+        // freshness is untouched by the RS-only TTL.
+        await (a as any).getWalletFunding(walletA.address);
+        expect(getBalanceCalls()).toBe(2);
+        expect(tokenWithSigner.balanceOf.calls).toHaveLength(1);
+
+        // The publisher read re-stamped the shared native slot; RS re-reads
+        // only once the slot is older than the native-only TTL again.
+        vi.setSystemTime(1_000 + PUBLISHER_FUNDING_CACHE_TTL_MS + 1_000 + NATIVE_ONLY_FUNDING_CACHE_TTL_MS + 1);
+        await (a as any).getWalletFunding(walletA.address, { metrics: 'native-only' });
+        expect(getBalanceCalls()).toBe(3);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('DKG_DISABLE_IDLE_AWARE_SELECTION ignores preferIdle (read in the constructor)', async () => {

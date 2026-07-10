@@ -38,7 +38,7 @@ import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, RPC_RECEIPT_TIMEOUT_MS, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, IDENTITY_STORAGE_HUB_REFRESH_MS, RS_SIGNER_REVALIDATION_TTL_MS, NATIVE_ONLY_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -598,10 +598,24 @@ export class EVMChainAdapterBase {
    * direct admin tx, or a key re-assigned to a different identity) — those go
    * stale until restart (which re-seeds to currently-registered wallets). Impact
    * of staleness is bounded: RS may waste one proof attempt on a no-longer-registered
-   * wallet, no fund/safety loss. A durable close (revalidate `getIdentityId(w)`
-   * at selection time via the identityId cache) is a tracked follow-up.
+   * wallet, no fund/safety loss. The durable close is the TTL-bound selection-time
+   * revalidation in `nextRandomSamplingSigner` (stamps in
+   * `rsSignerRevalidatedAt`), with `sendRandomSamplingTx`'s
+   * `ProfileDoesntExist` self-heal as the send-time backstop.
    */
   protected readonly registeredOperationalAddresses = new Set<string>();
+
+  /**
+   * Lowercased wallet address → epoch ms of the last DEFINITIVE selection-time
+   * identity revalidation match (`nextRandomSamplingSigner`). A confirmed
+   * wallet is trusted for `RS_SIGNER_REVALIDATION_TTL_MS` before it is
+   * re-checked on-chain; entries are dropped whenever the wallet is evicted
+   * (mismatch, `ProfileDoesntExist` self-heal, first-party removal) or the
+   * `IdentityStorage` binding is invalidated, so a stale stamp can never
+   * vouch for a wallet against a different storage contract. Fail-open passes
+   * (RPC read error, own identity unreadable) are deliberately NOT stamped.
+   */
+  protected readonly rsSignerRevalidatedAt = new Map<string, number>();
 
   /**
    * Funding-aware publish selection floors. A wallet is "fundable" (preferred
@@ -655,6 +669,15 @@ export class EVMChainAdapterBase {
   protected readonly approvalPolicy: ApprovalPolicy;
 
   protected contracts: ContractCache;
+
+  /**
+   * Epoch ms when the lazy `IdentityStorage` binding was last resolved from
+   * the Hub. Freshness backstop consumed by `getIdentityStorage`
+   * (`IDENTITY_STORAGE_HUB_REFRESH_MS`); reset to 0 by
+   * `invalidateIdentityStorageBinding` so a rotation-driven invalidation
+   * re-resolves immediately.
+   */
+  protected identityStorageResolvedAtMs = 0;
 
   protected initialized = false;
 
@@ -832,7 +855,12 @@ export class EVMChainAdapterBase {
 
   protected invalidateIdentityStorageBinding(): void {
     this.contracts.identityStorage = undefined;
+    this.identityStorageResolvedAtMs = 0;
     this.identityIdCache.invalidateAll();
+    // Revalidation stamps were earned against the OLD IdentityStorage; a
+    // rotated storage may resolve the same wallet differently, so force the
+    // next RS selection of every non-primary wallet through a fresh check.
+    this.rsSignerRevalidatedAt.clear();
   }
 
   protected async identityStorageAddressChanged(
@@ -853,7 +881,17 @@ export class EVMChainAdapterBase {
     const checksum = ethers.getAddress(address);
     await this.init();
     const previousIdentityStorage = this.contracts.identityStorage;
-    const identityStorage = await this.getIdentityStorage({ refresh: true });
+    // CACHED Hub resolution (idle-load fix for the #1516/#1519 wallet-rotation
+    // series): forcing `refresh` here issued one `Hub.getContractAddress`
+    // eth_call per identity read — and RS signer revalidation made that
+    // per-selection (~8 idle eth_calls/min on a 5s prover tick). Staleness is
+    // handled the same way as every other hub-resolved contract: the rotation
+    // poller invalidates the binding on an observed `IdentityStorage`
+    // rotation, and `getIdentityStorage` re-resolves on the
+    // `IDENTITY_STORAGE_HUB_REFRESH_MS` backstop for a missed event. The
+    // changed-detection below still catches an address change surfaced by
+    // either path mid-call.
+    const identityStorage = await this.getIdentityStorage();
     const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
     if (identityStorageChanged) this.identityIdCache.invalidateAll();
     const id: bigint = await this.readContract(
@@ -1823,9 +1861,24 @@ export class EVMChainAdapterBase {
       // tx stays in the set — and an RS tx it signs would act for the OTHER
       // identity (`RandomSampling` keys off `getIdentityId(msg.sender)`),
       // silently burning that identity's proof period. Revalidate only the
-      // CHOSEN wallet on-chain (one fresh read per RS selection). FAIL OPEN on
-      // read errors (an RPC blip must not stall proofs); fail CLOSED on a
-      // definitive mismatch: evict + re-select.
+      // CHOSEN wallet on-chain, TTL-bound per wallet: running the check on
+      // EVERY selection cost one `getIdentityId` eth_call per RS write
+      // attempt (~14 idle eth_calls/min on a 5s prover tick), so a DEFINITIVE
+      // match is trusted for `RS_SIGNER_REVALIDATION_TTL_MS`. An out-of-band
+      // removal that slips inside the window is still caught at send time by
+      // `sendRandomSamplingTx`'s `ProfileDoesntExist` self-heal (evict + retry
+      // on the primary signer), so the TTL bounds only how long a doomed FIRST
+      // attempt keeps being selected. FAIL OPEN on read errors (an RPC blip
+      // must not stall proofs — and is NOT stamped, so the next selection
+      // re-checks); fail CLOSED on a definitive mismatch: evict + re-select.
+      const revalKey = chosen.address.toLowerCase();
+      const lastConfirmedAt = this.rsSignerRevalidatedAt.get(revalKey);
+      if (
+        lastConfirmedAt !== undefined &&
+        Date.now() - lastConfirmedAt < RS_SIGNER_REVALIDATION_TTL_MS
+      ) {
+        return chosen;
+      }
       let onChainId: bigint | null;
       try {
         onChainId = await this.refreshIdentityIdForAddress(chosen.address);
@@ -1834,8 +1887,14 @@ export class EVMChainAdapterBase {
       }
       if (onChainId === null) return chosen;
       const ourId = await this.getIdentityId().catch(() => 0n);
-      if (ourId === 0n || onChainId === ourId) return chosen;
-      this.registeredOperationalAddresses.delete(chosen.address.toLowerCase());
+      if (ourId === 0n || onChainId === ourId) {
+        // Stamp only a DEFINITIVE match — a fail-open pass (our own identity
+        // unreadable) must not suppress revalidation for a full TTL.
+        if (ourId !== 0n) this.rsSignerRevalidatedAt.set(revalKey, Date.now());
+        return chosen;
+      }
+      this.registeredOperationalAddresses.delete(revalKey);
+      this.rsSignerRevalidatedAt.delete(revalKey);
       console.warn(
         `[chain] RS signer ${chosen.address} no longer resolves to this node's identity ` +
         `(on-chain identityId=${onChainId}, ours=${ourId}) — evicted from RS rotation; re-selecting.`,
@@ -1981,9 +2040,15 @@ export class EVMChainAdapterBase {
 
   /**
    * Best-effort native (+ TRAC) balance read for one operational wallet,
-   * per-metric cached for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure /
-   * timeout yields `null` for that metric (callers fail open). `forceRefresh`
-   * bypasses and warms the cache (used on the error-enrichment path).
+   * per-metric cached. Freshness is judged PER CALLER: publish selections
+   * (`native+trac`) require `PUBLISHER_FUNDING_CACHE_TTL_MS` (15s) on both
+   * slots, while `native-only` probes accept a native reading up to
+   * `NATIVE_ONLY_FUNDING_CACHE_TTL_MS` (60s) old — they fire on every idle
+   * prover tick across all wallets and the contract gives the real verdict at
+   * send time, so the shorter publisher TTL only wasted eth_getBalance calls
+   * there. A read failure / timeout yields `null` for that metric (callers
+   * fail open). `forceRefresh` bypasses and warms the cache (used on the
+   * error-enrichment path).
    *
    * `metrics: 'native-only'` (RS / relay / settle selections) reads and
    * refreshes ONLY the native slot; the returned `trac` is whatever the cache
@@ -1999,10 +2064,14 @@ export class EVMChainAdapterBase {
     const key = address.toLowerCase();
     const now = Date.now();
     const cached = this.fundingCache.get(key);
-    const fresh = (ts: number | undefined) =>
-      !opts?.forceRefresh && ts !== undefined && now - ts < PUBLISHER_FUNDING_CACHE_TTL_MS;
-    const readNative = !fresh(cached?.nativeTs);
-    const readTrac = (opts?.metrics ?? 'native+trac') === 'native+trac' && !fresh(cached?.tracTs);
+    const fresh = (ts: number | undefined, ttlMs: number) =>
+      !opts?.forceRefresh && ts !== undefined && now - ts < ttlMs;
+    const nativeTtlMs = (opts?.metrics ?? 'native+trac') === 'native-only'
+      ? NATIVE_ONLY_FUNDING_CACHE_TTL_MS
+      : PUBLISHER_FUNDING_CACHE_TTL_MS;
+    const readNative = !fresh(cached?.nativeTs, nativeTtlMs);
+    const readTrac = (opts?.metrics ?? 'native+trac') === 'native+trac' &&
+      !fresh(cached?.tracTs, PUBLISHER_FUNDING_CACHE_TTL_MS);
     if (!readNative && !readTrac) {
       return { native: cached!.native, trac: cached!.trac };
     }
@@ -2159,9 +2228,28 @@ export class EVMChainAdapterBase {
     return ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress(address)]));
   }
 
+  /**
+   * Lazy `IdentityStorage` Hub resolution with a TTL backstop (the
+   * `randomSamplingPairCache` pattern): the rotation poller invalidates this
+   * binding on an observed `IdentityStorage` rotation
+   * (`invalidateIdentityStorageBinding`), so the TTL only covers a MISSED
+   * event (HTTP-only RPC, failed log scan) — without it a stale binding would
+   * pin identity reads until restart; with it the steady-state cost is at
+   * most one `Hub.getContractAddress` eth_call per
+   * `IDENTITY_STORAGE_HUB_REFRESH_MS`. `refresh: true` remains the escape
+   * hatch for a caller that must observe the CURRENT Hub view (no caller
+   * forces it today; `readIdentityIdFromStorage` deliberately stopped —
+   * see the idle-load comment there).
+   */
   protected async getIdentityStorage(options: { refresh?: boolean } = {}): Promise<Contract> {
-    if (options.refresh || !this.contracts.identityStorage) {
+    const now = Date.now();
+    if (
+      options.refresh ||
+      !this.contracts.identityStorage ||
+      now - this.identityStorageResolvedAtMs >= IDENTITY_STORAGE_HUB_REFRESH_MS
+    ) {
       this.contracts.identityStorage = await this.resolveContract('IdentityStorage');
+      this.identityStorageResolvedAtMs = now;
     }
     return this.contracts.identityStorage;
   }

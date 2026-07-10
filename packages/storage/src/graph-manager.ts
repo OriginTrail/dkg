@@ -26,6 +26,16 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
+  /**
+   * Explicit SWM graph set to read INSTEAD of the whole
+   * `resolveSharedMemoryReadGraphs` bucket family. The named-assertion publish
+   * path (`publishFromFinalizedAssertion`) passes the named KA's own per-KA
+   * graph (+ the bare bucket, for legacy shares and the curated `_catalog`
+   * floor) so that co-resident assertions sharing a subject IRI are never
+   * bundled into another assertion's payload. Every entry is validated with
+   * `assertSafeIri` before being spliced into the `VALUES ?g { … }` clause.
+   */
+  graphs?: NonEmptyGraphList;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
@@ -146,7 +156,9 @@ export async function loadSelectedSharedMemoryQuads(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  const swmGraphs = options.graphs
+    ? ([...new Set(options.graphs.map((g) => assertSafeIri(g)))] as NonEmptyGraphList)
+    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }
