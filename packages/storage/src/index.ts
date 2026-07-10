@@ -48,6 +48,7 @@ export {
   asChangelogReader,
   type ChangeOp,
   type ChangeRecord,
+  type ChangelogEraGuard,
   type ChangelogHead,
   type ChangelogReader,
   type ChangelogStoreOptions,

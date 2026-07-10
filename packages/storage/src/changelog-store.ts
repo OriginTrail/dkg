@@ -143,6 +143,24 @@ export interface ChangelogReader {
   clearReconcileFlag(): void;
 }
 
+/**
+ * Durable, OUT-OF-STORE high-water record used to detect a backup/restore that
+ * rolls `seq` back **under the same era** — the one case the in-store era +
+ * responder `head.seq < sinceSeq` guards cannot catch (a file restore replaces
+ * the whole store atomically, so nothing inside it can tell it was rolled back;
+ * and once the restored node re-advances past a peer's cursor, `head.seq <
+ * sinceSeq` no longer fires while the seqs now mean different changes — a silent
+ * skip). The guard MUST persist somewhere the RDF-store restore does not roll
+ * back with it (e.g. `node-ui.db`, which survives a `store.nq` restore and works
+ * for external backends too). See OT-RFC-59 §6.
+ */
+export interface ChangelogEraGuard {
+  /** The last persisted `(era, highSeq)`; null if never written. */
+  load(): Promise<{ era: string; highSeq: number } | null>;
+  /** Persist the current high-water. Called at seed and after each committed seq. */
+  save(era: string, highSeq: number): Promise<void>;
+}
+
 export interface ChangelogStoreOptions {
   enabled?: boolean;
   /**
@@ -153,6 +171,14 @@ export interface ChangelogStoreOptions {
   reservedGraphs?: readonly string[];
   /** Observability hook fired after each marker is durably appended. */
   onAppend?: (record: ChangeRecord) => void;
+  /**
+   * Optional restore-detection guard. When provided, a seq rollback under the
+   * same era rotates the era on seed (forcing peers to full-resync instead of
+   * silently skipping). When absent, no restore detection runs — the historical
+   * behavior — which is why enabling the changelog fleet-wide REQUIRES a durable
+   * guard (OT-RFC-59 §6 P0).
+   */
+  eraGuard?: ChangelogEraGuard;
 }
 
 /**
@@ -168,6 +194,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
+  private readonly eraGuard?: ChangelogEraGuard;
 
   /** Last ALLOCATED seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
@@ -193,6 +220,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
     this.reserved = reserved;
     this.onAppend = options.onAppend;
+    this.eraGuard = options.eraGuard;
   }
 
   // ------------------------------------------------------------------
@@ -224,6 +252,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       // Data + markers in ONE insert() → one backend transaction → atomic.
       await this.inner.insert([...safe, ...markers], options);
       this.seq = candidate; // advance only after durable success (gapless)
+      await this.noteHighWater();
       this.fire(records);
     });
   }
@@ -507,13 +536,64 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       : '';
     if (era) {
       this.eraValue = era;
+    } else {
+      const minted = randomUUID();
+      await this.writeEra(minted);
+      this.eraValue = minted;
+    }
+    await this.applyEraGuard();
+  }
+
+  /**
+   * Restore-detection (OT-RFC-59 §6). With a durable {@link ChangelogEraGuard},
+   * a seq that has rolled BACK under the same era means the store was restored
+   * from an older backup: rotate the era so peers detect it and full-resync
+   * rather than silently skipping the changes above the restored point. Otherwise
+   * advance the durable high-water. No-op without a guard (default-off posture).
+   */
+  private async applyEraGuard(): Promise<void> {
+    if (!this.eraGuard) return;
+    const prior = await this.eraGuard.load();
+    if (prior && prior.era === this.eraValue && this.seq < prior.highSeq) {
+      // Rollback under the same era → rotate.
+      const rotated = randomUUID();
+      await this.writeEra(rotated);
+      this.eraValue = rotated;
+      await this.eraGuard.save(rotated, this.seq);
       return;
     }
-    const minted = randomUUID();
+    // Normal boot / wipe (new era) / forward progress: persist the high-water for
+    // this era. A different prior.era (e.g. after a wipe minted a fresh era)
+    // resets the high-water to the current seq under the new era.
+    const highSeq = prior && prior.era === this.eraValue
+      ? Math.max(this.seq, prior.highSeq)
+      : this.seq;
+    await this.eraGuard.save(this.eraValue as string, highSeq);
+  }
+
+  /** Replace the single `#era` marker in the reserved graph (delete-any + insert). */
+  private async writeEra(era: string): Promise<void> {
+    await this.inner.deleteByPattern({
+      subject: META_SUBJECT, predicate: P_ERA, graph: CHANGELOG_GRAPH,
+    });
     await this.inner.insert([{
-      subject: META_SUBJECT, predicate: P_ERA, object: `"${minted}"`, graph: CHANGELOG_GRAPH,
+      subject: META_SUBJECT, predicate: P_ERA, object: `"${era}"`, graph: CHANGELOG_GRAPH,
     }]);
-    this.eraValue = minted;
+  }
+
+  /**
+   * Best-effort: persist the current seq as the durable high-water after a
+   * committed write, so a later restore below it is detectable. Non-fatal — the
+   * data+marker already committed; a failed guard write just leaves a slightly
+   * stale high-water that the next write re-advances. Runs under the write mutex.
+   */
+  private async noteHighWater(): Promise<void> {
+    if (!this.eraGuard || !this.eraValue) return;
+    try {
+      await this.eraGuard.save(this.eraValue, this.seq);
+    } catch {
+      // A stale high-water only narrows restore detection; never fail a write.
+    }
   }
 
   /** Emit `upsert`/`drop` markers for graphs after a mutation, op by probe. */
@@ -560,6 +640,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       }
       await this.inner.insert(quads, options);
       this.seq = candidate;
+      await this.noteHighWater();
       this.fire(records);
     } catch (err) {
       this.flagReconcile('appendMarkers(post-mutation-marker-write-failed)');
