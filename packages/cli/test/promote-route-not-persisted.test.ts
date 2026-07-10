@@ -64,7 +64,11 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
   });
 
   async function startWithPromoteImpl(
-    promote: (cgId: string, name: string, opts: unknown) => Promise<{ promotedCount: number }>,
+    promote: (cgId: string, name: string, opts: unknown) => Promise<{
+      promotedCount: number;
+      sealed?: boolean;
+      publishReady?: boolean;
+    }>,
   ) {
     const agent = {
       async listContextGraphs() {
@@ -209,7 +213,7 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
     expect(res.body).toEqual({ swmShared: true, promotedCount: 49 });
   });
 
-  it('returns 200 with promotedCount=0 for a legitimately empty promote (no error thrown)', async () => {
+  it('returns 200 with an explicit non-share outcome when promote moves zero rows', async () => {
     // The publisher returns `{ promotedCount: 0 }` (does NOT throw) when
     // the data graph is empty AND `_meta` either has no extraction
     // record or says structuralTripleCount=0. The route must forward
@@ -217,12 +221,20 @@ describe('POST /api/knowledge-assets/:name/swm/share — issue #864 not-persiste
     // user-facing "nothing to promote" copy. If the route accidentally
     // mapped 0-count to 409, every freshly-created empty draft would
     // light up as "ASSERTION_NOT_PERSISTED".
-    await startWithPromoteImpl(async () => ({ promotedCount: 0 }));
+    await startWithPromoteImpl(async () => ({
+      promotedCount: 0,
+      sealed: true,
+      publishReady: false,
+    }));
 
     const res = await postPromote({ contextGraphId: CG_ID, entities: 'all' });
 
     expect(res.status).toBe(200);
-    // KA swm/share wraps the promotedCount in the share envelope.
-    expect(res.body).toEqual({ swmShared: true, promotedCount: 0 });
+    expect(res.body).toEqual({
+      swmShared: false,
+      promotedCount: 0,
+      sealed: false,
+      publishReady: false,
+    });
   });
 });

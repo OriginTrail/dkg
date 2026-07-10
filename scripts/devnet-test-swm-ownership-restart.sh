@@ -10,10 +10,9 @@
 #   3. Node 1 is stopped, so the original owner is offline.
 #   4. Node 2 is restarted, clearing process-local publisher ownership maps
 #      while preserving its local store and without live owner help.
-#   5. Node 2 attempts to promote the same root. Current assertion-promote
-#      semantics treat cross-owner co-claims as advisory skips: the call may
-#      return HTTP 200, but it must promote zero rows, must not be publish-ready,
-#      and must not overwrite SWM data or owner.
+#   5. Node 2 attempts to promote the same root. Assertion-promote ownership
+#      conflicts are advisory skips (#1116): the call returns HTTP 200 with an
+#      explicit non-share outcome and must not overwrite SWM data or owner.
 #
 # Preconditions:
 #   ./scripts/devnet.sh clean
@@ -249,20 +248,8 @@ wait_for_node_up() {
 }
 
 kill_node() {
-  local node="$1" pid
-  pid=$(cat "$(node_pidfile "$node")" 2>/dev/null || true)
-  [ -n "$pid" ] || return 0
-  kill "$pid" 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    sleep 0.5
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    log "node $node not down after SIGTERM, sending SIGKILL"
-    kill -9 "$pid" 2>/dev/null || true
-  fi
+  local node="$1"
+  ( cd "$REPO_ROOT" && ./scripts/devnet.sh stop-node "$node" 2>&1 | sed "s/^/  [devnet] /" )
   wait_for_node_down "$node"
 }
 
@@ -308,6 +295,27 @@ promote_expect_success() {
   response=$(api_call "$node" POST "/api/knowledge-assets/${assertion}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
   count=$(parse_json "$response" '.promotedCount')
   [ "$count" = "1" ] || fail "expected one promoted quad for $assertion, got '$count': $response"
+}
+
+assert_cross_owner_promote_skipped() {
+  local code="$1" body="$2"
+  [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || return 1
+  printf '%s' "$body" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => input += chunk);
+    process.stdin.on("end", () => {
+      try {
+        const result = JSON.parse(input);
+        const valid = result.swmShared === false &&
+          result.promotedCount === 0 &&
+          result.sealed === false &&
+          result.publishReady === false;
+        process.exit(valid ? 0 : 1);
+      } catch {
+        process.exit(1);
+      }
+    });
+  '
 }
 
 owner_values_on_node() {
@@ -390,27 +398,15 @@ wait_for_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_VALUE"
 wait_for_owner_meta "$ATTACKER_NODE" "$ROOT" "$OWNER_PEER"
 log "node $ATTACKER_NODE still has durable owner metadata after offline-owner restart"
 
-act "5. Cross-owner promote must be blocked or skipped from durable local metadata"
+act "5. Cross-owner promote must be advisory-skipped from durable local metadata"
 assertion_create_write_finalize "$ATTACKER_NODE" "$ATTACKER_ASSERTION" "$ROOT" "$ATTACKER_VALUE"
 
 PROMOTE_BODY=""
 PROMOTE_CODE=""
 api_capture "$ATTACKER_NODE" POST "/api/knowledge-assets/${ATTACKER_ASSERTION}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" PROMOTE_BODY PROMOTE_CODE
-if [ "$PROMOTE_CODE" -ge 200 ] && [ "$PROMOTE_CODE" -lt 300 ]; then
-  PROMOTED_COUNT=$(parse_json "$PROMOTE_BODY" '.promotedCount')
-  PUBLISH_READY=$(parse_json "$PROMOTE_BODY" '.publishReady')
-  [ "$PROMOTED_COUNT" = "0" ] \
-    || fail "cross-owner promote must not promote rows; got promotedCount=$PROMOTED_COUNT body=$PROMOTE_BODY"
-  [ "$PUBLISH_READY" = "false" ] \
-    || fail "cross-owner promote must not be publish-ready; got publishReady=$PUBLISH_READY body=$PROMOTE_BODY"
-  log "cross-owner promote was advisory-skipped with promotedCount=0 publishReady=false"
-else
-  EXPECTED_ERROR="Cannot promote entity <${ROOT}>: owned by peer ${OWNER_PEER}, not by caller ${ATTACKER_PEER}."
-  case "$PROMOTE_BODY" in
-    *"$EXPECTED_ERROR"*) log "cross-owner promote failed with expected ownership error" ;;
-    *) fail "promote failed with unexpected body (HTTP $PROMOTE_CODE): $PROMOTE_BODY; expected '$EXPECTED_ERROR'" ;;
-  esac
-fi
+assert_cross_owner_promote_skipped "$PROMOTE_CODE" "$PROMOTE_BODY" \
+  || fail "cross-owner promote must return the advisory non-share contract (HTTP 200, swmShared=false, promotedCount=0, sealed=false, publishReady=false); got HTTP $PROMOTE_CODE: $PROMOTE_BODY"
+log "cross-owner promote returned the advisory non-share contract"
 
 act "6. Blocked/skipped promote left WM, SWM, and ownership metadata intact"
 ASSERTION_QUERY=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
