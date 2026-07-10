@@ -222,23 +222,25 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteByPattern(pattern, options);
-    if (pattern.graph) {
-      // A graph-scoped delete against the reserved plane would erase the log.
-      this.assertNotReserved(pattern.graph, 'deleteByPattern');
-    } else {
-      // A no-graph delete by a reserved-namespaced subject/predicate would delete
-      // markers cross-graph — the same log-erasure vector, so reject it too.
-      this.assertNoReservedTerm(pattern);
+    if (!pattern.graph) {
+      // A graphless pattern deletes across ALL named graphs — INCLUDING the
+      // reserved plane (a `{}` or object-only pattern slips past any term check)
+      // — and cannot be attributed to a changed graph. There is no in-tree
+      // graphless caller (all pass a concrete graph), so fail closed rather than
+      // risk erasing the log or emitting an unattributed change.
+      throw new Error(
+        'ChangelogStore: graphless deleteByPattern is not supported while the changelog ' +
+          'is enabled (it could mutate the reserved plane and cannot be attributed); ' +
+          'pass a concrete graph.',
+      );
     }
+    // A graph-scoped delete against the reserved plane would erase the log.
+    const graph = pattern.graph;
+    this.assertNotReserved(graph, 'deleteByPattern');
     return this.runExclusive(async () => {
       const removed = await this.inner.deleteByPattern(pattern, options);
       if (removed > 0) {
-        if (pattern.graph) {
-          await this.markPostMutation([pattern.graph], options);
-        } else {
-          // No graph hint → cannot attribute which graphs shrank/emptied.
-          this.flagReconcile('deleteByPattern(no-graph)');
-        }
+        await this.markPostMutation([graph], options);
       }
       return removed;
     });
@@ -564,21 +566,6 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
         throw new Error(
           `ChangelogStore: ${op} references the reserved changelog graph <${g}>, ` +
             `which is not writable through the public store API.`,
-        );
-      }
-    }
-  }
-
-  /** Reject a no-graph deleteByPattern whose subject/predicate is namespaced
-   *  under a reserved graph (marker terms like `urn:dkg:changelog#seq`) — that
-   *  would delete markers cross-graph. */
-  private assertNoReservedTerm(pattern: Partial<Quad>): void {
-    const terms = [pattern.subject, pattern.predicate];
-    for (const g of this.reserved) {
-      if (terms.some((t) => t != null && t.startsWith(g))) {
-        throw new Error(
-          `ChangelogStore: deleteByPattern by a term under the reserved graph <${g}> ` +
-            `would mutate the changelog plane, which is not writable through the public store API.`,
         );
       }
     }

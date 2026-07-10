@@ -356,13 +356,16 @@ describe('ChangelogStore — reserved-graph write protection', () => {
     await base.close();
   });
 
-  it('rejects a no-graph deleteByPattern that targets marker terms (cross-graph log erasure)', async () => {
+  it('rejects ANY graphless deleteByPattern while enabled (fail-closed — no attribution, could reach the reserved plane)', async () => {
     const base = new OxigraphStore();
     const log = new ChangelogStore(base);
     await log.insert([q('http://ex.org/a', G1)]); // seq 1
-    await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
-    await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
-    expect(await log.headSeq()).toBe(1); // log intact
+    // Every graphless shape is refused — including the empty and object-only
+    // patterns that no subject/predicate term check could catch.
+    await expect(log.deleteByPattern({})).rejects.toThrow(/graphless|concrete graph/i);
+    await expect(log.deleteByPattern({ object: '"upsert"' })).rejects.toThrow(/graphless|concrete graph/i);
+    await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/graphless|concrete graph/i);
+    expect(await log.headSeq()).toBe(1); // log intact — nothing was deleted
     await base.close();
   });
 
@@ -419,13 +422,13 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
   });
 
-  it('deleteByPattern with NO graph hint flags reconcile when it removes quads', async () => {
+  it('rejects a graphless deleteByPattern while enabled (was: flagged reconcile; now fail-closed)', async () => {
     await log.insert([q('http://ex.org/s1', G1)]);
     expect(log.needsReconcile).toBe(false);
-    const removed = await log.deleteByPattern({ predicate: 'http://ex.org/p' }); // no graph
-    expect(removed).toBeGreaterThan(0);
-    // Cannot attribute which graphs shrank/emptied → reconcile owed.
-    expect(log.needsReconcile).toBe(true);
+    // A graphless pattern could reach the reserved plane and cannot be attributed
+    // — it is refused rather than executed-and-flagged.
+    await expect(log.deleteByPattern({ predicate: 'http://ex.org/p' })).rejects.toThrow(/graphless/i);
+    expect(log.needsReconcile).toBe(false); // nothing happened
   });
 
   it('deleteByPattern WITH a graph hint emits a marker: upsert when data remains, drop when it empties', async () => {
