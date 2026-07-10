@@ -6,10 +6,11 @@ import {
   validateSubGraphName,
   contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
-import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
+import type { QueryOptions, TripleStore, ChangelogReader, ChangeOp } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
+import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -308,6 +309,141 @@ export async function readDurableMetaPage(params: {
   );
 }
 
+/** Response byte budget for one changelog delta page — keeps a page under the
+ * transport read cap (the requester loops for more). A single graph larger than
+ * this is still emitted alone rather than split across pages. */
+const DEFAULT_CHANGELOG_PAGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The per-CG admission boundary shared by the durable-data phase and the
+ * changelog delta lane: the candidate-graph exclusions (wrong CG / top `_meta` /
+ * `/_shared_memory*` / `/_private`) and the RFC-49 `isAdmitted` gate
+ * (assertion-graph membership + child-CG descendant rejection). `assertionGraphs`
+ * is memoised per invocation, matching the original inline closure.
+ */
+function createAdmissionContext(store: TripleStore, contextGraphId: string): {
+  cgPrefix: string;
+  topMetaGraph: string;
+  isCandidateGraph: (graph: string) => boolean;
+  isAdmitted: (signal?: AbortSignal) => (graph: string) => Promise<boolean>;
+} {
+  const cgPrefix = contextGraphDataGraphUri(contextGraphId);
+  const topMetaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const isCandidateGraph = (graph: string): boolean => {
+    if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
+    if (graph === topMetaGraph) return false;
+    // SWM graphs are the dedicated SWM phase's exclusive domain; `/_private` is
+    // never durable-served (see readDurableDataPage's original inline note).
+    if (graph.includes('/_shared_memory')) return false;
+    return !graph.includes('/_private');
+  };
+  let assertionGraphs: Set<string> | null = null;
+  const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
+    if (graph.includes('/assertion/')) {
+      assertionGraphs ??= await readAdmittedAssertionGraphs(store, contextGraphId, signal);
+      const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
+      if (!assertionGraphs.has(assertionGraph)) return false;
+    }
+    return !(await isDescendantOfKnownChildContextGraph(store, cgPrefix, graph, signal));
+  };
+  return { cgPrefix, topMetaGraph, isCandidateGraph, isAdmitted };
+}
+
+/**
+ * OT-RFC-59 changelog delta lane (PROTOCOL_SYNC_CHANGELOG). Answers "what changed
+ * in this CG since (era, sinceSeq)?" from the append-only log instead of scanning
+ * the store. Reuses the SAME candidate exclusions + RFC-49 `isAdmitted` boundary
+ * as the durable-data phase, applied to BOTH upsert and drop records, so a graph
+ * — or its very existence — the requester may not host never leaks.
+ *
+ * Returns a `resync` directive on era mismatch / rollback / first contact (the
+ * requester then runs the existing bootstrap lane), else a byte-bounded `delta`
+ * page. Progress is `nextSeq` (scanned-through), never the record count, because
+ * `readChanges` is node-global and a CG-scoped page can be validly empty.
+ */
+export async function readChangelogDeltaPage(params: {
+  reader: ChangelogReader;
+  store: TripleStore;
+  contextGraphId: string;
+  sinceSeq: number;
+  requesterEra: string | null;
+  limit: number;
+  maxResponseBytes?: number;
+  signal?: AbortSignal;
+}): Promise<ChangelogSyncResponse> {
+  const head = await params.reader.changelogHead(
+    syncResponderStoreOptions(params.signal, 'sync.responder.changelogHead'),
+  );
+
+  // (1) First contact / era rotation (wipe, restore) / rollback ⇒ full resync.
+  if (
+    params.requesterEra == null ||
+    params.requesterEra !== head.era ||
+    head.seq < params.sinceSeq
+  ) {
+    return { kind: 'resync', era: head.era, headSeq: head.seq };
+  }
+
+  // (2) Node-global raw scan of the log since the requester's cursor.
+  const raw = await params.reader.readChanges(
+    params.sinceSeq,
+    params.limit,
+    syncResponderStoreOptions(params.signal, 'sync.responder.readChanges'),
+  );
+
+  // (3) Re-apply the candidate exclusions (readChanges bypassed every phase
+  // filter) and collapse to the latest op per graph (ascending seq ⇒ last wins).
+  const { isCandidateGraph, isAdmitted } = createAdmissionContext(params.store, params.contextGraphId);
+  const lastOp = new Map<string, { seq: number; op: ChangeOp }>();
+  for (const r of raw) {
+    if (!isCandidateGraph(r.graph)) continue; // wrong-CG / topMeta / SWM / private — hides other/private-CG URIs
+    lastOp.set(r.graph, { seq: r.seq, op: r.op });
+  }
+
+  // (4) Admit + serialise in SEQ order under a byte budget. Emitting ascending by
+  // seq makes `nextSeq = last-emitted seq` safe on a partial page: every graph
+  // with a smaller last-op seq is already emitted, so re-requesting from nextSeq
+  // never skips an un-emitted change.
+  const admit = isAdmitted(params.signal);
+  const ordered = [...lastOp.entries()]
+    .map(([graph, v]) => ({ graph, seq: v.seq, op: v.op }))
+    .sort((a, b) => a.seq - b.seq);
+  const budget = params.maxResponseBytes ?? DEFAULT_CHANGELOG_PAGE_BYTES;
+
+  const records: ChangelogDeltaRecord[] = [];
+  let bytes = 0;
+  let budgetStopped = false;
+  for (const { graph, seq, op } of ordered) {
+    if (!(await admit(graph))) continue; // unadmitted ⇒ omit URI + op entirely
+    if (op === 'drop') {
+      records.push({ seq, graph, op: 'drop' });
+      continue;
+    }
+    const quads = serializeResponderRows(
+      await readRowsAcrossGraphs(params.store, [graph], params.signal),
+    );
+    // Always include at least one record; otherwise stop before exceeding the
+    // budget (a single graph over budget is emitted alone, never split).
+    if (records.length > 0 && bytes + quads.length > budget) {
+      budgetStopped = true;
+      break;
+    }
+    bytes += quads.length;
+    records.push({ seq, graph, op: 'upsert', quads });
+  }
+
+  // (5) nextSeq: on a budget-truncated page, the last emitted record's seq; else
+  // the scanned-through high-water — head.seq if the scan drained the log,
+  // otherwise the max raw seq scanned (more remains beyond this window).
+  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
+  const drained = raw.length < params.limit;
+  const nextSeq = budgetStopped
+    ? records[records.length - 1].seq
+    : drained ? head.seq : scannedTo;
+
+  return { kind: 'delta', era: head.era, headSeq: head.seq, nextSeq, records };
+}
+
 export async function readDurableDataPage(params: {
   store: TripleStore;
   graphList: readonly string[];
@@ -320,32 +456,12 @@ export async function readDurableDataPage(params: {
   rowListCacheScope?: string;
   refreshRowList?: boolean;
 }): Promise<SyncRow[]> {
-  const cgPrefix = contextGraphDataGraphUri(params.contextGraphId);
-  const topMetaGraph = contextGraphMetaGraphUri(params.contextGraphId);
-  const candidateGraphs = params.graphList.filter((graph) => {
-    if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
-    if (graph === topMetaGraph) return false;
-    // Shared-memory graphs (`/_shared_memory`, `/_shared_memory_meta`, including
-    // per-sub-graph buckets) are the EXCLUSIVE domain of the dedicated SWM phase
-    // (readSwmDataPage), which applies per-(graph,subject) REPLACE + the
-    // curator-skip. Serving them in the durable DATA phase makes the requester
-    // blind-UNION them, which (a) corrupts single-valued SWM into {v1,v2}, and
-    // (b) lets a curator reverse-sync its OWN CG's SWM from a member, polluting
-    // itself (devnet curator-converge Gate A) — and it leaks gated SWM to durable
-    // requesters. SWM is never served through the durable data phase.
-    if (graph.includes('/_shared_memory')) return false;
-    return !graph.includes('/_private');
-  }).sort(compareCodePoint);
-
-  let assertionGraphs: Set<string> | null = null;
-  const isAdmitted = (signal?: AbortSignal) => async (graph: string): Promise<boolean> => {
-    if (graph.includes('/assertion/')) {
-      assertionGraphs ??= await readAdmittedAssertionGraphs(params.store, params.contextGraphId, signal);
-      const assertionGraph = graph.endsWith('/_meta') ? graph.slice(0, -'/_meta'.length) : graph;
-      if (!assertionGraphs.has(assertionGraph)) return false;
-    }
-    return !(await isDescendantOfKnownChildContextGraph(params.store, cgPrefix, graph, signal));
-  };
+  // Admission context (candidate exclusions + RFC-49 `isAdmitted`) — extracted to
+  // a module factory so `readChangelogDeltaPage` reuses it verbatim. Behaviour
+  // here is byte-identical to the previous inline closures.
+  const { cgPrefix, topMetaGraph, isCandidateGraph, isAdmitted } =
+    createAdmissionContext(params.store, params.contextGraphId);
+  const candidateGraphs = params.graphList.filter(isCandidateGraph).sort(compareCodePoint);
 
   if (params.sinceBatchId == null) {
     return readPagedRowsAcrossGraphs(
