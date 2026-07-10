@@ -44,6 +44,8 @@ export interface NetworkAdmissionAttemptOptions {
   timeoutMs?: number;
 }
 
+type NetworkAdmissionAttemptKind = 'automatic' | 'explicit-connect';
+
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
 }
@@ -147,7 +149,7 @@ export class NetworkAdmissionCoordinator {
   private readonly cleanupRejectedPeerState?: (peerId: string) => void;
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
-  private readonly inFlight = new Map<string, InFlightAdmissionAttempt>();
+  private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -212,13 +214,41 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
+    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'automatic', options);
+  }
+
+  async ensureExplicitConnectAdmitted(
+    remotePeer: string,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions = {},
+  ): Promise<boolean> {
+    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'explicit-connect', options);
+  }
+
+  private async ensureAdmittedForAttempt(
+    remotePeer: string,
+    ctx: OperationContext,
+    attemptKind: NetworkAdmissionAttemptKind,
+    options: NetworkAdmissionAttemptOptions,
+  ): Promise<boolean> {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
+    if (this.admission.isRejectedPeer(remotePeerId)) return false;
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
+
+    const backoff = attemptKind === 'explicit-connect'
+      ? undefined
+      : this.admission.getRetryableProbeBackoff(remotePeerId);
+    if (backoff) {
+      throw new NetworkAdmissionProbeError(
+        remotePeerId,
+        `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
+      );
+    }
 
     const attempt = new InFlightAdmissionAttempt(
       this.probeTimeoutMs,
@@ -258,7 +288,18 @@ export class NetworkAdmissionCoordinator {
         { timeoutMs: this.probeTimeoutMs, signal },
       );
     } catch (err) {
+      if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
+      // Every transport probe failure is retryable-transient — including a
+      // multistream "could not negotiate"/`na`. That `na` is ambiguous: a
+      // same-network peer that is still booting answers it during the window
+      // between `libp2p.start()` and `registerIdentityProtocol()`, and it is
+      // indistinguishable by message from a peer that will never support the
+      // protocol. Treating it as a long "unsupported-protocol" blackhole would
+      // reject a healthy restarting peer across *every* protocol for minutes
+      // (the admission gate is protocol-agnostic). The exponential transient
+      // backoff lets a booting peer recover on its next probe instead.
+      this.admission.rememberRetryableProbeFailure(remotePeer, message, 'transient');
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} failed retryably: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -269,6 +310,10 @@ export class NetworkAdmissionCoordinator {
       claimed = JSON.parse(new TextDecoder().decode(response)) as unknown;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // Store a fixed reason: the SyntaxError message echoes remote-controlled
+      // bytes, and the backoff reason is re-interpolated into later thrown
+      // errors and logs. The raw message is still logged once, below.
+      this.admission.rememberRetryableProbeFailure(remotePeer, 'unreadable response', 'unreadable-response');
       this.log?.warn(ctx, `Network identity probe for ${remotePeer.slice(-8)} returned unreadable response: ${message}`);
       throw new NetworkAdmissionProbeError(remotePeer, message);
     }
@@ -289,7 +334,11 @@ export class NetworkAdmissionCoordinator {
   }
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {
-    this.admission.quarantinePeer(remotePeer);
+    // Quarantine is a bounded cooldown, not a permanent blackhole: after it
+    // elapses the peer is re-probed, so an operator who corrects a mismatched
+    // networkId and restarts the peer re-admits without every observer node
+    // restarting.
+    this.admission.quarantinePeerForCooldown(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);
@@ -318,6 +367,7 @@ export class NetworkAdmissionCoordinator {
       this.log?.info(ctx, `Rejected peer ${shortPeer}: peerstore cleanup skipped/failed: ${message}`);
     }
   }
+
 }
 
 function abortErrorFromSignal(reason: unknown): Error {

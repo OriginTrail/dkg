@@ -1842,7 +1842,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     ctx: OperationContext,
     options?: NetworkAdmissionAttemptOptions,
   ): Promise<void> {
-    if (await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx, options)) return;
+    if (await this.networkAdmissionCoordinator.ensureExplicitConnectAdmitted(peerId, ctx, options)) return;
     throw new NetworkAdmissionRejectedError(peerId);
   }
 

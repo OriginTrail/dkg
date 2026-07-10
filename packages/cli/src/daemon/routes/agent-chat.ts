@@ -981,6 +981,12 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
         case 'NETWORK_ADMISSION_REJECTED':
           status = 403; // reachable peer, but not part of this active DKG network
           break;
+        case 'NETWORK_ADMISSION_PROBE_FAILED':
+          // Identity probe backed off (transient timeout / unreadable response),
+          // not a proven rejection — the peer becomes reachable again once the
+          // bounded backoff elapses, so this is retriable, not a client error.
+          status = 503;
+          break;
         default:
           status = 400;
       }
