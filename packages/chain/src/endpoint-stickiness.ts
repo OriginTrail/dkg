@@ -61,6 +61,24 @@ export interface StickinessConfig {
   onEstablished?: (rpcUrl: string) => void;
 }
 
+/**
+ * ONE bound attempt in a failover pass: the endpoint to try, plus its outcome
+ * recorders with the endpoint, its position (triedFirst = index 0), and the
+ * (canonical, intent) pair ALL captured at creation. A loop iterates the entries
+ * {@link EndpointStickiness.attempts} returns and, on the entry it actually ran,
+ * calls the NULLARY `recordSuccess()` / `recordFailure()`. Nothing is threaded
+ * back in, so a loop cannot record against the wrong endpoint, a stale index, or a
+ * mismatched canonical/intent — the invariant is structural, not just documented.
+ */
+export interface StickyAttempt<T extends StickyEndpoint> {
+  /** The endpoint to try for this attempt (preferred-first ordering). */
+  readonly endpoint: T;
+  /** Record that THIS endpoint served the op (triedFirst bound at creation). */
+  recordSuccess(): void;
+  /** Record that THIS endpoint FAILED (real error → failover); de-prefers it if preferred. */
+  recordFailure(): void;
+}
+
 export class EndpointStickiness {
   private state: StickyState = { kind: 'none' };
 
@@ -69,6 +87,28 @@ export class EndpointStickiness {
   /** Whether a preference is currently active (test/introspection helper). */
   hasPreference(): boolean {
     return this.state.kind === 'preferred';
+  }
+
+  /**
+   * Build the preferred-first list of BOUND {@link StickyAttempt}s for `intent`
+   * over `canonical`. `order()` runs EXACTLY once here (it may re-arm the TTL
+   * re-probe — it must not run twice per loop entry); each entry captures its own
+   * endpoint + position (triedFirst = index 0) + the SAME (canonical, intent), so
+   * a loop records via the nullary `recordSuccess()`/`recordFailure()` on the entry
+   * it ran and cannot drift the endpoint, index, canonical, or intent apart.
+   *
+   * This is the SOLE public API for DRIVING a failover pass — `order`,
+   * `recordSuccess`, and `recordFailure` are `private` below precisely so the
+   * mismatched hand-threaded path these entries prevent is not merely discouraged
+   * but unavailable. (`hasPreference` stays public as a read-only introspection
+   * helper; it can't cause drift.)
+   */
+  attempts<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): StickyAttempt<T>[] {
+    return this.order(canonical, intent).map((endpoint, i) => ({
+      endpoint,
+      recordSuccess: () => this.recordSuccess(endpoint, canonical, intent, i === 0),
+      recordFailure: () => this.recordFailure(endpoint, intent),
+    }));
   }
 
   /**
@@ -81,7 +121,7 @@ export class EndpointStickiness {
    * When the re-probe deadline has passed this op probes the primary first AND
    * re-arms the deadline `+ttlMs` (at most one primary re-stall per TTL).
    */
-  order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
+  private order<T extends StickyEndpoint>(canonical: T[], intent: StickinessIntent): T[] {
     if (intent === 'transparentRead' || !this.cfg.isEnabled() || this.state.kind !== 'preferred') {
       return canonical;
     }
@@ -133,7 +173,7 @@ export class EndpointStickiness {
    *     or silently re-point; `source` = 'write' for a populate, else 'read'. A
    *     later populate on the SAME preferred upgrades 'read'→'write'.
    */
-  recordSuccess<T extends StickyEndpoint>(
+  private recordSuccess<T extends StickyEndpoint>(
     endpoint: T,
     canonical: T[],
     intent: StickinessIntent,
@@ -193,7 +233,7 @@ export class EndpointStickiness {
    * null continues the loop without a failover), so a healthy-but-empty backup
    * stays preferred.
    */
-  recordFailure<T extends StickyEndpoint>(endpoint: T, intent: StickinessIntent): void {
+  private recordFailure<T extends StickyEndpoint>(endpoint: T, intent: StickinessIntent): void {
     if (intent === 'transparentRead' || !this.cfg.isEnabled()) return;
     if (this.state.kind === 'preferred' && this.state.url === endpoint.rpcUrl) {
       this.state = { kind: 'none' };
