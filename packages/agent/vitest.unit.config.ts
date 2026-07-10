@@ -41,6 +41,8 @@ export default defineConfig({
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",
       "test/sync-fetch-coalescing.test.ts",
+      "test/sync-backpressure.test.ts",
+      "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",

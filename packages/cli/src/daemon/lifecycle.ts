@@ -1572,6 +1572,8 @@ export async function runDaemonInner(
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
+    syncGlobalLimit: config.syncGlobalLimit,
+    syncGlobalQueueLimit: config.syncGlobalQueueLimit,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
     swmAwaitCuratorAck: config.swmAwaitCuratorAck,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),

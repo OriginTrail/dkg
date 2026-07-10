@@ -4,7 +4,21 @@ export interface SyncBackpressureSnapshot {
   inflight: number;
   queued: number;
   limit: number | null;
+  queueLimit: number | null;
 }
+
+export interface SyncGlobalBackpressureConfig {
+  syncGlobalMaxInflight?: number;
+  syncGlobalLimit?: number;
+  syncGlobalQueueLimit?: number;
+}
+
+declare const syncGlobalBackpressurePolicyBrand: unique symbol;
+
+export type SyncGlobalBackpressurePolicy = Readonly<(
+  | { limit: number; queueLimit: number }
+  | { limit: undefined; queueLimit: undefined }
+) & { [syncGlobalBackpressurePolicyBrand]: true }>;
 
 type Release = () => void;
 
@@ -13,9 +27,40 @@ interface QueueEntry {
   resolve: (release: Release) => void;
 }
 
+interface SyncBackpressureAdmission {
+  status: 'running' | 'queued';
+  queuedBefore: number;
+  release: Promise<Release>;
+}
+
 const queue: QueueEntry[] = [];
 let inflight = 0;
 let lastLimit: number | null = null;
+let lastQueueLimit: number | null = null;
+
+export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
+export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
+
+export class SyncBackpressureBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SyncBackpressureBusyError';
+  }
+}
+
+/** Return local admission pressure through the standard Error.cause chain. */
+export function getSyncBackpressureBusyError(
+  error: unknown,
+): SyncBackpressureBusyError | undefined {
+  const seen = new Set<Error>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof SyncBackpressureBusyError) return current;
+    seen.add(current);
+    current = current.cause;
+  }
+  return undefined;
+}
 
 function drain(): void {
   for (;;) {
@@ -36,18 +81,47 @@ function releaseOnce(): void {
   drain();
 }
 
-function acquire(limit: number): Promise<Release> {
+function acquire(
+  policy: SyncGlobalBackpressurePolicy,
+  label: string,
+): SyncBackpressureAdmission {
+  const { limit } = policy;
+  const queuedBefore = queue.length;
+  if (limit === undefined) {
+    lastLimit = null;
+    lastQueueLimit = null;
+    return {
+      status: 'running',
+      queuedBefore,
+      release: Promise.resolve(() => {}),
+    };
+  }
+
+  const { queueLimit } = policy;
   lastLimit = limit;
-  if (inflight < limit && queue.length === 0) {
+  lastQueueLimit = queueLimit ?? null;
+  if (inflight < limit && queuedBefore === 0) {
     inflight += 1;
     getMetrics().syncGlobalInflight.record(inflight);
-    return Promise.resolve(releaseOnce);
+    return {
+      status: 'running',
+      queuedBefore,
+      release: Promise.resolve(releaseOnce),
+    };
   }
-  return new Promise((resolve) => {
+  if (queuedBefore >= queueLimit) {
+    throw new SyncBackpressureBusyError(
+      `Sync backpressure rejected ${label} `
+        + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
+    );
+  }
+
+  const release = new Promise<Release>((resolve) => {
     queue.push({ limit, resolve });
     getMetrics().syncBackgroundQueueDepth.record(queue.length);
     drain();
   });
+  return { status: 'queued', queuedBefore, release };
 }
 
 export function parseBooleanEnv(name: string): boolean | undefined {
@@ -73,13 +147,21 @@ function parseIntegerEnv(name: string): number | undefined {
   return Number.isInteger(parsed) ? parsed : undefined;
 }
 
+function positiveInteger(value: number | undefined): number | undefined {
+  return Number.isInteger(value) && typeof value === 'number' && value > 0 ? value : undefined;
+}
+
+function nonNegativeInteger(value: number | undefined): number | undefined {
+  return Number.isInteger(value) && typeof value === 'number' && value >= 0 ? value : undefined;
+}
+
 export function resolvePositiveIntegerSwitch(
   configValue: number | undefined,
   envName: string,
 ): number | undefined {
   const value = parseIntegerEnv(envName) ?? configValue;
   if (value == null) return undefined;
-  return Number.isInteger(value) && value > 0 ? value : undefined;
+  return positiveInteger(value);
 }
 
 export function resolveNonNegativeIntegerSwitch(
@@ -88,48 +170,80 @@ export function resolveNonNegativeIntegerSwitch(
 ): number | undefined {
   const value = parseIntegerEnv(envName) ?? configValue;
   if (value == null) return undefined;
-  return Number.isInteger(value) && value >= 0 ? value : undefined;
+  return nonNegativeInteger(value);
 }
 
-export function resolveSyncGlobalMaxInflight(configValue: number | undefined): number | undefined {
-  return resolvePositiveIntegerSwitch(configValue, 'DKG_SYNC_GLOBAL_MAX_INFLIGHT');
+export function resolveSyncGlobalBackpressure(
+  config: SyncGlobalBackpressureConfig,
+): SyncGlobalBackpressurePolicy {
+  const limit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
+    ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'))
+    ?? nonNegativeInteger(config.syncGlobalMaxInflight)
+    ?? nonNegativeInteger(config.syncGlobalLimit)
+    ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
+  if (limit === 0) {
+    return Object.freeze({
+      limit: undefined,
+      queueLimit: undefined,
+    }) as SyncGlobalBackpressurePolicy;
+  }
+
+  const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
+    ?? nonNegativeInteger(config.syncGlobalQueueLimit)
+    ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
+  return Object.freeze({
+    limit,
+    queueLimit,
+  }) as SyncGlobalBackpressurePolicy;
 }
 
-export function getSyncBackpressureSnapshot(limit?: number): SyncBackpressureSnapshot {
+export function getSyncBackpressureSnapshot(
+  policy?: SyncGlobalBackpressurePolicy,
+): SyncBackpressureSnapshot {
   return {
     inflight,
     queued: queue.length,
-    limit: limit ?? lastLimit,
+    limit: policy ? policy.limit ?? null : lastLimit,
+    queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
   };
 }
 
 export async function withGlobalSyncBackpressure<T>(
   options: {
-    limit?: number;
+    policy: SyncGlobalBackpressurePolicy;
     ctx: OperationContext;
     label: string;
     logInfo?: (ctx: OperationContext, message: string) => void;
   },
   work: () => Promise<T>,
 ): Promise<T> {
-  const limit = options.limit;
-  if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
-    return work();
+  const { limit, queueLimit } = options.policy;
+  let admission: SyncBackpressureAdmission;
+  try {
+    admission = acquire(options.policy, options.label);
+  } catch (error) {
+    if (error instanceof SyncBackpressureBusyError) {
+      options.logInfo?.(options.ctx, error.message);
+    }
+    throw error;
   }
 
-  const queuedBefore = queue.length;
-  if (inflight >= limit) {
+  if (limit !== undefined && admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
-      `Sync backpressure queued ${options.label} (global inflight=${inflight}/${limit}, queued=${queuedBefore})`,
+      `Sync backpressure queued ${options.label} `
+        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
     );
   }
-  const release = await acquire(limit);
+  const release = await admission.release;
   try {
-    options.logInfo?.(
-      options.ctx,
-      `Sync backpressure running ${options.label} (global inflight=${inflight}/${limit}, queued=${queue.length})`,
-    );
+    if (limit !== undefined) {
+      options.logInfo?.(
+        options.ctx,
+        `Sync backpressure running ${options.label} `
+          + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
+      );
+    }
     return await work();
   } finally {
     release();
