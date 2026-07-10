@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -886,13 +886,15 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     try {
       const sparql = subGraphDeregistrationSparql(contextGraphId, subGraphName);
-      const storeUpdate = this.store.update;
-      if (typeof storeUpdate === 'function') {
-        await storeUpdate.call(this.store, sparql, {
+      const updated = await tryUpdateWithTouchedGraphs(
+        this.store,
+        sparql,
+        [metaGraph],
+        {
           source: 'agent.cg.removeSubGraph.registration',
-          touchedGraphs: [metaGraph],
-        });
-      } else {
+        },
+      );
+      if (!updated) {
         await this.store.query(sparql);
       }
     } catch {

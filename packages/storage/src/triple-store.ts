@@ -145,6 +145,23 @@ export interface TripleStore {
   close(): Promise<void>;
 }
 
+/**
+ * Run a server-side update whose affected named graphs are known by the caller.
+ * Returns `false` when the store does not support `update()` so feature code can
+ * apply its own fallback policy without duplicating method binding or hint wiring.
+ */
+export async function tryUpdateWithTouchedGraphs(
+  store: TripleStore,
+  sparql: string,
+  touchedGraphs: readonly string[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const update = store.update;
+  if (typeof update !== 'function') return false;
+  await update.call(store, sparql, { ...options, touchedGraphs });
+  return true;
+}
+
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
 
 // Backends that talk to a remote SPARQL endpoint over HTTP rather than
