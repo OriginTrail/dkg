@@ -227,8 +227,8 @@ import {
   getSyncBackpressureSnapshot,
   resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
-  resolveSyncGlobalMaxInflight,
-  resolveSyncGlobalQueueLimit,
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -610,6 +610,8 @@ type SharedMemorySyncContextGraphPlan = {
   eligibleContextGraphIds: string[];
 };
 
+type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
+
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
@@ -626,12 +628,12 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
   return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
 }
 
-function syncGlobalLimit(config: DKGAgentConfig): number | undefined {
-  return resolveSyncGlobalMaxInflight(config.syncGlobalMaxInflight, config.syncGlobalLimit);
-}
-
-function syncGlobalQueueLimit(config: DKGAgentConfig): number | undefined {
-  return resolveSyncGlobalQueueLimit(config.syncGlobalQueueLimit, syncGlobalLimit(config));
+function asSyncBackpressureBusyError(err: unknown): SyncBackpressureBusyError | undefined {
+  if (err instanceof SyncBackpressureBusyError) return err;
+  if (err instanceof SyncOnConnectPostSyncError && err.originalError instanceof SyncBackpressureBusyError) {
+    return err.originalError;
+  }
+  return undefined;
 }
 
 function emptyDurableSyncResult(): DurableSyncResult {
@@ -1457,11 +1459,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(syncGlobalLimit(this.config));
+                const syncPressure = getSyncBackpressureSnapshot(resolveSyncGlobalBackpressure(this.config));
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
-                  `syncGlobalLimit=${syncPressure.limit ?? 'unbounded'}`;
+                  `syncGlobalLimit=${syncPressure.limit ?? 'unbounded'} ` +
+                  `syncGlobalQueueLimit=${syncPressure.queueLimit ?? 'unbounded'}`;
                 this.log.warn(
                   attemptCtx,
                   `V10 StorageACK declined: code=${details.code} ` +
@@ -2774,7 +2777,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     probe: SyncReconcilerProbe,
-  ): Promise<SyncOnConnectOutcome | 'not-started'> {
+  ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
     let syncAccountingClearedBackoff = false;
@@ -2794,6 +2797,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       return outcome;
     } catch (err: unknown) {
+      const backpressureError = asSyncBackpressureBusyError(err);
+      if (backpressureError) {
+        this.log.info(
+          createOperationContext('sync'),
+          `Deferring sync from peer ${remotePeer.slice(-8)} due to local backpressure: ${backpressureError.message}`,
+        );
+        return 'deferred-backpressure';
+      }
       if (err instanceof SyncOnConnectPostSyncError) {
         if (err.backoffEligible) {
           this.recordSyncReconcilerFailure(remotePeer, probe);
@@ -3475,8 +3486,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const runSync = () => withGlobalSyncBackpressure(
       {
-        limit: syncGlobalLimit(this.config),
-        queueLimit: syncGlobalQueueLimit(this.config),
+        policy: resolveSyncGlobalBackpressure(this.config),
         ctx,
         label: `durable:${remotePeerId.slice(-8)}`,
         logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -3766,8 +3776,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           }
         : await withGlobalSyncBackpressure(
             {
-              limit: syncGlobalLimit(this.config),
-              queueLimit: syncGlobalQueueLimit(this.config),
+              policy: resolveSyncGlobalBackpressure(this.config),
               ctx,
               label: `shared-memory:${remotePeerId.slice(-8)}`,
               logInfo: (opCtx, message) => this.log.info(opCtx, message),
@@ -3853,6 +3862,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           }
         } catch (err) {
+          if (err instanceof SyncBackpressureBusyError) throw err;
           this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
           summary.failedPeers += 1;
           summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
@@ -3891,8 +3901,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     return withGlobalSyncBackpressure(
       {
-        limit: syncGlobalLimit(this.config),
-        queueLimit: syncGlobalQueueLimit(this.config),
+        policy: resolveSyncGlobalBackpressure(this.config),
         ctx,
         label: `swm-recovery:${remotePeerId.slice(-8)}`,
         logInfo: (opCtx, message) => this.log.info(opCtx, message),
