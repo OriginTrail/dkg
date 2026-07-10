@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Endpoint-stickiness (Mechanism B, #1340 retry residual + #1337 fail-close)
- * ACCEPTANCE suite (AC-1..AC-29). Split verbatim out of
- * `rpc-failover-client.unit.test.ts` (#1548 item 4) — that file's load-bearing
- * focus is the WRITE transport + `resolveCapMs` matrix; this file owns the
- * stickiness state-machine acceptance criteria, which had grown to ~580 lines.
+ * ACCEPTANCE suite (AC-1..AC-29). Split out of `rpc-failover-client.unit.test.ts`
+ * — that file's load-bearing focus is the WRITE transport + `resolveCapMs` matrix;
+ * this file owns the stickiness state-machine acceptance criteria.
  *
  * Prefer the last-good backend after a failover; re-probe the configured primary
  * at most once per TTL; stay fully transparent on `skipPreferred` tip reads; clear
@@ -12,8 +11,8 @@
  * pre-Mechanism-B index-0 behavior — the RED baseline these assertions are written
  * against (AC-4 pins that equivalence). Deterministic: injected `now` (no fake
  * timers) + bare recorder doubles, so we assert TRY-ORDER via call counts, not
- * wall-clock. The shared doubles/helpers below are duplicated from the sibling
- * file (each unit test file stays self-contained).
+ * wall-clock. The shared transport-double helpers (`recorder`, `makeClient`,
+ * `retryable429`, `NEVER_SIGN`) come from `./rpc-failover-test-helpers.js`.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { RpcFailoverClient, type SignPopulatedFn } from '../src/rpc-failover-client.js';

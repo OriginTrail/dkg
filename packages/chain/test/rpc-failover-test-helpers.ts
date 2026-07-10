@@ -4,9 +4,9 @@
  * `rpc-failover-client.unit.test.ts` (write transport + resolveCapMs matrix) and
  * `endpoint-stickiness.acceptance.unit.test.ts` (Mechanism-B AC scenarios). Both
  * build the module over the same bare-double transport contract, so the
- * construction + call-recording helpers live here as one source of truth (#1548
- * review). Scenario-specific doubles — `readSeq`, signer/contract builders, and
- * per-suite URL sets — stay local to each suite.
+ * construction + call-recording helpers live here as one source of truth.
+ * Scenario-specific doubles — `readSeq`, signer/contract builders, and per-suite
+ * URL sets — stay local to each suite.
  */
 import {
   RpcFailoverClient,
@@ -30,7 +30,8 @@ export const NEVER_SIGN: SignPopulatedFn = async () => {
   throw new Error('signPopulated must not be reached by this path');
 };
 
-/** Construct the module under test over bare doubles (PLAN §0 D1 thunks).
+/** Construct the module under test over bare provider/signer doubles (the two
+ *  injected capabilities: a `getEndpoints` thunk + a `signPopulated` callback).
  *  `stickiness` (Mechanism B) is optional — omitted, the client uses production
  *  defaults (stickiness on unless `DKG_DISABLE_RPC_STICKINESS=1`, `Date.now`
  *  clock, 30s TTL); the stickiness suite injects `{ enabled, now, ttlMs }`. */
