@@ -52,15 +52,15 @@ export interface OxigraphServerIo {
    * Verify the spawned child owns the listen socket (not merely that
    * something on the port returns HTTP 200). Tests inject `async () => true`.
    */
-  childOwnsListenPort?: (
+  childOwnsListenPort: (
     child: ChildProcess,
     port: number,
     host: string,
   ) => Promise<boolean>;
   /** Best-effort cgroup OOM snapshot (dir + oom_kill) for a live pid. Injectable for tests. */
-  readCgroupOomSnapshot?: (pid: number) => CgroupOomSnapshot | null;
+  readCgroupOomSnapshot: (pid: number) => CgroupOomSnapshot | null;
   /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
-  readCgroupOomKill?: (dir: string) => number | null;
+  readCgroupOomKill: (dir: string) => number | null;
 }
 
 export interface StartOxigraphServerOptions {
@@ -128,13 +128,13 @@ function normalizePositiveInteger(value: number | undefined): number | undefined
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
+  const ioOverrides = opts.io ?? {};
   const io: OxigraphServerIo = {
-    spawn,
-    fetch: globalThis.fetch,
-    childOwnsListenPort,
-    readCgroupOomSnapshot: (pid) => readCgroupOomSnapshot(pid),
-    readCgroupOomKill: (dir) => readCgroupOomKill(dir),
-    ...opts.io,
+    spawn: ioOverrides.spawn ?? spawn,
+    fetch: ioOverrides.fetch ?? globalThis.fetch,
+    childOwnsListenPort: ioOverrides.childOwnsListenPort ?? childOwnsListenPort,
+    readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
+    readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
@@ -179,7 +179,7 @@ export async function startOxigraphServer(
     // snapshot with no shared mutable lifecycle state. Best-effort; null
     // off-Linux / uncapped.
     const oomSnapshot: CgroupOomSnapshot | null =
-      typeof c.pid === 'number' ? (io.readCgroupOomSnapshot?.(c.pid) ?? null) : null;
+      typeof c.pid === 'number' ? io.readCgroupOomSnapshot(c.pid) : null;
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
     // startup/revive failure path instead (the binary couldn't be executed).
@@ -213,15 +213,13 @@ export async function startOxigraphServer(
       // restoring `ready`.
       ready = false;
       markStoreDown();
-      // Best-effort OOM classification: re-read the captured cgroup's
-      // memory.events (the dir persists after the pid is gone). An increase in
-      // `oom_kill` since spawn means the kernel cgroup-OOM-killed oxigraph —
-      // typically the operator's MemoryMax cap engaging (or a host OOM) rather
-      // than a crash. Surfaced in the restart log so operators don't have to
-      // SSH in and correlate journald to tell the two apart.
+      // Best-effort OOM classification: `oom_kill` is cgroup-scoped, not
+      // per-PID, so use an increment only as supporting evidence for a
+      // SIGKILL-compatible child death. This catches MemoryMax/host OOM kills
+      // without labelling unrelated non-SIGKILL exits as OOM.
       let oomNote = '';
-      if (oomSnapshot) {
-        const oomKillNow = io.readCgroupOomKill?.(oomSnapshot.dir) ?? null;
+      if (oomSnapshot && signal === 'SIGKILL') {
+        const oomKillNow = io.readCgroupOomKill(oomSnapshot.dir);
         if (typeof oomKillNow === 'number' && oomKillNow > oomSnapshot.oomKill) {
           oomNote = ', OOM-killed by cgroup memory cap (or host OOM)';
         }
@@ -253,11 +251,7 @@ export async function startOxigraphServer(
         signal: AbortSignal.timeout(readyIntervalMs + 1_000),
       });
       if (!res.ok) return false;
-      const ownsPort = await (io.childOwnsListenPort ?? childOwnsListenPort)(
-        c,
-        port,
-        host,
-      );
+      const ownsPort = await io.childOwnsListenPort(c, port, host);
       return ownsPort && childAlive();
     } catch {
       return false;

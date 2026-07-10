@@ -240,18 +240,27 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
   it('labels an OOM-kill when the cgroup oom_kill count increments across the exit', async () => {
     const port = await freePort();
     const logs: string[] = [];
+    const snapshotPids: number[] = [];
+    const oomDir = '/sys/fs/cgroup/oxi';
     let oomKillAtExit = 5;
     const handle = await startOxigraphServer(
       startOpts(port, {
         log: (m: string) => logs.push(m),
         io: {
-          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
-          readCgroupOomKill: () => oomKillAtExit,
+          readCgroupOomSnapshot: (pid: number) => {
+            snapshotPids.push(pid);
+            return { dir: oomDir, oomKill: 5 };
+          },
+          readCgroupOomKill: (dir: string) => {
+            expect(dir).toBe(oomDir);
+            return oomKillAtExit;
+          },
         },
       }),
     );
     try {
       const pid = await fetchPid(port);
+      expect(snapshotPids[0]).toBe(pid);
       oomKillAtExit = 6; // kernel cgroup-OOM-killed it: oom_kill 5 -> 6
       process.kill(pid, 'SIGKILL');
       const labelled = await waitForLog(
@@ -259,6 +268,34 @@ describe('startOxigraphServer OOM classification in the restart log', () => {
         /server exited unexpectedly.*OOM-killed by cgroup memory cap/,
       );
       expect(labelled, `no OOM-labelled restart log; got: ${logs.join(' | ')}`).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('omits the OOM note when the cgroup counter increments but the child was not SIGKILLed', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let exitReads = 0;
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
+          readCgroupOomKill: () => {
+            exitReads += 1;
+            return 6; // would look incremented, but the child did not die by SIGKILL
+          },
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      process.kill(pid, 'SIGTERM');
+      const logged = await waitForLog(logs, /server exited unexpectedly/);
+      expect(logged, `no restart log; got: ${logs.join(' | ')}`).toBe(true);
+      expect(exitReads).toBe(0);
+      expect(logs.some((l) => /OOM-killed/.test(l))).toBe(false);
     } finally {
       await handle.stop();
     }
