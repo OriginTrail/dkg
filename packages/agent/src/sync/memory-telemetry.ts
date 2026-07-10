@@ -16,6 +16,14 @@ export type SyncMemoryBoundary =
   | 'responder_snapshot_before_load'
   | 'responder_snapshot_after_load';
 
+export type SyncRequesterPhaseOutcome = 'completed' | 'timed_out' | 'error';
+
+export interface RequesterPhaseTelemetry {
+  recordPage(): void;
+  recordQuads(quads: readonly Quad[]): void;
+  finish(outcome: SyncRequesterPhaseOutcome, retainedQuads: number): void;
+}
+
 /**
  * Record process memory at a small, fixed set of sync lifecycle boundaries.
  * Both attributes are closed enums: never add peer, context-graph, session, or
@@ -37,10 +45,56 @@ export function recordSyncMemoryCheckpoint(
   metrics.processArrayBuffersBytes.record(usage.arrayBuffers, attributes);
 }
 
-// Approximate retained V8 heap: four string fields plus the row object and
-// array slot. V8 layout varies by release, so this is an admission estimate,
-// not an accounting claim. Counting UTF-16 code units is deliberately
-// conservative for the common ASCII-heavy RDF representation.
+export function requesterSyncMemoryPhase(
+  includeSharedMemory: boolean,
+  phase: 'catalog' | 'snapshot' | 'meta' | 'data',
+): SyncMemoryPhase {
+  if (phase === 'snapshot') return 'public_snapshot';
+  if (includeSharedMemory) return 'shared_memory';
+  return phase === 'meta' ? 'durable_meta' : 'durable_data';
+}
+
+/** Keeps requester instrumentation out of the pagination/session state machine. */
+export function createRequesterPhaseTelemetry(params: {
+  includeSharedMemory: boolean;
+  phase: 'catalog' | 'snapshot' | 'meta' | 'data';
+}): RequesterPhaseTelemetry {
+  const telemetryPhase = requesterSyncMemoryPhase(params.includeSharedMemory, params.phase);
+  const startedAt = Date.now();
+  let pageCount = 0;
+  let accumulatedBytesEstimate = 0;
+  let finished = false;
+  recordSyncMemoryCheckpoint(telemetryPhase, 'requester_phase_start');
+
+  return {
+    recordPage() {
+      pageCount += 1;
+    },
+    recordQuads(quads) {
+      for (const quad of quads) accumulatedBytesEstimate += estimateQuadHeapBytes(quad);
+    },
+    finish(outcome, retainedQuads) {
+      if (finished) return;
+      finished = true;
+      const attributes = { phase: telemetryPhase, outcome };
+      const metrics = getMetrics();
+      metrics.syncRequesterAccumulatedQuads.record(retainedQuads, attributes);
+      metrics.syncRequesterAccumulatedBytes.record(accumulatedBytesEstimate, attributes);
+      metrics.syncRequesterPageCount.record(pageCount, attributes);
+      metrics.syncRequesterPhaseDurationMs.record(Date.now() - startedAt, attributes);
+      recordSyncMemoryCheckpoint(
+        telemetryPhase,
+        outcome === 'error' ? 'requester_phase_error' : 'requester_phase_completed',
+      );
+    },
+  };
+}
+
+// Approximate retained V8 heap: four flat strings plus the row object and array
+// slot. Production RDF terms are overwhelmingly Latin-1/ASCII, which V8 keeps
+// as one-byte strings. The fixed overhead remains deliberately conservative;
+// charging two bytes per code unit made the hard cap fire ~1.7x too early for
+// measured DKG rows and rendered the documented row cap unreachable.
 const ROW_OBJECT_OVERHEAD_BYTES = 160;
 
 export function estimateStringRowHeapBytes(
@@ -49,7 +103,7 @@ export function estimateStringRowHeapBytes(
   object: string,
   graph: string,
 ): number {
-  return ROW_OBJECT_OVERHEAD_BYTES + 2 * (
+  return ROW_OBJECT_OVERHEAD_BYTES + (
     subject.length + predicate.length + object.length + graph.length
   );
 }

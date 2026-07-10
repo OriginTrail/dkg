@@ -24,6 +24,7 @@ import {
   type Attributes,
   type SpanContext,
   type Counter,
+  type Gauge,
   type Histogram,
   type UpDownCounter,
 } from '@opentelemetry/api';
@@ -119,20 +120,36 @@ export function activeSpanContext(): SpanContext | undefined {
 const OP_DURATION_BUCKETS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000];
 /** Duration buckets (ms) for chain RPC histograms (faster floor). */
 const RPC_DURATION_BUCKETS = [25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 120000];
+/** Retained/process bytes from 1 MiB through 4 GiB. */
+const BYTE_BUCKETS = [
+  1024 * 1024,
+  4 * 1024 * 1024,
+  16 * 1024 * 1024,
+  32 * 1024 * 1024,
+  64 * 1024 * 1024,
+  128 * 1024 * 1024,
+  256 * 1024 * 1024,
+  512 * 1024 * 1024,
+  1024 * 1024 * 1024,
+  2 * 1024 * 1024 * 1024,
+  4 * 1024 * 1024 * 1024,
+];
+const QUAD_COUNT_BUCKETS = [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000];
+const PAGE_COUNT_BUCKETS = [1, 2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000];
 
 export interface DkgMetrics {
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processHeapUsedBytes: Histogram;
+  processHeapUsedBytes: Gauge;
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processHeapTotalBytes: Histogram;
+  processHeapTotalBytes: Gauge;
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processHeapLimitBytes: Histogram;
+  processHeapLimitBytes: Gauge;
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processRssBytes: Histogram;
+  processRssBytes: Gauge;
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processExternalBytes: Histogram;
+  processExternalBytes: Gauge;
   /** bytes; boundary and phase are bounded sync lifecycle enums */
-  processArrayBuffersBytes: Histogram;
+  processArrayBuffersBytes: Gauge;
   /** outcome={tentative|confirmed|failed|error}, source={direct|swm}, chain_id
    *  (`error` = the publish flow threw before producing a status). */
   publishTotal: Counter;
@@ -172,8 +189,6 @@ export interface DkgMetrics {
   syncResponderSnapshotEvictionsTotal: Counter;
   /** ms; phase, outcome={completed|error} */
   syncResponderSnapshotLoadDurationMs: Histogram;
-  /** rows copied by avoidable whole-snapshot copies; phase is a bounded enum */
-  syncResponderSnapshotCopyRowsTotal: Counter;
   /** quads retained at requester phase completion; phase and outcome are bounded enums */
   syncRequesterAccumulatedQuads: Histogram;
   /** estimated bytes retained at requester phase completion; phase and outcome are bounded enums */
@@ -211,23 +226,23 @@ export interface DkgMetrics {
 function buildMetrics(): DkgMetrics {
   const meter = metrics.getMeter(METER_NAME);
   return {
-    processHeapUsedBytes: meter.createHistogram('process.heap_used_bytes', {
-      unit: 'By', description: 'V8 heap bytes currently used at bounded sync lifecycle checkpoints',
+    processHeapUsedBytes: meter.createGauge('process.heap_used_bytes', {
+      unit: 'By', description: 'Current V8 heap bytes sampled at bounded sync lifecycle checkpoints',
     }),
-    processHeapTotalBytes: meter.createHistogram('process.heap_total_bytes', {
-      unit: 'By', description: 'V8 heap bytes currently allocated at bounded sync lifecycle checkpoints',
+    processHeapTotalBytes: meter.createGauge('process.heap_total_bytes', {
+      unit: 'By', description: 'Current V8 allocated heap bytes sampled at bounded sync lifecycle checkpoints',
     }),
-    processHeapLimitBytes: meter.createHistogram('process.heap_limit_bytes', {
-      unit: 'By', description: 'V8 heap size limit at bounded sync lifecycle checkpoints',
+    processHeapLimitBytes: meter.createGauge('process.heap_limit_bytes', {
+      unit: 'By', description: 'Current V8 heap size limit sampled at bounded sync lifecycle checkpoints',
     }),
-    processRssBytes: meter.createHistogram('process.rss_bytes', {
-      unit: 'By', description: 'Process resident set size at bounded sync lifecycle checkpoints',
+    processRssBytes: meter.createGauge('process.rss_bytes', {
+      unit: 'By', description: 'Current process resident set size sampled at bounded sync lifecycle checkpoints',
     }),
-    processExternalBytes: meter.createHistogram('process.external_bytes', {
-      unit: 'By', description: 'V8 external memory at bounded sync lifecycle checkpoints',
+    processExternalBytes: meter.createGauge('process.external_bytes', {
+      unit: 'By', description: 'Current V8 external memory sampled at bounded sync lifecycle checkpoints',
     }),
-    processArrayBuffersBytes: meter.createHistogram('process.array_buffers_bytes', {
-      unit: 'By', description: 'V8 ArrayBuffer memory at bounded sync lifecycle checkpoints',
+    processArrayBuffersBytes: meter.createGauge('process.array_buffers_bytes', {
+      unit: 'By', description: 'Current V8 ArrayBuffer memory sampled at bounded sync lifecycle checkpoints',
     }),
     publishTotal: meter.createCounter('dkg.publish.total', { description: 'Publish operations by outcome/source' }),
     publishDuration: meter.createHistogram('dkg.publish.duration', {
@@ -279,17 +294,17 @@ function buildMetrics(): DkgMetrics {
       description: 'Sync responder full-snapshot materialization duration',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
-    syncResponderSnapshotCopyRowsTotal: meter.createCounter('dkg.sync.responder.snapshot_copy_rows_total', {
-      description: 'Rows copied by avoidable whole-snapshot copies while serving sync pages',
-    }),
     syncRequesterAccumulatedQuads: meter.createHistogram('dkg.sync.requester.accumulated_quads', {
       description: 'Requester quads retained at sync phase completion',
+      advice: { explicitBucketBoundaries: QUAD_COUNT_BUCKETS },
     }),
     syncRequesterAccumulatedBytes: meter.createHistogram('dkg.sync.requester.accumulated_bytes', {
       unit: 'By', description: 'Estimated requester quad bytes retained at sync phase completion',
+      advice: { explicitBucketBoundaries: BYTE_BUCKETS },
     }),
     syncRequesterPageCount: meter.createHistogram('dkg.sync.requester.page_count', {
       description: 'Pages consumed by a requester sync phase',
+      advice: { explicitBucketBoundaries: PAGE_COUNT_BUCKETS },
     }),
     syncRequesterPhaseDurationMs: meter.createHistogram('dkg.sync.requester.phase_duration_ms', {
       unit: 'ms',

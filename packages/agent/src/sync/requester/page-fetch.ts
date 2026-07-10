@@ -1,4 +1,4 @@
-import { getMetrics, type OperationContext } from '@origintrail-official/dkg-core';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { sendSyncRequest } from '../../p2p/sync-transport.js';
 import { markSyncPeerResponded } from '../error-tags.js';
@@ -10,9 +10,7 @@ import {
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
 } from '../durable-session.js';
 import {
-  estimateQuadHeapBytes,
-  recordSyncMemoryCheckpoint,
-  type SyncMemoryPhase,
+  createRequesterPhaseTelemetry,
 } from '../memory-telemetry.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
@@ -201,32 +199,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   } = params;
 
   const allQuads: Quad[] = [];
-  const telemetryPhase: SyncMemoryPhase = phase === 'snapshot'
-    ? 'public_snapshot'
-    : includeSharedMemory
-      ? 'shared_memory'
-      : phase === 'meta'
-        ? 'durable_meta'
-        : 'durable_data';
-  const phaseStartedAt = Date.now();
-  let pageCount = 0;
-  let accumulatedBytesEstimate = 0;
-  let phaseMetricsRecorded = false;
-  const recordPhaseMetrics = (outcome: 'completed' | 'timed_out' | 'error'): void => {
-    if (phaseMetricsRecorded) return;
-    phaseMetricsRecorded = true;
-    const attributes = { phase: telemetryPhase, outcome };
-    const metrics = getMetrics();
-    metrics.syncRequesterAccumulatedQuads.record(allQuads.length, attributes);
-    metrics.syncRequesterAccumulatedBytes.record(accumulatedBytesEstimate, attributes);
-    metrics.syncRequesterPageCount.record(pageCount, attributes);
-    metrics.syncRequesterPhaseDurationMs.record(Date.now() - phaseStartedAt, attributes);
-    recordSyncMemoryCheckpoint(
-      telemetryPhase,
-      outcome === 'error' ? 'requester_phase_error' : 'requester_phase_completed',
-    );
-  };
-  recordSyncMemoryCheckpoint(telemetryPhase, 'requester_phase_start');
+  const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   throwIfAborted(signal);
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
@@ -301,7 +274,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       });
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
-      pageCount += 1;
+      phaseTelemetry.recordPage();
 
       let parsed: { quads: Quad[]; totalQuads: number };
       let decodeDurationMs = 0;
@@ -325,7 +298,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         parsed = await parseAndFilter(nquadsText, graphUri, contextGraphId);
         throwIfAborted(signal);
         parseDurationMs = Date.now() - parseStartedAt;
-        for (const quad of parsed.quads) accumulatedBytesEstimate += estimateQuadHeapBytes(quad);
+        phaseTelemetry.recordQuads(parsed.quads);
       } catch (error) {
         markSyncPeerResponded(error);
         throw error;
@@ -395,7 +368,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         rememberUnfinishedSyncResponderSession(checkpointKey, responderSession);
       }
     }
-    recordPhaseMetrics('error');
+    phaseTelemetry.finish('error', allQuads.length);
     throw err;
   }
 
@@ -420,7 +393,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     );
   }
 
-  recordPhaseMetrics(timedOut ? 'timed_out' : 'completed');
+  phaseTelemetry.finish(timedOut ? 'timed_out' : 'completed', allQuads.length);
 
   return {
     quads: allQuads,

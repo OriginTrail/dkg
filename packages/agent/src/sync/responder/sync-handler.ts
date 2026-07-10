@@ -95,10 +95,59 @@ const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
 export const SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT = 64;
-export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT = 500_000;
-export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT = 256 * 1024 * 1024;
 export const SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT = 250_000;
 export const SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT = 128 * 1024 * 1024;
+// Keep enough retained capacity for every admitted responder computation. The
+// budget pins active page sessions, so this avoids cross-peer eviction/thrash
+// while preserving a finite process-wide ceiling.
+export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT =
+  SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT * SYNC_RESPONDER_GLOBAL_CONCURRENCY;
+export const SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT =
+  SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT * SYNC_RESPONDER_GLOBAL_CONCURRENCY;
+
+const SNAPSHOT_BUDGET_ENV = {
+  maxRows: 'DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT',
+  maxBytesEstimate: 'DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT',
+  maxSnapshotRows: 'DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT',
+  maxSnapshotBytesEstimate: 'DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT',
+} as const;
+
+function positiveIntegerEnv(
+  env: Readonly<Record<string, string | undefined>>,
+  name: string,
+  fallback: number,
+): number {
+  const parsed = Number(env[name]?.trim());
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Production snapshot limits, with explicit operator overrides in rows/bytes. */
+export function resolveSyncResponderSnapshotBudgetOptions(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SyncResponderSnapshotBudgetOptions {
+  return {
+    maxRows: positiveIntegerEnv(
+      env,
+      SNAPSHOT_BUDGET_ENV.maxRows,
+      SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+    ),
+    maxBytesEstimate: positiveIntegerEnv(
+      env,
+      SNAPSHOT_BUDGET_ENV.maxBytesEstimate,
+      SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    ),
+    maxSnapshotRows: positiveIntegerEnv(
+      env,
+      SNAPSHOT_BUDGET_ENV.maxSnapshotRows,
+      SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
+    ),
+    maxSnapshotBytesEstimate: positiveIntegerEnv(
+      env,
+      SNAPSHOT_BUDGET_ENV.maxSnapshotBytesEstimate,
+      SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+    ),
+  };
+}
 
 class SyncResponderBusyError extends Error {
   constructor(message: string) {

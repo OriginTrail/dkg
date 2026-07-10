@@ -19,8 +19,16 @@ interface SnapshotBudgetEntry {
   phase: SyncMemoryPhase;
   rows: number;
   bytesEstimate: number;
+  pinned: boolean;
   onEvict: () => void;
 }
+
+type SnapshotBudgetAdmission = Omit<SnapshotBudgetEntry, 'id' | 'pinned'> & {
+  id: symbol;
+  key: string;
+  /** Existing entry replaced atomically after the new entry passes admission. */
+  replaceId?: symbol;
+};
 
 export class SyncRowSnapshotBudgetError extends Error {
   readonly key: string;
@@ -50,8 +58,11 @@ export class SyncRowSnapshotBudgetError extends Error {
 }
 
 export interface SyncResponderSnapshotBudget {
-  admit(params: Omit<SnapshotBudgetEntry, 'id'> & { id: symbol; key: string }): void;
+  admit(params: SnapshotBudgetAdmission): void;
+  /** Marks an entry active and moves it to the protected MRU end. */
   touch(id: symbol): void;
+  /** Marks an entry completed so future admission may evict it. */
+  release(id: symbol): void;
   remove(id: symbol, reason?: 'expired' | 'released' | 'replaced'): void;
   stats(): SyncResponderSnapshotBudgetStats;
 }
@@ -105,7 +116,7 @@ export function createSyncResponderSnapshotBudget(
   };
 
   const reject = (
-    params: Omit<SnapshotBudgetEntry, 'id'> & { id: symbol; key: string },
+    params: SnapshotBudgetAdmission,
     reason: SyncRowSnapshotBudgetError['reason'],
     limit: number,
   ): never => {
@@ -131,21 +142,34 @@ export function createSyncResponderSnapshotBudget(
         reject(params, 'snapshot_bytes', limits.maxSnapshotBytesEstimate);
       }
 
+      const replaced = params.replaceId ? entries.get(params.replaceId) : undefined;
       while (
-        entries.size > 0 &&
-        (rows + params.rows > limits.maxRows ||
-          bytesEstimate + params.bytesEstimate > limits.maxBytesEstimate)
+        rows - (replaced && entries.has(replaced.id) ? replaced.rows : 0) + params.rows > limits.maxRows ||
+        bytesEstimate - (replaced && entries.has(replaced.id) ? replaced.bytesEstimate : 0) +
+          params.bytesEstimate > limits.maxBytesEstimate
       ) {
-        const oldestId = entries.keys().next().value as symbol | undefined;
-        if (!oldestId) break;
-        removeEntry(oldestId, 'lru', true);
+        const evictable = [...entries.entries()].find(([id, entry]) =>
+          id !== params.replaceId && !entry.pinned
+        );
+        if (!evictable) break;
+        removeEntry(evictable[0], 'lru', true);
       }
 
-      if (rows + params.rows > limits.maxRows) {
+      const currentRowsWithoutReplacement = rows - (replaced && entries.has(replaced.id) ? replaced.rows : 0);
+      const currentBytesWithoutReplacement = bytesEstimate - (
+        replaced && entries.has(replaced.id) ? replaced.bytesEstimate : 0
+      );
+      if (currentRowsWithoutReplacement + params.rows > limits.maxRows) {
         reject(params, 'global_rows', limits.maxRows);
       }
-      if (bytesEstimate + params.bytesEstimate > limits.maxBytesEstimate) {
+      if (currentBytesWithoutReplacement + params.bytesEstimate > limits.maxBytesEstimate) {
         reject(params, 'global_bytes', limits.maxBytesEstimate);
+      }
+
+      // The replacement is removed only after every reject path above has
+      // passed, so a failed refresh leaves the previously-good snapshot live.
+      if (replaced && entries.has(replaced.id)) {
+        removeEntry(replaced.id, 'replaced', false);
       }
 
       const entry: SnapshotBudgetEntry = {
@@ -153,6 +177,7 @@ export function createSyncResponderSnapshotBudget(
         phase: params.phase,
         rows: params.rows,
         bytesEstimate: params.bytesEstimate,
+        pinned: true,
         onEvict: params.onEvict,
       };
       entries.set(entry.id, entry);
@@ -164,7 +189,14 @@ export function createSyncResponderSnapshotBudget(
       const entry = entries.get(id);
       if (!entry) return;
       entries.delete(id);
-      entries.set(id, entry);
+      entries.set(id, { ...entry, pinned: true });
+    },
+    release(id) {
+      const entry = entries.get(id);
+      if (!entry) return;
+      // Preserve last-use order; admission scans past pinned entries and takes
+      // the oldest released snapshot first.
+      entries.set(id, { ...entry, pinned: false });
     },
     remove(id, reason = 'released') {
       removeEntry(id, reason, false);

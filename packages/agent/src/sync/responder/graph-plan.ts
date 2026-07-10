@@ -2,21 +2,21 @@ import {
   DKG_ONTOLOGY,
   MemoryLayer,
   assertSafeIri,
-  getMetrics,
   sparqlString,
   validateSubGraphName,
   contextGraphCatalogUri,
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
-import {
-  estimateStringRowHeapBytes,
-  recordSyncMemoryCheckpoint,
-  type SyncMemoryPhase,
-} from '../memory-telemetry.js';
-import type { SyncResponderSnapshotBudget } from './snapshot-budget.js';
+import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
+import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 
-export type SyncRow = { s: string; p: string; o: string; g: string };
+export {
+  createResponderSyncRowListMemo,
+  SyncRowSnapshotLimitError,
+  type SyncRow,
+  type SyncRowListMemo,
+} from './snapshot-cache.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const DKG_SUB_GRAPH = `${DKG}SubGraph`;
@@ -43,46 +43,6 @@ export interface GraphListMemo {
 
 export interface SubGraphNameMemo {
   get(contextGraphId: string, options?: { refresh?: boolean; signal?: AbortSignal }): Promise<readonly string[]>;
-}
-
-export interface SyncRowListMemo {
-  get(
-    key: string,
-    loadRows: () => Promise<readonly SyncRow[]>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
-  ): Promise<readonly SyncRow[] | null>;
-  release(key: string, options?: { graceMs?: number }): void;
-}
-
-interface SyncRowListMemoOptions {
-  phase: SyncMemoryPhase;
-  budget?: SyncResponderSnapshotBudget;
-}
-
-export class SyncRowSnapshotLimitError extends Error {
-  readonly key: string;
-  readonly maxEntries: number;
-  readonly cachedEntries: number;
-  readonly inflightEntries: number;
-  readonly activeEntries: number;
-
-  constructor(params: {
-    key: string;
-    maxEntries: number;
-    cachedEntries: number;
-    inflightEntries: number;
-  }) {
-    const activeEntries = params.cachedEntries + params.inflightEntries;
-    super(
-      `Too many active sync responder session snapshots (key=${params.key}, active=${activeEntries}, max=${params.maxEntries})`,
-    );
-    this.name = 'SyncRowSnapshotLimitError';
-    this.key = params.key;
-    this.maxEntries = params.maxEntries;
-    this.cachedEntries = params.cachedEntries;
-    this.inflightEntries = params.inflightEntries;
-    this.activeEntries = activeEntries;
-  }
 }
 
 interface RowListCache {
@@ -122,203 +82,6 @@ export function createResponderGraphListMemo(
       const graphs = await load;
       throwIfAborted(options?.signal);
       return [...graphs];
-    },
-  };
-}
-
-export function createResponderSyncRowListMemo(
-  ttlMs = 120_000,
-  maxEntries = 32,
-  memoOptions: SyncRowListMemoOptions = { phase: 'durable_data' },
-): SyncRowListMemo {
-  const cached = new Map<string, {
-    value: readonly SyncRow[];
-    cachedAt: number;
-    cleanupTimer: ReturnType<typeof setTimeout>;
-    budgetEntryId?: symbol;
-  }>();
-  const expired = new Map<string, ReturnType<typeof setTimeout>>();
-  const inflight = new Map<string, Promise<readonly SyncRow[]>>();
-
-  const deleteCached = (key: string, reason: 'expired' | 'released' | 'replaced' = 'released') => {
-    const existing = cached.get(key);
-    if (existing) clearTimeout(existing.cleanupTimer);
-    cached.delete(key);
-    if (existing?.budgetEntryId) memoOptions.budget?.remove(existing.budgetEntryId, reason);
-  };
-
-  const deleteExpired = (key: string) => {
-    const timer = expired.get(key);
-    if (timer) clearTimeout(timer);
-    expired.delete(key);
-  };
-
-  const rememberExpired = (key: string) => {
-    deleteExpired(key);
-    const timer = setTimeout(() => {
-      expired.delete(key);
-    }, ttlMs);
-    (timer as { unref?: () => void }).unref?.();
-    expired.set(key, timer);
-  };
-
-  const markExpired = (key: string) => {
-    deleteCached(key, 'expired');
-    rememberExpired(key);
-  };
-
-  const pruneExpired = (now = Date.now()) => {
-    for (const [key, entry] of cached) {
-      if (now - entry.cachedAt >= ttlMs) markExpired(key);
-    }
-  };
-
-  const scheduleCleanup = (key: string, cachedAt: number) => {
-    const timer = setTimeout(() => {
-      const existing = cached.get(key);
-      if (existing?.cachedAt === cachedAt) markExpired(key);
-    }, ttlMs);
-    (timer as { unref?: () => void }).unref?.();
-    return timer;
-  };
-
-  const storeCached = (key: string, value: readonly SyncRow[]) => {
-    const now = Date.now();
-    pruneExpired(now);
-    deleteExpired(key);
-    if (value.length === 0) return;
-    const replacingExisting = cached.has(key);
-    if (!replacingExisting && cached.size >= maxEntries) {
-      throw new SyncRowSnapshotLimitError({
-        key,
-        maxEntries,
-        cachedEntries: cached.size,
-        inflightEntries: inflight.size,
-      });
-    }
-    deleteCached(key, 'replaced');
-    const budgetEntryId = memoOptions.budget ? Symbol(key) : undefined;
-    if (budgetEntryId) {
-      let bytesEstimate = 0;
-      for (const row of value) {
-        bytesEstimate += estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
-      }
-      try {
-        memoOptions.budget!.admit({
-          id: budgetEntryId,
-          key,
-          phase: memoOptions.phase,
-          rows: value.length,
-          bytesEstimate,
-          onEvict: () => {
-            const existing = cached.get(key);
-            if (existing?.budgetEntryId !== budgetEntryId) return;
-            clearTimeout(existing.cleanupTimer);
-            cached.delete(key);
-            rememberExpired(key);
-          },
-        });
-      } catch (error) {
-        rememberExpired(key);
-        throw error;
-      }
-    }
-    cached.set(key, {
-      value,
-      cachedAt: now,
-      cleanupTimer: scheduleCleanup(key, now),
-      budgetEntryId,
-    });
-  };
-
-  return {
-    async get(key, loadRows, options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal }) {
-      throwIfAborted(options?.signal);
-      const now = Date.now();
-      pruneExpired(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      if (expired.has(key)) {
-        if (options?.refresh) {
-          deleteExpired(key);
-        } else {
-          throw new Error('Durable data sync session snapshot expired before page completion');
-        }
-      }
-
-      const existing = cached.get(key);
-      if (!options?.refresh && existing && now - existing.cachedAt < ttlMs) {
-        const refreshed = {
-          value: existing.value,
-          cachedAt: now,
-          cleanupTimer: scheduleCleanup(key, now),
-          budgetEntryId: existing.budgetEntryId,
-        };
-        clearTimeout(existing.cleanupTimer);
-        cached.delete(key);
-        cached.set(key, refreshed);
-        if (existing.budgetEntryId) memoOptions.budget?.touch(existing.budgetEntryId);
-        return existing.value;
-      }
-      if (options?.requireExisting) return null;
-      if (!cached.has(key) && cached.size + inflight.size >= maxEntries) {
-        throw new SyncRowSnapshotLimitError({
-          key,
-          maxEntries,
-          cachedEntries: cached.size,
-          inflightEntries: inflight.size,
-        });
-      }
-
-      const loadStartedAt = Date.now();
-      let loadOutcome: 'completed' | 'error' = 'completed';
-      recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_before_load');
-      const load = loadRows()
-        .then((rows) => {
-          // The owner's snapshot load (`readRowsAcrossGraphs` et al.) is NOT
-          // abort-aware — it carries no signal, so a settled `rows` here is the
-          // COMPLETE snapshot regardless of whether the owner's stream aborted
-          // mid-wait. Cache it unconditionally so a later same-session request
-          // (which coalesces on this `key`) reuses it instead of re-querying the
-          // store. The owner's own abort still surfaces at the `throwIfAborted`
-          // below, after `await load`, so the aborted request still rejects; it
-          // just no longer discards the snapshot it already paid to build.
-          storeCached(key, rows);
-          return rows;
-        })
-        .catch((error) => {
-          loadOutcome = 'error';
-          throw error;
-        })
-        .finally(() => {
-          getMetrics().syncResponderSnapshotLoadDurationMs.record(
-            Date.now() - loadStartedAt,
-            { phase: memoOptions.phase, outcome: loadOutcome },
-          );
-          recordSyncMemoryCheckpoint(memoOptions.phase, 'responder_snapshot_after_load');
-          if (inflight.get(key) === load) inflight.delete(key);
-        });
-      inflight.set(key, load);
-      const rows = await load;
-      throwIfAborted(options?.signal);
-      return rows;
-    },
-    release(key, options?: { graceMs?: number }) {
-      const existing = cached.get(key);
-      if (!existing) return;
-      const graceMs = Math.max(0, Math.min(options?.graceMs ?? 0, ttlMs));
-      if (graceMs === 0) {
-        markExpired(key);
-        return;
-      }
-      const cachedAt = Date.now() - (ttlMs - graceMs);
-      clearTimeout(existing.cleanupTimer);
-      cached.set(key, {
-        value: existing.value,
-        cachedAt,
-        cleanupTimer: scheduleCleanup(key, cachedAt),
-        budgetEntryId: existing.budgetEntryId,
-      });
     },
   };
 }
@@ -662,16 +425,31 @@ async function readPagedRowsAcrossGraphs(
     return readRowsAcrossGraphs(store, admittedGraphs);
   };
 
-  return readCachedRowsPage(
-    {
-      ...cache,
-      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
-    },
-    loadRows,
-    safeOffset,
-    safeLimit,
-    signal,
-  );
+  try {
+    return await readCachedRowsPage(
+      {
+        ...cache,
+        expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
+      },
+      loadRows,
+      safeOffset,
+      safeLimit,
+      signal,
+    );
+  } catch (error) {
+    if (!isPerSnapshotBudgetError(error)) throw error;
+    // Intrinsically-large durable snapshots must remain syncable. Fall back to
+    // the legacy store-bounded page query; the memo remembers the rejection for
+    // this session so subsequent pages avoid repeating the full materialization.
+    return readPagedRowsAcrossGraphsStoreBounded(
+      store,
+      graphs,
+      safeOffset,
+      safeLimit,
+      isAdmitted,
+      signal,
+    );
+  }
 }
 
 async function readPagedRowsAcrossGraphsStoreBounded(
@@ -709,16 +487,34 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   const safeLimit = Math.max(0, Math.floor(limit));
   if (safeLimit === 0) return [];
 
-  return readCachedRowsPage(
-    {
-      ...cache,
-      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
-    },
-    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
-    safeOffset,
-    safeLimit,
-    signal,
-  );
+  try {
+    return await readCachedRowsPage(
+      {
+        ...cache,
+        expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
+      },
+      () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
+      safeOffset,
+      safeLimit,
+      signal,
+    );
+  } catch (error) {
+    if (!isPerSnapshotBudgetError(error)) throw error;
+    return readDurableDeltaRowsPageAcrossGraphs(
+      store,
+      graphs,
+      metaGraphs,
+      sinceBatchId,
+      safeOffset,
+      safeLimit,
+      signal,
+    );
+  }
+}
+
+function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudgetError {
+  return error instanceof SyncRowSnapshotBudgetError &&
+    (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
 }
 
 async function readCachedRowsPage(

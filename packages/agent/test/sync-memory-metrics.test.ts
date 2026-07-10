@@ -70,6 +70,7 @@ describe('sync memory attribution metrics', () => {
     }));
 
     await dataMemo.get('data', async () => rows('data'));
+    dataMemo.release('data', { graceMs: 10_000 });
     await metaMemo.get('meta', async () => rows('meta'));
     await provider.forceFlush();
 
@@ -82,6 +83,7 @@ describe('sync memory attribution metrics', () => {
       point.attributes.boundary === 'responder_snapshot_after_load'
     )).toBe(true);
     expect(metricPoints(harness.exporter, 'process.rss_bytes').length).toBeGreaterThan(0);
+    expect(typeof metricPoints(harness.exporter, 'process.rss_bytes')[0].value).toBe('number');
     expect(metricPoints(harness.exporter, 'process.external_bytes').length).toBeGreaterThan(0);
     expect(metricPoints(harness.exporter, 'process.array_buffers_bytes').length).toBeGreaterThan(0);
     expect(metricPoints(harness.exporter, 'dkg.sync.responder.snapshot_evictions_total').some((point) =>
@@ -147,5 +149,15 @@ describe('sync memory attribution metrics', () => {
         !('peer_id' in point.attributes) && !('context_graph_id' in point.attributes)
       )).toBe(true);
     }
+    const byteHistogram = metricPoints(
+      harness.exporter,
+      'dkg.sync.requester.accumulated_bytes',
+    )[0].value as { buckets: { boundaries: number[] } };
+    const quadHistogram = metricPoints(
+      harness.exporter,
+      'dkg.sync.requester.accumulated_quads',
+    )[0].value as { buckets: { boundaries: number[] } };
+    expect(byteHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
+    expect(quadHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
   });
 });
