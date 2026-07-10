@@ -134,6 +134,35 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(typeof store.update).toBe('function');
   });
 
+  it('invalidates caches for query updates with dotted PREFIX labels', async () => {
+    const adapter = new OxigraphStore();
+    const queryStore = new Proxy(adapter, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => ({ type: 'bindings' as const, bindings: [] });
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    let invalidations = 0;
+    let projectionInvalidations = 0;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      queryStore,
+      () => { invalidations += 1; },
+      () => { projectionInvalidations += 1; },
+    );
+
+    await wrapped.query(
+      'PREFIX foaf.core: <http://xmlns.com/foaf/0.1/> ' +
+      'INSERT DATA { GRAPH <urn:g> { <urn:s> foaf.core:name "v" } }',
+    );
+
+    expect(invalidations).toBe(1);
+    expect(projectionInvalidations).toBe(1);
+    await wrapped.close();
+  });
+
   it('relocates the stranded KC through the full stack (heal does NOT silently no-op)', async () => {
     const ctrl = await extractV10KCFromStore(store, BigInt(CTRL_ONCHAIN), KA_ID);
     const expectedRoot = new V10MerkleTree(ctrl.leaves).root;

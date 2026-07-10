@@ -883,11 +883,20 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
 
     const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     try {
-      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+      const sparql = subGraphDeregistrationSparql(contextGraphId, subGraphName);
+      const storeUpdate = this.store.update;
+      if (typeof storeUpdate === 'function') {
+        await storeUpdate.call(this.store, sparql, {
+          source: 'agent.cg.removeSubGraph.registration',
+          touchedGraphs: [metaGraph],
+        });
+      } else {
+        await this.store.query(sparql);
+      }
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
-      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
       await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
     }

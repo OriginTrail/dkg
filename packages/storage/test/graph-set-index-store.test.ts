@@ -460,10 +460,14 @@ describe('GraphSetIndexStore', () => {
     // rebuild scan on the next read); here the index stays warm with zero scans.
     await store.update(
       'INSERT DATA { GRAPH <did:dkg:context-graph:heal> { <urn:s> <urn:p> "v" } }',
-      { touchedGraphs: [healed] },
+      { touchedGraphs: [healed], priority: 'ack', source: 'test.explicit-update' },
     );
 
     expect(counting.listGraphsCalls).toBe(1); // incremental hasGraph, NOT a full scan
+    expect(counting.hasGraphOptions.at(-1)).toEqual({
+      priority: 'ack',
+      source: 'test.explicit-update',
+    });
     await expect(store.listGraphs()).resolves.toEqual(
       expect.arrayContaining([healed, 'did:dkg:context-graph:seed']),
     );

@@ -24,11 +24,11 @@ export interface SparqlOperationAnalysis {
   mutatingKeyword: string | null;
 }
 
-const PREFIX_DECL = /^\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/i;
-const BASE_DECL = /^\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/i;
+const PREFIX_DECL = /\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
+const BASE_DECL = /\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
 const OPERATION_AT_START = new RegExp(
-  `^\\s*(${[...SPARQL_READ_ONLY_OPERATIONS, ...SPARQL_UPDATE_OPERATIONS].join('|')})\\b`,
-  'i',
+  `\\s*(${[...SPARQL_READ_ONLY_OPERATIONS, ...SPARQL_UPDATE_OPERATIONS].join('|')})\\b`,
+  'iy',
 );
 const MUTATING_PATTERN = new RegExp(
   `\\b(${SPARQL_MUTATING_KEYWORDS.join('|')})\\b`,
@@ -113,21 +113,24 @@ export function stripSparqlLiteralsAndComments(sparql: string): string {
 }
 
 function detectSparqlOperationFormFromStripped(stripped: string): SparqlDetectedOperation {
-  let cursor = stripped;
+  let offset = 0;
   while (true) {
-    const prefixHit = PREFIX_DECL.exec(cursor);
+    PREFIX_DECL.lastIndex = offset;
+    const prefixHit = PREFIX_DECL.exec(stripped);
     if (prefixHit) {
-      cursor = cursor.slice(prefixHit[0].length);
+      offset = PREFIX_DECL.lastIndex;
       continue;
     }
-    const baseHit = BASE_DECL.exec(cursor);
+    BASE_DECL.lastIndex = offset;
+    const baseHit = BASE_DECL.exec(stripped);
     if (baseHit) {
-      cursor = cursor.slice(baseHit[0].length);
+      offset = BASE_DECL.lastIndex;
       continue;
     }
     break;
   }
-  const operationHit = OPERATION_AT_START.exec(cursor);
+  OPERATION_AT_START.lastIndex = offset;
+  const operationHit = OPERATION_AT_START.exec(stripped);
   if (!operationHit) return 'UNKNOWN';
   const operation = operationHit[1].toUpperCase();
   return isReadOnlySparqlOperation(operation) || isSparqlUpdateOperationForm(operation)
