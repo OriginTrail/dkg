@@ -73,6 +73,9 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     expect(typeof body.chain.rpcFailovers).toBe('number');
     expect(typeof body.chain.rpcExhaustions).toBe('number');
     expect(body.chain.rpcFailoversByClass).toBeDefined();
+    // Success-side per-provider distribution (which endpoint served) — host-only.
+    expect(body.chain.rpcServedByEndpointHost).toBeDefined();
+    expect(body.chain.rpcFailoversByEndpointHost).toBeDefined();
     expect(JSON.stringify(body.chain)).not.toContain('://');
   });
 

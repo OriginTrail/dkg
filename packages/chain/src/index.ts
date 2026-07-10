@@ -49,6 +49,7 @@ export {
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
+  noteRpcServed,
 } from './rpc-failover-log.js';
 export {
   HubResolutionCache,
