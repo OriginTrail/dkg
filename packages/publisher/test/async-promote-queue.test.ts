@@ -13,7 +13,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
   PROMOTE_PAYLOAD,
@@ -319,6 +319,62 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
     const fetched = await queue.getStatus(jobId);
     expect(fetched).toEqual(claimed);
+  });
+
+  it('5a. getStatus() waits for an in-flight claim flush before exposing the running row', async () => {
+    const base = new OxigraphStore();
+    let blockNextFlush = false;
+    let flushStartedResolve!: () => void;
+    let releaseFlush!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      flushStartedResolve = resolve;
+    });
+    const flushRelease = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const blockingStore: TripleStore = {
+      createGraph: (graphUri) => base.createGraph(graphUri),
+      dropGraph: (graphUri) => base.dropGraph(graphUri),
+      insert: (quads) => base.insert(quads),
+      delete: (quads) => base.delete(quads),
+      deleteByPattern: (pattern) => base.deleteByPattern(pattern),
+      query: (sparql, options) => base.query(sparql, options),
+      hasGraph: (graphUri, options) => base.hasGraph(graphUri, options),
+      listGraphs: (options) => base.listGraphs(options),
+      deleteBySubjectPrefix: (graphUri, prefix) => base.deleteBySubjectPrefix(graphUri, prefix),
+      countQuads: (graphUri) => base.countQuads(graphUri),
+      close: () => base.close(),
+      flush: async () => {
+        if (blockNextFlush) {
+          flushStartedResolve();
+          await flushRelease;
+          blockNextFlush = false;
+        }
+        await base.flush?.();
+      },
+    };
+    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    const jobId = await queue.enqueue(makeRequest());
+    blockNextFlush = true;
+    const claimPromise = queue.claimNext('worker-1');
+    await flushStarted;
+
+    let statusSettled = false;
+    const statusPromise = queue.getStatus(jobId).finally(() => {
+      statusSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(statusSettled).toBe(false);
+
+    releaseFlush();
+    const [claimed, fetched] = await Promise.all([claimPromise, statusPromise]);
+    expect(claimed?.state).toBe('running');
+    expect(fetched?.state).toBe('running');
+    expect(fetched?.attempt.count).toBe(1);
   });
 
   // ---------------------------------------------------------------------------
