@@ -21,13 +21,20 @@
  * With the flag OFF (baseline), every path engages exactly as before — proving
  * the strip is gated and reversible via the kill-switch.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
+import {
+  encodeGossipEnvelope,
+  GOSSIP_ENVELOPE_VERSION,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
+  type SubscriptionSource,
+} from '@origintrail-official/dkg-core';
 import {
   chooseFanOutTier,
   type ChooseFanOutTierInput,
@@ -42,12 +49,19 @@ import {
 
 interface StripInternals {
   swmHostModeStore?: SwmHostModeStore;
-  swmHostModeHandlers: Map<string, unknown>;
+  swmHostModeHandlers: Map<string, (topic: string, data: Uint8Array, from: string) => void>;
+  swmHostModeCurated: Map<string, boolean>;
+  gossip: {
+    subscribe(topic: string): void;
+    onMessage(topic: string, handler: (topic: string, data: Uint8Array, from: string) => void): void;
+  };
   subscribedContextGraphs: Map<string, { subscribed: boolean; synced: boolean; onChainHash?: string }>;
   config: { swmHostMode?: { enabled?: boolean; stripCiphertext?: boolean } };
   isPrivateContextGraph(cgId: string): Promise<boolean>;
-  wireSwmHostModeHandler(cgId: string, source?: unknown): void;
+  wireSwmHostModeHandler(cgId: string, source?: SubscriptionSource, curated?: boolean): void;
   reconcileSwmHostModeSubscription(cgId: string): Promise<void>;
+  ingestSwmHostModeEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
+  ingestSwmCiphertextChunkEnvelope(cgId: string, data: Uint8Array, from: string): Promise<void>;
   enableSwmHostModeFor(cgId: string): Promise<{
     subscribed: boolean; alreadySubscribed: boolean; hostingEnabled: boolean; memberMode?: boolean;
   }>;
@@ -62,6 +76,26 @@ const CURATED = (id: string): { subscribed: boolean; synced: boolean; onChainHas
   synced: true,
   onChainHash: ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase(),
 });
+
+function hostEnvelope(contextGraphId: string, chunked: boolean): Uint8Array {
+  return encodeGossipEnvelope({
+    version: GOSSIP_ENVELOPE_VERSION,
+    type: chunked ? GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED : GOSSIP_TYPE_WORKSPACE_PUBLISH,
+    contextGraphId,
+    agentAddress: ethers.ZeroAddress,
+    timestamp: String(Date.now()),
+    signature: new Uint8Array(65),
+    payload: new Uint8Array([1, 2, 3]),
+    ...(chunked ? { swmMessageIndex: 0 } : {}),
+  });
+}
+
+function installGossipStub(g: StripInternals): void {
+  g.gossip = {
+    subscribe: vi.fn(),
+    onMessage: vi.fn(),
+  };
+}
 
 describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
   const tempDirs: string[] = [];
@@ -199,6 +233,66 @@ describe('OT-RFC-49 WS-A — host-mode private-ciphertext strip', () => {
 
     expect(result.subscribed).toBe(true);
     expect(wired).toEqual([cgId]);
+  });
+
+  it('strip ON gates both legacy and chunked dispatch for a curated handler', async () => {
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-curated-dispatch';
+    const legacyIngest = vi.fn(async () => {});
+    const chunkIngest = vi.fn(async () => {});
+    g.ingestSwmHostModeEnvelope = legacyIngest;
+    g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
+    installGossipStub(g);
+
+    g.wireSwmHostModeHandler(cgId, undefined, true);
+    const handler = [...g.swmHostModeHandlers.values()][0]!;
+    handler('', hostEnvelope(cgId, false), 'peer-legacy');
+    handler('', hostEnvelope(cgId, true), 'peer-chunk');
+
+    expect(legacyIngest).not.toHaveBeenCalled();
+    expect(chunkIngest).not.toHaveBeenCalled();
+  });
+
+  it('strip ON preserves both dispatch branches for an explicitly non-curated handler', async () => {
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-public-dispatch';
+    const legacyIngest = vi.fn(async () => {});
+    const chunkIngest = vi.fn(async () => {});
+    g.ingestSwmHostModeEnvelope = legacyIngest;
+    g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
+    installGossipStub(g);
+
+    g.wireSwmHostModeHandler(cgId, undefined, false);
+    const handler = [...g.swmHostModeHandlers.values()][0]!;
+    handler('', hostEnvelope(cgId, false), 'peer-legacy');
+    handler('', hostEnvelope(cgId, true), 'peer-chunk');
+
+    expect(legacyIngest).toHaveBeenCalledOnce();
+    expect(chunkIngest).toHaveBeenCalledOnce();
+  });
+
+  it('reconciliation upgrades a stale non-curated handler before later dispatch', async () => {
+    const core = await makeCore(true);
+    const g = core as unknown as StripInternals;
+    const cgId = 'cg-becomes-curated';
+    const legacyIngest = vi.fn(async () => {});
+    const chunkIngest = vi.fn(async () => {});
+    g.ingestSwmHostModeEnvelope = legacyIngest;
+    g.ingestSwmCiphertextChunkEnvelope = chunkIngest;
+    installGossipStub(g);
+
+    g.wireSwmHostModeHandler(cgId, undefined, false);
+    g.subscribedContextGraphs.set(cgId, CURATED(cgId));
+    await g.reconcileSwmHostModeSubscription(cgId);
+
+    expect([...g.swmHostModeCurated.values()]).toEqual([true]);
+    const handler = [...g.swmHostModeHandlers.values()][0]!;
+    handler('', hostEnvelope(cgId, false), 'peer-legacy');
+    handler('', hostEnvelope(cgId, true), 'peer-chunk');
+    expect(legacyIngest).not.toHaveBeenCalled();
+    expect(chunkIngest).not.toHaveBeenCalled();
   });
 
   // ── 3 + 4. serve responders RETIRED ──────────────────────────────────────
