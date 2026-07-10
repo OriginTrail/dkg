@@ -13,6 +13,10 @@ import {
   GraphSetIndexStore,
   type GraphSetIndexStoreOptions,
 } from './graph-set-index-store.js';
+import {
+  ChangelogStore,
+  type ChangelogStoreOptions,
+} from './changelog-store.js';
 
 export interface Quad {
   subject: string;
@@ -242,6 +246,14 @@ export interface TripleStoreConfig {
   options?: Record<string, unknown>;
   largeLiteralStorage?: LargeLiteralStorageConfig;
   graphSetIndex?: boolean | GraphSetIndexStoreOptions;
+  /**
+   * OT-RFC-59 append-only change log (write-side). **Default OFF** — opt-in per
+   * store, independent of backend (unlike `graphSetIndex`, which is gated to
+   * local Oxigraph): the changelog must work on Blazegraph too, and its cost is
+   * a few marker quads per write. Enable ONLY on a single-writer (daemon) store;
+   * see the {@link ChangelogStore} single-writer caveat.
+   */
+  changelog?: boolean | ChangelogStoreOptions;
 }
 
 type AdapterFactory = (
@@ -272,7 +284,19 @@ export async function createTripleStore(
   const withLargeLiteralStorage = largeLiteralStorage
     ? new SharedMemoryLiteralBlobStore(store, largeLiteralStorage)
     : store;
-  return wrapGraphSetIndex(withLargeLiteralStorage, config);
+  const withGraphSetIndex = wrapGraphSetIndex(withLargeLiteralStorage, config);
+  // Changelog is the OUTERMOST decorator: it observes logical mutations first,
+  // reuses the graph-set index's fast listGraphs() for reconcile, and hides its
+  // own reserved graph from everything above.
+  return wrapChangelog(withGraphSetIndex, config);
+}
+
+function wrapChangelog(store: TripleStore, config: TripleStoreConfig): TripleStore {
+  const changelog = config.changelog;
+  if (changelog == null || changelog === false) return store; // default OFF
+  if (typeof changelog === 'object' && changelog.enabled === false) return store;
+  const options = typeof changelog === 'object' ? changelog : undefined;
+  return new ChangelogStore(store, options);
 }
 
 function resolveAdapterOptions(config: TripleStoreConfig): Record<string, unknown> | undefined {
