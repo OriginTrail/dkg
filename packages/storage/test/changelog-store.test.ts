@@ -629,4 +629,18 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     expect(asChangelogReader(null)).toBeNull();
     await base.close();
   });
+
+  it('asChangelogReader unwraps a forwarder that exposes .innerStore (the daemon store wrapper)', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    // Mimic createListContextGraphsCacheInvalidatingStore: a wrapper that exposes
+    // .innerStore but does NOT forward the changelog API.
+    const wrapper = { innerStore: log, insert: () => {}, listGraphs: () => Promise.resolve([]) };
+    const reader = asChangelogReader(wrapper);
+    expect(reader).not.toBeNull();
+    expect(await reader!.changelogHead()).toMatchObject({ seq: 0 });
+    // A wrapper whose inner chain has no ChangelogStore stays null.
+    expect(asChangelogReader({ innerStore: { innerStore: base } })).toBeNull();
+    await base.close();
+  });
 });
