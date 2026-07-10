@@ -505,3 +505,102 @@ describe('a widen that still mismatches defers exactly as today (T6c)', () => {
     expect(sliceSources.filter((s) => s === SLICE_WIDENED)).toHaveLength(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// T5c — the advertised defer→accept improvement, end to end.
+//
+// The SAME root has residue in an out-of-range per-KA graph (#5) that the
+// publisher never hashed; the on-chain root commits ONLY the in-range graph (#9).
+// Today's unbounded read builds a superset and defers a KA that is in fact valid.
+// The bounded read reproduces the committed set and promotes it. T5's decoy is a
+// DIFFERENT root, which the CONSTRUCT's `?s = ?root` filter drops anyway — so it
+// cannot exercise this. The kill-switch half below IS the counterfactual: it runs
+// the identical fixture on the unbounded path and must defer.
+// ─────────────────────────────────────────────────────────────────────────
+describe('same-root recurrence residue: bounded read accepts where unbounded defers (T5c)', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+    delete process.env.DKG_DISABLE_SWM_KA_BOUND;
+  });
+
+  const ROOT = 'urn:test:t5c:root';
+  const RESIDUAL_PRED = 'http://schema.org/legacyName';
+
+  const committedQuads: Quad[] = [
+    { subject: ROOT, predicate: 'http://schema.org/name', object: '"V2"', graph: '' },
+    { subject: ROOT, predicate: 'http://schema.org/version', object: '"9"', graph: '' },
+  ];
+
+  async function seedRecurrence(store: OxigraphStore): Promise<void> {
+    await store.insert([
+      // Residue from an earlier publish under kaNumber 5 — NOT hashed on-chain.
+      { subject: ROOT, predicate: RESIDUAL_PRED, object: '"V1"', graph: swmGraph(AUTHOR_A, 5) },
+      ...committedQuads.map((q) => ({ ...q, graph: swmGraph(AUTHOR_A, 9) })),
+    ]);
+  }
+
+  async function runFinalization(store: OxigraphStore): Promise<{ logs: string[]; sources: string[] }> {
+    const committedRoot = computeFlatKCRootV10(committedQuads, []);
+    const packed = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR_A, kaNumber: 9 });
+    const msg = makeMsg({
+      startKAId: packed,
+      endKAId: packed,
+      kcMerkleRoot: committedRoot,
+      rootEntities: [ROOT],
+    });
+
+    const logs: string[] = [];
+    Logger.setSink((r: LogRecord) => logs.push(r.message));
+    const sources = captureQuerySources(store);
+    const handler = new FinalizationHandler(
+      store,
+      makeVerifyingChain({
+        blockNumber: 100,
+        txHash: msg.txHash,
+        merkleRoot: committedRoot,
+        publisher: AUTHOR_A,
+        startKAId: packed,
+        endKAId: packed,
+      }),
+    );
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
+    return { logs, sources: sources.filter((s) => s.startsWith(SLICE)) };
+  }
+
+  const residualPromoted = async (store: OxigraphStore): Promise<boolean> => {
+    const res = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}> { <${ROOT}> <${RESIDUAL_PRED}> ?o } }`,
+    );
+    return res.type === 'boolean' && res.value === true;
+  };
+
+  it('bounded: promotes on the first read, no widen, no mismatch, residue excluded', async () => {
+    const store = new OxigraphStore();
+    await seedRecurrence(store);
+
+    const { logs, sources } = await runFinalization(store);
+
+    expect(await promotedTo(store, ROOT)).toBe(true);
+    expect(logs.some((m) => m.includes('event=finalization_applied'))).toBe(true);
+    expect(logs.some((m) => m.includes('event=finalization_merkle_mismatch'))).toBe(false);
+    // The bounded read matched, so the widen must never have fired.
+    expect(sources).toContain(SLICE_BOUNDED);
+    expect(sources).not.toContain(SLICE_WIDENED);
+    // The out-of-range residue must not reach canonical.
+    expect(await residualPromoted(store)).toBe(false);
+  });
+
+  it('unbounded (kill-switch): the identical fixture defers on a merkle mismatch', async () => {
+    process.env.DKG_DISABLE_SWM_KA_BOUND = '1';
+    const store = new OxigraphStore();
+    await seedRecurrence(store);
+
+    const { logs, sources } = await runFinalization(store);
+
+    // This is today's behavior: the superset hashes differently, so a valid KA defers.
+    expect(await promotedTo(store, ROOT)).toBe(false);
+    expect(logs.some((m) => m.includes('event=finalization_merkle_mismatch'))).toBe(true);
+    expect(logs.some((m) => m.includes('event=finalization_applied'))).toBe(false);
+    expect(sources).not.toContain(SLICE_BOUNDED);
+  });
+});

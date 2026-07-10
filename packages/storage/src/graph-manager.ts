@@ -13,6 +13,7 @@ import {
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
   parseContextGraphLayerUri,
+  MemoryLayer,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -46,6 +47,39 @@ export interface SwmKaGraphBound {
   agentAddress: string;
   startNumber: bigint;
   endNumber: bigint;
+}
+
+/**
+ * Identify `graph` as a per-KA child of THIS shared-memory `bucketGraph`, or
+ * return undefined so the caller keeps it (fail-open).
+ *
+ * `parseContextGraphLayerUri` alone is too permissive to gate an exclusion on:
+ * it recognises every memory layer, and a child such as
+ * `…/_shared_memory/_verifiable_memory/{addr}/{n}` parses as a 5-segment
+ * VERIFIABLE-memory URI whose `subGraphName` happens to be `_shared_memory`.
+ * Gating on the raw parse would let that shape — and any future under-bucket
+ * shape that merely resembles a layer URI — be pruned by a bound meant only for
+ * `<bucket>/{addr}/{n}`. So require the parsed layer to be shared-memory AND its
+ * `(contextGraphId, subGraphName)` to reconstruct to exactly the bucket we are
+ * reading. Anything else stays in the read set.
+ *
+ * The reconstruct check is the load-bearing one: for a graph under `${bucketGraph}/`
+ * the layer segment is forced to `_shared_memory` whenever the reconstruction matches
+ * (a 4-segment child takes its layer from the bucket's own slug; a 5-segment child
+ * takes `_shared_memory` as its subGraphName and so reconstructs elsewhere). The layer
+ * comparison is therefore redundant today and no test can isolate it — it is kept as an
+ * explicit statement of intent, and as a guard if the URI grammar ever changes.
+ */
+function parseSharedMemoryChildGraph(
+  bucketGraph: string,
+  graph: string,
+): { agentAddress: string; kaNumber: bigint } | undefined {
+  const parsed = parseContextGraphLayerUri(graph);
+  if (!parsed || parsed.layer !== MemoryLayer.SharedWorkingMemory) return undefined;
+  if (contextGraphSharedMemoryUri(parsed.contextGraphId, parsed.subGraphName) !== bucketGraph) {
+    return undefined;
+  }
+  return { agentAddress: parsed.agentAddress, kaNumber: parsed.kaNumber };
 }
 
 export interface LoadSelectedSharedMemoryQuadsOptions {
@@ -136,14 +170,14 @@ export async function resolveSharedMemoryReadGraphs(
     if (graph.startsWith(stagingPrefix)) continue;
     if (!isSafeIri(graph)) continue;
     if (bound) {
-      // Fail-open: only a graph we can positively identify as a per-KA layer
-      // URI is eligible for exclusion; unparseable shapes are always read.
-      const parsed = parseContextGraphLayerUri(graph);
+      // Fail-open: only a graph we can positively identify as a per-KA child of
+      // THIS bucket is eligible for exclusion; every other shape is always read.
+      const child = parseSharedMemoryChildGraph(bucketGraph, graph);
       if (
-        parsed &&
-        (parsed.agentAddress.toLowerCase() !== boundAddress ||
-          parsed.kaNumber < bound.startNumber ||
-          parsed.kaNumber > bound.endNumber)
+        child &&
+        (child.agentAddress.toLowerCase() !== boundAddress ||
+          child.kaNumber < bound.startNumber ||
+          child.kaNumber > bound.endNumber)
       ) {
         continue;
       }

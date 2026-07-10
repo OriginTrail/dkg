@@ -147,3 +147,51 @@ describe('loadSelectedSharedMemoryQuads — bounded read equivalence', () => {
     }
   });
 });
+
+describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children (T2b)', () => {
+  // `parseContextGraphLayerUri` recognises every memory layer, so a child like
+  // `<swm>/_verifiable_memory/{addr}/{n}` PARSES — as a 5-segment VM URI whose
+  // subGraphName is `_shared_memory`. Gating exclusion on the raw parse would
+  // prune it. Only a child that reconstructs to exactly this bucket may be cut.
+  it('keeps layer-lookalike children of the bucket that are not per-KA SWM graphs', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-t2b');
+    const gAdmit = `${swm}/${AUTHOR_A_MIXED}/7`;
+    // Parses as layer=VerifiableMemory, subGraphName='_shared_memory'. Its author
+    // and number are BOTH out of the bound, so a raw-parse gate would drop it.
+    const gVmLookalike = `${swm}/_verifiable_memory/${AUTHOR_B}/12`;
+    const gWmLookalike = `${swm}/_working_memory/${AUTHOR_B}/12`;
+    try {
+      await seedGraphs(store, [swm, gAdmit, gVmLookalike, gWmLookalike]);
+
+      const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
+      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+
+      expect(resolved.slice().sort()).toEqual([swm, gAdmit, gVmLookalike, gWmLookalike].sort());
+    } finally {
+      await store.close();
+    }
+  });
+
+  // Isolates the bucket-RECONSTRUCT check specifically: `<swm>/_shared_memory/{addr}/{n}`
+  // parses as a 5-segment SHARED-memory URI, so the layer check alone passes. Its
+  // subGraphName is `_shared_memory`, so it reconstructs to `<cg>/_shared_memory/_shared_memory`
+  // — a different bucket, not ours to prune, even though its author and number both
+  // fall outside the bound.
+  it('keeps a shared-memory child that reconstructs to a DIFFERENT bucket', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-t2b2');
+    const gAdmit = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const gOtherBucketChild = `${swm}/_shared_memory/${AUTHOR_B}/12`;
+    try {
+      await seedGraphs(store, [swm, gAdmit, gOtherBucketChild]);
+
+      const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
+      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+
+      expect(resolved.slice().sort()).toEqual([swm, gAdmit, gOtherBucketChild].sort());
+    } finally {
+      await store.close();
+    }
+  });
+});
