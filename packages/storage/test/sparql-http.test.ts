@@ -12,7 +12,7 @@ let server: Server;
 let queryUrl: string;
 let updateUrl: string;
 const insertedQuads: string[] = [];
-/** How many times the server received the `SELECT DISTINCT ?g` listGraphs scan. */
+/** How many times the server received a listGraphs enumeration query (old `SELECT DISTINCT ?g` scan or the new index-read `GRAPH ?g {} FILTER EXISTS`). */
 let listGraphsHits = 0;
 
 function respondSelect(res: ServerResponse): void {
@@ -73,7 +73,7 @@ function startTestServer(): Promise<void> {
             }));
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             listGraphsHits++;
             respondListGraphs(res);
             return;
@@ -181,7 +181,7 @@ describe('SparqlHttpStore (test server)', () => {
             respondSelect(res);
             return;
           }
-          if (decoded.includes('DISTINCT') && decoded.includes('?g')) {
+          if (decoded.includes('?g') && (decoded.includes('DISTINCT') || decoded.includes('GRAPH ?g {}'))) {
             arrivals.push('listGraphs');
             listGraphRequests++;
             if (listGraphRequests <= backgroundSlots) {
@@ -429,7 +429,7 @@ describe('SparqlHttpStore (test server)', () => {
     expect(has).toBe(true);
   });
 
-  it('listGraphs returns graph URIs from SELECT DISTINCT ?g', async () => {
+  it('listGraphs returns graph URIs from the graph-index enumeration query', async () => {
     const graphs = await store.listGraphs();
     expect(graphs).toContain('http://ex.org/g1');
   });

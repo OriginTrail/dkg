@@ -483,8 +483,20 @@ export class SparqlHttpStore implements TripleStore {
 
   private async listGraphsDirect(options?: QueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
+    // Enumerate named graphs from oxigraph's graph index, NOT via a quad scan.
+    // `GRAPH ?g { ?s ?p ?o }` forces oxigraph to iterate EVERY quad and DISTINCT
+    // the graph column — O(#quads). Benchmarked on the pinned 0.5.8 RocksDB
+    // backend: 12ms -> 947ms as the store grows 25k -> 1M quads (super-linear),
+    // so on a large core store it exceeds the request timeout, the graph-set
+    // index never seeds, and the sync responder re-runs the doomed scan on every
+    // request (the observed 30s `sync.responder.listGraphs` livelock).
+    // `GRAPH ?g {}` reads the graph index directly (flat, single-digit ms). The
+    // `FILTER EXISTS` keeps the existing non-empty-only contract: a graph emptied
+    // by DELETE (but not DROP) stays registered, so bare `GRAPH ?g {}` would
+    // over-list it and break graph-set-index-store's invariant — confirmed on the
+    // 0.5.8 RocksDB backend (bare=1001 vs FILTER-EXISTS=1000 == the old query).
     const r = await this.query(
-      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      'SELECT ?g WHERE { GRAPH ?g {} FILTER EXISTS { GRAPH ?g { ?s ?p ?o } } }',
       { ...options, source: options?.source ?? 'sparql-http.listGraphs' },
     );
     return r.type === 'bindings' ? r.bindings.map((b) => b.g).filter(Boolean) : [];

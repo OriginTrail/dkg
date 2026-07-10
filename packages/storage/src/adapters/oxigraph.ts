@@ -300,8 +300,12 @@ export class OxigraphStore implements TripleStore {
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
     throwIfAborted(options?.signal);
+    // Read the graph index instead of scanning quads. See the detailed rationale
+    // in SparqlHttpStore.listGraphsDirect: `GRAPH ?g { ?s ?p ?o }` is O(#quads);
+    // `GRAPH ?g {}` reads the graph index (flat), and FILTER EXISTS preserves the
+    // non-empty-only contract (emptied-but-not-dropped graphs stay registered).
     const result = this.store.query(
-      'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      'SELECT ?g WHERE { GRAPH ?g {} FILTER EXISTS { GRAPH ?g { ?s ?p ?o } } }',
     );
     throwIfAborted(options?.signal);
     if (typeof result === 'boolean' || typeof result === 'string') return [];
