@@ -239,11 +239,34 @@ c -X POST "http://127.0.0.1:9202/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
 sleep 5
 CATCHUP_ST=$(poll_catchup 9202 "$CG_ID" 10)
-if [[ "$CATCHUP_ST" == "denied" || "$CATCHUP_ST" == "timeout" ]]; then
-  ok "Node 2 initial sync blocked ($CATCHUP_ST)"
-else
-  fail "Node 2 initial sync should be blocked (got=$CATCHUP_ST)"
-fi
+# The curator (Node 1) is up, so an unauthorized subscribe is expected to reach
+# an explicit `denied` terminal state. A bare `timeout` is ambiguous — it can
+# also mean a wedged/unresponsive node — so it is only accepted alongside a
+# positive no-leak proof: Node 2 must hold zero of the curator's private
+# assertion-data graphs (same invariant asserted post-approval in §3a). A
+# `completed` outcome means the sync actually served data and is the leak this
+# check exists to catch, so it must fail regardless.
+N2_PREJOIN_ASSERT=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && CONTAINS(STR(?g), \\\"/assertion/\\\")) }\"}")
+N2_PREJOIN_CT=$(safe_bindings_count "$N2_PREJOIN_ASSERT")
+case "$CATCHUP_ST" in
+  denied)
+    [[ "$N2_PREJOIN_CT" == "0" ]] \
+      && ok "Node 2 initial sync explicitly denied, no assertion data leaked" \
+      || fail "Node 2 sync denied but leaked $N2_PREJOIN_CT assertion graph(s) before approval"
+    ;;
+  timeout)
+    # No terminal denial within the window (unreachable/slow). Safe only if no
+    # private data reached Node 2; a genuinely wedged node is caught by §2b,
+    # which requires the signed-join sync to then succeed.
+    [[ "$N2_PREJOIN_CT" == "0" ]] \
+      && ok "Node 2 initial sync blocked (timeout), no assertion data leaked" \
+      || fail "Node 2 sync timed out but leaked $N2_PREJOIN_CT assertion graph(s) — not a clean block"
+    ;;
+  *)
+    fail "Node 2 initial sync should be blocked (got status=$CATCHUP_ST, leaked assertion graphs=$N2_PREJOIN_CT)"
+    ;;
+esac
 
 echo "--- 2b: Node 2 sends signed join request ---"
 SIGN=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
