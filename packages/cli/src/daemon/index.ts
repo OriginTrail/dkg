@@ -14,6 +14,7 @@ export { daemonState, resolveAutoUpdateEnabled, type CorsAllowlist } from './sta
 export * from './types.js';
 export * from './manifest.js';
 export * from './http-utils.js';
+export * from '../auto-update-ref.js';
 export * from './auto-update.js';
 export * from './openclaw.js';
 export * from './local-agents.js';

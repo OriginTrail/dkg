@@ -50,6 +50,11 @@ async function fetchPid(port: number): Promise<number> {
   return Number(await res.text());
 }
 
+async function fetchArgs(port: number): Promise<string[]> {
+  const res = await fetch(`http://127.0.0.1:${port}/args`);
+  return await res.json() as string[];
+}
+
 async function portAnswers(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/query`, { signal: AbortSignal.timeout(500) });
@@ -73,6 +78,12 @@ const bindIdx = process.argv.indexOf('--bind');
 const [host, port] = process.argv[bindIdx + 1].split(':');
 const srv = http.createServer((req, res) => {
   if (req.url === '/pid') { res.statusCode = 200; res.end(String(process.pid)); return; }
+  if (req.url === '/args') {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(process.argv.slice(2)));
+    return;
+  }
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/sparql-results+json');
   res.end(JSON.stringify({ head: {}, boolean: true }));
@@ -114,6 +125,19 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(handle.queryEndpoint).toContain(`:${port}`);
       // The child really owns a really-bound socket.
       expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('passes the native Oxigraph query timeout to the child process', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port, { queryTimeoutS: 35 }));
+    try {
+      const args = await fetchArgs(port);
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('35');
     } finally {
       await handle.stop();
     }

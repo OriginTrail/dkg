@@ -11,14 +11,11 @@
  * rewritten sparql-http endpoints answer a REAL SPARQL ASK, and stop()
  * really releases the port.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
-import { chmod, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import type { ChildProcess } from 'node:child_process';
+import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { PassThrough } from 'node:stream';
+import { delimiter, join } from 'node:path';
 
 import {
   planManagedOxigraph,
@@ -27,7 +24,65 @@ import {
   MANAGED_OXIGRAPH_BACKEND,
   DEFAULT_OXIGRAPH_PORT,
 } from '../src/daemon/oxigraph-managed.js';
-import type { OxigraphServerIo } from '../src/daemon/oxigraph-server.js';
+
+let systemOxigraphDir: string | undefined;
+let originalPath: string | undefined;
+
+beforeAll(async () => {
+  systemOxigraphDir = await mkdtemp(join(tmpdir(), 'oxi-managed-system-'));
+  const systemOxigraph = join(systemOxigraphDir, 'oxigraph');
+  await writeFile(
+    systemOxigraph,
+    `#!/usr/bin/env node
+const http = require('node:http');
+const args = process.argv.slice(2);
+const bindIdx = args.indexOf('--bind');
+if (bindIdx < 0 || !args[bindIdx + 1]) {
+  console.error('missing --bind');
+  process.exit(2);
+}
+const [host, rawPort] = args[bindIdx + 1].split(':');
+const port = Number(rawPort);
+const delayMs = Number(process.env.OXIGRAPH_STANDIN_STARTUP_DELAY_MS || '250');
+let listening = false;
+const srv = http.createServer((req, res) => {
+  if (req.url === '/args') {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(args));
+    return;
+  }
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/sparql-results+json');
+  res.end(JSON.stringify({ head: {}, boolean: true }));
+});
+srv.on('error', (e) => { console.error('bind failed: ' + e.message); process.exit(1); });
+srv.on('listening', () => { listening = true; });
+const listenTimer = setTimeout(() => srv.listen(port, host), delayMs);
+process.on('SIGTERM', () => {
+  clearTimeout(listenTimer);
+  if (!listening) process.exit(0);
+  srv.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 100).unref();
+});
+`,
+    'utf8',
+  );
+  await chmod(systemOxigraph, 0o755);
+  originalPath = process.env.PATH;
+  process.env.PATH = [systemOxigraphDir, originalPath].filter(Boolean).join(delimiter);
+});
+
+afterAll(async () => {
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
+  if (systemOxigraphDir) {
+    await rm(systemOxigraphDir, { recursive: true, force: true }).catch(() => {});
+  }
+});
 
 describe('planManagedOxigraph', () => {
   it('returns null for non-oxigraph-server backends', () => {
@@ -40,7 +95,6 @@ describe('planManagedOxigraph', () => {
     const plan = planManagedOxigraph({ store: { backend: MANAGED_OXIGRAPH_BACKEND } }, '/data');
     expect(plan).not.toBeNull();
     expect(plan!.port).toBe(DEFAULT_OXIGRAPH_PORT);
-    expect(plan!.readyTimeoutMs).toBeUndefined();
     expect(plan!.location).toBe(join('/data', 'oxigraph-data'));
     expect(plan!.cacheDir).toBe(join('/data', 'oxigraph'));
     expect(plan!.largeLiteralStorage).toEqual({
@@ -54,17 +108,12 @@ describe('planManagedOxigraph', () => {
     });
   });
 
-  it('honours operator overrides for port, location, cacheDir and readiness timeout', () => {
+  it('honours operator overrides for port, location and cacheDir', () => {
     const plan = planManagedOxigraph(
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: {
-            port: 9999,
-            location: '/mnt/oxi',
-            cacheDir: '/mnt/oxi-bin',
-            readyTimeoutMs: 180_000,
-          },
+          options: { port: 9999, location: '/mnt/oxi', cacheDir: '/mnt/oxi-bin' },
         },
       },
       '/data',
@@ -72,30 +121,52 @@ describe('planManagedOxigraph', () => {
     expect(plan!.port).toBe(9999);
     expect(plan!.location).toBe('/mnt/oxi');
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
-    expect(plan!.readyTimeoutMs).toBe(180_000);
   });
 
-  it.each([
-    0,
-    -1,
-    1.5,
-    Number.NaN,
-    Number.POSITIVE_INFINITY,
-    Number.MAX_SAFE_INTEGER + 1,
-    '180000',
-    null,
-  ])('ignores invalid readiness timeout %j', (readyTimeoutMs) => {
+  it('honours managed Oxigraph startup and native query timeout options', () => {
     const plan = planManagedOxigraph(
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { readyTimeoutMs },
+          options: { readyTimeoutMs: 180_000, queryTimeoutS: 35 },
         },
       },
       '/data',
     );
+    expect(plan!.readyTimeoutMs).toBe(180_000);
+    expect(plan!.queryTimeoutS).toBe(35);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(40_000);
+  });
 
+  it('clamps an absurd queryTimeoutS to Node’s max timer instead of overflowing to an instant abort', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          // ~24.8 days: queryTimeoutS * 1000 + grace exceeds 2^31-1 ms, which
+          // AbortSignal.timeout would silently coerce to 1ms (immediate abort).
+          options: { queryTimeoutS: 4_294_967 },
+        },
+      },
+      '/data',
+    );
+    expect(plan!.queryTimeoutS).toBe(4_294_967);
+    expect(plan!.storeConfigTemplate.options.timeout).toBe(2_147_483_647);
+  });
+
+  it('ignores invalid managed Oxigraph timeout options', () => {
+    const plan = planManagedOxigraph(
+      {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { readyTimeoutMs: 0, queryTimeoutS: 1.5 },
+        },
+      },
+      '/data',
+    );
     expect(plan!.readyTimeoutMs).toBeUndefined();
+    expect(plan!.queryTimeoutS).toBeUndefined();
+    expect(plan!.storeConfigTemplate.options).toEqual({ managedByDkg: true });
   });
 
   it('resolveManagedOxigraphPort rejects out-of-range values', () => {
@@ -211,109 +282,10 @@ async function freePort(): Promise<number> {
   });
 }
 
-function neverReadyChild(): ChildProcess {
-  const child = new EventEmitter() as ChildProcess;
-  let signalCode: NodeJS.Signals | null = null;
-  Object.defineProperties(child, {
-    exitCode: { get: () => null },
-    signalCode: { get: () => signalCode },
-  });
-  child.stderr = new PassThrough();
-  child.kill = ((signal: NodeJS.Signals = 'SIGTERM') => {
-    signalCode = signal;
-    queueMicrotask(() => child.emit('exit', null, signal));
-    return true;
-  }) as ChildProcess['kill'];
-  return child;
+async function fetchManagedArgs(port: number): Promise<string[]> {
+  const res = await fetch(`http://127.0.0.1:${port}/args`);
+  return await res.json() as string[];
 }
-
-async function observeManagedStartupTimeout(opts: {
-  configuredTimeoutMs: number;
-  callerTimeoutMs?: number;
-}): Promise<{ settledAfterOnePoll: boolean; error: unknown }> {
-  const binDir = await mkdtemp(join(tmpdir(), 'oxi-managed-bin-'));
-  const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-timeout-'));
-  const binaryPath = join(binDir, 'oxigraph');
-  const previousPath = process.env.PATH;
-  await writeFile(binaryPath, '#!/bin/sh\nexit 0\n', 'utf8');
-  await chmod(binaryPath, 0o755);
-  process.env.PATH = binDir;
-
-  let notifySpawn!: () => void;
-  const spawned = new Promise<void>((resolve) => {
-    notifySpawn = resolve;
-  });
-  const serverIo: Partial<OxigraphServerIo> = {
-    spawn: (() => {
-      notifySpawn();
-      return neverReadyChild();
-    }) as OxigraphServerIo['spawn'],
-    fetch: (async () => new Response(null, { status: 503 })) as typeof globalThis.fetch,
-  };
-
-  vi.useFakeTimers();
-  try {
-    let outcome: { error: unknown } | undefined;
-    const startup = startManagedOxigraph({
-      config: {
-        store: {
-          backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { readyTimeoutMs: opts.configuredTimeoutMs },
-        },
-      },
-      dataDir,
-      platform: 'freebsd',
-      readyTimeoutMs: opts.callerTimeoutMs,
-      serverIo,
-    }).then(
-      () => {
-        outcome = { error: new Error('managed startup unexpectedly succeeded') };
-      },
-      (error: unknown) => {
-        outcome = { error };
-      },
-    );
-
-    await spawned;
-    await vi.advanceTimersByTimeAsync(600);
-    const settledAfterOnePoll = outcome !== undefined;
-    if (!outcome) {
-      // Before the fix, config was ignored and the 30s server default kept
-      // polling. Advance far enough to cleanly stop that red-path child.
-      await vi.advanceTimersByTimeAsync(31_000);
-    }
-    await startup;
-    return { settledAfterOnePoll, error: outcome!.error };
-  } finally {
-    vi.useRealTimers();
-    process.env.PATH = previousPath;
-    await rm(binDir, { recursive: true, force: true });
-    await rm(dataDir, { recursive: true, force: true });
-  }
-}
-
-describe('startManagedOxigraph readiness timeout', () => {
-  it('passes the configured readiness timeout to the managed server', async () => {
-    const observed = await observeManagedStartupTimeout({ configuredTimeoutMs: 20 });
-
-    expect(observed.settledAfterOnePoll).toBe(true);
-    expect(observed.error).toEqual(
-      expect.objectContaining({ message: expect.stringContaining('within 20ms') }),
-    );
-  });
-
-  it('prefers an explicit caller readiness timeout over config', async () => {
-    const observed = await observeManagedStartupTimeout({
-      configuredTimeoutMs: 20,
-      callerTimeoutMs: 40,
-    });
-
-    expect(observed.settledAfterOnePoll).toBe(true);
-    expect(observed.error).toEqual(
-      expect.objectContaining({ message: expect.stringContaining('within 40ms') }),
-    );
-  });
-});
 
 describe('startManagedOxigraph (real download + real server)', () => {
   it('returns null for non-managed backends', async () => {
@@ -324,6 +296,78 @@ describe('startManagedOxigraph (real download + real server)', () => {
       dataDir: '/data',
     });
     expect(result).toBeNull();
+  });
+
+  it('forwards managed query timeout through startup and the rewritten HTTP store config', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port, readyTimeoutMs: 5_000, queryTimeoutS: 35 },
+        },
+      },
+      dataDir,
+      platform: 'freebsd',
+      log: () => {},
+    });
+    try {
+      expect(result).not.toBeNull();
+      expect(result!.storeConfig.options.timeout).toBe(40_000);
+      const args = await fetchManagedArgs(port);
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('35');
+    } finally {
+      await result?.handle.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses config readyTimeoutMs and lets the explicit startup override win', async () => {
+    const tooShortDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const tooShortPort = await freePort();
+    await expect(
+      startManagedOxigraph({
+        config: {
+          store: {
+            backend: MANAGED_OXIGRAPH_BACKEND,
+            options: { port: tooShortPort, readyTimeoutMs: 1, queryTimeoutS: 35 },
+          },
+        },
+        dataDir: tooShortDir,
+        platform: 'freebsd',
+        log: () => {},
+      }),
+    ).rejects.toThrow(/ready/i);
+    await rm(tooShortDir, { recursive: true, force: true });
+
+    const overrideDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const overridePort = await freePort();
+    const result = await startManagedOxigraph({
+      config: {
+        store: {
+          backend: MANAGED_OXIGRAPH_BACKEND,
+          options: { port: overridePort, readyTimeoutMs: 1, queryTimeoutS: 35 },
+        },
+      },
+      dataDir: overrideDir,
+      platform: 'freebsd',
+      readyTimeoutMs: 5_000,
+      log: () => {},
+    });
+    try {
+      expect(result).not.toBeNull();
+      const args = await fetchManagedArgs(overridePort);
+      const timeoutIndex = args.indexOf('--timeout-s');
+      expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+      expect(args[timeoutIndex + 1]).toBe('35');
+    } finally {
+      await result?.handle.stop();
+      await rm(overrideDir, { recursive: true, force: true });
+    }
   });
 
   it(

@@ -141,6 +141,41 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
   });
 
+  it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
+    // Guard the #1549 warm-index behaviour at the call site: a regression reverting
+    // either INSERT to a plain `store.update(sparql)` would still relocate the KC
+    // (the graphsAfter/merkle assertions above stay green) but would re-dirty the
+    // graph-set index and force a full rebuild scan. Capture the update() options the
+    // heal sends through the top of the production stack and assert each INSERT
+    // declares its scoped target graph + source tag.
+    const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    const capturing = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'update') {
+          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
+          return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
+            updateCalls.push({ sparql, options });
+            return orig.call(target, sparql, options);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    }) as TripleStore;
+
+    await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      { store: capturing, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    );
+
+    const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
+    const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
+    const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
+    const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
+    expect(dataInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedData] });
+    expect(metaInsert?.options).toMatchObject({ source: 'agent.swm.rsHeal.materialize', touchedGraphs: [scopedMeta] });
+  });
+
   it('relocates a VM-graph-only one-shot strand through the full stack (read-both)', async () => {
     // The publisher's own one-shot publish() lands public data in the per-KA VM
     // graph, not legacy root data. The read-both heal must recover it through the

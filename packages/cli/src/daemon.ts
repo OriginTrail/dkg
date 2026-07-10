@@ -13,6 +13,7 @@ export {
 export * from './daemon/types.js';
 export * from './daemon/manifest.js';
 export * from './daemon/http-utils.js';
+export * from './auto-update-ref.js';
 export * from './daemon/auto-update.js';
 export * from './daemon/openclaw.js';
 export * from './daemon/hermes.js';

@@ -994,11 +994,13 @@ jobs:
 
   # ------------------------------------------------------------------
   # Tornado static analysis lane — Slither + Aderyn + solhint, all
-  # SARIF-uploading to GitHub Code Scanning. INFORMATIONAL ONLY for
-  # the first phase: every step is `continue-on-error: true` so the
-  # job stays green regardless of findings, while the Security tab
-  # accumulates the baseline. A future PR will flip Slither to
-  # `fail-on: high` once we've triaged the existing finding set.
+  # SARIF-uploading to GitHub Code Scanning. Findings remain
+  # INFORMATIONAL ONLY for the first phase: scanner runs are
+  # `continue-on-error: true` so the job stays green regardless of
+  # findings, while the Security tab accumulates the baseline. Tool
+  # bootstrap smoke checks stay gating so scanner coverage cannot
+  # disappear silently. A future PR will flip Slither to `fail-on: high`
+  # once we've triaged the existing finding set.
   #
   # Triggers:
   #   * pull_request : runs only when the `changes` filter detects
@@ -1020,11 +1022,11 @@ jobs:
   # crytic-compile to read directly, and pass `ignore-compile: true`
   # to skip the action's own install/build.
   #
-  # Aderyn ships as the @cyfrin/aderyn npm devDep (postinstall fetches
-  # the platform-specific binary; gated by `pnpm.onlyBuiltDependencies`
-  # at the repo root). solhint is also a npm devDep. Both are then
-  # pulled by the standard `pnpm install --frozen-lockfile` step,
-  # so no scanner-specific install dance is needed.
+  # Aderyn ships as the @cyfrin/aderyn npm devDep. Its package lazily
+  # installs the platform-specific binary when `pnpm exec aderyn` runs;
+  # keep it out of repo-wide `pnpm.onlyBuiltDependencies` so ordinary
+  # test/build jobs do not depend on a scanner binary release download.
+  # solhint is also a npm devDep and is pulled by the standard install.
   # ------------------------------------------------------------------
   tornado-static-analysis:
     name: "Tornado: static analysis (informational)"
@@ -1104,6 +1106,19 @@ jobs:
           category: slither
 
       # ------- Aderyn -------
+      - name: Verify Aderyn bootstrap
+        working-directory: packages/evm-module
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm exec aderyn --version; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+
       - name: Run Aderyn (SARIF)
         # Aderyn auto-detects Hardhat from hardhat.config.ts and uses
         # the artifacts produced by the compile step above. Output
@@ -1111,6 +1126,13 @@ jobs:
         continue-on-error: true
         working-directory: packages/evm-module
         run: pnpm exec aderyn . --output aderyn.sarif
+
+      - name: Validate Aderyn SARIF
+        if: always()
+        working-directory: packages/evm-module
+        run: |
+          test -s aderyn.sarif
+          node -e "const fs = require('node:fs'); const sarif = JSON.parse(fs.readFileSync('aderyn.sarif', 'utf8')); if (!Array.isArray(sarif.runs) || sarif.runs.length === 0) throw new Error('Aderyn SARIF has no runs');"
 
       - name: Upload Aderyn SARIF to GitHub Code Scanning
         if: |

@@ -25,6 +25,7 @@ import {
   sharedHomeInitGate,
   repoDir,
   resolveNetworkConfigName,
+  resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
   resolveApprovalPolicy,
   resolveChainConfig,
@@ -665,6 +666,149 @@ describe('resolveAutoUpdateSource', () => {
       { autoUpdate: { enabled: false } },
       { autoUpdate: { enabled: false } as any },
     )).toBeUndefined();
+  });
+});
+
+describe('resolveAutoUpdateConfig', () => {
+  it('inherits network-level tag-signature verification for git auto-update polling', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('preserves a local false tag-signature override over network defaults', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: false,
+        },
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
+  });
+
+  it('parses legacy string false tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'false',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(false);
+  });
+
+  it('parses legacy string true tag-signature values at the config boundary', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'true',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: false,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('treats null tag-signature values as unset so network defaults still apply', () => {
+    const resolved = resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: null,
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    );
+
+    expect(resolved?.verifyTagSignature).toBe(true);
+  });
+
+  it('rejects invalid tag-signature values instead of disabling verification', () => {
+    expect(() => resolveAutoUpdateConfig(
+      {
+        autoUpdate: {
+          enabled: true,
+          source: 'git',
+          verifyTagSignature: 'maybe',
+        } as any,
+      },
+      {
+        autoUpdate: {
+          enabled: true,
+          repo: 'owner/repo',
+          branch: 'main',
+          checkIntervalMinutes: 30,
+          verifyTagSignature: true,
+          source: 'git',
+        },
+      },
+    )).toThrow(/verifyTagSignature must be a boolean/);
   });
 });
 

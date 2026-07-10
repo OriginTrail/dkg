@@ -71,13 +71,16 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "port": 7878,
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
-      "readyTimeoutMs": 180000
+      "readyTimeoutMs": 180000,
+      "queryTimeoutS": 35
     }
   }
 }
 ```
 
 `readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
+
+`queryTimeoutS` is the native Oxigraph query timeout in seconds. The rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
 
 ### Other stores
 

@@ -44,6 +44,7 @@ import {
   type DkgConfig,
   type ResolvedAutoUpdateConfig,
 } from '../config.js';
+import { resolveAutoUpdateGitRef, resolveAutoUpdateGitRefPlan, type AutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
   _autoUpdateIo,
   DAEMON_EXIT_CODE_RESTART,
@@ -79,40 +80,6 @@ export function normalizeRepo(repo: string): string {
   const m = t.match(/github\.com[/:](\S+\/\S+?)(?:\/|$)/);
   if (m) return m[1];
   return t;
-}
-
-export function parseTagName(ref: string): string | null {
-  const m = ref.match(/^refs\/tags\/(.+)$/);
-  return m ? m[1] : null;
-}
-
-export function isValidRef(ref: string): boolean {
-  if (!/^[\w./+\-]+$/.test(ref)) return false;
-  if (!ref || ref.startsWith("-") || ref.startsWith("/") || ref.endsWith("/")) return false;
-  if (ref.includes("..") || ref.includes("//") || ref.includes("@{")) return false;
-  if (ref.endsWith(".")) return false;
-  const parts = ref.split("/");
-  return parts.every((part) => {
-    if (!part || part === "." || part === "..") return false;
-    if (part.endsWith(".lock")) return false;
-    return true;
-  });
-}
-
-export function normalizeGitRefInput(ref: string): string {
-  const trimmed = ref.trim() || "main";
-  if (!isValidRef(trimmed)) {
-    throw new Error(`invalid branch/ref "${ref}"`);
-  }
-  if (trimmed.startsWith("refs/")) return trimmed;
-  return `refs/heads/${trimmed}`;
-}
-
-export function resolveAutoUpdateGitRef(
-  au: Pick<ResolvedAutoUpdateConfig, "branch"> & { ref?: string },
-  refOverride?: string,
-): string {
-  return normalizeGitRefInput(refOverride ?? au.ref ?? au.branch);
 }
 
 export function isValidRepoSpec(repo: string): boolean {
@@ -1187,13 +1154,19 @@ async function _performUpdateInner(
     }
   }
 
-  let ref = "";
+  let refPlan: AutoUpdateGitRefPlan;
   try {
-    ref = resolveAutoUpdateGitRef(au, opts.refOverride);
+    refPlan = resolveAutoUpdateGitRefPlan(au, {
+      refOverride: opts.refOverride,
+      ...(opts.verifyTagSignature !== undefined
+        ? { verifyTagSignature: opts.verifyTagSignature }
+        : {}),
+    });
   } catch (err: any) {
     log(`Auto-update (git): ${err?.message ?? "invalid branch/ref"}`);
     return "failed";
   }
+  const ref = refPlan.ref;
   const gitEnv = gitCommandEnv(au);
 
   const latestCommit = opts.expectedCommit?.trim()
@@ -1241,15 +1214,13 @@ async function _performUpdateInner(
   }
 
   try {
-    const maybeTag = parseTagName(ref);
-    const fetchRef = maybeTag ? `${ref}:${ref}` : ref;
     const fetchStartedAt = Date.now();
     log(
       `Auto-update (git): fetching "${ref}" from ${fetchUrl} into slot ${target}...`,
     );
     await execFileAsync(
       "git",
-      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, fetchRef],
+      [...gitCommandArgs(fetchUrl, au), "fetch", fetchUrl, refPlan.fetchRef],
       {
         cwd: targetDir,
         encoding: "utf-8",
@@ -1257,8 +1228,8 @@ async function _performUpdateInner(
         env: gitEnv,
       },
     );
-    if (opts.verifyTagSignature && maybeTag) {
-      await execFileAsync("git", ["verify-tag", maybeTag], {
+    if (refPlan.shouldVerifyTagSignature && refPlan.tagName) {
+      await execFileAsync("git", ["verify-tag", "--", refPlan.tagName], {
         cwd: targetDir,
         encoding: "utf-8",
         timeout: 30_000,

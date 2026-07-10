@@ -327,5 +327,13 @@ WHERE { GRAPH <${metaGraph}> {
   ?s ?p ?o .
   FILTER(?s = ?record || STRSTARTS(STR(?s), CONCAT(STR(?record), "/")))
 } }`;
-  await storeUpdate.call(store, sparql);
+  // #1549: the prune's DELETE only touches `metaGraph`, so declare it — the
+  // graph-set index then maintains itself incrementally (one `hasGraph`) instead
+  // of marking the whole index dirty and forcing a full store scan on the next
+  // enumeration. The agents-meta prune is one of only two recurring server-side
+  // UPDATE sources that dirtied the index on managed cores.
+  await storeUpdate.call(store, sparql, {
+    touchedGraphs: [metaGraph],
+    source: 'agent-registry-meta.prune',
+  });
 }
