@@ -215,23 +215,21 @@ export function createResponderSyncRowListMemo(
           },
         });
       } catch (error) {
-        if (
-          error instanceof SyncRowSnapshotBudgetError &&
-          (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
-        ) {
-          // Remember an intrinsically-oversized snapshot for this session so
-          // later pages can take the store-paged fallback without repeating the
-          // full materialization. A refresh/new session clears this marker.
-          //
-          // On a refresh (existing present) the prior snapshot was kept by
-          // admit()'s atomic replace, but the token that produced it is already
-          // superseded — so drop it here. Leaving it cached would let a later
-          // same-session page (requireExisting) resume the STALE snapshot after
-          // page 0 fell back to fresh store paging, mixing two snapshots in one
-          // session. Dropping it forces every page of the superseding session
-          // down the same fallback path.
+        if (error instanceof SyncRowSnapshotBudgetError) {
+          // A refresh whose new snapshot fails admission must not leave the
+          // superseded prior snapshot serveable. admit()'s atomic replace keeps
+          // the old entry on any failure, but the new token is already active,
+          // so a same-token retry (refresh=false) would resume the STALE rows.
+          // Drop it for BOTH the per-snapshot and the global rejection paths.
           if (existing) deleteCached(key, 'replaced');
-          rememberRejected(key, error);
+          // Intrinsically-oversized (per-snapshot) snapshots additionally remember
+          // the rejection so later pages of THIS session take the store-bounded
+          // fallback without re-materializing. Global (process-wide) pressure is
+          // transient and is NOT remembered — a retry re-attempts admission and
+          // succeeds once other sessions drain (and the drop above eases pressure).
+          if (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes') {
+            rememberRejected(key, error);
+          }
         }
         throw error;
       }

@@ -1278,6 +1278,43 @@ describe('sync responder pagination interleaving', () => {
     expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0 });
   });
 
+  it('does not resume a superseded snapshot after a refresh hits the global budget', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 4,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 4, // per-snapshot allows the grown snapshot; the GLOBAL cap does not
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_data', budget });
+    const other = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_meta', budget });
+    const rows = (count: number, label: string) => Array.from({ length: count }, (_, index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+
+    // A pinned 2-row snapshot on another memo holds half the global budget.
+    await expect(other.get('other', async () => rows(2, 'other'))).resolves.toHaveLength(2);
+    // 'key' caches 1 row (global now 3/4, both pinned/active).
+    const original = rows(1, 'original');
+    await expect(memo.get('key', async () => original)).resolves.toBe(original);
+
+    // Refreshing 'key' to 3 rows needs 2+3 > 4 and cannot evict the pinned peer:
+    // a GLOBAL (not per-snapshot) rejection.
+    await expect(
+      memo.get('key', async () => rows(3, 'grown'), { refresh: true }),
+    ).rejects.toMatchObject({ reason: 'global_rows' });
+
+    // A same-token retry (refresh=false) must NOT resume the stale 1-row snapshot;
+    // it was dropped, so requireExisting sees no snapshot (and offset 0 re-loads).
+    await expect(
+      memo.get('key', async () => [], { requireExisting: true }),
+    ).resolves.toBeNull();
+    // Dropping the superseded snapshot also eases the global pressure.
+    expect(budget.stats()).toMatchObject({ rows: 2 });
+  });
+
   it('enforces per-snapshot estimated-byte limits independently of row limits', async () => {
     const row = {
       s: 'urn:bytes:s',
@@ -1373,6 +1410,35 @@ describe('sync responder pagination interleaving', () => {
     }
   });
 
+  it('releases the shared budget when a cached snapshot expires by TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 2,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 2,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10, 10, { phase: 'durable_data', budget });
+    const rows = (label: string) => [0, 1].map((index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+
+    await expect(memo.get('a', async () => rows('a'))).resolves.toHaveLength(2);
+    expect(budget.stats()).toMatchObject({ snapshots: 1, rows: 2 });
+
+    // Advance past the TTL; the next access prunes the expired entry.
+    vi.setSystemTime(11);
+    await expect(memo.get('b', async () => [], { requireExisting: true })).resolves.toBeNull();
+
+    // TTL expiry must release the snapshot from the shared budget, so a later
+    // session cannot hit a global limit for a snapshot the cache no longer holds.
+    expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
   it('extracts a cached page without iterating or copying the complete snapshot', async () => {
     const source = Array.from({ length: 2_000 }, (_, index) => ({
       s: `urn:row:${index}`,
@@ -1380,12 +1446,26 @@ describe('sync responder pagination interleaving', () => {
       o: `"row-${index}"`,
       g: 'urn:graph',
     }));
+    const pageStart = 1_000;
+    const pageEnd = 1_500; // offset 1000 + limit 500
     let wholeSnapshotIterations = 0;
+    let outOfPageIndexReads = 0;
     const snapshot = new Proxy(source, {
       get(target, property, receiver) {
         if (property === Symbol.iterator) {
           wholeSnapshotIterations += 1;
           throw new Error('complete snapshot must not be iterated while extracting one page');
+        }
+        // A correct slice(offset, offset+limit) reads only in-page element
+        // indices (plus non-index props like `length`). Reading any index
+        // outside the page is a full-array copy (e.g. `rows.slice()` then slice
+        // again, or an indexed clone), which the iterator guard alone misses.
+        if (typeof property === 'string' && /^\d+$/.test(property)) {
+          const index = Number(property);
+          if (index < pageStart || index >= pageEnd) {
+            outOfPageIndexReads += 1;
+            throw new Error(`page extraction must not read out-of-page index ${index}`);
+          }
         }
         return Reflect.get(target, property, receiver);
       },
@@ -1408,5 +1488,6 @@ describe('sync responder pagination interleaving', () => {
     expect(page).toHaveLength(500);
     expect(page[0]?.s).toBe('urn:row:1000');
     expect(wholeSnapshotIterations).toBe(0);
+    expect(outOfPageIndexReads).toBe(0);
   });
 });
