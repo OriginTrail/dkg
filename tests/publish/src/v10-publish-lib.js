@@ -293,6 +293,16 @@ export function defineChainPublishSuite(config) {
             : `✅ present (length ${trimmedToken.length})`;
         console.log(`🔑 ${name} bearer token: ${tokenState}`);
 
+        // Log the node's version+commit — when publishes hang, the FIRST question
+        // is "which release is this node actually running?" (operator nodes may
+        // lag the npm mainnet tag), so put the answer in every build log.
+        try {
+          const st = await makeNodeClient(hostname, token).status();
+          console.log(`📟 ${name} node version: ${st.version}${st.commitShort ? ` (commit ${st.commitShort})` : ''}${st.distTag ? ` [${st.distTag}]` : ''}`);
+        } catch (error) {
+          console.log(`📟 ${name} node version: unreadable (${String(error.message).slice(0, 80)})`);
+        }
+
         let publishSuccess = 0, publishFail = 0;
         let querySuccess = 0, queryFail = 0;
         let vmGetSuccess = 0, vmGetFail = 0;
