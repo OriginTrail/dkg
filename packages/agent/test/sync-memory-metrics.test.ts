@@ -14,6 +14,7 @@ import {
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 
 function createMetricsHarness() {
   const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
@@ -159,6 +160,22 @@ describe('sync memory attribution metrics', () => {
     )[0].value as { buckets: { boundaries: number[] } };
     expect(byteHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
     expect(quadHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
+
+    // Assert the RECORDED measurements, not just that the series exist: a
+    // regression that finished the phase with 0 quads / 0 pages / 0 bytes would
+    // still produce points with the right labels, so presence alone is not proof.
+    const completedValue = (name: string): { sum: number; count: number } => {
+      const point = metricPoints(harness.exporter, name).find((candidate) =>
+        candidate.attributes.phase === 'durable_data' && candidate.attributes.outcome === 'completed',
+      );
+      return point!.value as { sum: number; count: number };
+    };
+    expect(completedValue('dkg.sync.requester.accumulated_quads').sum).toBe(2);
+    expect(completedValue('dkg.sync.requester.page_count').sum).toBe(2);
+    const expectedBytes =
+      estimateQuadHeapBytes({ subject: 'urn:s:1', predicate: 'urn:p', object: '"one"', graph: 'urn:data' }) +
+      estimateQuadHeapBytes({ subject: 'urn:s:2', predicate: 'urn:p', object: '"two"', graph: 'urn:data' });
+    expect(completedValue('dkg.sync.requester.accumulated_bytes').sum).toBe(expectedBytes);
   });
 
   it('attributes requester phase memory to the error outcome when parsing throws', async () => {

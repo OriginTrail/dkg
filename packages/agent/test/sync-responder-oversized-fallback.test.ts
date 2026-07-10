@@ -9,6 +9,7 @@ import {
   workspaceOpQuads,
   type CapturedSyncHandler,
 } from './_helpers/sync-responder.js';
+import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
@@ -256,7 +257,70 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(t2.size).toBe(3);
     expect([...t2].join('\n')).toContain('"row-002"');
   });
+
+  it('falls back to store-bounded paging for a BYTE-oversized durable snapshot', async () => {
+    // Byte limits are a separate production budget from the row cap and fire
+    // first for long RDF terms. Exercise the handler path under a low
+    // maxSnapshotBytesEstimate with a high row cap, so the rejection is
+    // snapshot_bytes (not snapshot_rows), and prove the graph still syncs.
+    const store = new OxigraphStore();
+    const cgId = 'byte-oversized';
+    const dataGraph = `did:dkg:context-graph:${cgId}/context/1`;
+    const rows: Quad[] = [0, 1].map((index) => ({
+      graph: dataGraph,
+      subject: `urn:byte:${index}`,
+      predicate: `${DKG_NS}label`,
+      object: `"${'x'.repeat(600)}-${index}"`,
+    }));
+    await store.insert(rows);
+    const perRowBytes = estimateStringRowHeapBytes(
+      rows[0].subject,
+      rows[0].predicate,
+      rows[0].object,
+      rows[0].graph,
+    );
+
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 1_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 100, // the row cap does NOT bind (2 rows)
+        maxSnapshotBytesEstimate: perRowBytes + 10, // one row fits; the 2-row snapshot does not
+      },
+    });
+    const boundedQuery = watchBoundedDataPageQuery(store, dataGraph);
+    const collected = await collectAllPages(
+      cap,
+      { contextGraphId: cgId, includeSharedMemory: false, phase: 'data', limit: 1, syncSessionId: 'byte-oversized-session' },
+      1,
+    );
+
+    // Both rows are served through the store-bounded fallback, not a limit error.
+    expect(collected.size).toBe(2);
+    boundedQuery.assertObserved();
+  });
 });
+
+/** Assert the durable-data fallback issued a bounded ORDER BY/OFFSET/LIMIT page query. */
+function watchBoundedDataPageQuery(store: OxigraphStore, graph: string) {
+  const originalQuery = store.query.bind(store);
+  let observed = 0;
+  store.query = (async (sparql: string) => {
+    const normalized = sparql.replace(/\s+/g, ' ').trim();
+    if (
+      /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+      normalized.includes(`<${graph}>`) &&
+      normalized.includes('ORDER BY ?g ?s ?p ?o') &&
+      /OFFSET \d+/.test(normalized) &&
+      /LIMIT \d+/.test(normalized)
+    ) {
+      observed += 1;
+    }
+    return originalQuery(sparql);
+  }) as OxigraphStore['query'];
+  return { assertObserved: () => expect(observed).toBeGreaterThan(0) };
+}
 
 /** Assert the durable-meta fallback issued a bounded, single-graph paged query. */
 function watchBoundedMetaPageQuery(store: OxigraphStore, metaGraph: string) {
