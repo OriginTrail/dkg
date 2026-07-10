@@ -296,6 +296,7 @@ import {
   performNpmUpdateEdge,
 } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
+import { resolveUpdateJitterMs, awaitUpdateHoldoff } from './auto-update-jitter.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2113,6 +2114,12 @@ export async function runDaemonInner(
       const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
       if (verificationWarning) log(verificationWarning);
 
+      // Rollout jitter: hold off a per-node random delay between detecting an
+      // available commit and applying it, so a release never restarts the whole
+      // fleet in one window (the 2026-07-10 bootstrap-storm trigger).
+      const updateJitterMs = resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes);
+      let updatePending = false;
+
       const runCheck = async () => {
         const gitStatus = await checkForNewCommitWithStatus(au, log);
         if (gitStatus.status === "error") {
@@ -2127,24 +2134,48 @@ export async function runDaemonInner(
         daemonState.lastUpdateCheck.latestCommit = gitStatus.commit ?? "";
 
         if (gitStatus.status !== "available" || !gitStatus.commit) return;
+        // Capture into a const: the narrowing above does not survive into the
+        // onHold closure passed to awaitUpdateHoldoff (TS re-widens it there).
+        const commit = gitStatus.commit;
+        // One rollout at a time: the hold-off below can outlast the poll
+        // interval, so a later tick must not start a second concurrent apply.
+        if (updatePending) return;
+        updatePending = true;
+        try {
+          const decision = await awaitUpdateHoldoff({
+            jitterMs: updateJitterMs,
+            isShuttingDown: () => shuttingDown,
+            onHold: (holdMs) =>
+              log(
+                `Auto-update (git): new commit ${commit.slice(0, 8)} available; ` +
+                  `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
+              ),
+          });
+          if (decision === "abort-shutdown") {
+            log("Auto-update (git): hold-off aborted — daemon shutting down; deferring to next boot.");
+            return;
+          }
 
-        daemonState.isUpdating = true;
-        const updateStatus = await performUpdateWithStatus(au, log, {
-          expectedCommit: gitStatus.commit,
-        }).finally(() => {
-          daemonState.isUpdating = false;
-        });
+          daemonState.isUpdating = true;
+          const updateStatus = await performUpdateWithStatus(au, log, {
+            expectedCommit: commit,
+          }).finally(() => {
+            daemonState.isUpdating = false;
+          });
 
-        if (updateStatus === "updated") {
-          log("Auto-update (git): update activated; exiting for supervised restart.");
-          await shutdown(DAEMON_EXIT_CODE_RESTART);
-          return;
+          if (updateStatus === "updated") {
+            log("Auto-update (git): update activated; exiting for supervised restart.");
+            await shutdown(DAEMON_EXIT_CODE_RESTART);
+            return;
+          }
+          if (updateStatus === "up-to-date") {
+            log("Auto-update (git): update skipped — node caught up before apply.");
+            return;
+          }
+          log("Auto-update (git): update failed.");
+        } finally {
+          updatePending = false;
         }
-        if (updateStatus === "up-to-date") {
-          log("Auto-update (git): update skipped — node caught up before apply.");
-          return;
-        }
-        log("Auto-update (git): update failed.");
       };
 
       setTimeout(runCheck, 15_000);
@@ -2167,6 +2198,11 @@ export async function runDaemonInner(
       `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
     );
 
+    // Rollout jitter (same rationale as the git path): stagger the fleet's
+    // restarts by holding off a per-node random delay before applying.
+    const updateJitterMs = au ? resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes) : 0;
+    let updatePending = false;
+
     const runCheck = async () => {
       const npmStatus = await checkForNpmVersionUpdate(log, allowPre, channel);
       const derived = deriveUpdateCheckState(npmStatus);
@@ -2185,18 +2221,39 @@ export async function runDaemonInner(
       if (npmStatus.status !== "available" || !npmStatus.version) return;
       if (!au) return; // version check only — no auto-apply when polling disabled
 
-      daemonState.isUpdating = true;
-      // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
-      const role = config.nodeRole ?? "edge";
-      const status = role === "edge"
-        ? await performNpmUpdateEdge(npmStatus.version, getCurrentCliVersion(), log)
-        : await performNpmUpdate(npmStatus.version, log);
-      const updated = status === "updated";
-      daemonState.isUpdating = false;
-      if (updated) {
-        log("Auto-update: update activated; exiting for supervised restart.");
-        await shutdown(DAEMON_EXIT_CODE_RESTART);
-        return;
+      // One rollout at a time: the hold-off can outlast the poll interval.
+      if (updatePending) return;
+      updatePending = true;
+      try {
+        const decision = await awaitUpdateHoldoff({
+          jitterMs: updateJitterMs,
+          isShuttingDown: () => shuttingDown,
+          onHold: (holdMs) =>
+            log(
+              `Auto-update (npm): version ${npmStatus.version} available; ` +
+                `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
+            ),
+        });
+        if (decision === "abort-shutdown") {
+          log("Auto-update (npm): hold-off aborted — daemon shutting down; deferring to next boot.");
+          return;
+        }
+
+        daemonState.isUpdating = true;
+        // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
+        const role = config.nodeRole ?? "edge";
+        const status = role === "edge"
+          ? await performNpmUpdateEdge(npmStatus.version, getCurrentCliVersion(), log)
+          : await performNpmUpdate(npmStatus.version, log);
+        const updated = status === "updated";
+        daemonState.isUpdating = false;
+        if (updated) {
+          log("Auto-update: update activated; exiting for supervised restart.");
+          await shutdown(DAEMON_EXIT_CODE_RESTART);
+          return;
+        }
+      } finally {
+        updatePending = false;
       }
     };
 

@@ -693,6 +693,38 @@ describe('resolveAutoUpdateConfig', () => {
     expect(resolved?.verifyTagSignature).toBe(true);
   });
 
+  it('plumbs a local updateJitterMinutes through to the resolved config', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git', updateJitterMinutes: 10 } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(10);
+  });
+
+  it('inherits a network-level updateJitterMinutes default when local is unset', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git' } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, updateJitterMinutes: 45, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(45);
+  });
+
+  it('prefers the local updateJitterMinutes over the network default (including 0 = disable)', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git', updateJitterMinutes: 0 } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, updateJitterMinutes: 45, source: 'git' } },
+    );
+    expect(resolved?.updateJitterMinutes).toBe(0);
+  });
+
+  it('omits updateJitterMinutes from the resolved config when neither layer sets it', () => {
+    const resolved = resolveAutoUpdateConfig(
+      { autoUpdate: { enabled: true, source: 'git' } },
+      { autoUpdate: { enabled: true, repo: 'owner/repo', branch: 'main', checkIntervalMinutes: 30, source: 'git' } },
+    );
+    expect(resolved).not.toHaveProperty('updateJitterMinutes');
+  });
+
   it('preserves a local false tag-signature override over network defaults', () => {
     const resolved = resolveAutoUpdateConfig(
       {
