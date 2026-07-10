@@ -544,12 +544,18 @@ export function defineChainPublishSuite(config) {
           const remoteNode = nodes[otherIndexes[Math.floor(Math.random() * otherIndexes.length)]];
           const remoteStart = Date.now();
           try {
-            if (!readUal) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
+            if (!readUal && !publishOk) throw new Error('Query Remote (sync): publish failed and no DKG_FALLBACK_UAL configured');
             const remotePeerId = await getPeerId(remoteNode);
             if (!remotePeerId) throw new Error(`Could not resolve peerId for ${remoteNode.name} (${remoteNode.hostname})`);
-            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, { lookupType: 'ENTITY_BY_UAL', ual: readUal }));
-            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${readUal} from ${remoteNode.name}`);
-            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced)`);
+            // Run-specific even when the UAL could not be recovered (response
+            // lost, #1572): ask the peer for THIS KA's unique root entity
+            // directly — a pass proves this run's KA propagated cross-node.
+            const lookup = publishOk && !ual
+              ? { lookupType: 'ENTITY_TRIPLES', entityUri: rootEntity }
+              : { lookupType: 'ENTITY_BY_UAL', ual: readUal };
+            const result = await readWithRetry('Query Remote (sync)', remoteNode.name, () => client.queryRemote(remotePeerId, contextGraphId, lookup));
+            assert.ok(queryHasData(result), `Query Remote (sync) returned no triples for ${lookup.ual || lookup.entityUri} from ${remoteNode.name}`);
+            console.log(`✅ Query Remote (sync) succeeded — ${remoteNode.name} has the KA (synced${publishOk && !ual ? ', by entity URI' : ''})`);
             queryRemoteSuccess++;
             queryRemoteDurations.push(Date.now() - remoteStart);
           } catch (error) {
@@ -616,7 +622,27 @@ export function defineChainPublishSuite(config) {
         const errorsFileName = `errors_${name.replace(/\s+/g, '_')}.json`;
         fs.writeFileSync(errorsFileName, JSON.stringify(errorData, null, 2));
         console.log(`✅ Saved errors to ${errorsFileName}`);
+
+        // Response-loss flag: consumed by the Jenkins pipeline to mark the
+        // build UNSTABLE while node bug OriginTrail/dkg#1572 is active.
+        // Appended (not truncated) — parallel node stages share the workspace.
+        if (publishRescued > 0) {
+          fs.appendFileSync('response_lost.flag', `${name}: ${publishRescued}\n`);
+        }
       }
+    });
+
+    // Runs AFTER the main test (summaries already written, Grafana import
+    // unaffected — the pipeline wraps stages in catchError(buildResult:
+    // 'SUCCESS')). Fails the STAGE whenever any publish response was lost,
+    // so node bug OriginTrail/dkg#1572 is impossible to overlook while the
+    // publish stats above still tell the true success story.
+    it('publish responses arrived in time (node bug OriginTrail/dkg#1572 inactive)', function () {
+      const lost = Object.values(globalStats[blockchainName] || {})
+        .reduce((s, st) => s + (st.publishRescued || 0), 0);
+      assert.equal(lost, 0,
+        `${lost} publish response(s) never arrived and were confirmed via VM read-back instead — ` +
+        `sync publish response hang (OriginTrail/dkg#1572) is active on this chain's cores`);
     });
 
     after(() => {
