@@ -2094,3 +2094,73 @@ describe('autoupdater hardening', () => {
   });
 
 });
+
+// Post-hold-off revalidation mappers for the rollout gate. These guard the
+// exact seam behind the 🔴 review finding: after the jitter delay, the target
+// detected earlier must be RE-CONFIRMED so a withdrawn / rolled-back release is
+// never installed. (The gate orchestration itself is covered in
+// auto-update-jitter.test.ts; here we prove the real npm/git mappers.)
+describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
+  function makeRegistryResponse(distTags: Record<string, string>) {
+    return { ok: true, json: async () => ({ 'dist-tags': distTags }) } as any;
+  }
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the version when the channel target is still available and ahead', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    currentVersion('9.0.0');
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+  });
+
+  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    currentVersion('9.0.0');
+    // 9.1.0 pulled; latest rolled back to what the node already runs.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+  });
+
+  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    currentVersion('9.0.0');
+    // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
+    fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+  });
+});
+
+describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSha(sha: string) {
+    execFileImpl = async (file: string, args: string[]) =>
+      file === 'git' && args[0] === 'ls-remote'
+        ? { stdout: `${sha}\trefs/heads/main\n`, stderr: '' }
+        : { stdout: '', stderr: '' };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('returns the fresh remote commit when the ref is still ahead', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon.js');
+    readFileImpl = async () => 'aaa1111'; // current commit
+    remoteSha('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+  });
+
+  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+    const { resolveCurrentGitTarget } = await import('../src/daemon.js');
+    readFileImpl = async () => 'aaa1111';
+    remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+  });
+});

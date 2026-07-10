@@ -106,3 +106,85 @@ export async function awaitUpdateHoldoff(deps: AwaitUpdateHoldoffDeps): Promise<
   await (deps.sleep ?? unrefSleep)(holdMs);
   return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
 }
+
+/** Single-flight holder shared across polling ticks (see runWithUpdateHoldoff). */
+export interface UpdatePendingFlag {
+  active: boolean;
+}
+
+export interface RunWithUpdateHoldoffDeps<T> {
+  /** Persists across polling ticks so a hold-off that outlasts the poll
+   *  interval cannot start a second concurrent rollout. */
+  pending: UpdatePendingFlag;
+  /** Resolved jitter window in ms (from resolveUpdateJitterMs). */
+  jitterMs: number;
+  /** True once the daemon has begun shutting down. */
+  isShuttingDown: () => boolean;
+  /** Toggle the daemon's user-visible "is updating" flag. */
+  setUpdating: (updating: boolean) => void;
+  log: (msg: string) => void;
+  /** Emit the mode-specific "holding Ns before applying" line (detected target). */
+  onHold: (holdMs: number) => void;
+  /**
+   * Re-confirm — AFTER the hold-off — that there is still a target to apply, and
+   * return the CURRENT one. The jitter delay means the target detected before
+   * the wait may have been withdrawn (dist-tag rolled back, ref moved) or the
+   * node may have caught up; returning null skips the apply so a superseded /
+   * withdrawn release is never installed. A refreshed target (e.g. a newer
+   * version published during the wait) is applied in place of the stale one.
+   */
+  revalidate: () => Promise<T | null>;
+  /** Apply the revalidated target (owns its own post-apply restart/log). */
+  apply: (target: T) => Promise<void>;
+  /** Logged when the hold-off is aborted because the daemon is shutting down. */
+  shutdownMessage: string;
+  /** Logged when revalidate() reports no current target (withdrawn / caught up). */
+  supersededMessage: string;
+  /** Injectable for deterministic tests. */
+  rng?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * The single auto-update rollout gate shared by the git and npm daemon paths.
+ * Owns the cross-cutting state machine so it lives in ONE place (and is unit
+ * tested directly) instead of being duplicated inside each updater branch:
+ *
+ *   single-flight guard -> hold-off (jitter) -> abort if shutting down
+ *     -> REVALIDATE the target -> set isUpdating -> apply -> clear isUpdating
+ *
+ * Mode-specific behaviour (which check, which installer, log wording, post-apply
+ * restart) is injected via `revalidate`/`apply`/`onHold`/messages.
+ */
+export async function runWithUpdateHoldoff<T>(deps: RunWithUpdateHoldoffDeps<T>): Promise<void> {
+  if (deps.pending.active) return; // one rollout at a time
+  deps.pending.active = true;
+  try {
+    const decision = await awaitUpdateHoldoff({
+      jitterMs: deps.jitterMs,
+      isShuttingDown: deps.isShuttingDown,
+      onHold: deps.onHold,
+      rng: deps.rng,
+      sleep: deps.sleep,
+    });
+    if (decision === 'abort-shutdown') {
+      deps.log(deps.shutdownMessage);
+      return;
+    }
+
+    const target = await deps.revalidate();
+    if (target === null || target === undefined) {
+      deps.log(deps.supersededMessage);
+      return;
+    }
+
+    deps.setUpdating(true);
+    try {
+      await deps.apply(target);
+    } finally {
+      deps.setUpdating(false);
+    }
+  } finally {
+    deps.pending.active = false;
+  }
+}
