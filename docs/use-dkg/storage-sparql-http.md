@@ -61,6 +61,27 @@ Optional:
 For a local Oxigraph server you do **not** have to run it yourself: set `"store": { "backend": "oxigraph-server" }` (the `dkg init` default) and the daemon fetches the pinned `oxigraph` binary, spawns it on `127.0.0.1`, and supervises it. Use the manual `sparql-http` steps above only when you run Oxigraph (or another SPARQL store) yourself or off-host.
 {% endhint %}
 
+Managed Oxigraph accepts optional launch settings under `store.options`:
+
+```json
+{
+  "store": {
+    "backend": "oxigraph-server",
+    "options": {
+      "port": 7878,
+      "location": "/var/lib/dkg/oxigraph-data",
+      "cacheDir": "/var/lib/dkg/oxigraph-bin",
+      "readyTimeoutMs": 180000,
+      "queryTimeoutS": 35
+    }
+  }
+}
+```
+
+`readyTimeoutMs` is the maximum startup readiness wait in milliseconds. It must be a positive integer; invalid values are ignored and the default 30-second timeout is used. Increase it when a large or recovering RocksDB database needs longer to open.
+
+`queryTimeoutS` is the native Oxigraph query timeout in seconds. The rewritten HTTP store timeout includes an additional five-second grace period so Oxigraph can return its timeout response before the client aborts the request.
+
 ### Other stores
 
 - **Blazegraph:** One URL for both query and update. Set only `queryEndpoint` or set both options to the same URL (e.g. `http://127.0.0.1:9999/blazegraph/namespace/kb/sparql`).

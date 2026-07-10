@@ -38,12 +38,14 @@ export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519
 export { MessageHandler, type SkillRequest, type SkillResponse, type SkillHandler, type ChatHandler, type ChatAclCheck } from './messaging.js';
 export {
   NetworkAdmissionService,
-  peerIdsFromMultiaddr,
-  peerIdsFromMultiaddrs,
-  targetPeerIdFromMultiaddr,
   type NetworkAdmissionOptions,
   type NetworkAdmissionSnapshot,
 } from './p2p/network-admission.js';
+export {
+  peerIdsFromMultiaddr,
+  peerIdsFromMultiaddrs,
+  targetPeerIdFromMultiaddr,
+} from './p2p/multiaddr-peer-target.js';
 export { GossipPublishHandler, type GossipPublishHandlerCallbacks } from './gossip-publish-handler.js';
 export { FinalizationHandler } from './finalization-handler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';

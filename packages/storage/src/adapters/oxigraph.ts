@@ -10,6 +10,7 @@ import type {
   ConstructResult,
   AskResult,
   TripleStoreQueryOptions,
+  UpdateOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -332,7 +333,11 @@ export class OxigraphStore implements TripleStore {
    * graph-to-graph `INSERT…WHERE` copies keep terms byte-identical (no JS
    * termToString→parseTerm round-trip). See {@link TripleStore.update}.
    */
-  async update(sparql: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async update(sparql: string, _options?: UpdateOptions): Promise<void> {
+    // In-process oxigraph is never wrapped by a graph-set index, so the
+    // `touchedGraphs` hint is inapplicable here — accepted for a uniform
+    // update contract, ignored.
     this.store.update(sparql);
     this.scheduleFlush();
   }

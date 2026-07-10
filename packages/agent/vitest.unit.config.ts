@@ -49,6 +49,7 @@ export default defineConfig({
       "test/v10-ack-provider-wiring.test.ts",
       "test/agents-meta-policy.test.ts",
       "test/agents-meta-sync-wiring.test.ts",
+      "test/network-identity-proof.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
     ],
     testTimeout: 60_000,

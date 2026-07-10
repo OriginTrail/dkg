@@ -2,6 +2,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  UpdateOptions,
   StorePressureSnapshot,
   TripleStoreQueryOptions,
   QueryResult,
@@ -146,7 +147,7 @@ export class BlazegraphStore implements TripleStore {
    * delete with two full-graph `countQuads` scans (see above), which is
    * prohibitive on a CPU-pegged core.
    */
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     await this.sparqlUpdate(
       sparql,
       { ...options, source: options?.source ?? 'blazegraph.update' },

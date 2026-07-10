@@ -25,6 +25,7 @@ import type {
   TripleStore,
   Quad as DKGQuad,
   QueryOptions,
+  UpdateOptions,
   QueryResult,
   SelectResult,
   ConstructResult,
@@ -365,7 +366,7 @@ export class SparqlHttpStore implements TripleStore {
    * (oxigraph-server) executes graph-to-graph `INSERT…WHERE` copies internally,
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     const res = await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',

@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
+import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
 import { connectToMultiaddr, primeCatchupConnections } from '../src/p2p/peer-connect.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
@@ -11,13 +13,31 @@ describe('connectToMultiaddr', () => {
   it('dials direct multiaddrs without circuit expansion', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);
-    const connections = [{ remotePeer: { toString: () => '12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' } }];
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const connections = [{ remotePeer: { toString: () => peerId } }];
 
     await connectToMultiaddr({
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    }, parseMultiaddrConnectTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${peerId}`));
+
+    expect(dial.calls).toHaveLength(1);
+    expect(merge.calls).toEqual([]);
+  });
+
+  it('confirms direct CID-form target peer ids against canonical connections', async () => {
+    const dial = recorder(async () => undefined);
+    const merge = recorder(async () => undefined);
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const cidPeerId = peerIdFromString(peerId).toCID().toString();
+    const connections = [{ remotePeer: { toString: () => peerId } }];
+
+    await connectToMultiaddr({
+      getConnections: () => connections as any,
+      dial,
+      peerStore: { merge },
+    }, parseMultiaddrConnectTarget(`/ip4/127.0.0.1/tcp/9090/p2p/${cidPeerId}`));
 
     expect(dial.calls).toHaveLength(1);
     expect(merge.calls).toEqual([]);
@@ -26,17 +46,46 @@ describe('connectToMultiaddr', () => {
   it('dials relay first then target peer for circuit multiaddrs', async () => {
     const dial = recorder(async () => undefined);
     const merge = recorder(async () => undefined);
-    const multiaddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M/p2p-circuit/p2p/12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
-    const connections = [{ remotePeer: { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' } }];
+    const relayAddress = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const multiaddress = `${relayAddress}/p2p-circuit/p2p/${targetPeerId}`;
+    const connections = [{ remotePeer: { toString: () => targetPeerId } }];
 
     await connectToMultiaddr({
       getConnections: () => connections as any,
       dial,
       peerStore: { merge },
-    }, multiaddress);
+    }, parseMultiaddrConnectTarget(multiaddress));
 
     expect(dial.calls).toHaveLength(2);
+    expect(dial.calls[0]?.[0]?.toString()).toBe(relayAddress);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
     expect(merge.calls).toHaveLength(1);
+    expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
+    expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
+  });
+
+  it('confirms circuit CID-form target peer ids against canonical connections', async () => {
+    const dial = recorder(async () => undefined);
+    const merge = recorder(async () => undefined);
+    const relayPeerId = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const targetPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const targetPeerIdCid = peerIdFromString(targetPeerId).toCID().toString();
+    const multiaddress = `/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}/p2p-circuit/p2p/${targetPeerIdCid}`;
+    const connections = [{ remotePeer: { toString: () => targetPeerId } }];
+
+    await connectToMultiaddr({
+      getConnections: () => connections as any,
+      dial,
+      peerStore: { merge },
+    }, parseMultiaddrConnectTarget(multiaddress));
+
+    expect(dial.calls).toHaveLength(2);
+    expect(dial.calls[0]?.[0]?.toString()).toBe(`/ip4/178.104.54.178/tcp/9090/p2p/${relayPeerId}`);
+    expect(dial.calls[1]?.[0]?.toString()).toBe(targetPeerId);
+    expect(merge.calls).toHaveLength(1);
+    expect(merge.calls[0]?.[0]?.toString()).toBe(targetPeerId);
+    expect(merge.calls[0]?.[1].multiaddrs.map((addr) => addr.toString())).toEqual([multiaddress]);
   });
 
   it('throws when final circuit target never appears', async () => {
@@ -48,7 +97,7 @@ describe('connectToMultiaddr', () => {
       getConnections: () => [],
       dial,
       peerStore: { merge },
-    }, multiaddress)).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
+    }, parseMultiaddrConnectTarget(multiaddress))).rejects.toThrow('Circuit target peer 12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6 not observed before timeout');
   });
 });
 

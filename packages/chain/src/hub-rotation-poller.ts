@@ -95,23 +95,35 @@ export class HubRotationPoller {
     };
   }
 
+  /**
+   * Every poller read is a background TIP probe at the ~stickiness-TTL cadence:
+   * preference-TRANSPARENT so a poll tick never re-probes/clears the preferred
+   * backend the read/write paths rely on, and so head/logs stay canonical-fresh
+   * (not a lagging sticky backend's lower tip). Owns the transport-internal
+   * `skipPreferred` opt-out ONCE so the call sites below read by INTENT (tip
+   * probe), not by the double-negative flag. Mirrors the adapter's `readTipProvider`.
+   */
+  private readTip<T>(
+    label: string,
+    fn: (provider: JsonRpcProvider) => Promise<T>,
+    opts?: ReadOpts,
+  ): Promise<T> {
+    return this.readProvider(label, fn, { ...opts, skipPreferred: true });
+  }
+
   async pollOnce(generation = this.generation): Promise<void> {
     const binding = this.binding;
     if (!this.started || !binding || binding.topics.length === 0 || generation !== this.generation) return;
 
     const previousLastScannedBlock = this.lastScannedBlock;
-    const head = await this.readProvider(
+    const head = await this.readTip(
       'Hub rotation poll getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      // Background head probe at the ~stickiness-TTL cadence: keep it
-      // preference-transparent so a poll tick never re-probes/clears the
-      // preferred backend the read/write paths rely on, and so `head` stays
-      // canonical-fresh (not a lagging sticky backend's lower tip).
-      { policy: 'watchdogPointRead', skipPreferred: true },
+      { policy: 'watchdogPointRead' },
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
-    const logs = await this.readProvider<ethers.Log[]>(
+    const logs = await this.readTip<ethers.Log[]>(
       'Hub rotation poll getLogs',
       (provider) => provider.getLogs({
         address: binding.hubAddress,
@@ -119,7 +131,7 @@ export class HubRotationPoller {
         toBlock: head,
         topics: [binding.topics],
       }),
-      { policy: 'watchdogWideLogScan', skipPreferred: true },
+      { policy: 'watchdogWideLogScan' },
     );
     if (!this.started || generation !== this.generation) return;
 
@@ -132,12 +144,10 @@ export class HubRotationPoller {
 
   private async recordInitialHead(generation: number): Promise<void> {
     if (!this.started || generation !== this.generation) return;
-    const head = await this.readProvider(
+    const head = await this.readTip(
       'Hub rotation poll initial getBlockNumber',
       (provider) => provider.getBlockNumber(),
-      // Preference-transparent (see pollOnce): background head probe must not
-      // disturb the read/write stickiness state.
-      { policy: 'watchdogPointRead', skipPreferred: true },
+      { policy: 'watchdogPointRead' },
     );
     if (!this.started || generation !== this.generation) return;
     this.lastScannedBlock = this.lastScannedBlock == null
