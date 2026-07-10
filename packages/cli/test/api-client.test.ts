@@ -153,6 +153,49 @@ describe('ApiClient', () => {
       expect(calls[0].url).toBe('http://100.65.228.120:9317/api/status');
     });
 
+    it.each([
+      ['0.0.0.0', 'http://127.0.0.1:9317/api/status'],
+      ['::', 'http://[::1]:9317/api/status'],
+      ['::1', 'http://[::1]:9317/api/status'],
+    ])('connect() normalizes configured apiHost %s when using the persisted API port', async (apiHost, expectedUrl) => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(
+        join(tempDir, 'config.json'),
+        JSON.stringify({ name: 'bound-node', apiHost, apiPort: 9200 }),
+      );
+      await writeFile(join(tempDir, 'api.port'), '9317\n', 'utf8');
+      await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
+      const body = { name: 'bound-node', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect();
+      const result = await connected.status();
+
+      expect(result).toEqual(body);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe(expectedUrl);
+    });
+
+    it('connect() keeps using the persisted API port when config parsing fails', async () => {
+      process.env.DKG_HOME = tempDir;
+      delete process.env.DKG_API_PORT;
+      await writeFile(join(tempDir, 'config.json'), '{ bad json', 'utf8');
+      await writeFile(join(tempDir, 'api.port'), '9317\n', 'utf8');
+      await writeFile(join(tempDir, 'auth.token'), 'local-token\n', 'utf8');
+      const body = { name: 'running-node', peerId: 'peer1', uptimeMs: 1000, connectedPeers: 2, relayConnected: true, multiaddrs: [] };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const connected = await ApiClient.connect();
+      const result = await connected.status();
+
+      expect(result).toEqual(body);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe('http://127.0.0.1:9317/api/status');
+    });
+
     it('connect() respects configured apiHost when falling back to the configured API port', async () => {
       process.env.DKG_HOME = tempDir;
       delete process.env.DKG_API_PORT;
