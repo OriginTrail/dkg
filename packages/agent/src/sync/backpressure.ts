@@ -48,15 +48,16 @@ export class SyncBackpressureBusyError extends Error {
   }
 }
 
-/** Return local admission pressure through a direct or wrapped error boundary. */
+/** Return local admission pressure through the standard Error.cause chain. */
 export function getSyncBackpressureBusyError(
   error: unknown,
 ): SyncBackpressureBusyError | undefined {
-  if (error instanceof SyncBackpressureBusyError) return error;
-  if (error && typeof error === 'object' && 'originalError' in error) {
-    return error.originalError instanceof SyncBackpressureBusyError
-      ? error.originalError
-      : undefined;
+  const seen = new Set<Error>();
+  let current = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof SyncBackpressureBusyError) return current;
+    seen.add(current);
+    current = current.cause;
   }
   return undefined;
 }

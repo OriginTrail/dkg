@@ -649,6 +649,7 @@ describe('runSyncOnConnect callbacks', () => {
 
     expect(caught).toBeInstanceOf(SyncOnConnectPostSyncError);
     expect((caught as SyncOnConnectPostSyncError).originalError).toBe(laterError);
+    expect((caught as SyncOnConnectPostSyncError).cause).toBe(laterError);
     expect((caught as SyncOnConnectPostSyncError).backoffEligible).toBe(false);
     expect(synced).toEqual([]);
     expect(syncingPeers.has(remotePeer)).toBe(false);

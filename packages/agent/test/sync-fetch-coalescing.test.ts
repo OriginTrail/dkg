@@ -436,6 +436,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       async () => new Uint8Array(0),
       { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     );
+    const backpressureLogs: string[] = [];
+    (agent as any).log.info = (_ctx: unknown, message: string) => {
+      if (message.startsWith('Sync backpressure ')) backpressureLogs.push(message);
+    };
     (agent as any).listSubGraphs = async () => [];
     (agent as any).fetchSyncPages = async (...args: unknown[]) => emptySyncPage(String(args[4]));
     (agent as any).getOrCreateSyncVerifyWorker = () => ({
@@ -462,6 +466,12 @@ describe('DKGAgent sync fetch coalescing', () => {
           },
         },
       )).resolves.toMatchObject({ failedPeers: 0 });
+      const runningAdmissions = backpressureLogs.filter((message) => (
+        message.startsWith('Sync backpressure running ')
+      ));
+      expect(runningAdmissions).toHaveLength(1);
+      expect(runningAdmissions[0]).toContain('running shared-memory:');
+      expect(runningAdmissions[0]).not.toContain('swm-recovery:');
     } finally {
       await agent.stop().catch(() => {});
     }
