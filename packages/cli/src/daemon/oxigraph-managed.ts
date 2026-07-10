@@ -36,6 +36,13 @@ export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
 /** Default loopback bind port. Override via `store.options.port`. */
 export const DEFAULT_OXIGRAPH_PORT = 7878;
 
+const MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS = 5_000;
+// Node timers (and AbortSignal.timeout) coerce any delay above 2^31-1 ms to 1ms
+// with a TimeoutOverflowWarning — aborting the request almost immediately, the
+// opposite of a long timeout. Cap the derived client timeout so an absurd
+// operator-configured queryTimeoutS degrades to "very long", never "instant".
+const MAX_NODE_TIMER_MS = 2_147_483_647;
+
 /** Same port validation as {@link planManagedOxigraph} — shared with status. */
 export function resolveManagedOxigraphPort(
   options: Record<string, unknown> | undefined,
@@ -44,6 +51,22 @@ export function resolveManagedOxigraphPort(
   return typeof rawPort === 'number' && Number.isInteger(rawPort) && rawPort > 0 && rawPort < 65536
     ? rawPort
     : DEFAULT_OXIGRAPH_PORT;
+}
+
+function resolvePositiveIntegerOption(
+  options: Record<string, unknown> | undefined,
+  key: string,
+): number | undefined {
+  const value = options?.[key];
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function resolveManagedQueryClientTimeoutMs(queryTimeoutS: number | undefined): number | undefined {
+  return queryTimeoutS === undefined
+    ? undefined
+    : Math.min(queryTimeoutS * 1_000 + MANAGED_OXIGRAPH_CLIENT_TIMEOUT_GRACE_MS, MAX_NODE_TIMER_MS);
 }
 
 interface StoreConfigLike {
@@ -92,6 +115,10 @@ export interface ManagedOxigraphPlan {
    * to preserve parity with the local Oxigraph default.
    */
   largeLiteralStorage: { enabled: boolean; thresholdBytes?: number; directory: string };
+  /** Startup readiness deadline passed to the managed server supervisor. */
+  readyTimeoutMs?: number;
+  /** Native Oxigraph query timeout, passed as `oxigraph serve --timeout-s`. */
+  queryTimeoutS?: number;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -115,6 +142,8 @@ export function planManagedOxigraph(
 
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
+  const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
+  const queryTimeoutS = resolvePositiveIntegerOption(options, 'queryTimeoutS');
   const location =
     typeof options.location === 'string' && options.location.trim()
       ? options.location
@@ -150,7 +179,12 @@ export function planManagedOxigraph(
     backend: 'sparql-http',
     // managedByDkg lets chain-reset wipe DROP ALL on the local RocksDB
     // we own end-to-end; queryEndpoint/updateEndpoint added at launch.
-    options: { managedByDkg: true },
+    options: {
+      managedByDkg: true,
+      ...(queryTimeoutS === undefined
+        ? {}
+        : { timeout: resolveManagedQueryClientTimeoutMs(queryTimeoutS) }),
+    },
   };
   if (graphSetIndex !== undefined) {
     storeConfigTemplate.graphSetIndex = graphSetIndex;
@@ -162,6 +196,8 @@ export function planManagedOxigraph(
     cacheDir,
     storeConfigTemplate,
     largeLiteralStorage,
+    readyTimeoutMs,
+    queryTimeoutS,
     sharedMemoryPublicSnapshotStorage,
   };
 }
@@ -217,7 +253,8 @@ export async function startManagedOxigraph(
     location: plan.location,
     port: plan.port,
     log,
-    readyTimeoutMs: opts.readyTimeoutMs,
+    readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
+    queryTimeoutS: plan.queryTimeoutS,
     io: opts.serverIo,
   });
 
