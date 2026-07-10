@@ -4,6 +4,33 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.6] - 2026-07-10
+
+Sync-, storage-, and admission-path hardening on top of 10.0.5, plus the StorageACK priority-lane follow-ups and a set of CLI/RPC fixes. Eliminates the perpetually-dirty graph-set-index full scan that was saturating managed Oxigraph cores, bounds sync-responder memory and coalesces duplicate sync fan-out, makes network admission probing back off and use canonical peer ids, and completes the StorageACK priority-lane hardening (ACK candidate selection, async promote-queue read serialization, and OT-RFC-49 host-mode ciphertext strip-by-curation). **No smart-contract changes — no deployment required** (no Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5).
+
+### Fixed
+
+- **StorageACK priority-lane follow-up hardening** (#1564): the ACK candidate pool now unions the peer store with active libp2p connections so it is not empty immediately after startup; async promote-queue status/list/stats reads are serialized under the queue mutation lock so readers never observe a transitional `running` row; and OT-RFC-49 host-mode ciphertext stripping is gated by cached curation classification across both the legacy and chunked dispatch paths, so a stripping node never custodies private ciphertext for a curated context graph.
+- **Graph-set index kept warm and off the ACK lane** (#1563; fixes #1549): every server-side SPARQL `UPDATE` was marking the graph-set index dirty, forcing a fresh full `SELECT DISTINCT ?g` scan on the next `listGraphs` (sync responder, finalization slice, ACK SWM read) — 12–30 s under load, the dominant driver of managed-Oxigraph saturation. The index now updates from the statically known touched-graph URIs at the source (RS-heal, agents-`_meta` prune) and stays off the StorageACK read path.
+- **Graph-index SPARQL update maintenance hardened** (#1554): index maintenance now uses the authoritative `touchedGraphs` path with dirty-rebuild-only background scheduling, fails closed for arbitrary SPARQL updates via a shared ReDoS-safe operation analyzer, and centralizes generation-stale recovery so raced maintenance cannot apply obsolete graph membership.
+- **Sync responder snapshot heap bounded** (#1569): the sync responder no longer copies full-snapshot pages, reducing heap amplification under sync load, and adds telemetry to attribute remaining sync memory.
+- **Duplicate sync fan-out coalesced** (#1559): duplicate in-flight durable and shared-memory peer/context-graph syncs — and identical `syncContextGraphFromConnectedPeers` catch-up rounds — are coalesced before they consume separate global backpressure slots.
+- **Canonical peer ids for admission proofs** (#1555): remote, response, and explicit-connect peer ids are canonicalized before network-identity proof comparison, while invalid `/p2p/` targets stay rejected with `INVALID_PEER_ID`.
+- **Failed network admission probes back off** (#1558): failed network-identity probes get a short retryable backoff (longer for unsupported-protocol failures), repeat probes for already-rejected peers are skipped, and backoff clears on a successful verification or rejection.
+- **Configured API host honored for status** (#1570): the status path respects the configured API host instead of assuming a default bind address.
+- **Managed Oxigraph timeout options honored** (#1552): managed-Oxigraph query timeout options are applied as configured.
+- **Git tag signature verification honored in polling** (#1556): the Git auto-update polling path verifies tag signatures rather than trusting the tag ref alone.
+
+### Changed
+
+- **RPC-failover read-intent and stickiness ergonomics** (#1560, follow-up to #1544/#1548): a behavior-preserving refactor of the `packages/chain` transport — tip reads go through a named `readTip` wrapper, and `EndpointStickiness.attempts(canonical, intent)` bundles the per-loop order/record-success/record-failure triple so `(canonical, intent)` cannot drift across the four failover loops. No production-behavior change.
+- **Admission policy follow-ups** (#1582): bounded admission-probe retry history and active suppression are extracted behind `NetworkAdmissionService`, the mode branch is replaced with a private automatic-only suppression gate (shared in-flight coalescing preserved), and the `/api/connect` status/error-envelope policy is extracted into a pure route-local classifier. Behavior-preserving refactor.
+
+### Deployment
+
+- **No contract changes in this release.** No Solidity source, ABI, or mainnet/testnet deployment-registry changes since 10.0.5, so no on-chain deployment is required and nodes need no action to upgrade.
+- **On-chain PublishingConviction surface unchanged from 10.0.5.** Mainnet (Base + Gnosis) remains on 10.0.7; the 10.0.8 deploy and PCA emission-schedule migration remain a separate, coordinated on-chain activity, unaffected by this node release.
+
 ## [10.0.5] - 2026-07-08
 
 Node stability and sync hardening on top of 10.0.4, plus contract updates and post-canary mainnet-readiness fixes. Ends the oversize-literal retry loop that could pin sync CPU, keeps the `agents/_meta` graph off the sync plane (reduces sync fan-out load), gates node-UI metric store-scans on consumer presence, and repairs the 10.0.4 npm tarball, which shipped without its `network/*.json` overlays and `project.json` (npm-installed nodes were falling back to built-in defaults). Also ships updated PublishingConviction 10.0.8 contracts (sources + ABIs); the on-chain deploy is a separate, coordinated activity (see **Deployment**). The stable cut extends the `10.0.5-canary.1` testnet build with ACK-path hardening, RPC failover fixes, graph-indexed hot-path store reads, active-network peer isolation, git auto-update opt-in, and KA publish lifecycle observability.
