@@ -1556,19 +1556,6 @@ export class DKGPublisher implements Publisher {
        * the existing allocate-at-publish behavior.
        */
       reservedKaId?: bigint;
-      /**
-       * NAMED-PUBLISH SWM SCOPING — explicit SWM graph set to read (and, on a
-       * confirmed publish, to drain) instead of the whole bucket family.
-       * `publishFromFinalizedAssertion` passes the named KA's own per-KA
-       * `…/_shared_memory/{addr}/{number}` graph plus the bare bucket (legacy
-       * shares + the curated `_catalog` floor live there). Without this, the
-       * subject-scoped `rootEntities` selection reads EVERY per-KA graph under
-       * the bucket, so a co-resident assertion that shares a subject IRI —
-       * including an already-minted one left in SWM — gets bundled into the
-       * payload (merkle-root mismatch vs the finalize-time seal) and its SWM
-       * copy is stomped by the family-wide post-confirm drain.
-       */
-      swmReadGraphs?: [string, ...string[]];
     },
   ): Promise<PublishResult> {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
@@ -1616,7 +1603,6 @@ export class DKGPublisher implements Publisher {
 
     const quads = await loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
       quadFilter: (q) => !isSwmMerkleExcludedQuad(q),
-      ...(options?.swmReadGraphs ? { graphs: options.swmReadGraphs } : {}),
       rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
         hadInput
           ? `No valid rootEntities provided (all ${inputCount} entries failed IRI validation)`
@@ -1905,10 +1891,7 @@ export class DKGPublisher implements Publisher {
     // clearSharedMemoryAfter controls only whether the REMAINING unpublished triples are also cleared.
     if (publishResult.status === 'confirmed') {
       const kaMap = skolemizeByEntity(quads);
-      // Scope the drain to the same graph set the payload was read from (when
-      // the caller scoped the read): a named publish must not delete another
-      // co-resident assertion's same-subject SWM copy from its per-KA graph.
-      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx, options?.swmReadGraphs);
+      await this.clearPublishedSwmRoots(contextGraphId, [...kaMap.keys()], options?.subGraphName, ctx);
       // If clearSharedMemoryAfter is explicitly true, also clear any remaining unpublished content.
       // Default is false: unpublished entities stay in SWM for future publishes.
       if (options?.clearSharedMemoryAfter === true) {
@@ -5507,22 +5490,12 @@ export class DKGPublisher implements Publisher {
     rootEntities: string[],
     subGraphName: string | undefined,
     ctx: OperationContext,
-    /**
-     * NAMED-PUBLISH SWM SCOPING — when the payload read was scoped to an
-     * explicit graph set (`publishFromSharedMemory`'s `swmReadGraphs`), the
-     * drain must be scoped the SAME way: a family-wide subject delete would
-     * stomp a co-resident assertion's same-subject copy in ITS per-KA graph.
-     * Undefined keeps the family-wide drain (unscoped/selection publishes).
-     */
-    scopeGraphs?: readonly string[],
   ): Promise<void> {
     if (rootEntities.length === 0) return;
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
-    const swmGraphsForClear = scopeGraphs && scopeGraphs.length > 0
-      ? [...new Set(scopeGraphs)]
-      : await this.swmGraphsUnder(swmGraph);
+    const swmGraphsForClear = await this.swmGraphsUnder(swmGraph);
     let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       for (const g of swmGraphsForClear) {

@@ -3317,13 +3317,10 @@ export class PublishMethods extends DKGAgentBase {
     contextGraphId: string,
     selection: 'all' | { rootEntities: string[] },
     subGraphName?: string,
-    /** NAMED-PUBLISH SWM SCOPING — explicit graph set (per-KA graph + bucket) instead of the whole bucket family. */
-    readGraphs?: [string, ...string[]],
   ): Promise<Quad[]> {
     const swmGraph = contextGraphSharedMemoryUri(contextGraphId, subGraphName);
     return loadSelectedSharedMemoryQuads(this.store, swmGraph, selection, {
       querySource: 'agent.resolveLiftWorkspaceSlice',
-      ...(readGraphs ? { graphs: readGraphs } : {}),
       rootEntitiesErrorMessage: ({ inputCount, hadInput }) => (
         hadInput
           ? `_loadSelectedSWMQuads: no valid rootEntities provided ` +
@@ -3811,28 +3808,6 @@ export class PublishMethods extends DKGAgentBase {
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     let result: PublishResult;
-    // NAMED-PUBLISH SWM SCOPING — the queued lane publishes an immutable
-    // share-time SNAPSHOT (no SWM reload, so no bundling risk), but its
-    // confirmed-publish drain must still be scoped to THIS assertion's own
-    // per-KA SWM graph (+ bucket): a family-wide subject delete would stomp a
-    // co-resident same-subject copy (e.g. a gossip-replicated foreign share)
-    // in ITS per-KA graph. Mirrors `publishFromFinalizedAssertion`.
-    let queuedSwmScopeGraphs: [string, ...string[]] | undefined;
-    {
-      let kaNumberForScope: bigint | undefined;
-      if (stampedNumberStr != null && stampedNumberStr !== '') {
-        try { kaNumberForScope = BigInt(stampedNumberStr); } catch { /* fall through to seal-derived number */ }
-      }
-      if (kaNumberForScope === undefined && seal.reservedKaId !== undefined) {
-        kaNumberForScope = seal.reservedKaId & ((1n << 96n) - 1n);
-      }
-      if (kaNumberForScope !== undefined) {
-        queuedSwmScopeGraphs = [
-          contextGraphLayerUri(request.contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, kaNumberForScope, request.subGraphName),
-          contextGraphSharedMemoryUri(request.contextGraphId, request.subGraphName),
-        ];
-      }
-    }
     const clearPublishedRoots = async (label: string): Promise<void> => {
       try {
         await publisher.clearPublishedSwmRoots(
@@ -3840,7 +3815,6 @@ export class PublishMethods extends DKGAgentBase {
           [...request.roots],
           request.subGraphName,
           ctx,
-          queuedSwmScopeGraphs,
         );
       } catch (err) {
         this.log.warn(
@@ -4293,39 +4267,6 @@ export class PublishMethods extends DKGAgentBase {
 
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
 
-    // ── NAMED-PUBLISH SWM SCOPING ──
-    //
-    // The seal's `rootEntities` selection is SUBJECT-scoped, but the SWM read
-    // spans the whole bucket family (bare bucket + EVERY per-KA
-    // `…/_shared_memory/{addr}/{number}` graph). A co-resident assertion that
-    // shares a subject IRI with this one — including an ALREADY-MINTED share
-    // left in SWM — would therefore be bundled into this named publish: the
-    // recomputed merkle diverges from the finalize-time seal (publish fails /
-    // flips tentative) and the post-confirm family-wide drain stomps the other
-    // assertion's copy so ITS next publish breaks too. Scope the payload read
-    // AND the drain to THIS assertion's own per-KA SWM graph, plus the bare
-    // bucket (legacy pre-per-KA shares and the curated `_catalog` floor live
-    // there). The per-KA graph is derived exactly like the promote-side
-    // `swmGraphUri` (same lifecycle `dkg:kaId` row, same `agentAddress`); when
-    // no kaNumber was ever stamped (mock/no-chain or legacy lifecycle) the
-    // scope stays undefined and the read keeps its bucket-family behavior.
-    let namedSwmReadGraphs: [string, ...string[]] | undefined;
-    {
-      let kaNumberForScope: bigint | undefined;
-      if (stampedNumberStr != null && stampedNumberStr !== '') {
-        try { kaNumberForScope = BigInt(stampedNumberStr); } catch { /* fall through to seal-derived number */ }
-      }
-      if (kaNumberForScope === undefined && seal.reservedKaId !== undefined) {
-        kaNumberForScope = seal.reservedKaId & ((1n << 96n) - 1n);
-      }
-      if (kaNumberForScope !== undefined) {
-        namedSwmReadGraphs = [
-          contextGraphLayerUri(contextGraphId, MemoryLayer.SharedWorkingMemory, agentAddress, kaNumberForScope, opts?.subGraphName),
-          contextGraphSharedMemoryUri(contextGraphId, opts?.subGraphName),
-        ];
-      }
-    }
-
     let result: PublishResult;
     if (vmCurrent && packedKaId !== undefined) {
       // ── UPDATE PATH ──
@@ -4338,7 +4279,6 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
-        namedSwmReadGraphs,
       );
       const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
         packedKaId,
@@ -4371,7 +4311,6 @@ export class PublishMethods extends DKGAgentBase {
             seal.rootEntities,
             opts?.subGraphName,
             opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            namedSwmReadGraphs,
           );
         } catch (err) {
           this.log.warn(
@@ -4458,7 +4397,6 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         { rootEntities: seal.rootEntities },
         opts?.subGraphName,
-        namedSwmReadGraphs,
       );
       if (sealedSwmQuads.length === 0) {
         throw new Error(
@@ -4475,7 +4413,6 @@ export class PublishMethods extends DKGAgentBase {
           publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
           publishEpochs: opts?.publishEpochs,
           clearSharedMemoryAfter: opts?.clearSharedMemoryAfter,
-          swmReadGraphs: namedSwmReadGraphs,
           reservedKaId: recoveredReservedKaId,
           // Wired through to the inner publisher.publish() via
           // publishFromSharedMemory's `precomputedAttestation` option.
@@ -4908,16 +4845,6 @@ export class PublishMethods extends DKGAgentBase {
        */
       reservedKaId?: bigint;
       /**
-       * NAMED-PUBLISH SWM SCOPING — explicit SWM graph set for the payload
-       * read (and confirmed-publish drain). `publishFromFinalizedAssertion`
-       * passes the named KA's per-KA SWM graph + the bare bucket so that
-       * co-resident assertions sharing a subject IRI are never bundled into
-       * this publish. See `DKGPublisher.publishFromSharedMemory`'s
-       * `swmReadGraphs` for the full semantics. Undefined keeps the whole
-       * bucket-family read (selection/escape-hatch publishes).
-       */
-      swmReadGraphs?: [string, ...string[]];
-      /**
        * RFC-001 §9.x — pre-computed attestation captured by
        * `agent.assertion.finalize()`. When the caller has already
        * sealed a named assertion they can plumb the seal here verbatim
@@ -5013,7 +4940,6 @@ export class PublishMethods extends DKGAgentBase {
         contextGraphId,
         selection,
         options?.subGraphName,
-        options?.swmReadGraphs,
       );
       if (swmQuads.length > 0) {
         resolvedSeal = await this._buildPrecomputedAttestationForSelection(
@@ -5093,8 +5019,6 @@ export class PublishMethods extends DKGAgentBase {
       precomputedAttestation: resolvedSeal,
       // OT-RFC-43 A2 — reuse the finalize-stamped packed kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
-      // NAMED-PUBLISH SWM SCOPING — same graph set as the seal preflight read.
-      swmReadGraphs: options?.swmReadGraphs,
       encryptInlinePayload,
       encryptInlineChunked,
     });
