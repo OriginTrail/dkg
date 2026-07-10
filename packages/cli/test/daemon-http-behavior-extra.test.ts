@@ -2157,7 +2157,7 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
   const OTHER = '0x00000000000000000000000000000000000000ff';
 
   async function subscribeWith(opts: {
-    isPrivate: boolean;
+    isPrivate: boolean | 'throw';
     allowlist: string[];
   }): Promise<{ status: number; subscribeCalled: boolean }> {
     const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
@@ -2191,7 +2191,10 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         const agent = {
           getContextGraphAllowedAgents: async () => opts.allowlist,
-          isPrivateContextGraph: async () => opts.isPrivate,
+          isPrivateContextGraph: async () => {
+            if (opts.isPrivate === 'throw') throw new Error('policy read failed');
+            return opts.isPrivate;
+          },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => {
@@ -2274,6 +2277,19 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
   it('still 403s a non-allowlisted caller on an explicit-private CG', async () => {
     const { status, subscribeCalled } = await subscribeWith({
       isPrivate: true, // accessPolicy="private" / curated
+      allowlist: [OTHER],
+    });
+    expect(status).toBe(403);
+    expect(subscribeCalled).toBe(false);
+  });
+
+  it('keeps the allowlist gate CLOSED (403) when the privacy resolver read fails', async () => {
+    // Fix 1 fails closed: `isPrivateContextGraph(...).catch(() => true)`. A
+    // resolver error must keep the curated gate, never fall open to public —
+    // otherwise a future fail-open regression would silently pass the cases
+    // above while letting a non-allowlisted caller subscribe. (#1599 review.)
+    const { status, subscribeCalled } = await subscribeWith({
+      isPrivate: 'throw',
       allowlist: [OTHER],
     });
     expect(status).toBe(403);

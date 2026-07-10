@@ -347,6 +347,44 @@ describe('DKGQueryEngine', () => {
       // that would project the sentinel.
       expect(multiGraphQuery()).toBeUndefined();
     });
+
+    // #1599 review: the VALUES fast path changed execution for EVERY multi-graph
+    // query form with a locatable WHERE block, but only SELECT was covered above.
+    // CONSTRUCT and ASK are part of the engine contract and have had shape
+    // regressions before (#789), so pin them through the new VALUES path too —
+    // without an inner UNION (which would divert to the per-graph fallback).
+    it('CONSTRUCT over the SWM view uses the VALUES path and keeps the quad shape', async () => {
+      const quads: Quad[] = [];
+      for (let i = 0; i < 4; i++) {
+        quads.push(q(`urn:cq:s${i}`, 'http://ex.org/p', `"v${i}"`, swmGraph('0xcq', i)));
+      }
+      await recStore.insert(quads);
+      recStore.queries.length = 0;
+
+      const result = await swmQuery('CONSTRUCT { ?s <urn:out> ?o } WHERE { ?s <http://ex.org/p> ?o }');
+      // Graph-shaped result preserved (not silently flattened to bindings).
+      expect(result.quads).toBeDefined();
+      expect((result.quads ?? []).map((qd) => qd.subject).sort())
+        .toEqual(['urn:cq:s0', 'urn:cq:s1', 'urn:cq:s2', 'urn:cq:s3']);
+      expect((result.quads ?? []).every((qd) => qd.predicate === 'urn:out')).toBe(true);
+      // ...and it went through the ONE VALUES query, never a per-graph UNION.
+      expect(multiGraphQuery()).toBeDefined();
+      expect(recStore.queries.some((s) => /}\s*UNION\s*{\s*GRAPH\s*</i.test(s))).toBe(false);
+    });
+
+    it('ASK over the SWM view uses the VALUES path and returns the boolean', async () => {
+      await recStore.insert([
+        q('urn:aq:s', 'http://ex.org/p', '"present"', swmGraph('0xaq', 2)),
+      ]);
+      recStore.queries.length = 0;
+
+      const hit = await swmQuery('ASK WHERE { ?s <http://ex.org/p> "present" }');
+      expect(hit.bindings).toEqual([{ result: 'true' }]);
+      expect(multiGraphQuery()).toBeDefined();
+
+      const miss = await swmQuery('ASK WHERE { ?s <http://ex.org/p> "absent" }');
+      expect(miss.bindings).toEqual([{ result: 'false' }]);
+    });
   });
 
   it('queries across all contextGraphs', async () => {
