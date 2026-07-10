@@ -48,6 +48,19 @@ export class SyncBackpressureBusyError extends Error {
   }
 }
 
+/** Return local admission pressure through a direct or wrapped error boundary. */
+export function getSyncBackpressureBusyError(
+  error: unknown,
+): SyncBackpressureBusyError | undefined {
+  if (error instanceof SyncBackpressureBusyError) return error;
+  if (error && typeof error === 'object' && 'originalError' in error) {
+    return error.originalError instanceof SyncBackpressureBusyError
+      ? error.originalError
+      : undefined;
+  }
+  return undefined;
+}
+
 function drain(): void {
   for (;;) {
     const next = queue[0];
