@@ -78,6 +78,16 @@ describe.skipIf(!URL)('ChangelogStore integration (live Blazegraph read-path)', 
     expect(tail).toEqual([{ seq: 4, graph: G(2), op: 'upsert' }]);
   });
 
+  it('era is minted once and reseeds from the live log on a fresh store', async () => {
+    // First reader mints+persists an era; a second store (restart) must recover
+    // the SAME era from the live Blazegraph, not mint a new one.
+    const era1 = (await new ChangelogStore(base).changelogHead()).era;
+    expect(era1).toMatch(/^[0-9a-f-]{36}$/i);
+    const head2 = await new ChangelogStore(base).changelogHead();
+    expect(head2.era).toBe(era1);
+    expect(head2.seq).toBeGreaterThanOrEqual(3); // seq survives across the "restart" too
+  });
+
   it('upsert marker and data are both durably present after one insert', async () => {
     const log = new ChangelogStore(base);
     await log.insert([q('urn:cl-int:s5', G(3))]);

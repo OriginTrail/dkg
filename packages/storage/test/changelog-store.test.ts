@@ -64,6 +64,10 @@ describe('ChangelogStore — upsert marker atomicity', () => {
     const spy = new SpyStore(base);
     const log = new ChangelogStore(spy);
 
+    // Seed first so the one-time era-mint insert isn't counted; we are asserting
+    // that a DATA write fuses its marker into a single call, not the seed path.
+    await log.changelogHead();
+    spy.insertCalls.length = 0;
     await log.insert([q('http://ex.org/s1', G1)]);
 
     // Exactly one inner insert() — data + marker together, never two calls.
@@ -282,8 +286,9 @@ describe('ChangelogStore over Blazegraph — single-request atomicity', () => {
   });
 
   it('the data quad and its marker land in ONE n-quads POST', async () => {
-    insertBodies.length = 0;
     const log = new ChangelogStore(new BlazegraphStore(url));
+    await log.changelogHead();   // one-time era-mint POST, not under test here
+    insertBodies.length = 0;
     await log.insert([q('http://ex.org/s1', G1)]);
 
     // Exactly one write request, carrying both the data triple and the marker.
@@ -560,6 +565,68 @@ describe('ChangelogStore — lifecycle drains the write queue', () => {
     // flush() did not latch closing: further writes still succeed.
     await log.insert([q('http://ex.org/s2', G2)]);
     expect((await log.readChanges(0, 100)).map((c) => c.graph)).toEqual([G1, G2]);
+    await base.close();
+  });
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+describe('ChangelogStore — era foundation & reader capability', () => {
+  it('mints a stable era on first changelogHead() and returns the live seq', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    const h1 = await log.changelogHead();
+    expect(h1.era).toMatch(UUID_RE);
+    expect(h1.seq).toBe(0);
+    await log.insert([q('http://ex.org/a', G1)]);
+    await log.insert([q('http://ex.org/b', G2)]);
+    const h2 = await log.changelogHead();
+    expect(h2.era).toBe(h1.era); // era is immutable while the log lives
+    expect(h2.seq).toBe(2);
+    await base.close();
+  });
+
+  it('reads the existing era rather than re-minting (a fresh store over the same log)', async () => {
+    const base = new OxigraphStore();
+    const minted = (await new ChangelogStore(base).changelogHead()).era;
+    // A second ChangelogStore (e.g. a daemon restart) over the SAME underlying
+    // store must recover the SAME era — re-minting would falsely signal a wipe
+    // to peers and force needless full resyncs.
+    const reread = (await new ChangelogStore(base).changelogHead()).era;
+    expect(reread).toBe(minted);
+    await base.close();
+  });
+
+  it('era + seq are durable across a persistent-store reopen', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'changelog-era-'));
+    try {
+      const path = join(dir, 'store.nq');
+      const first = new OxigraphStore(path);
+      const log1 = new ChangelogStore(first);
+      const era = (await log1.changelogHead()).era;
+      await log1.insert([q('http://ex.org/a', G1)]);
+      await first.flush();
+      await first.close();
+
+      const second = new OxigraphStore(path);
+      const head = await new ChangelogStore(second).changelogHead();
+      expect(head.era).toBe(era);
+      expect(head.seq).toBe(1);
+      await second.close();
+    } finally {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ }
+    }
+  });
+
+  it('asChangelogReader narrows a ChangelogStore and rejects a plain store', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    const reader = asChangelogReader(log);
+    expect(reader).not.toBeNull();
+    expect(await reader!.readChanges(0, 10)).toEqual([]);
+    // A plain (non-changelog) store is not a reader → capability probe is false.
+    expect(asChangelogReader(base)).toBeNull();
+    expect(asChangelogReader(null)).toBeNull();
     await base.close();
   });
 });
