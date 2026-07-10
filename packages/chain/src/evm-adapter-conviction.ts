@@ -30,16 +30,6 @@ import type { PcaMutationInvalidation } from './pca-read-cache.js';
  *  block → sticky (prefer the endpoint that already has it). */
 const PCA_TIP_BLOCK_TAGS = new Set<string>(['latest', 'pending', 'safe', 'finalized']);
 
-/** Allowlisted PCA proxy methods whose `null` means "this endpoint doesn't have
- *  the object (yet)", not a definitive answer — so a `null` must FAIL OVER to
- *  other endpoints (via `readProviderRetryingNull`) rather than terminate the
- *  lookup or reinforce a preference. */
-const PCA_NULLABLE_LOOKUP_METHODS = new Set<string>([
-  'eth_getTransactionReceipt',
-  'eth_getTransactionByHash',
-  'eth_getBlockByNumber',
-]);
-
 type PcaReadStrategy = 'tipTransparent' | 'tipNullableTransparent' | 'stickyNullable' | 'sticky';
 
 /**
@@ -64,17 +54,34 @@ type PcaReadStrategy = 'tipTransparent' | 'tipNullableTransparent' | 'stickyNull
  */
 function classifyPcaRead(method: PcaRpcMethod, params: readonly unknown[]): PcaReadStrategy {
   const isLatestFamilyTag = (t: unknown): boolean => typeof t === 'string' && PCA_TIP_BLOCK_TAGS.has(t);
-  if (method === 'eth_blockNumber'
-    || (method === 'eth_call' && (params[1] === undefined || isLatestFamilyTag(params[1])))) {
-    return 'tipTransparent';
+  switch (method) {
+    // Never-null tip: the current head.
+    case 'eth_blockNumber':
+      return 'tipTransparent';
+    // Reads CURRENT contract state (tip) when the block tag (params[1]) is omitted
+    // (defaults to `latest`) or latest-family; a CONCRETE block is a fixed answer.
+    case 'eth_call':
+      return params[1] === undefined || isLatestFamilyTag(params[1]) ? 'tipTransparent' : 'sticky';
+    // Latest-family block = tip but NULLABLE (a lagging primary may lack it); a
+    // concrete block is fixed but still nullable ("not here yet" must fail over).
+    case 'eth_getBlockByNumber':
+      return isLatestFamilyTag(params[0]) ? 'tipNullableTransparent' : 'stickyNullable';
+    // Receipt / tx lookups: prefer the endpoint that already saw it; a `null` means
+    // "not here yet" and fails over rather than terminating the lookup.
+    case 'eth_getTransactionReceipt':
+    case 'eth_getTransactionByHash':
+      return 'stickyNullable';
+    // Chain id: a fixed answer that can't change → plain sticky.
+    case 'eth_chainId':
+      return 'sticky';
+    default: {
+      // Exhaustive over PcaRpcMethod: a newly-added method must pick a strategy
+      // HERE (a conscious routing decision) or this is a compile error (TS2322) —
+      // never a silent `sticky` fallback.
+      const _exhaustive: never = method;
+      return _exhaustive;
+    }
   }
-  if (method === 'eth_getBlockByNumber' && isLatestFamilyTag(params[0])) {
-    return 'tipNullableTransparent';
-  }
-  if (PCA_NULLABLE_LOOKUP_METHODS.has(method)) {
-    return 'stickyNullable';
-  }
-  return 'sticky';
 }
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
