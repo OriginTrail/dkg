@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
+import { appendInPlace } from '../append-in-place.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 
@@ -858,7 +859,7 @@ async function readFreshSwmDataRows(
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
     const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph), signal);
-    rows.push(...graphRows.filter((row) =>
+    appendInPlace(rows, graphRows.filter((row) =>
       roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix)),
     ));
   }

@@ -35,6 +35,8 @@ export default defineConfig({
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
+      "test/sync-responder-large-graph-stack-overflow.test.ts",
+      "test/sync-append-in-place.test.ts",
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",
       "test/sync-fetch-coalescing.test.ts",
