@@ -8,7 +8,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
-import { appendInPlace } from '../append-in-place.js';
 import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 
@@ -859,9 +858,16 @@ async function readFreshSwmDataRows(
     if (roots.size === 0) continue;
     const rootPrefixes = [...roots].map((root) => `${root}/.well-known/genid/`);
     const graphRows = await readRowsAcrossGraphs(store, candidateGraphsFor(graph), signal);
-    appendInPlace(rows, graphRows.filter((row) =>
-      roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix)),
-    ));
+    // Append only matching rows, one at a time — never `rows.push(...matches)`.
+    // The spread passes every element as a call argument, so a shared-memory
+    // graph with more than V8's argument-count limit (~1.25e5) of matching rows
+    // throws `RangeError: Maximum call stack size exceeded` mid-serve. The loop
+    // also avoids allocating a filtered intermediary before appending.
+    for (const row of graphRows) {
+      if (roots.has(row.s) || rootPrefixes.some((prefix) => row.s.startsWith(prefix))) {
+        rows.push(row);
+      }
+    }
   }
   return rows.sort(compareRows);
 }
