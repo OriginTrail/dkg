@@ -296,3 +296,76 @@ describe('ChangelogStore — createTripleStore wiring', () => {
     await store.close();
   });
 });
+
+describe('ChangelogStore — reserved-graph mutation guard', () => {
+  it('does not emit a marker for mutations that TARGET the reserved changelog graph', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+    await log.insert([q('http://ex.org/s1', G1)]); // 1 fused insert (data+marker)
+    const callsBefore = spy.insertCalls.length;
+    // A drop/delete aimed at the reserved graph must NOT append a self-referential
+    // marker (which would pollute the log and, in PR2, make the responder try to
+    // reconcile the log graph itself).
+    await log.dropGraph(CHANGELOG_GRAPH);
+    await log.deleteByPattern({ graph: CHANGELOG_GRAPH });
+    expect(spy.insertCalls.length).toBe(callsBefore); // no new marker write
+    // No record ever names the changelog graph as its changed graph.
+    await log.insert([q('http://ex.org/s2', G2)]);
+    const changes = await log.readChanges(0, 100);
+    expect(changes.every((c) => c.graph !== CHANGELOG_GRAPH)).toBe(true);
+    await base.close();
+  });
+});
+
+describe('ChangelogStore — delete-path op attribution & reconcile', () => {
+  let base: OxigraphStore;
+  let log: ChangelogStore;
+  beforeEach(() => { base = new OxigraphStore(); log = new ChangelogStore(base); });
+  afterEach(async () => { await base.close(); });
+
+  it('deleteBySubjectPrefix emits upsert when data remains, drop when it empties the graph', async () => {
+    await log.insert([
+      q('http://ex.org/a/1', G1), q('http://ex.org/a/2', G1), q('http://ex.org/b/1', G1),
+    ]);
+    // Remove the a/* subjects → b/1 remains → graph still there → upsert.
+    expect(await log.deleteBySubjectPrefix(G1, 'http://ex.org/a/')).toBeGreaterThan(0);
+    // Remove the last subject → graph empty → drop.
+    expect(await log.deleteBySubjectPrefix(G1, 'http://ex.org/b/')).toBeGreaterThan(0);
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
+  });
+
+  it('deleteByPattern with NO graph hint flags reconcile when it removes quads', async () => {
+    await log.insert([q('http://ex.org/s1', G1)]);
+    expect(log.needsReconcile).toBe(false);
+    const removed = await log.deleteByPattern({ predicate: 'http://ex.org/p' }); // no graph
+    expect(removed).toBeGreaterThan(0);
+    // Cannot attribute which graphs shrank/emptied → reconcile owed.
+    expect(log.needsReconcile).toBe(true);
+  });
+});
+
+describe('ChangelogStore — reserved-graph hiding (prefix) & post-mutation failure', () => {
+  it('hides the reserved changelog graph from listGraphsByPrefix (even a matching prefix)', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([q('http://ex.org/s1', G1)]);
+    // 'urn:' and the exact IRI both match CHANGELOG_GRAPH in the inner store, but
+    // the decorator must filter it out of prefix enumeration too.
+    expect(await log.listGraphsByPrefix('urn:')).not.toContain(CHANGELOG_GRAPH);
+    expect(await log.listGraphsByPrefix('urn:dkg:changelog')).not.toContain(CHANGELOG_GRAPH);
+    await base.close();
+  });
+
+  it('flags reconcile when a post-mutation (drop) marker write fails after the mutation committed', async () => {
+    const base = new OxigraphStore();
+    const spy = new SpyStore(base);
+    const log = new ChangelogStore(spy);
+    await log.insert([q('http://ex.org/s1', G1)]); // seq 1 (fused, succeeds)
+    spy.failNextInsert = true;                     // the drop's marker insert will throw
+    await expect(log.dropGraph(G1)).rejects.toThrow(/injected/);
+    // The graph is durably dropped but its marker was lost → gap recorded.
+    expect(log.needsReconcile).toBe(true);
+    await base.close();
+  });
+});

@@ -27,19 +27,37 @@ import type {
  * ## Crash-consistency (the invariant that matters)
  *
  * OT-RFC-59 §6 / G3: *every committed store change is discoverable through the
- * log* — no committed upsert is ever invisible. This holds because an **upsert
- * marker is appended to the very same `insert(quads)` call as the data**
- * (`inner.insert([...quads, ...markers])`). A single `insert()` is one backend
- * transaction on every adapter — one Oxigraph in-memory apply flushed as a whole
- * snapshot, one Blazegraph N-Quads POST, one `sparql-http` INSERT DATA — so the
- * data and its marker commit or abort together. There is no window where the
- * data is durable but the marker is lost.
+ * log*. The strength of that guarantee differs by path:
  *
- * Drops/deletes are the opposite (benign) direction: a *lost* drop marker means
- * a peer keeps stale data, healed by a later catalog reconcile, never silent
- * data loss. Those markers are therefore written in a second step after the
- * mutation (`op` derived from a `hasGraph` probe), which is acceptable per §6
- * and avoids depending on multi-statement UPDATE atomicity.
+ * - **`insert()` — atomic, no window.** The upsert marker is appended to the
+ *   very same `insert(quads)` call as the data (`inner.insert([...quads,
+ *   ...markers])`). A single `insert()` is one backend transaction on every
+ *   adapter — one Oxigraph in-memory apply flushed as a whole snapshot, one
+ *   Blazegraph N-Quads POST, one `sparql-http` INSERT DATA — so data and marker
+ *   commit or abort together. There is genuinely no window where the data is
+ *   durable but the marker is lost.
+ *
+ * - **`delete()`/`dropGraph()`/`deleteByPattern()`/`deleteBySubjectPrefix()`/
+ *   `update()` — post-mutation marker, benign lost-marker window.** These write
+ *   the marker in a SECOND step after the mutation (`op` derived from a
+ *   `hasGraph` probe), so a crash/store-error between the mutation commit and
+ *   the marker append leaves the data durable with no marker. That is acceptable
+ *   because it is **store-authoritative and reconcile-healable**: a later catalog
+ *   reconcile (PR2) re-derives the missing marker from the store. To bound the
+ *   window we also set {@link needsReconcile} whenever the post-mutation marker
+ *   write itself throws (see {@link markPostMutation}), so the daemon has an
+ *   in-process signal even before PR2 reconcile runs (see {@link appendMarkers}).
+ *
+ *   Note the op is not always `drop`: `update()`/`deleteByPattern` with a
+ *   `touchedGraphs` hint into a graph that still has data emits an **`upsert`**
+ *   marker post-mutation. A *lost* such marker is the one non-benign shape a
+ *   naive set-based (listGraphs-vs-log) reconcile cannot catch — the graph is
+ *   present in both store and log, so a set diff sees no discrepancy while a
+ *   syncing peer keeps an under-complete copy. **PR2 constraint:** the reconcile
+ *   pass must be content-aware for graphs touched by opaque/`update()` writes
+ *   (or such upserts must be fused on the `insert()` path), not merely
+ *   set-difference. Today this is latent: the only `update()`-INSERT caller
+ *   (RS-heal) targets brand-new scoped graphs, which a set reconcile does catch.
  *
  * ## Single-writer sequence allocation (the load-bearing constraint)
  *
@@ -267,6 +285,13 @@ export class ChangelogStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
+    // Deliberate passthrough: unlike listGraphs()/hasGraph(), counting is NOT
+    // masked, so countQuads() (no arg) and query() include marker quads. The
+    // reserved-plane-invisible contract covers enumeration only. No current
+    // caller counts for accounting that must exclude the reserved plane; the
+    // total-triples telemetry (metrics-queries.ts) will drift by the marker
+    // count when enabled — exclude urn:dkg:changelog there alongside the PR2
+    // enable-path wiring.
     return this.inner.countQuads(graphUri, options);
   }
 
@@ -381,24 +406,39 @@ export class ChangelogStore implements TripleStore {
     await this.appendMarkers(specs, options);
   }
 
-  /** Allocate contiguous seqs and durably append markers (caller holds mutex). */
+  /**
+   * Allocate contiguous seqs and durably append markers (caller holds mutex).
+   *
+   * This is the POST-MUTATION marker sink (drops/deletes/update-upserts): the
+   * data mutation has already committed, so a failure here means a committed
+   * change with no marker. We flag {@link needsReconcile} before propagating so
+   * the gap is signalled even before the PR2 catalog reconcile runs. `seq` is
+   * advanced only after a durable append, so a failure is gapless (the next
+   * write reuses the seq). The atomic `insert()` upsert path does NOT go through
+   * here — it fuses markers into the data transaction and cannot half-commit.
+   */
   private async appendMarkers(
     specs: ReadonlyArray<{ graph: string; op: ChangeOp }>,
     options?: QueryOptions,
   ): Promise<void> {
     if (specs.length === 0) return;
-    await this.ensureSeeded();
-    let candidate = this.seq;
-    const quads: Quad[] = [];
-    const records: ChangeRecord[] = [];
-    for (const spec of specs) {
-      candidate += 1;
-      records.push({ seq: candidate, graph: spec.graph, op: spec.op });
-      quads.push(...markerQuads(candidate, spec.graph, spec.op));
+    try {
+      await this.ensureSeeded();
+      let candidate = this.seq;
+      const quads: Quad[] = [];
+      const records: ChangeRecord[] = [];
+      for (const spec of specs) {
+        candidate += 1;
+        records.push({ seq: candidate, graph: spec.graph, op: spec.op });
+        quads.push(...markerQuads(candidate, spec.graph, spec.op));
+      }
+      await this.inner.insert(quads, options);
+      this.seq = candidate;
+      this.fire(records);
+    } catch (err) {
+      this.flagReconcile('appendMarkers(post-mutation-marker-write-failed)');
+      throw err;
     }
-    await this.inner.insert(quads, options);
-    this.seq = candidate;
-    this.fire(records);
   }
 
   private fire(records: readonly ChangeRecord[]): void {
