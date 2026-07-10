@@ -115,33 +115,6 @@ function watchBoundedPageQuery(
   };
 }
 
-function watchUnorderedSnapshotRead(
-  store: OxigraphStore,
-  graph: string,
-) {
-  const originalQuery = store.query.bind(store);
-  let observedSnapshotReads = 0;
-  store.query = (async (sparql: string) => {
-    const normalized = sparql.replace(/\s+/g, ' ').trim();
-    const isTargetSnapshotRead = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${graph}>`) &&
-      normalized.includes('GRAPH ?g { ?s ?p ?o }');
-    if (isTargetSnapshotRead) {
-      observedSnapshotReads++;
-      expect(normalized).not.toContain('ORDER BY');
-      expect(normalized).not.toContain('OFFSET ');
-      expect(normalized).not.toContain('LIMIT ');
-    }
-    return originalQuery(sparql);
-  }) as OxigraphStore['query'];
-
-  return {
-    assertObserved() {
-      expect(observedSnapshotReads).toBeGreaterThan(0);
-    },
-  };
-}
-
 describe('sync responder pagination interleaving', () => {
   it('returns an exact no-gap/no-duplicate union across overlapping durable-data page loops', async () => {
     const store = new OxigraphStore();
@@ -425,7 +398,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep SWM data pages with TTL filtering', async () => {
+  it('uses store-bounded paged reads for deep TTL-filtered SWM data pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm-ttl';
     const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
@@ -440,7 +413,9 @@ describe('sync responder pagination interleaving', () => {
     }
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, dataGraph);
+    // The TTL-cutoff SWM-data read is now store-bounded (fresh roots resolved via
+    // FILTER EXISTS), so a deep page pulls only the requested rows.
+    const probe = watchBoundedPageQuery(store, dataGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -460,7 +435,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep durable meta pages', async () => {
+  it('uses store-bounded paged reads for deep durable meta pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -483,7 +458,9 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, metaGraph);
+    // The durable-meta read is now store-bounded (subject-membership filter
+    // pushed into the store via EXISTS), so a deep page is a paged store query.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,

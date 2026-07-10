@@ -251,16 +251,19 @@ export async function readSwmDataPage(params: {
     params.cutoffIso!,
     signal,
   );
-  const loadStoreBoundedPage = async (): Promise<SyncRow[]> => {
-    const rows = await loadRows(params.signal);
-    const safeOffset = Math.max(0, Math.floor(params.offset));
-    const safeLimit = Math.max(0, Math.floor(params.limit));
-    return rows.slice(safeOffset, safeOffset + safeLimit);
-  };
   return readResponderRowsPage(
     cache,
     () => loadRows(),
-    loadStoreBoundedPage,
+    () => readFreshSwmDataRowsPage(
+      params.store,
+      dataGraphs,
+      graphSet,
+      candidateGraphsFor,
+      params.cutoffIso!,
+      params.offset,
+      params.limit,
+      params.signal,
+    ),
     params.offset,
     params.limit,
     params.signal,
@@ -288,16 +291,17 @@ export async function readDurableMetaPage(params: {
       expiredMessage: 'Durable meta sync session snapshot expired before page completion',
     }
     : undefined;
-  const loadStoreBoundedPage = async (): Promise<SyncRow[]> => {
-    const rows = await loadRows(params.signal);
-    const safeOffset = Math.max(0, Math.floor(params.offset));
-    const safeLimit = Math.max(0, Math.floor(params.limit));
-    return rows.slice(safeOffset, safeOffset + safeLimit);
-  };
   return readResponderRowsPage(
     cache,
     () => loadRows(),
-    loadStoreBoundedPage,
+    () => readDurableMetaRowsPage(
+      params.store,
+      params.contextGraphId,
+      params.registeredSubGraphNames,
+      params.offset,
+      params.limit,
+      params.signal,
+    ),
     params.offset,
     params.limit,
     params.signal,
@@ -824,6 +828,8 @@ async function readSwmMetaRowsPage(
     .filter((row) => row.s && row.p && row.o && row.g);
 }
 
+// NOTE: keep in sync with its page-safe twin {@link readFreshSwmDataRowsPage} —
+// both MUST return the same SET of rows (see readDurableMetaRows note).
 async function readFreshSwmDataRows(
   store: TripleStore,
   dataGraphs: readonly string[],
@@ -847,6 +853,68 @@ async function readFreshSwmDataRows(
   return rows.sort(compareRows);
 }
 
+/**
+ * Store-bounded, page-safe equivalent of {@link readFreshSwmDataRows} used as the
+ * oversized-snapshot fallback for TTL-cutoff shared-memory data. Fresh roots are
+ * resolved per data-graph inside the store (`FILTER EXISTS`), so a page reads
+ * only the requested rows instead of materializing every fresh root's data
+ * across all candidate graphs.
+ *
+ * INVARIANT: this MUST return the same SET of rows as {@link readFreshSwmDataRows}
+ * and MUST be edited together with it. Row ORDER may differ from `compareRows`;
+ * that is safe within a single paginated session (see readDurableMetaRowsPage).
+ */
+async function readFreshSwmDataRowsPage(
+  store: TripleStore,
+  dataGraphs: readonly string[],
+  graphSet: ReadonlySet<string>,
+  candidateGraphsFor: (graph: string) => string[],
+  cutoffIso: string,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const cutoffFilter =
+    `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
+  const unions: string[] = [];
+  for (const graph of dataGraphs) {
+    const metaGraph = `${graph}_meta`;
+    if (!graphSet.has(metaGraph)) continue;
+    const candidateValues = graphValues(candidateGraphsFor(graph));
+    if (!candidateValues) continue;
+    unions.push(`
+      {
+        VALUES ?g { ${candidateValues} }
+        GRAPH ?g { ?s ?p ?o }
+        FILTER EXISTS {
+          GRAPH <${assertSafeIri(metaGraph)}> {
+            ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+                <${DKG_PUBLISHED_AT}> ?ts ;
+                <${DKG_ROOT_ENTITY}> ?root .
+            ${cutoffFilter}
+          }
+          FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        }
+      }`);
+  }
+  if (unions.length === 0) return [];
+  const res = await store.query(`
+    SELECT DISTINCT ?g ?s ?p ?o WHERE {
+      ${unions.join('\n      UNION')}
+    }
+    ORDER BY ?g ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `, syncResponderStoreOptions(signal, 'sync.responder.readFreshSwmDataRowsPage'));
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
+}
+
 async function readFreshSwmRoots(
   store: TripleStore,
   metaGraph: string,
@@ -867,6 +935,11 @@ async function readFreshSwmRoots(
   return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
 
+// NOTE: this in-memory filter and its store-bounded, page-safe twin
+// {@link readDurableMetaRowsPage} MUST return the same SET of rows. Edit them
+// together — the paged variant only runs in the rare oversized-snapshot fallback,
+// so a divergence would hide until it silently corrupts an oversized CG's meta
+// sync. `sync-responder-oversized-fallback.test.ts` asserts their equivalence.
 async function readDurableMetaRows(
   store: TripleStore,
   contextGraphId: string,
@@ -915,6 +988,77 @@ async function readDurableMetaRows(
       [...assertionNames].some((name) => row.s.endsWith(`/${name}`))
     ),
   );
+}
+
+/**
+ * Store-bounded, page-safe equivalent of {@link readDurableMetaRows} used as the
+ * oversized-snapshot fallback. It pushes the entire subject-membership predicate
+ * into the store (the graph-scaling non-working-lifecycle / event-subject sets
+ * are expressed as `EXISTS`, never materialized in Node) and pages with
+ * `OFFSET`/`LIMIT`, so an intrinsically-oversized durable-meta snapshot syncs
+ * without buffering the complete filtered set in heap.
+ *
+ * INVARIANT: this MUST return the same SET of rows as {@link readDurableMetaRows}.
+ * The two encode the same filter and MUST be edited together. Row ORDER may
+ * differ (SPARQL term order vs `compareRows` code-point order diverge on the
+ * object tiebreaker); that is safe because only one path runs within a single
+ * paginated session and SPARQL `ORDER BY` is internally deterministic, so pages
+ * never skip or duplicate.
+ */
+async function readDurableMetaRowsPage(
+  store: TripleStore,
+  contextGraphId: string,
+  registeredSubGraphNames: readonly string[],
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+  const cgEntity = contextGraphDataGraphUri(contextGraphId);
+  const notWorking = `FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})`;
+  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
+    .filter((name) => validateSubGraphName(name).valid)
+    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
+  const registeredSubGraphClause = registeredSubGraphSubjects.length
+    ? `|| ?s IN (${registeredSubGraphSubjects.join(', ')})`
+    : '';
+  const res = await store.query(`
+    SELECT ?g ?s ?p ?o WHERE {
+      VALUES ?g { <${assertSafeIri(metaGraph)}> }
+      GRAPH ?g { ?s ?p ?o }
+      FILTER(
+        ?s = <${assertSafeIri(cgEntity)}>
+        ${registeredSubGraphClause}
+        || STRSTARTS(STR(?s), "did:dkg:activity:")
+        || STRSTARTS(STR(?s), "did:dkg:join-request:")
+        || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
+        || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
+        || EXISTS {
+             GRAPH ?g { ?s (<${PROV_GENERATED}>|<${PROV_USED}>) ?evLifecycle . ?evLifecycle <${DKG_MEMORY_LAYER}> ?ml }
+             ${notWorking}
+           }
+        || (
+             CONTAINS(STR(?s), "/assertion/") &&
+             EXISTS {
+               GRAPH ?g { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
+               ${notWorking}
+               FILTER(STR(?an) != "")
+               FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
+             }
+           )
+      )
+    }
+    ORDER BY ?g ?s ?p ?o
+    OFFSET ${safeOffset}
+    LIMIT ${safeLimit}
+  `, syncResponderStoreOptions(signal, 'sync.responder.readDurableMetaRowsPage'));
+  if (res.type !== 'bindings') return [];
+  return res.bindings
+    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
+    .filter((row) => row.s && row.p && row.o && row.g);
 }
 
 async function readDurableDeltaRowsPageAcrossGraphs(

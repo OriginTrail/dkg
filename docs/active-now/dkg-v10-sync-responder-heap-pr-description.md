@@ -160,10 +160,15 @@ flowchart TD
 
 Default limits:
 
+The global limits are derived as `per-snapshot × SYNC_RESPONDER_GLOBAL_CONCURRENCY`
+(concurrency `3`) so every admitted responder computation retains room without
+cross-peer eviction, and every limit is operator-overridable via env
+(`DKG_SYNC_RESPONDER_{GLOBAL_SNAPSHOT_ROW,GLOBAL_SNAPSHOT_BYTES_ESTIMATE,PER_SNAPSHOT_ROW,PER_SNAPSHOT_BYTES_ESTIMATE}_LIMIT`).
+
 | Limit | Default |
 | --- | ---: |
-| Global retained rows | 500,000 |
-| Global retained estimated bytes | 256 MiB |
+| Global retained rows | 750,000 |
+| Global retained estimated bytes | 384 MiB |
 | Rows in one retained snapshot | 250,000 |
 | Estimated bytes in one retained snapshot | 128 MiB |
 | Durable-data entry cap | 128 |
@@ -174,8 +179,12 @@ The byte estimate is deliberately conservative and version-independent:
 
 ```text
 160 bytes of row/object/array overhead
-+ 2 bytes per UTF-16 code unit in s, p, o, and g
++ 1 byte per UTF-16 code unit in s, p, o, and g
 ```
+
+Production RDF terms are overwhelmingly Latin-1/ASCII, which V8 stores as
+one-byte strings; charging one byte per code unit keeps the estimate close to
+measured retained size instead of ~1.7x over it.
 
 It is an admission estimate, not a claim about exact V8 retained size. Row
 count and estimated bytes are enforced together so neither a large number of
@@ -265,8 +274,8 @@ retained heap = sum(size of up to 256 independently capped snapshots)
 to:
 
 ```text
-retained rows <= 500,000
-retained estimated bytes <= 256 MiB
+retained rows <= 750,000
+retained estimated bytes <= 384 MiB
 one snapshot <= 250,000 rows and <= 128 MiB estimated
 ```
 
@@ -286,7 +295,16 @@ snapshot arrays plus the page. Expected effects:
 
 The budget is applied after the store returns a complete snapshot. Therefore it
 bounds **retained cache state**, but not the temporary store result while a
-single snapshot is being built and sorted.
+single under-cap snapshot is being built and sorted for caching.
+
+When a snapshot is intrinsically larger than the per-snapshot cap, every
+memoized responder phase now falls back to a **store-bounded paged read**
+(`ORDER BY … OFFSET/LIMIT`) — including durable-meta and TTL-cutoff SWM-data,
+whose subject-membership filters are pushed into the store via `EXISTS` rather
+than re-materialized in Node. Such a graph therefore stays syncable (paginated,
+uncached) instead of buffering the complete filtered set or returning a
+permanent retryable limit. Global (process-wide) budget pressure remains a quiet
+retryable limit so the requester retries once other sessions drain.
 
 This PR also does not yet bound:
 
