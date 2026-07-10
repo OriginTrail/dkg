@@ -34,6 +34,7 @@ export default defineConfig({
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
+      "test/sync-responder-snapshot-cache.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
       "test/sync-append-in-place.test.ts",
