@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, QueryResult, StorePressureSnapshot, TripleStore, UpdateOptions } from './triple-store.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -14,8 +15,9 @@ export type GraphSetMutationSource =
   | 'query'
   | 'update';
 
-type GraphSetRefreshSource = 'seed' | 'revalidate' | 'deleteByPattern' | 'query' | 'update';
-type PendingFullRefreshSource = 'deleteByPattern' | 'query' | 'update';
+type TouchedGraphMutationSource = 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'update';
+type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
+type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
   | {
@@ -104,7 +106,7 @@ export class GraphSetIndexStore implements TripleStore {
     const touched = namedGraphsFromQuads(quads);
     if (touched.length === 0) return;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'delete', options));
+    await this.maintainTouchedGraphs(touched, 'delete', options);
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
@@ -116,7 +118,7 @@ export class GraphSetIndexStore implements TripleStore {
     const graph = pattern.graph;
     if (graph) {
       this.bumpMutation();
-      await this.maintainIndex(() => this.refreshTouchedGraphs([graph], 'deleteByPattern', options));
+      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
     } else {
       // No target graph → can't know which graphs emptied; defer to a single
       // lazy rebuild on the next read instead of a full scan now.
@@ -130,7 +132,7 @@ export class GraphSetIndexStore implements TripleStore {
       return this.inner.query(sparql, options);
     }
     const result = await this.inner.query(sparql, options);
-    if (isSparqlUpdate(sparql)) {
+    if (isSparqlUpdateOperation(sparql)) {
       // A SPARQL UPDATE through query() may create/drop named graphs we can't
       // derive incrementally — query() is the READ-path type and carries no
       // index-maintenance hint (that lives on `update(…, UpdateOptions.touchedGraphs)`).
@@ -170,7 +172,7 @@ export class GraphSetIndexStore implements TripleStore {
         // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
         const readOptions = queryOptionsFromUpdateOptions(options);
         this.bumpMutation();
-        await this.maintainIndex(() => this.refreshTouchedGraphs(touched, 'update', readOptions));
+        await this.maintainTouchedGraphs(touched, 'update', readOptions);
         return;
       }
     }
@@ -234,7 +236,7 @@ export class GraphSetIndexStore implements TripleStore {
     const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
     if (removed <= 0) return removed;
     this.bumpMutation();
-    await this.maintainIndex(() => this.refreshTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options));
+    await this.maintainTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options);
     return removed;
   }
 
@@ -316,9 +318,20 @@ export class GraphSetIndexStore implements TripleStore {
     this.pendingFullRefresh ??= source;
   }
 
-  private async maintainIndex(task: () => Promise<unknown>): Promise<void> {
+  private async maintainIndex<T>(
+    source: PendingFullRefreshSource,
+    inspect: () => Promise<T>,
+    apply: (result: T) => void,
+  ): Promise<void> {
+    const generation = this.mutationGeneration;
     try {
-      await task();
+      const result = await inspect();
+      if (!this.graphs) return;
+      if (generation !== this.mutationGeneration) {
+        this.scheduleFullRefresh(source);
+        return;
+      }
+      apply(result);
     } catch {
       this.clearIndex();
     }
@@ -357,20 +370,31 @@ export class GraphSetIndexStore implements TripleStore {
     }
   }
 
-  private async refreshTouchedGraphs(
+  private async maintainTouchedGraphs(
     graphs: string[],
-    source: GraphSetMutationSource,
+    source: TouchedGraphMutationSource,
     options?: QueryOptions,
   ): Promise<void> {
     if (!this.graphs) return;
-    for (const graph of graphs) {
-      if (!graph) continue;
-      if (await this.inner.hasGraph(graph, options)) {
-        this.addGraphs([graph], source);
-      } else {
-        this.removeGraphs([graph], source);
-      }
-    }
+    const uniqueGraphs = [...new Set(graphs.filter(Boolean))];
+    await this.maintainIndex(
+      source,
+      () => Promise.all(
+        uniqueGraphs.map(async (graph) => ({
+          graph,
+          present: await this.inner.hasGraph(graph, options),
+        })),
+      ),
+      (graphPresence) => {
+        for (const { graph, present } of graphPresence) {
+          if (present) {
+            this.addGraphs([graph], source);
+          } else {
+            this.removeGraphs([graph], source);
+          }
+        }
+      },
+    );
   }
 
   private emit(event: GraphSetMutationEvent): void {
@@ -399,14 +423,6 @@ function normalizeGraphUris(graphs: readonly string[]): string[] {
 function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
   const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
   return readOptions;
-}
-
-function isSparqlUpdate(sparql: string): boolean {
-  const withoutPrologue = sparql
-    .trimStart()
-    .replace(/^(?:(?:#[^\r\n]*(?:\r?\n|$))|(?:PREFIX\s+(?:[A-Za-z][\w-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*)+/i, '')
-    .trimStart();
-  return /^(?:INSERT|DELETE|WITH|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

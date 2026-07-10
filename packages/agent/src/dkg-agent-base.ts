@@ -94,6 +94,7 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
+  isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
@@ -398,14 +399,6 @@ function readNonNegativeNumberEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
 }
 
-function isSparqlUpdateStatement(sparql: string): boolean {
-  const withoutPrologue = sparql.replace(
-    /^\s*(?:(?:PREFIX\s+[\w-]*:\s*<[^>]+>|BASE\s+<[^>]+>)\s*)*/i,
-    '',
-  );
-  return /^(?:WITH\s+<[^>]+>\s*)?(?:INSERT|DELETE|DROP|CLEAR|CREATE|LOAD|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
-}
-
 export function createListContextGraphsCacheInvalidatingStore(
   innerStore: TripleStore,
   invalidate: () => void,
@@ -452,7 +445,7 @@ export function createListContextGraphsCacheInvalidatingStore(
     query(sparql, options) {
       return invalidateAfterMutation(
         () => innerStore.query(sparql, options),
-        () => isSparqlUpdateStatement(sparql),
+        () => isSparqlUpdateOperation(sparql),
         () => markProjectionDirty?.(),
       );
     },
