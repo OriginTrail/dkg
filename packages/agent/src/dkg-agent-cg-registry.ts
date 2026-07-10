@@ -95,7 +95,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -883,11 +883,22 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
 
     const { subGraphDeregistrationSparql } = await import('@origintrail-official/dkg-publisher');
+    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     try {
-      await this.store.query(subGraphDeregistrationSparql(contextGraphId, subGraphName));
+      const sparql = subGraphDeregistrationSparql(contextGraphId, subGraphName);
+      const updated = await tryUpdateWithTouchedGraphs(
+        this.store,
+        sparql,
+        [metaGraph],
+        {
+          source: 'agent.cg.removeSubGraph.registration',
+        },
+      );
+      if (!updated) {
+        await this.store.query(sparql);
+      }
     } catch {
       // SPARQL DELETE WHERE may not be supported — delete quads manually
-      const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
       const subGraphUri = `did:dkg:context-graph:${contextGraphId}/${subGraphName}`;
       await this.store.deleteByPattern({ graph: metaGraph, subject: subGraphUri });
     }

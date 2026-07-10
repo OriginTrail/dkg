@@ -37,6 +37,11 @@ describe('detectSparqlQueryForm — happy path (functional equivalence)', () => 
     expect(detectSparqlQueryForm('PREFIX ex: <http://example.org/> SELECT * WHERE { ?s ?p ?o }')).toBe('SELECT');
   });
 
+  it('handles relative IRI refs in PREFIX and BASE declarations', () => {
+    expect(detectSparqlQueryForm('PREFIX ex: <1/> SELECT * WHERE { ?s ?p ?o }')).toBe('SELECT');
+    expect(detectSparqlQueryForm('BASE <1/> ASK { ?s ?p ?o }')).toBe('ASK');
+  });
+
   it('handles multi-line PREFIX preamble', () => {
     const q = `
       PREFIX foaf: <http://xmlns.com/foaf/0.1/>
@@ -87,6 +92,11 @@ describe('validateReadOnlySparql — happy path (functional equivalence)', () =>
     const r = validateReadOnlySparql('SELECT * WHERE { ?s ?p ?o } INSERT DATA { <urn:x> <urn:y> <urn:z> }');
     expect(r.safe).toBe(false);
     expect(r.reason).toMatch(/INSERT/i);
+  });
+
+  it('does not treat mutating words inside relative prologue IRIs as updates', () => {
+    const r = validateReadOnlySparql('PREFIX ex: <1/INSERT/> SELECT * WHERE { ?s ?p ?o }');
+    expect(r.safe).toBe(true);
   });
 
   it('rejects queries that do not start with a read-only form', () => {

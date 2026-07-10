@@ -15,6 +15,7 @@ export {
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
+  tryUpdateWithTouchedGraphs,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,

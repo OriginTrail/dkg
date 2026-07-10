@@ -94,7 +94,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -2729,16 +2729,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!sub.onChainId) return;
       // Server-side byte-safe copy is the ONLY safe relocation mechanism; if the
       // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
-      const storeUpdate = this.store.update;
-      if (typeof storeUpdate !== 'function') return;
+      if (typeof this.store.update !== 'function') return;
       // #1549: every server-side INSERT in this RS-heal path has a statically-known
       // target graph, so `touchedGraphs` is REQUIRED — the index then maintains
       // itself incrementally (a bounded `hasGraph`) instead of marking the whole
       // index dirty and forcing a full store scan on the next enumeration. Requiring
       // it (not optional) closes the escape hatch: a future `update(sparql)` here that
       // forgot to declare its graph would silently fall back to dirtying the index.
-      const update = (sparql: string, touchedGraphs: readonly string[]): Promise<void> =>
-        storeUpdate.call(this.store, sparql, { source: 'agent.swm.rsHeal.materialize', touchedGraphs });
+      const update = async (sparql: string, touchedGraphs: readonly string[]): Promise<void> => {
+        const updated = await tryUpdateWithTouchedGraphs(
+          this.store,
+          sparql,
+          touchedGraphs,
+          { source: 'agent.swm.rsHeal.materialize' },
+        );
+        if (!updated) throw new Error('RS heal requires server-side update() support');
+      };
 
       const DKG = 'http://dkg.io/ontology/';
       const legacyMeta = contextGraphMetaUri(localCgId);

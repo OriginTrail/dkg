@@ -6,25 +6,11 @@
  * This module rejects any SPARQL that attempts mutation operations.
  */
 
-import { stripLiteralsAndComments } from './sparql-utils.js';
+import {
+  analyzeSparqlOperation,
+  classifySparqlOperation,
+} from '@origintrail-official/dkg-core';
 import type { QueryResult } from './query-engine.js';
-
-const MUTATING_KEYWORDS = [
-  'INSERT',
-  'DELETE',
-  'LOAD',
-  'CLEAR',
-  'DROP',
-  'CREATE',
-  'COPY',
-  'MOVE',
-  'ADD',
-] as const;
-
-const MUTATING_PATTERN = new RegExp(
-  `\\b(${MUTATING_KEYWORDS.join('|')})\\b`,
-  'i',
-);
 
 // CodeQL alert #65 (js/redos) — the previous single-shot regex
 // `^\s*(?:(?:PREFIX\s+[^\s:]*:\s*)|(?:BASE\s+))*\s*(SELECT|...)\b/i`
@@ -34,7 +20,7 @@ const MUTATING_PATTERN = new RegExp(
 // query form). Because this regex runs on operator-supplied SPARQL
 // arriving over HTTP, the exposure is a real CPU-DoS vector.
 //
-// The replacement scans the stripped query as a bounded state machine:
+// The shared core classifier scans the stripped query as a bounded state machine:
 //   1. consume one `PREFIX <label>:` or `BASE` declaration at a time
 //      via a small ANCHORED regex (no nested quantifiers — linear in
 //      the prefix length),
@@ -46,21 +32,8 @@ const MUTATING_PATTERN = new RegExp(
 // bytes from the cursor, so total cost is O(n) where n = stripped length,
 // regardless of adversarial input shape.
 //
-// `stripLiteralsAndComments` runs upstream — it blanks IRI bodies and
-// comments to whitespace, so the preamble decls always end at `:` and
-// never need to skip across IRI angles inside this scanner.
-
-// Each anchored regex matches at most ONE declaration's KEYWORD —
-// the trailing IRI body is already blanked to whitespace by
-// `stripLiteralsAndComments` upstream, so the next iteration's `\s*`
-// consumes it transparently. `\s+` and `\s*` inside these are NOT
-// nested under another quantifier, so they cannot drive polynomial
-// backtracking. `[^\s:]*` is greedy but terminates at `:` which is
-// required to be present immediately after — failed matches are
-// O(label length), single-shot.
-const PREFIX_DECL = /^\s*PREFIX\s+[^\s:]*:/i;
-const BASE_DECL = /^\s*BASE\b/i;
-const QUERY_FORM_AT_START = /^\s*(SELECT|CONSTRUCT|ASK|DESCRIBE)\b/i;
+// The classifier blanks IRI bodies and comments to whitespace before scanning,
+// so preamble decls cannot hide operation keywords inside prologue IRIs.
 
 /** SPARQL query form — enough to shape a `QueryResult` correctly. */
 export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNKNOWN';
@@ -96,33 +69,9 @@ export type SparqlQueryForm = 'SELECT' | 'CONSTRUCT' | 'ASK' | 'DESCRIBE' | 'UNK
  * explosion possible because every successful preamble match advances
  * the cursor.
  */
-function scanReadOnlyForm(stripped: string): SparqlQueryForm {
-  let cursor = stripped;
-  while (true) {
-    const prefixHit = PREFIX_DECL.exec(cursor);
-    if (prefixHit) {
-      cursor = cursor.slice(prefixHit[0].length);
-      continue;
-    }
-    const baseHit = BASE_DECL.exec(cursor);
-    if (baseHit) {
-      cursor = cursor.slice(baseHit[0].length);
-      continue;
-    }
-    break;
-  }
-  const formHit = QUERY_FORM_AT_START.exec(cursor);
-  if (!formHit) return 'UNKNOWN';
-  const kw = formHit[1].toUpperCase();
-  if (kw === 'SELECT' || kw === 'CONSTRUCT' || kw === 'ASK' || kw === 'DESCRIBE') {
-    return kw;
-  }
-  return 'UNKNOWN';
-}
-
 export function detectSparqlQueryForm(sparql: string): SparqlQueryForm {
-  const stripped = stripLiteralsAndComments(sparql);
-  return scanReadOnlyForm(stripped);
+  const operation = classifySparqlOperation(sparql);
+  return operation.kind === 'read' ? operation.form : 'UNKNOWN';
 }
 
 /**
@@ -287,9 +236,10 @@ export interface SparqlGuardResult {
  * Returns `{ safe: false, reason }` for anything that could mutate data.
  */
 export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
-  const stripped = stripLiteralsAndComments(sparql);
+  const analysis = analyzeSparqlOperation(sparql);
+  const operation = analysis.operation;
 
-  if (scanReadOnlyForm(stripped) === 'UNKNOWN') {
+  if (operation.kind !== 'read') {
     return {
       safe: false,
       reason: `Query must start with SELECT, CONSTRUCT, ASK, or DESCRIBE. ` +
@@ -297,11 +247,11 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
     };
   }
 
-  const match = MUTATING_PATTERN.exec(stripped);
-  if (match) {
+  const mutatingKeyword = analysis.mutatingKeyword;
+  if (mutatingKeyword) {
     return {
       safe: false,
-      reason: `Query contains mutating keyword "${match[1]}". ` +
+      reason: `Query contains mutating keyword "${mutatingKeyword}". ` +
         `Use the publish() or update() API to modify data.`,
     };
   }
