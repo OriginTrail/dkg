@@ -12,7 +12,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, loadSelectedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, loadKaBoundedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -614,15 +614,19 @@ export class FinalizationHandler {
     // fidelity for the merkle recompute, and so the same logical triple
     // present in BOTH the bucket and a per-KA graph collapses to one
     // (a constructed graph is a set).
-    // #1549: when the caller supplies a per-author `kaGraphBound` (derived from
-    // the finalization message's packed `startKAId`/`endKAId`), the resolved
-    // graph set drops sibling per-KA under-graphs outside the range instead of
-    // scanning all ~120–175 of them. The bound is FAIL-OPEN in storage and a
-    // pure accelerator here — the gossip caller widens to the unbounded read on
-    // an empty-or-mismatch result before it defers.
+    // #1549: with a per-author `kaGraphBound` (derived from the finalization
+    // message's packed `startKAId`/`endKAId`), the resolved graph set drops the
+    // sibling per-KA under-graphs outside the range instead of scanning all
+    // ~120–175 of them. `loadKaBoundedSharedMemoryQuads` is UNSAFE alone — only
+    // `loadSwmSliceWithFallback` may call this with a bound, because it owns the
+    // widen to the unbounded read on an empty-or-mismatch result.
+    if (kaGraphBound) {
+      return loadKaBoundedSharedMemoryQuads(
+        this.store, sharedMemoryGraph, { rootEntities: safeRoots }, kaGraphBound, { querySource },
+      );
+    }
     return loadSelectedSharedMemoryQuads(this.store, sharedMemoryGraph, { rootEntities: safeRoots }, {
       querySource,
-      kaGraphBound,
     });
   }
 

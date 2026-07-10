@@ -51,14 +51,25 @@ const SWM_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory`
 const coreWallet = ethers.Wallet.createRandom();
 const fakePeerId = { toString: () => 'requester-peer' } as any;
 
-const q = (subject: string, predicate: string, object: string): Quad =>
-  ({ subject, predicate, object, graph: SWM_GRAPH_URI });
+// Two DIFFERENT authors, so no single `SwmKaGraphBound` (which pins one author and
+// a kaNumber range) can admit both child graphs.
+const AUTHOR_A = '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01';
+const AUTHOR_B = '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const CHILD_A = `${SWM_GRAPH_URI}/${AUTHOR_A}/7`;
+const CHILD_B = `${SWM_GRAPH_URI}/${AUTHOR_B}/9`;
 
-// A small author payload seeded directly into the SWM bucket graph.
+const q = (subject: string, predicate: string, object: string, graph = SWM_GRAPH_URI): Quad =>
+  ({ subject, predicate, object, graph });
+
+// The author payload is deliberately SPREAD across the bucket and two per-KA child
+// graphs under different authors. The bucket is always retained even by a bounded
+// read, so a fixture living only in the bucket could not detect an accidental
+// `kaGraphBound` on the ACK path. With this layout ANY bound prunes at least one
+// child, changes the recomputed root, and turns the ACK into a decline.
 const authorQuads: Quad[] = [
   q('urn:entity:1', 'http://schema.org/name', '"Entity One"'),
-  q('urn:entity:1', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://schema.org/Thing'),
-  q('urn:entity:2', 'http://schema.org/name', '"Entity Two"'),
+  q('urn:entity:1', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://schema.org/Thing', CHILD_A),
+  q('urn:entity:2', 'http://schema.org/name', '"Entity Two"', CHILD_B),
 ];
 const authorRoot = computeFlatKCRoot(authorQuads, []);
 const authorLeafCount = computeFlatKCMerkleLeafCountV10(authorQuads, []);
@@ -67,6 +78,8 @@ interface SpyHandle {
   handler: StorageACKHandler;
   /** `source` recorded for every `store.query` the handler issues, in order. */
   querySources: (string | undefined)[];
+  /** Full SPARQL text of every `store.query`, in order. */
+  querySparqls: string[];
 }
 
 // Real OxigraphStore (genuine merkle recompute) behind a Proxy that records the
@@ -78,11 +91,13 @@ async function makeHandler(seedQuads: Quad[]): Promise<SpyHandle> {
   if (seedQuads.length > 0) await inner.insert(seedQuads);
 
   const querySources: (string | undefined)[] = [];
+  const querySparqls: string[] = [];
   const store = new Proxy(inner, {
     get(target, prop, receiver) {
       if (prop === 'query') {
         return (sparql: string, options?: QueryOptions): Promise<QueryResult> => {
           querySources.push(options?.source);
+          querySparqls.push(sparql);
           return target.query(sparql, options);
         };
       }
@@ -104,7 +119,22 @@ async function makeHandler(seedQuads: Quad[]): Promise<SpyHandle> {
   return {
     handler: new StorageACKHandler(store as any, config, eventBus as any),
     querySources,
+    querySparqls,
   };
+}
+
+/**
+ * The ACK read must resolve the COMPLETE SWM graph set. Any `kaGraphBound` would
+ * prune at least one of the two per-KA children (they sit under different authors),
+ * so asserting both appear in the CONSTRUCT's `VALUES ?g` pins graph-set breadth
+ * directly, independently of the recomputed root.
+ */
+function expectFullGraphSet(querySparqls: string[]): void {
+  const construct = querySparqls.find((s) => s.includes('CONSTRUCT'));
+  expect(construct, 'no CONSTRUCT was issued').toBeDefined();
+  expect(construct).toContain(`<${CHILD_A}>`);
+  expect(construct).toContain(`<${CHILD_B}>`);
+  expect(construct).toContain(`<${SWM_GRAPH_URI}>`);
 }
 
 // SWM-fallback publish intent: NO stagingQuads → the handler recomputes the root
@@ -142,7 +172,7 @@ function ackRootHex(ack: { merkleRoot: Uint8Array | ArrayLike<number> }): string
 
 describe('T7 — storage-ACK SWM read lane is off the #1549 bound path', () => {
   it('per-root-entity read carries the unbounded storage-ack.loadSWMQuads.constructEntity source', async () => {
-    const { handler, querySources } = await makeHandler(authorQuads);
+    const { handler, querySources, querySparqls } = await makeHandler(authorQuads);
 
     const response = await handler.handler(
       swmFallbackIntent({ rootEntities: ['urn:entity:1', 'urn:entity:2'] }),
@@ -151,17 +181,19 @@ describe('T7 — storage-ACK SWM read lane is off the #1549 bound path', () => {
     const ack = decodeStorageACK(response);
 
     expect(isStorageACKDecline(ack)).toBe(false);
-    // Byte-identical read: the signed root equals the root over the EXACT seeded
-    // quads, i.e. the read returned the whole bucket — no graph-set narrowing.
+    // The signed root equals the root over the EXACT seeded quads, which are spread
+    // across the bucket AND two per-KA children under different authors. Any bound
+    // would prune a child, change this root, and turn the ACK into a decline.
     expect(ackRootHex(ack as any)).toBe(ethers.hexlify(authorRoot));
 
     const swmReads = querySources.filter((s) => s?.startsWith('storage-ack.loadSWMQuads.'));
     expect(swmReads).toEqual(['storage-ack.loadSWMQuads.constructEntity']);
     expectNoBoundLane(querySources);
+    expectFullGraphSet(querySparqls);
   });
 
   it('read-both (empty rootEntities) carries the unbounded storage-ack.loadSWMQuads.constructAll source', async () => {
-    const { handler, querySources } = await makeHandler(authorQuads);
+    const { handler, querySources, querySparqls } = await makeHandler(authorQuads);
 
     const response = await handler.handler(
       swmFallbackIntent({ rootEntities: [] }),

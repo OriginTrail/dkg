@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   createTripleStore,
   loadSelectedSharedMemoryQuads,
+  loadKaBoundedSharedMemoryQuads,
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
@@ -126,7 +127,7 @@ describe('loadSelectedSharedMemoryQuads — bounded read equivalence', () => {
       ]);
 
       const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
-      const bounded = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [r] }, { kaGraphBound: bound });
+      const bounded = await loadKaBoundedSharedMemoryQuads(store, swm, { rootEntities: [r] }, bound);
       const unbounded = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [r] });
 
       expect(keys(bounded)).toEqual(keys(unbounded));
@@ -190,6 +191,64 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
       const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
 
       expect(resolved.slice().sort()).toEqual([swm, gAdmit, gOtherBucketChild].sort());
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('the generic SWM loader cannot be pruned (bound is not an option)', () => {
+  // `kaGraphBound` was removed from `LoadSelectedSharedMemoryQuadsOptions`, so the
+  // four production callers — two of them merkle-DEFINING, one the ACK decline lane
+  // — get a compile error if they try to prune. This pins the runtime half: even if
+  // the field is forced through at a type boundary, the read stays unbounded.
+  it('ignores a forced kaGraphBound option and still reads every under-graph', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-nofootgun');
+    const root = 'urn:test:footgun:root';
+    const inBound = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const outOfBound = `${swm}/${AUTHOR_B}/12`;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: root, predicate: 'urn:p', object: '"in"', graph: inBound },
+        { subject: root, predicate: 'urn:p', object: '"out"', graph: outOfBound },
+      ]);
+
+      const forced = {
+        querySource: 'test.forced',
+        kaGraphBound: { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+      } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[3];
+
+      const quads = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, forced);
+
+      // All three objects present ⇒ the out-of-bound graph was NOT pruned.
+      expect(quads.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"', '"out"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('loadKaBoundedSharedMemoryQuads DOES prune, and takes the bound positionally', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-explicit');
+    const root = 'urn:test:explicit:root';
+    const inBound = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const outOfBound = `${swm}/${AUTHOR_B}/12`;
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: root, predicate: 'urn:p', object: '"in"', graph: inBound },
+        { subject: root, predicate: 'urn:p', object: '"out"', graph: outOfBound },
+      ]);
+
+      const quads = await loadKaBoundedSharedMemoryQuads(
+        store, swm, { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        { querySource: 'test.bounded' },
+      );
+
+      expect(quads.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"']);
     } finally {
       await store.close();
     }

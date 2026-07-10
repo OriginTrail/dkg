@@ -86,7 +86,6 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   querySource?: QueryOptions['source'];
   queryOptions?: QueryOptions;
   quadFilter?: (quad: Quad) => boolean;
-  kaGraphBound?: SwmKaGraphBound;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
@@ -150,10 +149,17 @@ async function listGraphsByPrefix(
  *
  * `bound` (optional) narrows the under-graph set to a single author + kaNumber
  * range — see `SwmKaGraphBound`. It is FAIL-OPEN: an under-graph is dropped
- * ONLY when it parses as a per-KA layer URI AND its author/kaNumber falls
- * outside the bound. A graph that does not parse (blob/`_meta`/snapshot or any
- * future shape) is KEPT, so a bound can never silently under-read a graph it
+ * ONLY when it parses as a per-KA child of THIS bucket AND its author/kaNumber
+ * falls outside the bound. A graph that does not parse (blob/`_meta`/snapshot or
+ * any future shape) is KEPT, so a bound can never silently under-read a graph it
  * does not understand. The bucket graph is always part of the read contract.
+ *
+ * Passing a `bound` still yields a STRICT SUBSET of the full read set, and INV-1
+ * is refuted under root recurrence, so a bounded resolution can legitimately omit
+ * graphs the on-chain merkle root commits to. Anything that hashes or declines on
+ * the result must widen to the unbounded resolution first — the same contract
+ * `loadKaBoundedSharedMemoryQuads` documents. Do not reach for this to "just make
+ * the read cheaper" on a merkle-defining or ACK path.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
@@ -192,12 +198,55 @@ export async function resolveSharedMemoryReadGraphs(
  * `resolveSharedMemoryReadGraphs`. This keeps merkle-sensitive SWM selection
  * policy in one place while allowing call sites to inject their small
  * differences, such as query source tags or post-query bookkeeping filters.
+ *
+ * This function reads the COMPLETE SWM graph set and is safe to use anywhere,
+ * including the merkle-DEFINING publish reads and the StorageACK decline lanes.
+ * There is deliberately no way to prune the graph set from here — see
+ * `loadKaBoundedSharedMemoryQuads` for that, and read its contract first.
  */
 export async function loadSelectedSharedMemoryQuads(
   store: TripleStore,
   bucketGraph: string,
   selection: SharedMemoryReadSelection,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, undefined);
+}
+
+/**
+ * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
+ *
+ * UNSAFE ON ITS OWN. The pruned graph set is a strict subset of the set
+ * `loadSelectedSharedMemoryQuads` reads, and INV-1 — "a root's quads live only
+ * under its own KA number" — is REFUTED under root recurrence, so this read can
+ * legitimately miss quads the on-chain merkle root commits to. Every caller MUST
+ * widen to `loadSelectedSharedMemoryQuads` on an empty-or-mismatched result and
+ * recompute BEFORE it declines, defers, or otherwise acts on the miss.
+ *
+ * Never call this from a merkle-DEFINING read (it would change what the chain
+ * commits to) or from a StorageACK decline lane (a miss costs a publish-quorum
+ * vote). Today the only caller is the finalization gossip lane, via
+ * `FinalizationHandler.loadSwmSliceWithFallback`, which owns the widen.
+ *
+ * The bound is a required positional argument, not an option, so that no generic
+ * SWM read can opt into pruning by adding a field to an options object.
+ */
+export async function loadKaBoundedSharedMemoryQuads(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound,
+  options: LoadSelectedSharedMemoryQuadsOptions = {},
+): Promise<Quad[]> {
+  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+}
+
+async function loadSharedMemoryQuadsInternal(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+  kaGraphBound: SwmKaGraphBound | undefined,
 ): Promise<Quad[]> {
   let innerGraphPattern: string;
   if (selection === 'all') {
@@ -230,7 +279,7 @@ export async function loadSelectedSharedMemoryQuads(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions, options.kaGraphBound);
+  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions, kaGraphBound);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }

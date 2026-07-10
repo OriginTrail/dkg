@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   OxigraphStore,
   loadSelectedSharedMemoryQuads,
+  loadKaBoundedSharedMemoryQuads,
   type SwmKaGraphBound,
   type Quad,
 } from '@origintrail-official/dkg-storage';
@@ -235,7 +236,7 @@ describe('bounded SWM read is merkle-equivalent to the unbounded read (T5b)', ()
     ]);
 
     const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A_LOWER, startNumber: 7n, endNumber: 7n };
-    const bounded = await loadSelectedSharedMemoryQuads(store, bucket, { rootEntities: [root] }, { kaGraphBound: bound });
+    const bounded = await loadKaBoundedSharedMemoryQuads(store, bucket, { rootEntities: [root] }, bound);
     const unbounded = await loadSelectedSharedMemoryQuads(store, bucket, { rootEntities: [root] });
 
     // Both reads must return exactly r's three quads (proves the bound did NOT
