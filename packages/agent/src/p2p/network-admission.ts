@@ -92,17 +92,14 @@ export class NetworkAdmissionService {
     this.retryableProbeBackoff.delete(canonicalPeerId);
   }
 
-  /** Preserve the existing no-deadline contract: omitted `untilMs` is indefinite. */
-  quarantinePeer(peerId: string, untilMs?: number): void {
-    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.quarantinedPeers.set(canonicalPeerId, untilMs ?? null);
-    this.verifiedPeerIds.delete(canonicalPeerId);
-    this.retryableProbeBackoff.delete(canonicalPeerId);
+  /** Preserve the existing public operation as an explicit indefinite quarantine. */
+  quarantinePeer(peerId: string): void {
+    this.setQuarantine(peerId, null);
   }
 
   /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
   quarantinePeerForCooldown(peerId: string): void {
-    this.quarantinePeer(peerId, this.now() + this.quarantineCooldownMs);
+    this.setQuarantine(peerId, this.now() + this.quarantineCooldownMs);
   }
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
@@ -207,6 +204,13 @@ export class NetworkAdmissionService {
       this.probeBackoff.transientMaxMs,
       this.probeBackoff.transientBaseMs * (2 ** exponent),
     );
+  }
+
+  private setQuarantine(peerId: string, untilMs: number | null): void {
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    this.quarantinedPeers.set(canonicalPeerId, untilMs);
+    this.verifiedPeerIds.delete(canonicalPeerId);
+    this.retryableProbeBackoff.delete(canonicalPeerId);
   }
 }
 

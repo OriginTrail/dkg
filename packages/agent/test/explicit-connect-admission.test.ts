@@ -33,7 +33,7 @@ function makeAgent(overrides: Record<string, unknown> = {}): any {
     },
     networkAdmissionCoordinator: {
       enabled: true,
-      ensureAdmitted: vi.fn(async () => false),
+      ensureExplicitConnectAdmitted: vi.fn(async () => false),
     },
     log: { info: vi.fn() },
     ...overrides,
@@ -86,10 +86,10 @@ describe('explicit connect network admission', () => {
       }),
       expect.any(Function),
     );
-    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
+    expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
-      { bypassBackoff: true },
+      undefined,
     );
   });
 
@@ -141,11 +141,10 @@ describe('explicit connect network admission', () => {
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(agent.node.libp2p.dial).toHaveBeenCalledOnce();
-    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
+    expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
       expect.objectContaining({
-        bypassBackoff: true,
         signal: expect.any(AbortSignal),
         timeoutMs: expect.any(Number),
       }),
@@ -167,11 +166,10 @@ describe('explicit connect network admission', () => {
       AgentRegistryMethods.prototype.connectToPeerId.call(agent, PEER_ID, { timeoutMs: 5_000 }),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_REJECTED' });
 
-    expect(agent.networkAdmissionCoordinator.ensureAdmitted).toHaveBeenCalledWith(
+    expect(agent.networkAdmissionCoordinator.ensureExplicitConnectAdmitted).toHaveBeenCalledWith(
       PEER_ID,
       expect.objectContaining({ operationName: 'connect' }),
       expect.objectContaining({
-        bypassBackoff: true,
         signal: expect.any(AbortSignal),
         timeoutMs: expect.any(Number),
       }),

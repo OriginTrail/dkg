@@ -160,10 +160,9 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
 
     await expect(
-      fixture.coordinator.ensureAdmitted(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
         REMOTE_PEER_ID,
         createOperationContext('connect'),
-        { bypassBackoff: true },
       ),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
@@ -171,10 +170,9 @@ describe('NetworkAdmissionCoordinator', () => {
 
     fixture.admission.quarantinePeer(REMOTE_PEER_ID);
     await expect(
-      fixture.coordinator.ensureAdmitted(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
         REMOTE_PEER_ID,
         createOperationContext('connect'),
-        { bypassBackoff: true },
       ),
     ).resolves.toBe(false);
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
@@ -196,15 +194,13 @@ describe('NetworkAdmissionCoordinator', () => {
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
 
-    const first = fixture.coordinator.ensureAdmitted(
+    const first = fixture.coordinator.ensureExplicitConnectAdmitted(
       REMOTE_PEER_ID,
       createOperationContext('connect'),
-      { bypassBackoff: true },
     );
-    const second = fixture.coordinator.ensureAdmitted(
+    const second = fixture.coordinator.ensureExplicitConnectAdmitted(
       REMOTE_PEER_ID_CID,
       createOperationContext('connect'),
-      { bypassBackoff: true },
     );
     await Promise.resolve();
 
@@ -590,10 +586,9 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeDefined();
 
     await expect(
-      fixture.coordinator.ensureAdmitted(
+      fixture.coordinator.ensureExplicitConnectAdmitted(
         REMOTE_PEER_ID_CID,
         createOperationContext('connect'),
-        { bypassBackoff: true },
       ),
     ).resolves.toBe(true);
     expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeUndefined();

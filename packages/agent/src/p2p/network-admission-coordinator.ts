@@ -40,10 +40,11 @@ export interface NetworkAdmissionCoordinatorOptions {
 }
 
 export interface NetworkAdmissionAttemptOptions {
-  bypassBackoff?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
+
+type NetworkAdmissionAttemptKind = 'automatic' | 'explicit-connect';
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -213,6 +214,23 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
+    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'automatic', options);
+  }
+
+  async ensureExplicitConnectAdmitted(
+    remotePeer: string,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions = {},
+  ): Promise<boolean> {
+    return this.ensureAdmittedForAttempt(remotePeer, ctx, 'explicit-connect', options);
+  }
+
+  private async ensureAdmittedForAttempt(
+    remotePeer: string,
+    ctx: OperationContext,
+    attemptKind: NetworkAdmissionAttemptKind,
+    options: NetworkAdmissionAttemptOptions,
+  ): Promise<boolean> {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
     if (this.admission.isAcceptedPeer(remotePeerId)) return true;
@@ -222,7 +240,7 @@ export class NetworkAdmissionCoordinator {
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
 
-    const backoff = options.bypassBackoff
+    const backoff = attemptKind === 'explicit-connect'
       ? undefined
       : this.admission.getRetryableProbeBackoff(remotePeerId);
     if (backoff) {
