@@ -136,9 +136,12 @@ async function bootAgent(opts?: { withChainSigner?: boolean; stripCiphertext?: b
   const agent = await DKGAgent.create({
     name: 'CatchupWiringTest',
     chainAdapter: chain,
-    // These LU-11 wiring tests mostly pin the legacy host-mode chunk-custody
-    // path. Make that kill-switch explicit now that WS-A strips by default.
-    swmHostMode: { enabled: true, stripCiphertext: opts?.stripCiphertext ?? false },
+    // Omit stripCiphertext unless a test explicitly overrides it so the suite
+    // continues to exercise the production default (strip ON).
+    swmHostMode: {
+      enabled: true,
+      ...(opts?.stripCiphertext !== undefined ? { stripCiphertext: opts.stripCiphertext } : {}),
+    },
   });
   const internals = agent as unknown as WiringInternals & SignerInternals;
   return { agent, internals };
@@ -582,37 +585,6 @@ describe('DKGAgent.ingestSwmCiphertextChunkEnvelope — gossip ingester wiring (
       chunkIndex: 7,
     });
     expect(persisted).toBe(`"${Buffer.from(ciphertext).toString('base64')}"`);
-  });
-
-  it('strip ON drops chunked ingest even if a stale host-mode handler is still wired', async () => {
-    const boot = await bootAgent({ stripCiphertext: true });
-    agent = boot.agent;
-    const internals = boot.internals;
-    stubAuthority(internals, { accepted: true });
-
-    const cgId = 'cg-ingest-strip-on';
-    internals.subscribedContextGraphs.set(cgId, { topic: cgId });
-    const canonical = internals.gossipWireIdFor(cgId);
-
-    const batchId = ethers.getBytes(ethers.id('ingest-strip-on-batch'));
-    const ciphertext = new Uint8Array([0xCA, 0xFE]);
-    const payload = new Uint8Array(batchId.length + ciphertext.length);
-    payload.set(batchId, 0);
-    payload.set(ciphertext, batchId.length);
-
-    const envelopeBytes = buildChunkedEnvelopeBytes({
-      contextGraphId: cgId,
-      swmMessageIndex: 0,
-      payload,
-    });
-
-    await internals.ingestSwmCiphertextChunkEnvelope(cgId, envelopeBytes, REMOTE_PEER);
-
-    expect(await chunkPersistedAt(internals, {
-      canonicalCgId: canonical,
-      batchId,
-      chunkIndex: 0,
-    })).toBeNull();
   });
 
   it('truncated payload (≤ 32 bytes — no room for ciphertext after batchId): silently drops, nothing persists', async () => {

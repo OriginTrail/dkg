@@ -605,6 +605,12 @@ export class DKGAgentBase {
    */
   protected readonly swmHostModeSubscribed = new Map<string, SubscriptionSource>();
   /**
+   * Cached curation classification for each host-mode handler. The handler
+   * reads this map before dispatch so the strip can cover both legacy and
+   * chunked envelopes without a store-backed policy lookup per message.
+   */
+  protected readonly swmHostModeCurated = new Map<string, boolean>();
+  /**
    * Per-CG reference to the host-mode gossip handler closure. Kept
    * so we can call `gossip.offMessage(topic, handler)` to remove
    * JUST the host-mode handler when the same core later becomes
