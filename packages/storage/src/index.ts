@@ -11,6 +11,7 @@ export {
   type TripleStoreConfig,
   type TripleStoreBackend,
   type TripleStoreQueryOptions,
+  type UpdateOptions,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,

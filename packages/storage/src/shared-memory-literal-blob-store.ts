@@ -5,6 +5,7 @@ import type {
   ConstructResult,
   Quad,
   QueryOptions,
+  UpdateOptions,
   QueryResult,
   SelectResult,
   StorePressureSnapshot,
@@ -83,7 +84,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return removed;
   }
 
-  async update(sparql: string, options?: QueryOptions): Promise<void> {
+  async update(sparql: string, options?: UpdateOptions): Promise<void> {
     if (typeof this.inner.update !== 'function') {
       throw new Error('SharedMemoryLiteralBlobStore: inner store does not support update()');
     }
