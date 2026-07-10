@@ -98,10 +98,11 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
  * ends unpack to DIFFERENT authors is not a contiguous per-author number range
  * — the low-96 numbers wrap independently of the high-160 address — so no single
  * `SwmKaGraphBound` can describe it; we fall through to the unbounded read.
+ *
+ * Pure: identical inputs always yield an identical result. The ops kill-switch is
+ * read by `swmKaBoundDisabled` at the orchestration boundary, not here.
  */
 export function deriveSwmKaGraphBound(startKAId: bigint, endKAId: bigint): SwmKaGraphBound | undefined {
-  // Kill-switch: no redeploy needed to fall back to the unbounded read.
-  if (process.env.DKG_DISABLE_SWM_KA_BOUND === '1') return undefined;
   if (startKAId <= 0n || endKAId < startKAId) return undefined;
   const start = unpackKnowledgeAssetId(startKAId);
   const end = unpackKnowledgeAssetId(endKAId);
@@ -114,6 +115,15 @@ export function deriveSwmKaGraphBound(startKAId: bigint, endKAId: bigint): SwmKa
     startNumber: start.kaNumber,
     endNumber: end.kaNumber,
   };
+}
+
+/**
+ * Ops kill-switch for the #1549 bounded SWM read. Set `DKG_DISABLE_SWM_KA_BOUND=1`
+ * to fall back to the unbounded read with no redeploy. Read at the orchestration
+ * boundary so `deriveSwmKaGraphBound` stays a deterministic identity transform.
+ */
+function swmKaBoundDisabled(): boolean {
+  return process.env.DKG_DISABLE_SWM_KA_BOUND === '1';
 }
 
 export class FinalizationHandler {
@@ -280,7 +290,7 @@ export class FinalizationHandler {
         contextGraphId,
         msg.rootEntities,
         subGraphName,
-        deriveSwmKaGraphBound(startKAId, endKAId),
+        swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
         async () => {
           const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
           const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);

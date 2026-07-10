@@ -12,8 +12,6 @@ import {
   contextGraphSubGraphMetaUri,
   contextGraphSubGraphPrivateUri,
   contextGraphCatalogUri,
-  parseContextGraphLayerUri,
-  MemoryLayer,
   isSafeIri,
   assertSafeIri,
   sparqlString,
@@ -49,37 +47,37 @@ export interface SwmKaGraphBound {
   endNumber: bigint;
 }
 
+const SWM_CHILD_AGENT_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const SWM_CHILD_KA_NUMBER = /^\d+$/;
+
 /**
  * Identify `graph` as a per-KA child of THIS shared-memory `bucketGraph`, or
  * return undefined so the caller keeps it (fail-open).
  *
- * `parseContextGraphLayerUri` alone is too permissive to gate an exclusion on:
- * it recognises every memory layer, and a child such as
- * `…/_shared_memory/_verifiable_memory/{addr}/{n}` parses as a 5-segment
- * VERIFIABLE-memory URI whose `subGraphName` happens to be `_shared_memory`.
- * Gating on the raw parse would let that shape — and any future under-bucket
- * shape that merely resembles a layer URI — be pruned by a bound meant only for
- * `<bucket>/{addr}/{n}`. So require the parsed layer to be shared-memory AND its
- * `(contextGraphId, subGraphName)` to reconstruct to exactly the bucket we are
- * reading. Anything else stays in the read set.
- *
- * The reconstruct check is the load-bearing one: for a graph under `${bucketGraph}/`
- * the layer segment is forced to `_shared_memory` whenever the reconstruction matches
- * (a 4-segment child takes its layer from the bucket's own slug; a 5-segment child
- * takes `_shared_memory` as its subGraphName and so reconstructs elsewhere). The layer
- * comparison is therefore redundant today and no test can isolate it — it is kept as an
- * explicit statement of intent, and as a guard if the URI grammar ever changes.
+ * Deliberately bucket-RELATIVE. The only shape a bound is allowed to prune is
+ * exactly `${bucketGraph}/{0x…40hex}/{decimal}`, so we strip the bucket prefix and
+ * require precisely those two segments. Every other suffix — `_meta`, blob and
+ * snapshot graphs, and deeper descendants such as
+ * `${bucketGraph}/_verifiable_memory/{addr}/{n}` — simply fails to match and stays
+ * in the read set. Using the general `parseContextGraphLayerUri` here instead would
+ * accept unrelated layer shapes and force reconstruction checks to rule them back
+ * out; the relative parser makes the contract the code's shape rather than a
+ * comment's claim. Works unchanged for a sub-graph bucket, since the prefix we
+ * strip is whatever bucket the caller is reading.
  */
-function parseSharedMemoryChildGraph(
+function parseBoundableSwmChildGraph(
   bucketGraph: string,
   graph: string,
 ): { agentAddress: string; kaNumber: bigint } | undefined {
-  const parsed = parseContextGraphLayerUri(graph);
-  if (!parsed || parsed.layer !== MemoryLayer.SharedWorkingMemory) return undefined;
-  if (contextGraphSharedMemoryUri(parsed.contextGraphId, parsed.subGraphName) !== bucketGraph) {
+  const prefix = `${bucketGraph}/`;
+  if (!graph.startsWith(prefix)) return undefined;
+  const segments = graph.slice(prefix.length).split('/');
+  if (segments.length !== 2) return undefined;
+  const [agentAddress, kaNumberRaw] = segments;
+  if (!SWM_CHILD_AGENT_ADDRESS.test(agentAddress) || !SWM_CHILD_KA_NUMBER.test(kaNumberRaw)) {
     return undefined;
   }
-  return { agentAddress: parsed.agentAddress, kaNumber: parsed.kaNumber };
+  return { agentAddress, kaNumber: BigInt(kaNumberRaw) };
 }
 
 export interface LoadSelectedSharedMemoryQuadsOptions {
@@ -147,25 +145,49 @@ async function listGraphsByPrefix(
  * revalidate interval; there an under-read is still FAIL-SAFE on merkle-gated
  * paths (recompute mismatch → reject/retry, never accept-with-wrong-data).
  *
- * `bound` (optional) narrows the under-graph set to a single author + kaNumber
- * range — see `SwmKaGraphBound`. It is FAIL-OPEN: an under-graph is dropped
- * ONLY when it parses as a per-KA child of THIS bucket AND its author/kaNumber
- * falls outside the bound. A graph that does not parse (blob/`_meta`/snapshot or
- * any future shape) is KEPT, so a bound can never silently under-read a graph it
- * does not understand. The bucket graph is always part of the read contract.
- *
- * Passing a `bound` still yields a STRICT SUBSET of the full read set, and INV-1
- * is refuted under root recurrence, so a bounded resolution can legitimately omit
- * graphs the on-chain merkle root commits to. Anything that hashes or declines on
- * the result must widen to the unbounded resolution first — the same contract
- * `loadKaBoundedSharedMemoryQuads` documents. Do not reach for this to "just make
- * the read cheaper" on a merkle-defining or ACK path.
+ * This resolver is COMPLETE and therefore safe everywhere, including the
+ * merkle-defining publish reads and the StorageACK decline lanes. Pruning lives in
+ * `resolveKaBoundedSharedMemoryReadGraphs`, which is not part of the package's
+ * public surface — read its contract before reaching for it.
  */
 export async function resolveSharedMemoryReadGraphs(
   store: TripleStore,
   bucketGraph: string,
   options?: QueryOptions,
-  bound?: SwmKaGraphBound,
+): Promise<NonEmptyGraphList> {
+  return resolveSwmReadGraphs(store, bucketGraph, options, undefined);
+}
+
+/**
+ * Resolve the SWM read set pruned to one author's per-KA under-graphs.
+ *
+ * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`: the
+ * result is a STRICT SUBSET of the complete read set, and INV-1 is refuted under
+ * root recurrence, so a bounded resolution can omit graphs the on-chain merkle root
+ * commits to. Only `loadKaBoundedSharedMemoryQuads` may call this, and only because
+ * its own caller (`FinalizationHandler.loadSwmSliceWithFallback`) owns the widen.
+ * Never build a `VALUES ?g` from this and hash or decline on the result.
+ *
+ * Pruning is FAIL-OPEN: an under-graph is dropped ONLY when it is positively a
+ * per-KA child of THIS bucket (`parseBoundableSwmChildGraph`) AND its author or
+ * kaNumber falls outside the bound. Any other shape — `_meta`, blob, snapshot,
+ * deeper descendants, anything future — is KEPT, so a bound can never silently
+ * under-read a graph it does not understand. The bucket is always in the set.
+ */
+export async function resolveKaBoundedSharedMemoryReadGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  bound: SwmKaGraphBound,
+  options?: QueryOptions,
+): Promise<NonEmptyGraphList> {
+  return resolveSwmReadGraphs(store, bucketGraph, options, bound);
+}
+
+async function resolveSwmReadGraphs(
+  store: TripleStore,
+  bucketGraph: string,
+  options: QueryOptions | undefined,
+  bound: SwmKaGraphBound | undefined,
 ): Promise<NonEmptyGraphList> {
   assertSafeIri(bucketGraph);
   const stagingPrefix = `${bucketGraph}/staging/`;
@@ -176,9 +198,7 @@ export async function resolveSharedMemoryReadGraphs(
     if (graph.startsWith(stagingPrefix)) continue;
     if (!isSafeIri(graph)) continue;
     if (bound) {
-      // Fail-open: only a graph we can positively identify as a per-KA child of
-      // THIS bucket is eligible for exclusion; every other shape is always read.
-      const child = parseSharedMemoryChildGraph(bucketGraph, graph);
+      const child = parseBoundableSwmChildGraph(bucketGraph, graph);
       if (
         child &&
         (child.agentAddress.toLowerCase() !== boundAddress ||
@@ -279,7 +299,9 @@ async function loadSharedMemoryQuadsInternal(
   }
 
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const swmGraphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions, kaGraphBound);
+  const swmGraphs = kaGraphBound
+    ? await resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, kaGraphBound, queryOptions)
+    : await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
   const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
   const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
         VALUES ?g { ${graphValues} }

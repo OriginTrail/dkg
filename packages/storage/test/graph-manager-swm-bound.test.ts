@@ -7,6 +7,10 @@ import {
   type Quad,
   type SwmKaGraphBound,
 } from '../src/index.js';
+// `resolveKaBoundedSharedMemoryReadGraphs` is deliberately NOT re-exported from
+// `src/index.ts` — pruning is not part of the package's public surface. Tests reach
+// into the module directly rather than widening that surface.
+import { resolveKaBoundedSharedMemoryReadGraphs } from '../src/graph-manager.js';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 
 // The bound's `agentAddress` arrives LOWERCASE (it is unpacked from a packed
@@ -45,7 +49,7 @@ describe('resolveSharedMemoryReadGraphs — SwmKaGraphBound (fail-open per-KA sl
       await seedGraphs(store, [swm, gAdmit, gRangeOut, gAuthorOut, gNonLayer, gStaging]);
 
       const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
-      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
 
       // Kills: author-blind range (would admit gAuthorOut), range off-by-one
       // (would admit gRangeOut), fail-CLOSED parse (would drop gNonLayer), and a
@@ -70,7 +74,7 @@ describe('resolveSharedMemoryReadGraphs — SwmKaGraphBound (fail-open per-KA sl
       await seedGraphs(store, [swm, gSub]);
 
       const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
-      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
 
       expect(resolved).toContain(gSub);
       expect(resolved.slice().sort()).toEqual([swm, gSub].sort());
@@ -79,15 +83,20 @@ describe('resolveSharedMemoryReadGraphs — SwmKaGraphBound (fail-open per-KA sl
     }
   });
 
-  it('T3: absent bound is a no-op — resolve(store, swm) deep-equals resolve(store, swm, undefined, undefined)', async () => {
+  // The public resolver has no bound parameter at all: it is COMPLETE by construction
+  // and therefore safe on the merkle-defining and ACK lanes. Pruning requires the
+  // separately-named `resolveKaBoundedSharedMemoryReadGraphs`.
+  it('T3: the public resolver is complete — every non-staging child, regardless of author or number', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('bound-t3');
+    const gA = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const gB = `${swm}/${AUTHOR_B}/9`;
     try {
-      await seedGraphs(store, [swm, `${swm}/${AUTHOR_A_MIXED}/7`, `${swm}/${AUTHOR_B}/9`, `${swm}/staging/tmp`]);
+      await seedGraphs(store, [swm, gA, gB, `${swm}/staging/tmp`]);
 
-      const implicit = await resolveSharedMemoryReadGraphs(store, swm);
-      const explicit = await resolveSharedMemoryReadGraphs(store, swm, undefined, undefined);
-      expect(implicit).toEqual(explicit);
+      const resolved = await resolveSharedMemoryReadGraphs(store, swm);
+
+      expect(resolved.slice().sort()).toEqual([swm, gA, gB].sort());
     } finally {
       await store.close();
     }
@@ -166,7 +175,7 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
       await seedGraphs(store, [swm, gAdmit, gVmLookalike, gWmLookalike]);
 
       const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
-      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
 
       expect(resolved.slice().sort()).toEqual([swm, gAdmit, gVmLookalike, gWmLookalike].sort());
     } finally {
@@ -179,6 +188,28 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
   // subGraphName is `_shared_memory`, so it reconstructs to `<cg>/_shared_memory/_shared_memory`
   // — a different bucket, not ours to prune, even though its author and number both
   // fall outside the bound.
+  // A deeper descendant whose FIRST two segments look like `{addr}/{n}` must not be
+  // pruned: it is not a per-KA child (it has a trailing segment). Requires an EXACT
+  // two-segment match, not a >=2 prefix match.
+  it('keeps a deeper descendant even when its leading segments resemble a per-KA child', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-deep');
+    const gAdmit = `${swm}/${AUTHOR_A_MIXED}/7`;
+    // Leading `${AUTHOR_B}/12` would be out-of-bound if this parsed as a per-KA
+    // child, but the trailing `/extra` means it is NOT one.
+    const gDeep = `${swm}/${AUTHOR_B}/12/extra`;
+    try {
+      await seedGraphs(store, [swm, gAdmit, gDeep]);
+
+      const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
+
+      expect(resolved.slice().sort()).toEqual([swm, gAdmit, gDeep].sort());
+    } finally {
+      await store.close();
+    }
+  });
+
   it('keeps a shared-memory child that reconstructs to a DIFFERENT bucket', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('bound-t2b2');
@@ -188,7 +219,7 @@ describe('resolveSharedMemoryReadGraphs — bound only prunes real SWM children 
       await seedGraphs(store, [swm, gAdmit, gOtherBucketChild]);
 
       const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n };
-      const resolved = await resolveSharedMemoryReadGraphs(store, swm, undefined, bound);
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
 
       expect(resolved.slice().sort()).toEqual([swm, gAdmit, gOtherBucketChild].sort());
     } finally {
@@ -249,6 +280,54 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
       );
 
       expect(quads.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"']);
+    } finally {
+      await store.close();
+    }
+  });
+});
+
+describe('a multi-KA range admits the interior, not just the endpoints (T8)', () => {
+  // Every other bound test uses a degenerate [n,n] range, so an implementation that
+  // admitted only `kaNumber === startNumber` would pass all of them. This drives a
+  // real same-author batch range: below/above are pruned, both endpoints AND the
+  // interior are kept.
+  it('admits [start..end] inclusive and prunes below/above and other authors', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-t8');
+    const below = `${swm}/${AUTHOR_A_MIXED}/3`;
+    const start = `${swm}/${AUTHOR_A_MIXED}/5`;
+    const interior = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const end = `${swm}/${AUTHOR_A_MIXED}/9`;
+    const above = `${swm}/${AUTHOR_A_MIXED}/12`;
+    const otherAuthor = `${swm}/${AUTHOR_B}/7`;
+    try {
+      await seedGraphs(store, [swm, below, start, interior, end, above, otherAuthor]);
+
+      const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 5n, endNumber: 9n };
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
+
+      expect(resolved.slice().sort()).toEqual([swm, start, interior, end].sort());
+      expect(resolved).not.toContain(below);
+      expect(resolved).not.toContain(above);
+      expect(resolved).not.toContain(otherAuthor);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('kaNumbers compare numerically, not lexicographically', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('bound-t8-lex');
+    // Lexicographically "10" < "9", so a string compare would wrongly prune g10.
+    const g9 = `${swm}/${AUTHOR_A_MIXED}/9`;
+    const g10 = `${swm}/${AUTHOR_A_MIXED}/10`;
+    try {
+      await seedGraphs(store, [swm, g9, g10]);
+
+      const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A, startNumber: 9n, endNumber: 10n };
+      const resolved = await resolveKaBoundedSharedMemoryReadGraphs(store, swm, bound);
+
+      expect(resolved.slice().sort()).toEqual([swm, g9, g10].sort());
     } finally {
       await store.close();
     }

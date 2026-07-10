@@ -180,9 +180,15 @@ describe('deriveSwmKaGraphBound (T4)', () => {
     expect(deriveSwmKaGraphBound(packA(9), packA(5))).toBeUndefined();
   });
 
-  it('does NOT bound when the DKG_DISABLE_SWM_KA_BOUND kill-switch is set', () => {
+  it('is PURE — the kill-switch does not change its result', () => {
+    // The switch is read by the orchestration boundary, not the derivation, so the
+    // identity transform stays deterministic for identical inputs.
     process.env.DKG_DISABLE_SWM_KA_BOUND = '1';
-    expect(deriveSwmKaGraphBound(packA(7), packA(7))).toBeUndefined();
+    expect(deriveSwmKaGraphBound(packA(7), packA(7))).toEqual({
+      agentAddress: AUTHOR_A_LOWER,
+      startNumber: 7n,
+      endNumber: 7n,
+    });
   });
 
   it('wires a derived bound through to the SWM read (and no bound leaves it plain)', async () => {
@@ -200,6 +206,12 @@ describe('deriveSwmKaGraphBound (T4)', () => {
     const unbounded = await sliceSourcesFor(makeMsg({ startKAId: 0, endKAId: 0 }));
     expect(unbounded).not.toContain(SLICE_BOUNDED);
     expect(unbounded).toContain(SLICE);
+
+    // Kill-switch is applied at the boundary: a derivable bound is not used.
+    process.env.DKG_DISABLE_SWM_KA_BOUND = '1';
+    const killed = await sliceSourcesFor(makeMsg({ startKAId: packA(7), endKAId: packA(7) }));
+    expect(killed).not.toContain(SLICE_BOUNDED);
+    expect(killed).toContain(SLICE);
   });
 });
 
@@ -603,5 +615,71 @@ describe('same-root recurrence residue: bounded read accepts where unbounded def
     expect(logs.some((m) => m.includes('event=finalization_merkle_mismatch'))).toBe(true);
     expect(logs.some((m) => m.includes('event=finalization_applied'))).toBe(false);
     expect(sources).not.toContain(SLICE_BOUNDED);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// T8 — a real multi-KA batch range, end to end. Every other finalization case
+// uses a degenerate [n,n] bound, so an implementation that admitted only the
+// start endpoint would pass them all. Here the committed quads straddle two
+// per-KA graphs inside the range and same-root residue sits below it.
+// ─────────────────────────────────────────────────────────────────────────
+describe('multi-KA same-author batch promotes from the bounded read (T8)', () => {
+  afterEach(() => Logger.setSink(null));
+
+  it('admits both in-range KA graphs, excludes below-range residue, no widen', async () => {
+    const store = new OxigraphStore();
+    const root = 'urn:test:t8:root';
+    const residualPred = 'http://schema.org/legacyName';
+
+    // Committed content is SPLIT across kaNumbers 5 and 9 — both inside [5,9].
+    const committed: Quad[] = [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Batch"', graph: '' },
+      { subject: root, predicate: 'http://schema.org/version', object: '"9"', graph: '' },
+    ];
+    await store.insert([
+      { ...committed[0], graph: swmGraph(AUTHOR_A, 5) },
+      { ...committed[1], graph: swmGraph(AUTHOR_A, 9) },
+      // Same-root residue from an older publish, BELOW the range — must be pruned.
+      { subject: root, predicate: residualPred, object: '"V0"', graph: swmGraph(AUTHOR_A, 3) },
+    ]);
+
+    const committedRoot = computeFlatKCRootV10(committed, []);
+    const startKAId = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR_A, kaNumber: 5 });
+    const endKAId = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR_A, kaNumber: 9 });
+    const msg = makeMsg({ startKAId, endKAId, kcMerkleRoot: committedRoot, rootEntities: [root] });
+
+    const logs: string[] = [];
+    Logger.setSink((r: LogRecord) => logs.push(r.message));
+    const sources = captureQuerySources(store);
+    const handler = new FinalizationHandler(
+      store,
+      makeVerifyingChain({
+        blockNumber: 100,
+        txHash: msg.txHash,
+        merkleRoot: committedRoot,
+        publisher: AUTHOR_A,
+        startKAId,
+        endKAId,
+      }),
+    );
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
+
+    // The bounded read spanned kaNumbers 5 AND 9: an endpoints-only or
+    // equality-only admission would have missed one, mismatched, and widened.
+    expect(await promotedTo(store, root)).toBe(true);
+    expect(logs.some((m) => m.includes('event=finalization_applied'))).toBe(true);
+    expect(logs.some((m) => m.includes('event=finalization_merkle_mismatch'))).toBe(false);
+
+    const sliceSources = sources.filter((s) => s.startsWith(SLICE));
+    expect(sliceSources).toContain(SLICE_BOUNDED);
+    expect(sliceSources).not.toContain(SLICE_WIDENED);
+
+    // Below-range residue never reaches canonical.
+    const residual = await store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}> { <${root}> <${residualPred}> ?o } }`,
+    );
+    expect(residual.type === 'boolean' && residual.value).toBe(false);
   });
 });
