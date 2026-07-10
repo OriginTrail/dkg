@@ -107,15 +107,8 @@ export async function awaitUpdateHoldoff(deps: AwaitUpdateHoldoffDeps): Promise<
   return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
 }
 
-/** Single-flight holder shared across polling ticks (see runWithUpdateHoldoff). */
-export interface UpdatePendingFlag {
-  active: boolean;
-}
-
-export interface RunWithUpdateHoldoffDeps<T> {
-  /** Persists across polling ticks so a hold-off that outlasts the poll
-   *  interval cannot start a second concurrent rollout. */
-  pending: UpdatePendingFlag;
+/** Daemon-wide config for the rollout gate — stable across polling ticks. */
+export interface UpdateHoldoffGateConfig {
   /** Resolved jitter window in ms (from resolveUpdateJitterMs). */
   jitterMs: number;
   /** True once the daemon has begun shutting down. */
@@ -123,6 +116,13 @@ export interface RunWithUpdateHoldoffDeps<T> {
   /** Toggle the daemon's user-visible "is updating" flag. */
   setUpdating: (updating: boolean) => void;
   log: (msg: string) => void;
+  /** Injectable for deterministic tests. */
+  rng?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Per-rollout, mode-specific behaviour injected into a gate run. */
+export interface UpdateHoldoffStep<T> {
   /** Emit the mode-specific "holding Ns before applying" line (detected target). */
   onHold: (holdMs: number) => void;
   /**
@@ -136,55 +136,73 @@ export interface RunWithUpdateHoldoffDeps<T> {
   revalidate: () => Promise<T | null>;
   /** Apply the revalidated target (owns its own post-apply restart/log). */
   apply: (target: T) => Promise<void>;
-  /** Logged when the hold-off is aborted because the daemon is shutting down. */
+  /** Logged when the run is aborted because the daemon is shutting down. */
   shutdownMessage: string;
   /** Logged when revalidate() reports no current target (withdrawn / caught up). */
   supersededMessage: string;
-  /** Injectable for deterministic tests. */
-  rng?: () => number;
-  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface UpdateHoldoffGate {
+  /** Run one rollout attempt for a detected update. Concurrent calls while a
+   *  run is in flight are no-ops (single-flight across polling ticks). */
+  run<T>(step: UpdateHoldoffStep<T>): Promise<void>;
 }
 
 /**
  * The single auto-update rollout gate shared by the git and npm daemon paths.
- * Owns the cross-cutting state machine so it lives in ONE place (and is unit
- * tested directly) instead of being duplicated inside each updater branch:
+ * A factory so it OWNS its single-flight state (the `pending` flag) instead of
+ * making callers allocate and thread a mutable object — create it ONCE, at the
+ * daemon scope, and call `.run(step)` on every polling tick. Each run:
  *
  *   single-flight guard -> hold-off (jitter) -> abort if shutting down
- *     -> REVALIDATE the target -> set isUpdating -> apply -> clear isUpdating
+ *     -> REVALIDATE the target -> abort if shutting down (revalidate is async)
+ *     -> set isUpdating -> apply -> clear isUpdating
  *
- * Mode-specific behaviour (which check, which installer, log wording, post-apply
- * restart) is injected via `revalidate`/`apply`/`onHold`/messages.
+ * The second shutdown check matters: revalidate() is a network call, so SIGTERM
+ * can arrive while it runs; without the re-check the gate would start a
+ * build/install after shutdown cleanup has begun.
  */
-export async function runWithUpdateHoldoff<T>(deps: RunWithUpdateHoldoffDeps<T>): Promise<void> {
-  if (deps.pending.active) return; // one rollout at a time
-  deps.pending.active = true;
-  try {
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: deps.jitterMs,
-      isShuttingDown: deps.isShuttingDown,
-      onHold: deps.onHold,
-      rng: deps.rng,
-      sleep: deps.sleep,
-    });
-    if (decision === 'abort-shutdown') {
-      deps.log(deps.shutdownMessage);
-      return;
-    }
+export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
+  // Owned here so single-flight holds across ticks — do NOT recreate per tick.
+  let pending = false;
+  return {
+    async run<T>(step: UpdateHoldoffStep<T>): Promise<void> {
+      if (pending) return; // one rollout at a time
+      pending = true;
+      try {
+        const decision = await awaitUpdateHoldoff({
+          jitterMs: config.jitterMs,
+          isShuttingDown: config.isShuttingDown,
+          onHold: step.onHold,
+          rng: config.rng,
+          sleep: config.sleep,
+        });
+        if (decision === 'abort-shutdown') {
+          config.log(step.shutdownMessage);
+          return;
+        }
 
-    const target = await deps.revalidate();
-    if (target === null || target === undefined) {
-      deps.log(deps.supersededMessage);
-      return;
-    }
+        const target = await step.revalidate();
+        // revalidate() is async (a network check); shutdown may have started
+        // during it, so re-check before committing to an install/restart.
+        if (config.isShuttingDown()) {
+          config.log(step.shutdownMessage);
+          return;
+        }
+        if (target === null || target === undefined) {
+          config.log(step.supersededMessage);
+          return;
+        }
 
-    deps.setUpdating(true);
-    try {
-      await deps.apply(target);
-    } finally {
-      deps.setUpdating(false);
-    }
-  } finally {
-    deps.pending.active = false;
-  }
+        config.setUpdating(true);
+        try {
+          await step.apply(target);
+        } finally {
+          config.setUpdating(false);
+        }
+      } finally {
+        pending = false;
+      }
+    },
+  };
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { AutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon.js';
 
@@ -204,6 +204,8 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createNpmUpdateRunCheck, createGitUpdateRunCheck, type AutoUpdateLastCheck } from '../src/daemon/auto-update-runner.js';
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -2162,5 +2164,123 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
     readFileImpl = async () => 'aaa1111';
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
     expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+  });
+});
+
+// End-to-end polling wiring: prove the REAL npm/git runChecks route through the
+// gate and skip a target that was withdrawn during the hold-off — i.e. that the
+// production path uses the post-hold-off revalidation, not the pre-hold-off
+// detected target. (Guards against a `revalidate: () => detectedTarget` regression.)
+function freshLastCheck(): AutoUpdateLastCheck {
+  return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
+}
+function noJitterGate(log: (m: string) => void) {
+  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+}
+
+describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
+  function currentVersion(v: string) {
+    readFileImpl = async (path: any) => {
+      if (String(path).endsWith('.current-version')) return v;
+      throw new Error('ENOENT');
+    };
+  }
+  // Successive fetches return successive dist-tag sets (detect, then revalidate).
+  function registrySequence(...tagSets: Record<string, string>[]) {
+    let i = 0;
+    fetchImpl = async () => {
+      const tags = tagSets[Math.min(i, tagSets.length - 1)];
+      i += 1;
+      return { ok: true, json: async () => ({ 'dist-tags': tags }) } as any;
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT install a version withdrawn during the hold-off (detect ahead, revalidate up-to-date)', async () => {
+    const logs: string[] = [];
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }, { latest: '9.0.0' }); // 9.1.0 detected, then rolled back
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+    });
+
+    await runCheck();
+
+    expect(mkdirCalls.length, 'the installer (performNpmUpdate) must not run').toBe(0);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0'); // detect recorded the then-available target
+  });
+
+  it('reaches the installer when the target is still available after the hold-off', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
+    const runCheck = createNpmUpdateRunCheck({
+      gate: noJitterGate(() => {}), log: () => {},
+      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
+    await runCheck().catch(() => {});
+    expect(mkdirCalls.length, 'installer entered → releases dir created').toBeGreaterThan(0);
+  });
+
+  it('version-check-only mode (no gate) records status but never installs', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' });
+    const lastUpdateCheck = freshLastCheck();
+    const runCheck = createNpmUpdateRunCheck({
+      gate: null, log: () => {},
+      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    await runCheck();
+    expect(mkdirCalls.length).toBe(0);
+    expect(lastUpdateCheck.latestVersion).toBe('9.1.0');
+    expect(lastUpdateCheck.upToDate).toBe(false);
+  });
+});
+
+describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
+  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key' } as any;
+  function remoteSequence(...shas: string[]) {
+    let i = 0;
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'ls-remote') {
+        const sha = shas[Math.min(i, shas.length - 1)];
+        i += 1;
+        return { stdout: `${sha}\trefs/heads/main\n`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    };
+  }
+
+  beforeEach(() => { resetMocks(); installMocks(); });
+  afterEach(() => { restoreIo(); });
+
+  it('does NOT build a commit the ref moved away from during the hold-off', async () => {
+    const logs: string[] = [];
+    readFileImpl = async () => 'aaa1111';   // current commit
+    remoteSequence('bbb2222', 'aaa1111');    // detect ahead, then ref rolled back to current
+    const lastUpdateCheck = freshLastCheck();
+    const onRestart = vi.fn(async () => {});
+    const runCheck = createGitUpdateRunCheck({
+      gate: noJitterGate((m) => logs.push(m)),
+      log: (m) => logs.push(m),
+      lastUpdateCheck, au: gitAu, onRestart,
+    });
+
+    await runCheck();
+
+    expect(logs.some((m) => m.includes('update started')), 'performUpdateWithStatus must not run').toBe(false);
+    expect(onRestart).not.toHaveBeenCalled();
+    expect(logs.some((m) => m.includes('superseded'))).toBe(true);
+    expect(lastUpdateCheck.latestCommit).toBe('bbb2222'); // detect recorded the then-available tip
   });
 });
