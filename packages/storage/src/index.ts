@@ -45,8 +45,10 @@ export {
   CHANGELOG_SCHEMA_VERSION,
   ChangelogStore,
   changelogSchemaQuad,
+  asChangelogReader,
   type ChangeOp,
   type ChangeRecord,
+  type ChangelogReader,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 

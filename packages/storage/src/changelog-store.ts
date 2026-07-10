@@ -1,3 +1,4 @@
+import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type {
   Quad,
   QueryOptions,
@@ -107,6 +108,24 @@ export interface ChangeRecord {
   op: ChangeOp;
 }
 
+/**
+ * The changelog READ capability the sync responder (PR2) consumes. Exposed as an
+ * explicit interface + {@link asChangelogReader} type guard so a consumer of a
+ * `createTripleStore(...)` result can recover it without a cast or knowledge of
+ * decorator order — the changelog is otherwise invisible behind the `TripleStore`
+ * factory return type.
+ */
+export interface ChangelogReader {
+  /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
+  readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
+  /** Highest seq durably present in the log (0 if empty). */
+  headSeq(options?: QueryOptions): Promise<number>;
+  /** True when an opaque mutation left the log incomplete (reconcile owed). */
+  readonly needsReconcile: boolean;
+  /** Cleared by the reconcile pass (PR2) once it has emitted synthetic markers. */
+  clearReconcileFlag(): void;
+}
+
 export interface ChangelogStoreOptions {
   enabled?: boolean;
   /**
@@ -123,7 +142,7 @@ export interface ChangelogStoreOptions {
  * Write-path append-only change log. See the class-level docstring for the
  * crash-consistency and single-writer arguments.
  */
-export class ChangelogStore implements TripleStore {
+export class ChangelogStore implements TripleStore, ChangelogReader {
   get queryCancellation() {
     return this.inner.queryCancellation;
   }
@@ -138,6 +157,8 @@ export class ChangelogStore implements TripleStore {
   private seedPromise: Promise<void> | null = null;
   /** Serializes mutations so commit order === seq order (single writer). */
   private tail: Promise<unknown> = Promise.resolve();
+  /** Set by close(): the write gate is shut so no new mutation may enqueue. */
+  private closing = false;
   /**
    * Set when a mutation could not be attributed to specific graphs (an opaque
    * `update()`/`query()` UPDATE with no `touchedGraphs` hint). Its changed
@@ -161,10 +182,15 @@ export class ChangelogStore implements TripleStore {
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.insert(quads, options);
-    const touched = this.attributableGraphs(quads);
+    // The reserved plane is not writable through the public API: strip any
+    // caller-supplied quads targeting it so a forged marker (e.g. a fake seq to
+    // jump the high-water mark) can never reach the inner store. Only the
+    // decorator's own internal writes (below, via this.inner) touch it.
+    const safe = this.stripReserved(quads);
+    const touched = this.attributableGraphs(safe);
     if (touched.length === 0) {
-      // Nothing the log cares about (default graph, or only reserved graphs).
-      return this.inner.insert(quads, options);
+      // Nothing the log cares about (default graph only).
+      return this.inner.insert(safe, options);
     }
     await this.runExclusive(async () => {
       await this.ensureSeeded();
@@ -177,7 +203,7 @@ export class ChangelogStore implements TripleStore {
         markers.push(...markerQuads(candidate, graph, 'upsert'));
       }
       // Data + markers in ONE insert() → one backend transaction → atomic.
-      await this.inner.insert([...quads, ...markers], options);
+      await this.inner.insert([...safe, ...markers], options);
       this.seq = candidate; // advance only after durable success (gapless)
       this.fire(records);
     });
@@ -185,21 +211,31 @@ export class ChangelogStore implements TripleStore {
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.delete(quads, options);
-    const touched = this.attributableGraphs(quads);
+    // Strip reserved-graph quads: callers cannot delete markers out of the log.
+    const safe = this.stripReserved(quads);
+    const touched = this.attributableGraphs(safe);
     await this.runExclusive(async () => {
-      await this.inner.delete(quads, options);
+      await this.inner.delete(safe, options);
       await this.markPostMutation(touched, options);
     });
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteByPattern(pattern, options);
+    if (pattern.graph) {
+      // A graph-scoped delete against the reserved plane would erase the log.
+      this.assertNotReserved(pattern.graph, 'deleteByPattern');
+    } else {
+      // A no-graph delete by a reserved-namespaced subject/predicate would delete
+      // markers cross-graph — the same log-erasure vector, so reject it too.
+      this.assertNoReservedTerm(pattern);
+    }
     return this.runExclusive(async () => {
       const removed = await this.inner.deleteByPattern(pattern, options);
       if (removed > 0) {
-        if (pattern.graph && !this.reserved.has(pattern.graph)) {
+        if (pattern.graph) {
           await this.markPostMutation([pattern.graph], options);
-        } else if (!pattern.graph) {
+        } else {
           // No graph hint → cannot attribute which graphs shrank/emptied.
           this.flagReconcile('deleteByPattern(no-graph)');
         }
@@ -210,9 +246,10 @@ export class ChangelogStore implements TripleStore {
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
+    this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
     return this.runExclusive(async () => {
       const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-      if (removed > 0 && !this.reserved.has(graphUri)) {
+      if (removed > 0) {
         await this.markPostMutation([graphUri], options);
       }
       return removed;
@@ -221,11 +258,13 @@ export class ChangelogStore implements TripleStore {
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.dropGraph(graphUri, options);
+    // Dropping the reserved plane through the public API would delete the log
+    // with no trace; only internal maintenance (chain-reset, which bypasses this
+    // decorator) may wipe it.
+    this.assertNotReserved(graphUri, 'dropGraph');
     await this.runExclusive(async () => {
       await this.inner.dropGraph(graphUri, options);
-      if (!this.reserved.has(graphUri)) {
-        await this.appendMarkers([{ graph: graphUri, op: 'drop' }], options);
-      }
+      await this.appendMarkers([{ graph: graphUri, op: 'drop' }], options);
     });
   }
 
@@ -241,11 +280,15 @@ export class ChangelogStore implements TripleStore {
       throw new Error('ChangelogStore: inner store does not support update()');
     }
     if (!this.enabled) return this.inner.update(sparql, options);
+    // Reject BEFORE the mutation runs so it never touches the reserved plane.
+    this.assertNoReservedRef(sparql, 'update');
     await this.runExclusive(async () => {
       await this.inner.update!(sparql, options);
       const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.reserved.has(g));
       if (hinted.length > 0) {
-        await this.markPostMutation(hinted, options);
+        // Strip the update-only touchedGraphs hint before the read-path hasGraph
+        // probes — it is meaningless there and must not leak past this boundary.
+        await this.markPostMutation(hinted, queryOptionsFromUpdateOptions(options));
       } else {
         // Opaque server-side UPDATE (e.g. an RS heal INSERT…WHERE with no hint).
         this.flagReconcile('update(no-touchedGraphs)');
@@ -254,12 +297,13 @@ export class ChangelogStore implements TripleStore {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
-    const result = await this.inner.query(sparql, options);
     // A SPARQL UPDATE smuggled through query() is opaque to us — flag for
-    // reconcile rather than silently dropping its changes from the log.
-    if (this.enabled && isSparqlUpdate(sparql)) {
-      this.flagReconcile('query(update)');
-    }
+    // reconcile rather than silently dropping its changes from the log; and if it
+    // targets the reserved plane, reject it before it executes.
+    const isUpdate = this.enabled && isSparqlUpdateOperation(sparql);
+    if (isUpdate) this.assertNoReservedRef(sparql, 'query()-UPDATE');
+    const result = await this.inner.query(sparql, options);
+    if (isUpdate) this.flagReconcile('query(update)');
     return result;
   }
 
@@ -358,11 +402,26 @@ export class ChangelogStore implements TripleStore {
   }
 
   async flush(options?: QueryOptions): Promise<void> {
+    // Drain queued mutations (data + their markers) before flushing the inner
+    // store, so a durability flush cannot return while a write is still queued.
+    // Does NOT close the write gate — flush() is called periodically, not only
+    // at shutdown.
+    await this.drain();
     await this.inner.flush?.(options);
   }
 
   async close(): Promise<void> {
+    // Shut the gate first (reject new mutations), then drain the queue so a
+    // just-enqueued insert's data AND marker are durable before we close the
+    // inner store — otherwise close() could resolve with a write still pending.
+    this.closing = true;
+    await this.drain();
     await this.inner.close();
+  }
+
+  /** Await the current mutation-queue tail (all writes enqueued so far settle). */
+  private drain(): Promise<void> {
+    return this.tail.then(() => undefined, () => undefined);
   }
 
   // ------------------------------------------------------------------
@@ -371,6 +430,11 @@ export class ChangelogStore implements TripleStore {
 
   /** Serialize a mutation so no two writes interleave their seq allocation. */
   private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    // Once close() has shut the gate, refuse new mutations rather than racing
+    // the inner store's close — anything already queued still drains.
+    if (this.closing) {
+      return Promise.reject(new Error('ChangelogStore: store is closing; write rejected'));
+    }
     const run = this.tail.then(() => fn(), () => fn());
     // Keep the chain alive regardless of this op's outcome.
     this.tail = run.then(() => undefined, () => undefined);
@@ -398,11 +462,15 @@ export class ChangelogStore implements TripleStore {
   private async markPostMutation(graphs: readonly string[], options?: QueryOptions): Promise<void> {
     const distinct = [...new Set(graphs.filter((g) => g && !this.reserved.has(g)))];
     if (distinct.length === 0) return;
-    const specs: Array<{ graph: string; op: ChangeOp }> = [];
-    for (const graph of distinct) {
-      const stillThere = await this.inner.hasGraph(graph, options);
-      specs.push({ graph, op: stillThere ? 'upsert' : 'drop' });
-    }
+    // The presence probes are independent — run them concurrently (matching
+    // GraphSetIndexStore) instead of serially inside the held write mutex, then
+    // append markers in the original deterministic (distinct) order.
+    const specs = await Promise.all(
+      distinct.map(async (graph): Promise<{ graph: string; op: ChangeOp }> => ({
+        graph,
+        op: (await this.inner.hasGraph(graph, options)) ? 'upsert' : 'drop',
+      })),
+    );
     await this.appendMarkers(specs, options);
   }
 
@@ -464,6 +532,57 @@ export class ChangelogStore implements TripleStore {
     }
     return [...set];
   }
+
+  /** Drop caller quads that target the reserved plane (marker forgery guard). */
+  private stripReserved(quads: readonly Quad[]): Quad[] {
+    return quads.filter((q) => !(q.graph && this.reserved.has(q.graph)));
+  }
+
+  /** Reject a graph-targeted mutation aimed at the reserved plane. Safe as a
+   *  hard error: reserved graphs are never enumerated (listGraphs filters,
+   *  hasGraph returns false), so no legitimate iterate-and-drop loop can reach
+   *  one — only a hardcoded reserved IRI does. */
+  private assertNotReserved(graphUri: string, op: string): void {
+    if (this.reserved.has(graphUri)) {
+      throw new Error(
+        `ChangelogStore: ${op}(<${graphUri}>) targets the reserved changelog plane, ` +
+          `which is not writable through the public store API.`,
+      );
+    }
+  }
+
+  /**
+   * Reject an opaque SPARQL UPDATE that references a reserved graph IRI. A
+   * best-effort guard against accidental mutation and the obvious hardcoded-IRI
+   * vector — NOT airtight against hostile opaque SPARQL (prefixed forms evade
+   * it). The structured paths (insert/delete/dropGraph) are the real guards; the
+   * reserved plane's integrity ultimately rests on it being reconcile-derived.
+   */
+  private assertNoReservedRef(sparql: string, op: string): void {
+    for (const g of this.reserved) {
+      if (sparql.includes(`<${g}>`)) {
+        throw new Error(
+          `ChangelogStore: ${op} references the reserved changelog graph <${g}>, ` +
+            `which is not writable through the public store API.`,
+        );
+      }
+    }
+  }
+
+  /** Reject a no-graph deleteByPattern whose subject/predicate is namespaced
+   *  under a reserved graph (marker terms like `urn:dkg:changelog#seq`) — that
+   *  would delete markers cross-graph. */
+  private assertNoReservedTerm(pattern: Partial<Quad>): void {
+    const terms = [pattern.subject, pattern.predicate];
+    for (const g of this.reserved) {
+      if (terms.some((t) => t != null && t.startsWith(g))) {
+        throw new Error(
+          `ChangelogStore: deleteByPattern by a term under the reserved graph <${g}> ` +
+            `would mutate the changelog plane, which is not writable through the public store API.`,
+        );
+      }
+    }
+  }
 }
 
 // ====================================================================
@@ -511,11 +630,37 @@ function stripLiteral(term: string | undefined): string {
   return m ? m[1] : term;
 }
 
-/** True if `sparql` is a SPARQL 1.1 UPDATE (mirrors GraphSetIndexStore). */
-function isSparqlUpdate(sparql: string): boolean {
-  const withoutPrologue = sparql
-    .trimStart()
-    .replace(/^(?:(?:#[^\r\n]*(?:\r?\n|$))|(?:PREFIX\s+(?:[A-Za-z][\w-]*)?:\s*<[^>]*>|BASE\s*<[^>]*>)\s*)+/i, '')
-    .trimStart();
-  return /^(?:INSERT|DELETE|WITH|LOAD|CLEAR|CREATE|DROP|COPY|MOVE|ADD)\b/i.test(withoutPrologue);
+/**
+ * Drop the update-only `touchedGraphs` hint, yielding the read-path
+ * `QueryOptions` (source/priority/signal) to forward to the post-mutation
+ * `hasGraph` probes. Intentionally duplicates GraphSetIndexStore's boundary
+ * helper of the same name — a trivial destructure kept local to avoid a
+ * decorator-to-decorator import.
+ */
+function queryOptionsFromUpdateOptions(options?: UpdateOptions): QueryOptions | undefined {
+  if (!options) return undefined;
+  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
+  return readOptions;
+}
+
+/**
+ * Recover the {@link ChangelogReader} capability from a store (typically a
+ * `createTripleStore(...)` result), or `null` when the changelog is not enabled.
+ * The intended consumer boundary: `asChangelogReader(store)?.readChanges(...)` —
+ * no `instanceof`/cast/decorator-order assumption at the call site.
+ */
+export function asChangelogReader(store: unknown): ChangelogReader | null {
+  if (store instanceof ChangelogStore) return store;
+  // Duck-type so a further wrapper that forwards the API still resolves.
+  const s = store as Partial<ChangelogReader> | null | undefined;
+  if (
+    s &&
+    typeof s.readChanges === 'function' &&
+    typeof s.headSeq === 'function' &&
+    typeof s.clearReconcileFlag === 'function' &&
+    typeof s.needsReconcile === 'boolean'
+  ) {
+    return s as ChangelogReader;
+  }
+  return null;
 }

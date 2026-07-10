@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { ChangelogStore, CHANGELOG_GRAPH } from '../src/changelog-store.js';
+import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
 
@@ -224,6 +224,27 @@ describe('ChangelogStore — opaque update handling', () => {
     expect(log.needsReconcile).toBe(true);
     await base.close();
   });
+
+  it('a SPARQL UPDATE smuggled through query() (even behind a comment) flags reconcile', async () => {
+    // Some HTTP backends execute UPDATEs sent to the query endpoint; the changelog
+    // cannot observe those, so it must flag reconcile. (Oxigraph's query() rejects
+    // updates outright, so this uses an inner whose query() runs them.)
+    const base = new OxigraphStore();
+    const executed: string[] = [];
+    const inner = new (class extends SpyStore {
+      async query(sparql: string): Promise<QueryResult> {
+        executed.push(sparql);
+        return { type: 'bindings', bindings: [] };
+      }
+    })(base);
+    const log = new ChangelogStore(inner);
+    expect(log.needsReconcile).toBe(false);
+    // Leading comment exercises the canonical prologue-aware classifier.
+    await log.query(`# housekeeping\nINSERT DATA { GRAPH <${G1}> { <http://ex.org/s> <http://ex.org/p> "v" } }`);
+    expect(log.needsReconcile).toBe(true); // update detected behind the comment
+    expect(executed).toHaveLength(1);      // and the inner query ran
+    await base.close();
+  });
 });
 
 describe('ChangelogStore over Blazegraph — single-request atomicity', () => {
@@ -297,24 +318,87 @@ describe('ChangelogStore — createTripleStore wiring', () => {
   });
 });
 
-describe('ChangelogStore — reserved-graph mutation guard', () => {
-  it('does not emit a marker for mutations that TARGET the reserved changelog graph', async () => {
+describe('ChangelogStore — reserved-graph write protection', () => {
+  it('rejects graph-targeted mutations against the reserved changelog plane', async () => {
     const base = new OxigraphStore();
     const spy = new SpyStore(base);
     const log = new ChangelogStore(spy);
     await log.insert([q('http://ex.org/s1', G1)]); // 1 fused insert (data+marker)
     const callsBefore = spy.insertCalls.length;
-    // A drop/delete aimed at the reserved graph must NOT append a self-referential
-    // marker (which would pollute the log and, in PR2, make the responder try to
-    // reconcile the log graph itself).
-    await log.dropGraph(CHANGELOG_GRAPH);
-    await log.deleteByPattern({ graph: CHANGELOG_GRAPH });
-    expect(spy.insertCalls.length).toBe(callsBefore); // no new marker write
-    // No record ever names the changelog graph as its changed graph.
-    await log.insert([q('http://ex.org/s2', G2)]);
+    // The reserved plane is not writable through the public API — a drop/delete
+    // aimed at it would erase or corrupt the log, so it is rejected outright.
+    await expect(log.dropGraph(CHANGELOG_GRAPH)).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPattern({ graph: CHANGELOG_GRAPH })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteBySubjectPrefix(CHANGELOG_GRAPH, 'x')).rejects.toThrow(/reserved/i);
+    expect(spy.insertCalls.length).toBe(callsBefore); // nothing reached the store
+    await base.close();
+  });
+
+  it('strips forged marker quads from insert() — the high-water mark cannot be jumped', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([q('http://ex.org/a', G1)]); // seq 1
+    // Forge a marker with a huge seq alongside real data in ONE insert.
+    await log.insert([
+      q('http://ex.org/b', G2),
+      {
+        subject: 'urn:dkg:changelog:e:999999',
+        predicate: 'urn:dkg:changelog#seq',
+        object: '"999999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: CHANGELOG_GRAPH,
+      },
+    ]);
+    // The real data landed (G2 → seq 2); the forged marker never reached the store.
+    expect(await log.headSeq()).toBe(2);
     const changes = await log.readChanges(0, 100);
+    expect(changes.map((c) => c.seq)).toEqual([1, 2]);
     expect(changes.every((c) => c.graph !== CHANGELOG_GRAPH)).toBe(true);
     await base.close();
+  });
+
+  it('rejects a no-graph deleteByPattern that targets marker terms (cross-graph log erasure)', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await log.insert([q('http://ex.org/a', G1)]); // seq 1
+    await expect(log.deleteByPattern({ predicate: 'urn:dkg:changelog#seq' })).rejects.toThrow(/reserved/i);
+    await expect(log.deleteByPattern({ subject: 'urn:dkg:changelog:e:1' })).rejects.toThrow(/reserved/i);
+    expect(await log.headSeq()).toBe(1); // log intact
+    await base.close();
+  });
+
+  it('rejects a SPARQL update()/query()-UPDATE that references the reserved plane, but allows reads', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(base);
+    await expect(
+      log.update(`INSERT DATA { GRAPH <${CHANGELOG_GRAPH}> { <urn:x> <urn:p> "9" } }`),
+    ).rejects.toThrow(/reserved/i);
+    await expect(
+      log.query(`INSERT DATA { GRAPH <${CHANGELOG_GRAPH}> { <urn:x> <urn:p> "9" } }`),
+    ).rejects.toThrow(/reserved/i);
+    // A READ referencing the reserved graph is NOT a mutation → allowed.
+    const res = await log.query(
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CHANGELOG_GRAPH}> { ?s ?p ?o } }`,
+    );
+    expect(res.type).toBe('bindings');
+    await base.close();
+  });
+});
+
+describe('ChangelogStore — capability boundary (asChangelogReader)', () => {
+  it('recovers the changelog reader from a createTripleStore result without a cast', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph', changelog: true });
+    const reader = asChangelogReader(store);
+    expect(reader).not.toBeNull();
+    await store.insert([q('http://ex.org/a', G1)]);
+    expect(await reader!.headSeq()).toBe(1);
+    expect((await reader!.readChanges(0, 100)).map((c) => c.graph)).toContain(G1);
+    await store.close();
+  });
+
+  it('returns null when the changelog is not enabled', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    expect(asChangelogReader(store)).toBeNull();
+    await store.close();
   });
 });
 
@@ -343,6 +427,16 @@ describe('ChangelogStore — delete-path op attribution & reconcile', () => {
     // Cannot attribute which graphs shrank/emptied → reconcile owed.
     expect(log.needsReconcile).toBe(true);
   });
+
+  it('deleteByPattern WITH a graph hint emits a marker: upsert when data remains, drop when it empties', async () => {
+    await log.insert([q('http://ex.org/a', G1), q('http://ex.org/b', G1)]); // seq 1
+    // Remove one subject → G1 still has data → upsert.
+    expect(await log.deleteByPattern({ subject: 'http://ex.org/a', graph: G1 })).toBeGreaterThan(0);
+    // Remove the last subject → G1 empty → drop.
+    expect(await log.deleteByPattern({ subject: 'http://ex.org/b', graph: G1 })).toBeGreaterThan(0);
+    expect((await log.readChanges(0, 100)).map((c) => c.op)).toEqual(['upsert', 'upsert', 'drop']);
+    expect(log.needsReconcile).toBe(false); // graph-hinted path is fully attributed
+  });
 });
 
 describe('ChangelogStore — reserved-graph hiding (prefix) & post-mutation failure', () => {
@@ -366,6 +460,106 @@ describe('ChangelogStore — reserved-graph hiding (prefix) & post-mutation fail
     await expect(log.dropGraph(G1)).rejects.toThrow(/injected/);
     // The graph is durably dropped but its marker was lost → gap recorded.
     expect(log.needsReconcile).toBe(true);
+    await base.close();
+  });
+});
+
+/** Inner store whose insert() can be held mid-flight to prove close()/flush() drain. */
+class GatedStore implements TripleStore {
+  readonly insertCalls: Quad[][] = [];
+  flushed = false;
+  closed = false;
+  private gate: Promise<void> | null = null;
+  private release: (() => void) | null = null;
+  constructor(private readonly inner: TripleStore) {}
+  block() { this.gate = new Promise<void>((r) => { this.release = r; }); }
+  unblock() { this.release?.(); this.gate = null; this.release = null; }
+  async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
+    if (this.gate) await this.gate;
+    this.insertCalls.push(quads.map((x) => ({ ...x })));
+    return this.inner.insert(quads, options);
+  }
+  delete(quads: Quad[], options?: QueryOptions) { return this.inner.delete(quads, options); }
+  deleteByPattern(p: Partial<Quad>, options?: QueryOptions) { return this.inner.deleteByPattern(p, options); }
+  deleteBySubjectPrefix(g: string, p: string, options?: QueryOptions) { return this.inner.deleteBySubjectPrefix(g, p, options); }
+  query(sparql: string, options?: QueryOptions): Promise<QueryResult> { return this.inner.query(sparql, options); }
+  hasGraph(g: string, options?: QueryOptions) { return this.inner.hasGraph(g, options); }
+  createGraph(g: string) { return this.inner.createGraph(g); }
+  dropGraph(g: string, options?: QueryOptions) { return this.inner.dropGraph(g, options); }
+  listGraphs(options?: QueryOptions) { return this.inner.listGraphs(options); }
+  update(sparql: string, options?: UpdateOptions) { return this.inner.update!(sparql, options); }
+  countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
+  async flush(options?: QueryOptions) { this.flushed = true; return this.inner.flush?.(options); }
+  async close() { this.closed = true; return this.inner.close(); }
+}
+
+const tick = (ms = 20) => new Promise<void>((r) => setTimeout(r, ms));
+
+describe('ChangelogStore — lifecycle drains the write queue', () => {
+  it('close() does not resolve until a queued insert has appended data + marker', async () => {
+    const base = new OxigraphStore();
+    const gated = new GatedStore(base);
+    const log = new ChangelogStore(gated);
+
+    gated.block();
+    const insertP = log.insert([q('http://ex.org/s1', G1)]); // enqueued, hangs in inner.insert
+    let closed = false;
+    const closeP = log.close().then(() => { closed = true; });
+
+    await tick();
+    expect(closed, 'close() must not resolve while a write is queued').toBe(false);
+    expect(gated.closed, 'inner store must not be closed before the queue drains').toBe(false);
+
+    gated.unblock();
+    await Promise.all([insertP, closeP]);
+
+    expect(closed).toBe(true);
+    expect(gated.closed).toBe(true);
+    // The drained insert carried BOTH the data and its marker (one txn).
+    const fused = gated.insertCalls.at(-1)!;
+    expect(fused.some((x) => x.graph === G1)).toBe(true);
+    expect(fused.some((x) => x.graph === CHANGELOG_GRAPH)).toBe(true);
+  });
+
+  it('rejects new writes once close() has started, but still drains the in-flight one', async () => {
+    const base = new OxigraphStore();
+    const gated = new GatedStore(base);
+    const log = new ChangelogStore(gated);
+
+    gated.block();
+    const inFlight = log.insert([q('http://ex.org/a', G1)]);
+    const closeP = log.close();
+    await tick();
+    // A write attempted after the gate is shut is refused, not silently queued.
+    await expect(log.insert([q('http://ex.org/b', G2)])).rejects.toThrow(/closing/i);
+
+    gated.unblock();
+    await Promise.all([inFlight, closeP]);
+    // Only the in-flight insert drained; the rejected one never reached the store.
+    expect(gated.insertCalls.some((c) => c.some((x) => x.graph === G1))).toBe(true);
+    expect(gated.insertCalls.some((c) => c.some((x) => x.graph === G2))).toBe(false);
+  });
+
+  it('flush() persists queued mutations before returning (and does NOT shut the gate)', async () => {
+    const base = new OxigraphStore();
+    const gated = new GatedStore(base);
+    const log = new ChangelogStore(gated);
+
+    gated.block();
+    const insertP = log.insert([q('http://ex.org/s1', G1)]);
+    let flushed = false;
+    const flushP = log.flush().then(() => { flushed = true; });
+
+    await tick();
+    expect(flushed, 'flush() must wait for the queued write').toBe(false);
+
+    gated.unblock();
+    await Promise.all([insertP, flushP]);
+    expect(flushed).toBe(true);
+    expect(gated.flushed).toBe(true);
+    // flush() did not latch closing: further writes still succeed.
+    await log.insert([q('http://ex.org/s2', G2)]);
+    expect((await log.readChanges(0, 100)).map((c) => c.graph)).toEqual([G1, G2]);
     await base.close();
   });
 });
