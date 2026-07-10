@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import type {
   Quad,
@@ -91,6 +92,7 @@ const P_SEQ = `${NS}seq`;
 const P_GRAPH = `${NS}graph`;
 const P_OP = `${NS}op`;
 const P_SCHEMA_VERSION = `${NS}schemaVersion`;
+const P_ERA = `${NS}era`;
 const ENTRY_PREFIX = 'urn:dkg:changelog:e:';
 const META_SUBJECT = `${NS}self`;
 
@@ -108,6 +110,19 @@ export interface ChangeRecord {
   op: ChangeOp;
 }
 
+/** Durable head cursor a responder returns so a requester can advance safely. */
+export interface ChangelogHead {
+  /**
+   * Log generation id (a UUID). Immutable while the log lives; a wipe/reseed
+   * mints a fresh one. A requester whose cursor `era` differs MUST full-resync
+   * rather than trust `seq` (the guard against cursor poisoning after a
+   * restore/reseed/chain-reset rolls `seq` back — OT-RFC-59 §6).
+   */
+  era: string;
+  /** Highest seq durably present in the log (0 if empty). */
+  seq: number;
+}
+
 /**
  * The changelog READ capability the sync responder (PR2) consumes. Exposed as an
  * explicit interface + {@link asChangelogReader} type guard so a consumer of a
@@ -116,6 +131,8 @@ export interface ChangeRecord {
  * factory return type.
  */
 export interface ChangelogReader {
+  /** Durable head cursor `(era, seq)` — era mismatch or `seq` rollback ⇒ full resync. */
+  changelogHead(options?: QueryOptions): Promise<ChangelogHead>;
   /** Change records with `seq > sinceSeq`, ascending, at most `limit`. */
   readChanges(sinceSeq: number, limit: number, options?: QueryOptions): Promise<ChangeRecord[]>;
   /** Highest seq durably present in the log (0 if empty). */
@@ -154,6 +171,8 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   /** Last ALLOCATED seq (0 = none). Next seq is `seq + 1`. */
   private seq = 0;
+  /** Log generation id, established (read or minted) on seed. Null until then. */
+  private eraValue: string | null = null;
   private seedPromise: Promise<void> | null = null;
   /** Serializes mutations so commit order === seq order (single writer). */
   private tail: Promise<unknown> = Promise.resolve();
@@ -343,6 +362,17 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   // Changelog read API (consumed by the sync responder — PR2)
   // ------------------------------------------------------------------
 
+  /**
+   * Durable head cursor `(era, seq)` the sync responder returns so a requester
+   * can advance its cursor and detect a wipe/reseed (era change) or a rollback
+   * (`seq` < the requester's cursor). Establishes the era on first call.
+   */
+  async changelogHead(options?: QueryOptions): Promise<ChangelogHead> {
+    await this.ensureSeeded();
+    const seq = await this.headSeq(options);
+    return { era: this.eraValue as string, seq };
+  }
+
   /** Highest seq durably present in the log (0 if empty). */
   async headSeq(options?: QueryOptions): Promise<number> {
     const res = await this.inner.query(
@@ -441,21 +471,49 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     return run;
   }
 
-  /** Seed the in-memory counter from the durable log's high-water mark, once. */
+  /**
+   * Seed the in-memory seq counter AND the era from the durable log, once.
+   *
+   * If the log has no era yet — a brand-new log, or a pre-era PR1 log first read
+   * by a PR2 node — mint and persist one. Writes reach here under the write mutex
+   * ({@link runExclusive}); reads (the responder's {@link changelogHead}) share
+   * the memoized `seedPromise`, and a concurrent write awaits the same promise
+   * before allocating, so the mint write runs at most once with no writer racing
+   * it.
+   */
   private ensureSeeded(): Promise<void> {
     if (!this.seedPromise) {
-      this.seedPromise = this.headSeq({ source: 'changelog.seed' })
-        .then((head) => {
-          this.seq = head;
-        })
+      this.seedPromise = this.seedOnce()
         .catch((err) => {
-          // Reset so a transient store error retries seeding on the next write
+          // Reset so a transient store error retries seeding on the next call
           // rather than latching seq=0 (which would collide with existing seqs).
           this.seedPromise = null;
           throw err;
         });
     }
     return this.seedPromise;
+  }
+
+  /** Read the durable head (seq + era), minting+persisting an era if absent. */
+  private async seedOnce(): Promise<void> {
+    const seq = await this.headSeq({ source: 'changelog.seed' });
+    this.seq = seq;
+    const res = await this.inner.query(
+      `SELECT ?era WHERE { GRAPH <${CHANGELOG_GRAPH}> { <${META_SUBJECT}> <${P_ERA}> ?era } } LIMIT 1`,
+      { source: 'changelog.seed.era' },
+    );
+    const era = res.type === 'bindings' && res.bindings.length > 0
+      ? stripLiteral(res.bindings[0].era)
+      : '';
+    if (era) {
+      this.eraValue = era;
+      return;
+    }
+    const minted = randomUUID();
+    await this.inner.insert([{
+      subject: META_SUBJECT, predicate: P_ERA, object: `"${minted}"`, graph: CHANGELOG_GRAPH,
+    }]);
+    this.eraValue = minted;
   }
 
   /** Emit `upsert`/`drop` markers for graphs after a mutation, op by probe. */

@@ -48,6 +48,7 @@ export {
   asChangelogReader,
   type ChangeOp,
   type ChangeRecord,
+  type ChangelogHead,
   type ChangelogReader,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
