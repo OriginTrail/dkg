@@ -24,6 +24,10 @@ interface NetworkAdmissionProbeBackoffEntry {
   untilMs: number;
 }
 
+type NetworkAdmissionQuarantineEntry =
+  | { kind: 'indefinite' }
+  | { kind: 'cooldown'; untilMs: number };
+
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
@@ -57,8 +61,7 @@ export class NetworkAdmissionService {
   private readonly maxProbeBackoffEntries: number;
   private readonly quarantineCooldownMs: number;
   private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
-  // `null` preserves the pre-existing indefinite quarantine contract.
-  private readonly quarantinedPeers = new Map<CanonicalPeerId, number | null>();
+  private readonly quarantinedPeers = new Map<CanonicalPeerId, NetworkAdmissionQuarantineEntry>();
   // Map insertion order is the least-recently-updated eviction order.
   private readonly retryableProbeBackoff = new Map<CanonicalPeerId, NetworkAdmissionProbeBackoffEntry>();
 
@@ -94,12 +97,15 @@ export class NetworkAdmissionService {
 
   /** Preserve the existing public operation as an explicit indefinite quarantine. */
   quarantinePeer(peerId: string): void {
-    this.setQuarantine(peerId, null);
+    this.setQuarantine(peerId, { kind: 'indefinite' });
   }
 
   /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
   quarantinePeerForCooldown(peerId: string): void {
-    this.setQuarantine(peerId, this.now() + this.quarantineCooldownMs);
+    this.setQuarantine(peerId, {
+      kind: 'cooldown',
+      untilMs: this.now() + this.quarantineCooldownMs,
+    });
   }
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
@@ -173,10 +179,10 @@ export class NetworkAdmissionService {
   }
 
   private isQuarantined(peerId: CanonicalPeerId): boolean {
-    const untilMs = this.quarantinedPeers.get(peerId);
-    if (untilMs === undefined) return false;
-    if (untilMs === null) return true;
-    if (untilMs <= this.now()) {
+    const entry = this.quarantinedPeers.get(peerId);
+    if (!entry) return false;
+    if (entry.kind === 'indefinite') return true;
+    if (entry.untilMs <= this.now()) {
       this.quarantinedPeers.delete(peerId);
       return false;
     }
@@ -206,9 +212,9 @@ export class NetworkAdmissionService {
     );
   }
 
-  private setQuarantine(peerId: string, untilMs: number | null): void {
+  private setQuarantine(peerId: string, entry: NetworkAdmissionQuarantineEntry): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.quarantinedPeers.set(canonicalPeerId, untilMs);
+    this.quarantinedPeers.set(canonicalPeerId, entry);
     this.verifiedPeerIds.delete(canonicalPeerId);
     this.retryableProbeBackoff.delete(canonicalPeerId);
   }
