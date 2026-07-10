@@ -73,7 +73,7 @@ import {
   utimesSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { isExternalBackend, getSparqlEndpoint } from '@origintrail-official/dkg-storage';
+import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
 
 const STATE_FILE = '.network-state.json';
 
@@ -134,10 +134,15 @@ export interface ChainResetWipeStoreConfig {
 const V10_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
 const SPARQL_DROP_ALL = 'DROP ALL';
+// Scoped wipe also clears the OT-RFC-59 changelog graph so a chain reset is a
+// clean reseed (stale markers referencing now-deleted CG graphs must not
+// survive). `DROP ALL` (managed namespaces) already covers it. The changelog
+// graph is a reserved `urn:` graph outside the CG prefix, so it needs an
+// explicit disjunct here.
 const SPARQL_SCOPED_DELETE =
   'DELETE { GRAPH ?g { ?s ?p ?o } } ' +
   'WHERE { GRAPH ?g { ?s ?p ?o } ' +
-  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}")) }`;
+  `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
 
 export interface ChainResetWipeResult {
   /** True when a wipe was performed. */

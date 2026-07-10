@@ -40,6 +40,17 @@ export {
   type GraphSetMutationEvent,
   type GraphSetMutationSource,
 } from './graph-set-index-store.js';
+export {
+  CHANGELOG_GRAPH,
+  CHANGELOG_SCHEMA_VERSION,
+  ChangelogStore,
+  changelogSchemaQuad,
+  asChangelogReader,
+  type ChangeOp,
+  type ChangeRecord,
+  type ChangelogReader,
+  type ChangelogStoreOptions,
+} from './changelog-store.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
