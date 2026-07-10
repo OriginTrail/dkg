@@ -220,3 +220,70 @@ describe('startOxigraphServer (real child processes)', () => {
     expect(await portAnswers(port)).toBe(false);
   });
 });
+
+describe('startOxigraphServer OOM classification in the restart log', () => {
+  // The cgroup OOM readers are the one piece that can't be exercised against a
+  // real cgroup portably in CI, so we inject ONLY those while keeping the REAL
+  // child lifecycle (genuine SIGKILL -> real exit event -> the supervisor's
+  // exit handler). This proves startOxigraphServer captures the per-child
+  // baseline and surfaces the operator-facing OOM note — coverage the
+  // parser-only oxigraph-memory tests cannot provide.
+  async function waitForLog(logs: string[], re: RegExp, ms = 3_000): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (logs.some((l) => re.test(l))) return true;
+      await sleep(25);
+    }
+    return false;
+  }
+
+  it('labels an OOM-kill when the cgroup oom_kill count increments across the exit', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let oomKillAtExit = 5;
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
+          readCgroupOomKill: () => oomKillAtExit,
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      oomKillAtExit = 6; // kernel cgroup-OOM-killed it: oom_kill 5 -> 6
+      process.kill(pid, 'SIGKILL');
+      const labelled = await waitForLog(
+        logs,
+        /server exited unexpectedly.*OOM-killed by cgroup memory cap/,
+      );
+      expect(labelled, `no OOM-labelled restart log; got: ${logs.join(' | ')}`).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('omits the OOM note on a plain crash (oom_kill unchanged)', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    const handle = await startOxigraphServer(
+      startOpts(port, {
+        log: (m: string) => logs.push(m),
+        io: {
+          readCgroupOomSnapshot: () => ({ dir: '/sys/fs/cgroup/oxi', oomKill: 5 }),
+          readCgroupOomKill: () => 5, // unchanged → not an OOM-kill
+        },
+      }),
+    );
+    try {
+      const pid = await fetchPid(port);
+      process.kill(pid, 'SIGKILL');
+      const logged = await waitForLog(logs, /server exited unexpectedly/);
+      expect(logged, `no restart log; got: ${logs.join(' | ')}`).toBe(true);
+      expect(logs.some((l) => /OOM-killed/.test(l))).toBe(false);
+    } finally {
+      await handle.stop();
+    }
+  });
+});

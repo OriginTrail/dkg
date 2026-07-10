@@ -1,43 +1,27 @@
 import { readFileSync } from 'node:fs';
 
 /**
- * Best-effort memory observability for the managed oxigraph child.
+ * Best-effort OOM-kill detection for the managed oxigraph child, narrowed to
+ * exactly what the supervisor's restart logging needs.
  *
- * Every export is NON-THROWING and returns null / null-fields on any
- * unsupported platform (non-Linux, cgroup-v1) or read failure — callers use it
- * purely for logging/telemetry, never for control flow.
+ * Every export is NON-THROWING and returns null on any unsupported platform
+ * (non-Linux, cgroup-v1) or read failure — it is used purely to annotate a
+ * restart log, never for control flow.
  *
- * On Linux cgroup-v2 it reads the process's own cgroup accounting
- * (`memory.current` / `memory.max` / `memory.events`). When an operator has
- * applied a unit-level `MemoryHigh`/`MemoryMax` drop-in (the 2026-07 beacon-OOM
- * remediation), a cap-induced kill increments `memory.events` `oom_kill` — so
- * the daemon can tell an OOM-kill (by the memory cap, or the host) apart from a
- * plain crash in its restart logs, which today requires an operator to SSH in
- * and read `journalctl`/`/proc`.
+ * The supervisor captures a snapshot (cgroup dir + `oom_kill` count) while the
+ * child is alive, then re-reads `oom_kill` from that dir when the child exits
+ * (the dir persists after the pid is gone). An increase means the kernel
+ * cgroup-OOM-killed oxigraph — typically the operator's unit-level `MemoryMax`
+ * cap engaging (the 2026-07 beacon remediation), or a host OOM — which the
+ * supervisor surfaces so operators can tell it apart from a plain crash without
+ * SSHing in to correlate journald + /proc.
  */
 
-export interface CgroupMemoryEvents {
-  /** times usage was throttled at memory.high */
-  high: number;
-  /** times an allocation would have exceeded memory.max */
-  max: number;
-  /** processes in the cgroup killed by the cgroup OOM killer */
+export interface CgroupOomSnapshot {
+  /** Absolute cgroup dir under /sys/fs/cgroup. Persists after the pid exits. */
+  dir: string;
+  /** `memory.events` oom_kill count at capture time. */
   oomKill: number;
-}
-
-export interface OxigraphMemoryStats {
-  /** Resident set size of the process, bytes. null if unreadable. */
-  rssBytes: number | null;
-  /** cgroup-v2 accounting for the process's cgroup; null if unavailable. */
-  cgroup: {
-    /** Absolute cgroup dir under /sys/fs/cgroup (persists after the process exits). */
-    dir: string;
-    /** memory.current, bytes. */
-    currentBytes: number | null;
-    /** memory.max (the hard cap), bytes; null when uncapped ("max"). */
-    maxBytes: number | null;
-    events: CgroupMemoryEvents;
-  } | null;
 }
 
 export interface MemoryReaderIo {
@@ -52,49 +36,30 @@ const defaultIo: MemoryReaderIo = {
   platform: process.platform,
 };
 
-/** Full stats for a live pid (rss + its cgroup accounting). */
-export function readOxigraphMemoryStats(
+/**
+ * Spawn-time capture (pid must be alive): resolve the process's cgroup-v2 dir
+ * and read its current `oom_kill` count. Returns null on non-Linux, cgroup-v1,
+ * or any read failure.
+ */
+export function readCgroupOomSnapshot(
   pid: number,
   io: MemoryReaderIo = defaultIo,
-): OxigraphMemoryStats | null {
+): CgroupOomSnapshot | null {
   if (io.platform !== 'linux' || !Number.isInteger(pid) || pid <= 0) return null;
-  const rssBytes = readRssBytes(pid, io);
-  const cgroup = readCgroupForPid(pid, io);
-  if (rssBytes === null && cgroup === null) return null;
-  return { rssBytes, cgroup };
+  const dir = resolveCgroupDir(pid, io);
+  if (!dir) return null;
+  const oomKill = readOomKill(dir, io);
+  if (oomKill === null) return null;
+  return { dir, oomKill };
 }
 
 /**
- * Read `memory.events` from a known cgroup dir. Used at process EXIT, when
- * /proc/<pid> is already gone but the cgroup dir still exists — so the caller
- * captures the dir at spawn and re-reads events here to detect an OOM-kill.
+ * Exit-time re-read of `oom_kill` from a captured cgroup dir. Used after the
+ * pid is gone (the dir outlives it). Returns null on non-Linux / read failure.
  */
-export function readCgroupEvents(dir: string, io: MemoryReaderIo = defaultIo): CgroupMemoryEvents | null {
+export function readCgroupOomKill(dir: string, io: MemoryReaderIo = defaultIo): number | null {
   if (io.platform !== 'linux' || !dir) return null;
-  return readEvents(`${dir}/memory.events`, io);
-}
-
-function readRssBytes(pid: number, io: MemoryReaderIo): number | null {
-  try {
-    const m = io.readTextSync(`/proc/${pid}/status`).match(/^VmRSS:\s+(\d+)\s+kB/m);
-    return m ? Number(m[1]) * 1024 : null;
-  } catch {
-    return null;
-  }
-}
-
-function readCgroupForPid(pid: number, io: MemoryReaderIo): OxigraphMemoryStats['cgroup'] {
-  const dir = resolveCgroupDir(pid, io);
-  if (!dir) return null;
-  const events = readEvents(`${dir}/memory.events`, io);
-  const currentBytes = readIntFile(`${dir}/memory.current`, io);
-  if (events === null && currentBytes === null) return null; // not a v2 memory cgroup we can read
-  return {
-    dir,
-    currentBytes,
-    maxBytes: readMaxFile(`${dir}/memory.max`, io),
-    events: events ?? { high: 0, max: 0, oomKill: 0 },
-  };
+  return readOomKill(dir, io);
 }
 
 function resolveCgroupDir(pid: number, io: MemoryReaderIo): string | null {
@@ -113,38 +78,16 @@ function resolveCgroupDir(pid: number, io: MemoryReaderIo): string | null {
   }
 }
 
-function readIntFile(path: string, io: MemoryReaderIo): number | null {
+function readOomKill(dir: string, io: MemoryReaderIo): number | null {
   try {
-    const n = Number(io.readTextSync(path).trim());
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-function readMaxFile(path: string, io: MemoryReaderIo): number | null {
-  try {
-    const v = io.readTextSync(path).trim();
-    if (v === 'max' || v === '') return null; // uncapped
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-function readEvents(path: string, io: MemoryReaderIo): CgroupMemoryEvents | null {
-  try {
-    const map: Record<string, number> = {};
-    for (const line of io.readTextSync(path).split('\n')) {
-      const [k, v] = line.trim().split(/\s+/);
-      if (k && v !== undefined) {
-        const n = Number(v);
-        if (Number.isFinite(n)) map[k] = n;
+    for (const raw of io.readTextSync(`${dir}/memory.events`).split('\n')) {
+      const [key, value] = raw.trim().split(/\s+/);
+      if (key === 'oom_kill' && value !== undefined) {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
       }
     }
-    if (Object.keys(map).length === 0) return null;
-    return { high: map.high ?? 0, max: map.max ?? 0, oomKill: map.oom_kill ?? 0 };
+    return null;
   } catch {
     return null;
   }

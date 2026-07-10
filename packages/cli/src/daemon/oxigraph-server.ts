@@ -40,10 +40,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { childOwnsListenPort } from './oxigraph-listen-port.js';
 import { invalidateExternalStoreQuadsCache } from './routes/status.js';
 import {
-  readOxigraphMemoryStats,
-  readCgroupEvents,
-  type OxigraphMemoryStats,
-  type CgroupMemoryEvents,
+  readCgroupOomSnapshot,
+  readCgroupOomKill,
+  type CgroupOomSnapshot,
 } from './oxigraph-memory.js';
 
 export interface OxigraphServerIo {
@@ -58,10 +57,10 @@ export interface OxigraphServerIo {
     port: number,
     host: string,
   ) => Promise<boolean>;
-  /** Best-effort memory stats for a live pid (observability only). Injectable for tests. */
-  readMemoryStats?: (pid: number) => OxigraphMemoryStats | null;
-  /** Best-effort `memory.events` read from a captured cgroup dir (observability only). */
-  readCgroupEvents?: (dir: string) => CgroupMemoryEvents | null;
+  /** Best-effort cgroup OOM snapshot (dir + oom_kill) for a live pid. Injectable for tests. */
+  readCgroupOomSnapshot?: (pid: number) => CgroupOomSnapshot | null;
+  /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
+  readCgroupOomKill?: (dir: string) => number | null;
 }
 
 export interface StartOxigraphServerOptions {
@@ -133,8 +132,8 @@ export async function startOxigraphServer(
     spawn,
     fetch: globalThis.fetch,
     childOwnsListenPort,
-    readMemoryStats: (pid) => readOxigraphMemoryStats(pid),
-    readCgroupEvents: (dir) => readCgroupEvents(dir),
+    readCgroupOomSnapshot: (pid) => readCgroupOomSnapshot(pid),
+    readCgroupOomKill: (dir) => readCgroupOomKill(dir),
     ...opts.io,
   };
   const markStoreDown = (): void => {
@@ -158,12 +157,6 @@ export async function startOxigraphServer(
   let ready = false;
   let child: ChildProcess | null = null;
   let restarts = 0;
-  // Observability only (best-effort): the current child's cgroup dir and its
-  // `oom_kill` count at spawn, captured while the process is alive so we can
-  // re-read `memory.events` at EXIT (when /proc/<pid> is gone but the cgroup
-  // dir persists) and log whether it was OOM-killed vs. a plain crash.
-  let childCgroupDir: string | null = null;
-  let childOomKillBaseline = 0;
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
@@ -181,15 +174,12 @@ export async function startOxigraphServer(
       args,
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
-    // Capture the child's cgroup + oom_kill baseline while it's alive, for the
-    // OOM-vs-crash classification at exit. Best-effort; null on non-Linux/no-cap.
-    childCgroupDir = null;
-    childOomKillBaseline = 0;
-    if (typeof c.pid === 'number') {
-      const stats = io.readMemoryStats?.(c.pid) ?? null;
-      childCgroupDir = stats?.cgroup?.dir ?? null;
-      childOomKillBaseline = stats?.cgroup?.events.oomKill ?? 0;
-    }
+    // Capture THIS child's cgroup OOM baseline while it's alive, closed over by
+    // its own exit handler below — so each child classifies against its own
+    // snapshot with no shared mutable lifecycle state. Best-effort; null
+    // off-Linux / uncapped.
+    const oomSnapshot: CgroupOomSnapshot | null =
+      typeof c.pid === 'number' ? (io.readCgroupOomSnapshot?.(c.pid) ?? null) : null;
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
     // startup/revive failure path instead (the binary couldn't be executed).
@@ -230,9 +220,9 @@ export async function startOxigraphServer(
       // than a crash. Surfaced in the restart log so operators don't have to
       // SSH in and correlate journald to tell the two apart.
       let oomNote = '';
-      if (childCgroupDir) {
-        const events = io.readCgroupEvents?.(childCgroupDir) ?? null;
-        if (events && events.oomKill > childOomKillBaseline) {
+      if (oomSnapshot) {
+        const oomKillNow = io.readCgroupOomKill?.(oomSnapshot.dir) ?? null;
+        if (typeof oomKillNow === 'number' && oomKillNow > oomSnapshot.oomKill) {
           oomNote = ', OOM-killed by cgroup memory cap (or host OOM)';
         }
       }

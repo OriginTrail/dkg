@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
-  readOxigraphMemoryStats,
-  readCgroupEvents,
+  readCgroupOomSnapshot,
+  readCgroupOomKill,
   type MemoryReaderIo,
 } from '../src/daemon/oxigraph-memory.js';
 
@@ -17,63 +17,38 @@ function makeIo(files: Record<string, string>, platform: string = 'linux'): Memo
 
 const CG = '/sys/fs/cgroup/system.slice/dkg-v9-node.service';
 
-describe('oxigraph-memory reader (best-effort, non-throwing)', () => {
-  it('returns null on non-Linux', () => {
-    expect(readOxigraphMemoryStats(123, makeIo({}, 'darwin'))).toBeNull();
-  });
-
-  it('returns null for a non-positive/invalid pid', () => {
-    expect(readOxigraphMemoryStats(0, makeIo({}))).toBeNull();
-    expect(readOxigraphMemoryStats(-1, makeIo({}))).toBeNull();
-    expect(readOxigraphMemoryStats(1.5, makeIo({}))).toBeNull();
-  });
-
-  it('parses RSS + cgroup-v2 accounting including oom_kill', () => {
+describe('oxigraph-memory OOM reader (best-effort, non-throwing)', () => {
+  it('readCgroupOomSnapshot returns dir + oom_kill on Linux cgroup-v2', () => {
     const io = makeIo({
-      '/proc/42/status': 'Name:\toxigraph\nVmRSS:\t 3145728 kB\nThreads:\t8\n',
       '/proc/42/cgroup': '0::/system.slice/dkg-v9-node.service\n',
-      [`${CG}/memory.current`]: '4000000000\n',
-      [`${CG}/memory.max`]: '5368709120\n',
       [`${CG}/memory.events`]: 'low 0\nhigh 11239\nmax 3\noom 1\noom_kill 2\n',
     });
-    const stats = readOxigraphMemoryStats(42, io);
-    expect(stats).not.toBeNull();
-    expect(stats!.rssBytes).toBe(3145728 * 1024);
-    expect(stats!.cgroup).toMatchObject({
-      dir: CG,
-      currentBytes: 4000000000,
-      maxBytes: 5368709120,
-      events: { high: 11239, max: 3, oomKill: 2 },
-    });
+    expect(readCgroupOomSnapshot(42, io)).toEqual({ dir: CG, oomKill: 2 });
   });
 
-  it('reports maxBytes null when the cgroup is uncapped ("max")', () => {
-    const io = makeIo({
-      '/proc/7/status': 'VmRSS:\t 1024 kB\n',
-      '/proc/7/cgroup': '0::/foo\n',
-      '/sys/fs/cgroup/foo/memory.current': '100\n',
-      '/sys/fs/cgroup/foo/memory.max': 'max\n',
-      '/sys/fs/cgroup/foo/memory.events': 'high 0\nmax 0\noom_kill 0\n',
+  it('readCgroupOomSnapshot returns null on non-Linux / bad pid / cgroup-v1', () => {
+    const linux = makeIo({
+      '/proc/42/cgroup': '0::/x\n',
+      '/sys/fs/cgroup/x/memory.events': 'oom_kill 0\n',
     });
-    expect(readOxigraphMemoryStats(7, io)!.cgroup!.maxBytes).toBeNull();
+    expect(readCgroupOomSnapshot(42, { ...linux, platform: 'darwin' })).toBeNull();
+    expect(readCgroupOomSnapshot(0, linux)).toBeNull();
+    expect(readCgroupOomSnapshot(1.5, linux)).toBeNull();
+    // cgroup-v1 (no `0::` entry)
+    expect(
+      readCgroupOomSnapshot(9, makeIo({ '/proc/9/cgroup': '12:memory:/system.slice/foo\n' })),
+    ).toBeNull();
   });
 
-  it('returns cgroup null on cgroup-v1 (no 0:: entry) but still reports RSS', () => {
-    const io = makeIo({
-      '/proc/9/status': 'VmRSS:\t 2048 kB\n',
-      '/proc/9/cgroup': '12:memory:/system.slice/foo\n11:cpu:/system.slice/foo\n',
-    });
-    const stats = readOxigraphMemoryStats(9, io);
-    expect(stats).not.toBeNull();
-    expect(stats!.rssBytes).toBe(2048 * 1024);
-    expect(stats!.cgroup).toBeNull();
+  it('readCgroupOomSnapshot returns null when memory.events is unreadable', () => {
+    expect(readCgroupOomSnapshot(42, makeIo({ '/proc/42/cgroup': '0::/x\n' }))).toBeNull();
   });
 
-  it('readCgroupEvents reads events from a captured dir (the exit-time path)', () => {
-    const io = makeIo({ '/sys/fs/cgroup/x/memory.events': 'high 5\nmax 1\noom_kill 3\n' });
-    expect(readCgroupEvents('/sys/fs/cgroup/x', io)).toEqual({ high: 5, max: 1, oomKill: 3 });
-    expect(readCgroupEvents('', io)).toBeNull();
-    expect(readCgroupEvents('/sys/fs/cgroup/x', makeIo({}, 'darwin'))).toBeNull();
-    expect(readCgroupEvents('/missing', io)).toBeNull();
+  it('readCgroupOomKill re-reads oom_kill from a captured dir (exit-time path)', () => {
+    const io = makeIo({ [`${CG}/memory.events`]: 'high 5\nmax 1\noom_kill 3\n' });
+    expect(readCgroupOomKill(CG, io)).toBe(3);
+    expect(readCgroupOomKill('', io)).toBeNull();
+    expect(readCgroupOomKill(CG, makeIo({}, 'darwin'))).toBeNull();
+    expect(readCgroupOomKill('/missing', io)).toBeNull();
   });
 });
