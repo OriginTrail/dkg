@@ -70,6 +70,23 @@ export interface QueryOptions {
 
 export type TripleStoreQueryOptions = QueryOptions;
 
+/**
+ * Options for a server-side `update()`. A superset of {@link QueryOptions} with an
+ * index-maintenance hint — kept OFF the read-path `QueryOptions` so it can't be set
+ * on `listGraphs`/`query` reads where it is meaningless.
+ */
+export interface UpdateOptions extends QueryOptions {
+  /**
+   * The named graphs whose membership (existence) this UPDATE may change — the graphs
+   * it creates, or empties/drops. When supplied, a graph-set index can maintain itself
+   * INCREMENTALLY (a bounded `hasGraph` per graph) instead of marking the whole index
+   * dirty and forcing a full `SELECT DISTINCT ?g` rebuild on the next read. Omit it for
+   * opaque updates whose affected graphs are not derivable at the call site (those fall
+   * back to a lazy full rebuild).
+   */
+  touchedGraphs?: readonly string[];
+}
+
 export interface TripleStore {
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
@@ -110,7 +127,7 @@ export interface TripleStore {
    * callers needing a byte-stable copy MUST guard on its presence and never
    * fall back to `insert(quads)` for already-stored terms.
    */
-  update?(sparql: string, options?: QueryOptions): Promise<void>;
+  update?(sparql: string, options?: UpdateOptions): Promise<void>;
 
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number>;
 
@@ -126,6 +143,23 @@ export interface TripleStore {
   flush?(options?: QueryOptions): Promise<void>;
 
   close(): Promise<void>;
+}
+
+/**
+ * Run a server-side update whose affected named graphs are known by the caller.
+ * Returns `false` when the store does not support `update()` so feature code can
+ * apply its own fallback policy without duplicating method binding or hint wiring.
+ */
+export async function tryUpdateWithTouchedGraphs(
+  store: TripleStore,
+  sparql: string,
+  touchedGraphs: readonly string[],
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const update = store.update;
+  if (typeof update !== 'function') return false;
+  await update.call(store, sparql, { ...options, touchedGraphs });
+  return true;
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;

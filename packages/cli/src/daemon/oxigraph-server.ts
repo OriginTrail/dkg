@@ -66,6 +66,8 @@ export interface StartOxigraphServerOptions {
   log?: (msg: string) => void;
   /** Total time to wait for the server to answer before failing start. */
   readyTimeoutMs?: number;
+  /** Native Oxigraph query timeout (`oxigraph serve --timeout-s`). */
+  queryTimeoutS?: number;
   /** Poll interval while waiting for readiness. */
   readyIntervalMs?: number;
   /** Grace period between SIGTERM and SIGKILL on stop. */
@@ -103,6 +105,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
 }
 
+function normalizePositiveInteger(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
 /**
  * Spawn and health-check a local Oxigraph server. Resolves once the
  * server answers an `ASK` probe; rejects if it never becomes ready within
@@ -132,6 +140,7 @@ export async function startOxigraphServer(
   const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
+  const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
 
   let stopping = false;
   let ready = false;
@@ -147,9 +156,11 @@ export async function startOxigraphServer(
   const erroredChildren = new WeakSet<ChildProcess>();
 
   const spawnChild = (): ChildProcess => {
+    const args = ['serve', '--location', opts.location, '--bind', bind];
+    if (queryTimeoutS !== undefined) args.push('--timeout-s', String(queryTimeoutS));
     const c = io.spawn(
       opts.binaryPath,
-      ['serve', '--location', opts.location, '--bind', bind],
+      args,
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
     // Without this listener Node throws the `error` event as an uncaught
@@ -317,7 +328,11 @@ export async function startOxigraphServer(
     log('[oxigraph] server stopped');
   };
 
-  log(`Starting Oxigraph server on ${bind} (location: ${opts.location})…`);
+  log(
+    queryTimeoutS !== undefined
+      ? `Starting Oxigraph server on ${bind} (location: ${opts.location}, query timeout: ${queryTimeoutS}s)…`
+      : `Starting Oxigraph server on ${bind} (location: ${opts.location})…`,
+  );
   child = spawnChild();
 
   const deadline = Date.now() + readyTimeoutMs;

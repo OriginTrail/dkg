@@ -1,4 +1,4 @@
-import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
+import { tryUpdateWithTouchedGraphs, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   isAgentRegistryContextGraph,
   sparqlIri,
@@ -269,8 +269,7 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   // store with no client round-trips or counts. Same "bail if the backend can't
   // do server-side UPDATE" contract as the RS heal (dkg-agent-swm-host.ts
   // healStrandedScopedKCs); every production + test backend implements it.
-  const storeUpdate = store.update;
-  if (typeof storeUpdate !== 'function') {
+  if (typeof store.update !== 'function') {
     // Pruning IS required here (agents CG + non-empty roots), but the store
     // cannot run a server-side UPDATE. Do NOT silently skip — and do NOT throw
     // (a defensive bound must never break the publish path). WARN loudly so the
@@ -327,5 +326,15 @@ WHERE { GRAPH <${metaGraph}> {
   ?s ?p ?o .
   FILTER(?s = ?record || STRSTARTS(STR(?s), CONCAT(STR(?record), "/")))
 } }`;
-  await storeUpdate.call(store, sparql);
+  // #1549: the prune's DELETE only touches `metaGraph`, so declare it — the
+  // graph-set index then maintains itself incrementally (one `hasGraph`) instead
+  // of marking the whole index dirty and forcing a full store scan on the next
+  // enumeration. The agents-meta prune is one of only two recurring server-side
+  // UPDATE sources that dirtied the index on managed cores.
+  await tryUpdateWithTouchedGraphs(
+    store,
+    sparql,
+    [metaGraph],
+    { source: 'agent-registry-meta.prune' },
+  );
 }

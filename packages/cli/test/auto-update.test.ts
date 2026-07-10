@@ -197,10 +197,12 @@ function restoreIo() {
 import {
   checkForNewCommitWithStatus,
   checkForUpdate,
+  formatAutoUpdateTagVerificationWarning,
   normalizeGitRefInput,
   performUpdate,
   performNpmUpdate,
   resolveAutoUpdateGitRef,
+  resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
 
 const AU: AutoUpdateConfig = {
@@ -232,6 +234,66 @@ describe('git auto-update ref normalization', () => {
     expect(() => normalizeGitRefInput('main; rm -rf /')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('--upload-pack=/tmp/pwn')).toThrow(/invalid branch\/ref/);
     expect(() => normalizeGitRefInput('refs/heads/')).toThrow(/invalid branch\/ref/);
+  });
+
+  it('plans signed tag verification and the matching force-fetch ref in one place', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: true,
+      fetchRef: '+refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toBeNull();
+  });
+
+  it('plans unverified tag fetches with a non-forced destination refspec', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      ref: 'refs/tags/v10.0.8',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: false,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/tags/v10.0.8',
+      tagName: 'v10.0.8',
+      verifyTagSignature: false,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/tags/v10.0.8:refs/tags/v10.0.8',
+    });
+  });
+
+  it('plans branch verification as inert and formats the daemon startup warning', () => {
+    const plan = resolveAutoUpdateGitRefPlan({
+      enabled: true,
+      repo: 'owner/repo',
+      branch: 'main',
+      checkIntervalMinutes: 30,
+      verifyTagSignature: true,
+    });
+
+    expect(plan).toMatchObject({
+      ref: 'refs/heads/main',
+      tagName: null,
+      verifyTagSignature: true,
+      shouldVerifyTagSignature: false,
+      fetchRef: 'refs/heads/main',
+    });
+    expect(formatAutoUpdateTagVerificationWarning(plan)).toContain(
+      'verifyTagSignature=true is inert for non-tag ref "refs/heads/main"',
+    );
   });
 });
 
@@ -1014,9 +1076,78 @@ describe('blue-green checkForUpdate', () => {
     expect(fetchUrl).toContain('/commits/v9.0.5');
     expect(fetchUrl).not.toContain('refs%2Ftags%2Fv9.0.5');
     const allGitCalls = getExecFileCalls();
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
-    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git +refs/tags/v9.0.5:refs/tags/v9.0.5')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
     expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'checkout --force FETCH_HEAD')).toBe(true);
+  });
+
+  it('defaults tag-signature verification from resolved git auto-update config', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'verify-tag -- v9.0.5')).toBe(true);
+  });
+
+  it('terminates git verify-tag options before option-shaped tag names', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/--signed-release', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    const verifyCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'verify-tag');
+    expect(verifyCall?.args).toEqual(['verify-tag', '--', '--signed-release']);
+  });
+
+  it('preserves normal tag immutability when tag verification is disabled', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('tagsha123');
+    execFileImpl = async (file: string, args: string[]) => {
+      if (file === 'git' && args[0] === 'fetch' && args.at(-1) === 'refs/tags/v9.0.5:refs/tags/v9.0.5') {
+        throw new Error('would clobber existing tag');
+      }
+      return { stdout: '', stderr: '' };
+    };
+
+    const logCalls: string[] = [];
+    const result = await performUpdate(
+      { ...AU, ref: 'refs/tags/v9.0.5', verifyTagSignature: false },
+      (msg) => { logCalls.push(msg); },
+    );
+
+    expect(result).toBe(false);
+    const allGitCalls = getExecFileCalls();
+    const fetchCall = allGitCalls.find((c) => c.file === 'git' && c.args[0] === 'fetch');
+    expect(fetchCall?.args).toEqual(['fetch', 'https://github.com/owner/repo.git', 'refs/tags/v9.0.5:refs/tags/v9.0.5']);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.includes('+refs/tags/v9.0.5:refs/tags/v9.0.5'))).toBe(false);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
+    expect(logCalls.some((msg) => msg.includes('would clobber existing tag'))).toBe(true);
+  });
+
+  it('does not run git verify-tag for branch refs when tag verification is requested', async () => {
+    readFileImpl = async () => 'aaa111';
+    makeFetchOk('branchsha123');
+
+    const result = await performUpdate(
+      { ...AU, branch: 'main', verifyTagSignature: true },
+      () => {},
+    );
+
+    expect(result).toBe(true);
+    const allGitCalls = getExecFileCalls();
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args.join(' ') === 'fetch https://github.com/owner/repo.git refs/heads/main')).toBe(true);
+    expect(allGitCalls.some((c) => c.file === 'git' && c.args[0] === 'verify-tag')).toBe(false);
   });
 
   it('accepts refs containing build metadata (+) for tag checks', async () => {

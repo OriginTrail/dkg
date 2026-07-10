@@ -245,6 +245,40 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     expect(await base.countQuads(metaOf(AGENTS)), 'the prior record was deleted by the UPDATE').toBe(0);
   });
 
+  it('(#1549) the prune declares touchedGraphs=[metaGraph] on its server-side update (index stays warm)', async () => {
+    // Call-site guard: a regression reverting to `store.update(sparql)` (dropping the
+    // hint) would still delete the record and pass the count-free test above, but it
+    // would mark the graph-set index dirty and force a full rebuild scan on the next
+    // enumeration — exactly what #1549 avoids. Assert the hint is sent.
+    const base = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    await base.insert(metaQuadsFor(AGENTS, agent, mkUal('prior')));
+    const updateCalls: Array<{ sparql: string; options?: { touchedGraphs?: readonly string[] } }> = [];
+    const capturing = new Proxy(base, {
+      get(t, p, r) {
+        if (p === 'update') {
+          return (sparql: string, options?: { touchedGraphs?: readonly string[] }) => {
+            updateCalls.push({ sparql, options });
+            return base.update(sparql, options);
+          };
+        }
+        return Reflect.get(t, p, r);
+      },
+    }) as unknown as OxigraphStore;
+
+    await pruneSupersededAgentRegistryMeta({
+      store: capturing,
+      contextGraphId: AGENTS,
+      metaGraph: metaOf(AGENTS),
+      rootEntities: [agent],
+      keepUal: mkUal('prior'),
+    });
+
+    const deleteUpdate = updateCalls.find((c) => /DELETE/i.test(c.sparql));
+    expect(deleteUpdate, 'the prune issues a server-side DELETE update').toBeDefined();
+    expect(deleteUpdate?.options?.touchedGraphs).toEqual([metaOf(AGENTS)]);
+  });
+
   it('(B) evicts the WHOLE record for legacy/multi-root shape (member on <ual>/n with dkg:partOf)', async () => {
     // Legacy / multi-root shape: the member entity sits on the `<ual>/1` TOKEN
     // subject (carrying `dkg:partOf <ual>`), while the KC-level rows (status,

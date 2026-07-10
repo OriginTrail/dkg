@@ -324,6 +324,17 @@ function isAmbiguousFallbackName(name: unknown): boolean {
   return typeof name !== 'string' || name.trim() === '' || name.trim() === DEFAULT_NODE_NAME;
 }
 
+function configuredApiBaseUrl(apiHost: unknown, port: number): string {
+  const configuredHost = typeof apiHost === 'string' ? apiHost.trim() : '';
+  const host = !configuredHost || configuredHost === '0.0.0.0'
+    ? '127.0.0.1'
+    : configuredHost === '::'
+      ? '::1'
+      : configuredHost;
+  const authority = host.includes(':') ? `[${host}]` : host;
+  return `http://${authority}:${port}`;
+}
+
 function isConnectionFailure(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   if ('httpStatus' in err) return false;
@@ -386,11 +397,19 @@ export class ApiClient {
     let port = envPort ?? filePort;
     let warning: string | undefined;
     let expectedStatusName: string | undefined;
+    let config: Awaited<ReturnType<typeof loadConfig>> | null = null;
+
+    // A persisted api.port contains only the bound port. Pair it with the
+    // configured bind host so CLI commands reach daemons bound to a specific
+    // non-loopback address. Keep the port usable if config parsing fails.
+    if (!hasEnvPort && filePort && configExists()) {
+      config = await loadConfig().catch(() => null);
+    }
 
     if (!port) {
       const pid = await readPid();
       if (opts.allowConfigFallback && !hasEnvPort && configExists()) {
-        const config = await loadConfig();
+        config = config ?? await loadConfig();
         const configuredPort = Number.isFinite(config.apiPort) && config.apiPort > 0 ? config.apiPort : null;
         if (configuredPort && !isAmbiguousFallbackName(config.name)) {
           const missingFiles = ['api.port', ...(pid ? [] : ['daemon.pid'])];
@@ -411,7 +430,10 @@ export class ApiClient {
 
     const tokens = await loadTokens();
     const token = tokens.size > 0 ? tokens.values().next().value : undefined;
-    return new ApiClient(port, token, { controlPlaneWarning: warning, expectedStatusName });
+    const portOrBaseUrl = !hasEnvPort && config
+      ? configuredApiBaseUrl(config.apiHost, port)
+      : port;
+    return new ApiClient(portOrBaseUrl, token, { controlPlaneWarning: warning, expectedStatusName });
   }
 
   async status(): Promise<DaemonStatusResponse> {

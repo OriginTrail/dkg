@@ -422,8 +422,10 @@ type InFlightSyncPageFetch = {
   controller: AbortController;
   waiters: number;
 };
+type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeers']>>;
 
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
+const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, Promise<unknown>>>();
 
 function syncPageFetchCoalescingKey(params: {
   remotePeerId: string;
@@ -456,6 +458,89 @@ function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPa
     inFlightSyncPageFetchesByAgent.set(agent, inFlight);
   }
   return inFlight;
+}
+
+function runSyncSingleFlight<T>(
+  agent: DKGAgent,
+  key: string,
+  factory: () => Promise<T>,
+): Promise<T> {
+  let inFlight = inFlightSyncSingleFlightsByAgent.get(agent);
+  if (!inFlight) {
+    inFlight = new Map();
+    inFlightSyncSingleFlightsByAgent.set(agent, inFlight);
+  }
+  const existing = inFlight.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const promise = Promise.resolve()
+    .then(factory)
+    .finally(() => {
+      if (inFlight.get(key) === promise) {
+        inFlight.delete(key);
+      }
+    });
+  inFlight.set(key, promise);
+  return promise;
+}
+
+function syncSingleFlightKey(scope: string, fields: Record<string, unknown>): string {
+  return JSON.stringify({ scope, ...fields });
+}
+
+function normalizedCatchupMaxPeers(maxPeers: number | undefined): number | null {
+  if (maxPeers === undefined || !Number.isInteger(maxPeers) || maxPeers <= 0) return null;
+  return maxPeers;
+}
+
+function contextGraphCatchupSingleFlightKey(params: {
+  contextGraphId: string;
+  includeSharedMemory: boolean;
+  maxPeers?: number;
+  peerRotationKey?: string;
+}): string {
+  return syncSingleFlightKey('context-graph-catchup', {
+    contextGraphId: params.contextGraphId,
+    includeSharedMemory: params.includeSharedMemory,
+    maxPeers: normalizedCatchupMaxPeers(params.maxPeers),
+    peerRotationKey: params.peerRotationKey ?? null,
+  });
+}
+
+function durableSyncSingleFlightKey(params: {
+  remotePeerId: string;
+  contextGraphIds: readonly string[];
+  stopOnBackoffWorthyFailure?: boolean;
+  syncAgentsMeta: boolean;
+  hasPhaseCallback: boolean;
+  hasAccessDeniedCallback: boolean;
+  hasSinceBatchIdResolver: boolean;
+}): string | null {
+  if (params.hasPhaseCallback || params.hasAccessDeniedCallback || params.hasSinceBatchIdResolver) {
+    return null;
+  }
+  return syncSingleFlightKey('durable-sync', {
+    remotePeerId: params.remotePeerId,
+    contextGraphIds: params.contextGraphIds,
+    stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    syncAgentsMeta: params.syncAgentsMeta,
+  });
+}
+
+function sharedMemorySyncSingleFlightKey(params: {
+  remotePeerId: string;
+  contextGraphIds: readonly string[];
+  stopOnBackoffWorthyFailure?: boolean;
+  publicContextGraphIds: readonly string[];
+  privateRecoverFromCurator: readonly string[];
+}): string {
+  return syncSingleFlightKey('shared-memory-sync', {
+    remotePeerId: params.remotePeerId,
+    contextGraphIds: params.contextGraphIds,
+    stopOnBackoffWorthyFailure: params.stopOnBackoffWorthyFailure === true,
+    publicContextGraphIds: params.publicContextGraphIds,
+    privateRecoverFromCurator: params.privateRecoverFromCurator,
+  });
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -3381,7 +3466,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return emptyDurableSyncResult();
     }
-    return withGlobalSyncBackpressure(
+    const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
+    const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const runSync = () => withGlobalSyncBackpressure(
       {
         limit: syncGlobalLimit(this.config),
         ctx,
@@ -3394,11 +3481,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphIds,
         onPhase,
         onAccessDenied,
-        syncAgentsMeta: resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+        syncAgentsMeta,
         createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
         fetchSyncPages: this.fetchSyncPages.bind(this),
         sinceBatchIdFor,
-        stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+        stopOnBackoffWorthyFailure,
         processDurableBatchInWorker: this.processDurableBatchInWorker.bind(this),
         storeInsert: (quads) => this.insertSyncedQuadsAndInvalidateListCache(quads, {
           priority: 'background',
@@ -3411,6 +3498,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         logDebug: (opCtx, message) => this.log.debug(opCtx, message),
       }),
     );
+
+    const singleFlightKey = durableSyncSingleFlightKey({
+      remotePeerId,
+      contextGraphIds,
+      stopOnBackoffWorthyFailure,
+      syncAgentsMeta,
+      hasPhaseCallback: Boolean(onPhase),
+      hasAccessDeniedCallback: Boolean(onAccessDenied),
+      hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
+    });
+    return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
   }
 
   /**
@@ -3633,123 +3731,135 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? planned
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
     const { publicContextGraphIds, privateRecoverFromCurator } = plan;
+    const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const singleFlightKey = sharedMemorySyncSingleFlightKey({
+      remotePeerId,
+      contextGraphIds,
+      stopOnBackoffWorthyFailure,
+      publicContextGraphIds,
+      privateRecoverFromCurator,
+    });
 
-    const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
-    const getSubGraphAdmission = (contextGraphId: string) => {
-      let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
-      if (!admission) {
-        admission = getSharedMemorySubGraphAdmission(this.store, contextGraphId, this.listSubGraphs(contextGraphId));
-        subGraphAdmissionByContextGraph.set(contextGraphId, admission);
-      }
-      return admission;
-    };
-
-    const summary: SharedMemorySyncResult = publicContextGraphIds.length === 0
-      ? {
-          insertedTriples: 0, fetchedMetaTriples: 0, fetchedDataTriples: 0,
-          insertedMetaTriples: 0, insertedDataTriples: 0, bytesReceived: 0,
-          resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
-          emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+    const runSync = async (): Promise<SharedMemorySyncResult> => {
+      const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
+      const getSubGraphAdmission = (contextGraphId: string) => {
+        let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
+        if (!admission) {
+          admission = getSharedMemorySubGraphAdmission(this.store, contextGraphId, this.listSubGraphs(contextGraphId));
+          subGraphAdmissionByContextGraph.set(contextGraphId, admission);
         }
-      : await withGlobalSyncBackpressure(
-          {
-            limit: syncGlobalLimit(this.config),
-            ctx,
-            label: `shared-memory:${remotePeerId.slice(-8)}`,
-            logInfo: (opCtx, message) => this.log.info(opCtx, message),
-          },
-          () => runSharedMemorySync({
-            ctx,
-            remotePeerId,
-            contextGraphIds: publicContextGraphIds,
-            createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
-            fetchSyncPages: this.fetchSyncPages.bind(this),
-            processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
-              this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
-                wsDataQuads,
-                wsMetaQuads,
-                contextGraphId,
-                registeredSubGraphNames,
-                excludedSubGraphNames,
-              ),
-            getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
-            getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
-            stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
-            ensureContextGraph: async (contextGraphId) => {
-              const graphManager = new GraphManager(this.store);
-              await graphManager.ensureContextGraph(contextGraphId);
-            },
-            storeInsert: async (quads) => {
-              // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
-              // literals BEFORE insert so the SWM page cursor advances instead
-              // of the store throwing and the page re-fetching forever.
-              const inserted = await insertWithOversizeGuard(
-                (kept) => this.store.insert(kept, {
-                  priority: 'background',
-                  source: 'agent.sharedMemorySync.storeInsert',
-                }),
-                quads,
-                { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
-                'swm-sync',
-              );
-              this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
-            },
-            publicSnapshotStore: this.publicSnapshotStore,
-            deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-            setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
-            ensureOwnedMap: (contextGraphId) => {
-              if (!this.workspaceOwnedEntities.has(contextGraphId)) {
-                this.workspaceOwnedEntities.set(contextGraphId, new Map());
-              }
-              return this.workspaceOwnedEntities.get(contextGraphId)!;
-            },
-            logInfo: (opCtx, message) => this.log.info(opCtx, message),
-            logWarn: (opCtx, message) => this.log.warn(opCtx, message),
-            logDebug: (opCtx, message) => this.log.debug(opCtx, message),
-          }),
-        );
+        return admission;
+      };
 
-    // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
-    // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
-    for (const contextGraphId of privateRecoverFromCurator) {
-      try {
-        const r = await this.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
-        summary.insertedDataTriples += r.insertedDataQuads;
-        summary.insertedMetaTriples += r.insertedMetaQuads;
-        summary.insertedTriples += r.insertedDataQuads + r.insertedMetaQuads;
-        summary.droppedDataTriples += r.droppedDataTriples;
-        // `recoverContextGraphSwmFromPeer` signals a partial / deadline-bounded
-        // fetch with `completed === false` WITHOUT throwing (all-or-nothing
-        // REPLACE mutates nothing on a partial). The on-connect accounting and
-        // the catch-up runner key success off the phase counters, so an
-        // incomplete recovery that left `failedPhases`/`completedPhases` at 0
-        // would be reported clean — stamping `lastSuccessfulSyncAt` and
-        // suppressing the next retry while the member stays stale. Count an
-        // incomplete recovery as a failed phase (forces a prompt retry); count a
-        // complete one as a completed phase so an idempotent 0-insert REPLACE
-        // still registers as progress.
-        if (r.completed) {
-          summary.completedPhases += 1;
-        } else {
-          summary.failedPhases += 1;
+      const summary: SharedMemorySyncResult = publicContextGraphIds.length === 0
+        ? {
+            insertedTriples: 0, fetchedMetaTriples: 0, fetchedDataTriples: 0,
+            insertedMetaTriples: 0, insertedDataTriples: 0, bytesReceived: 0,
+            resumedPhases: 0, timedOutPhases: 0, completedPhases: 0, checkpointAdvances: 0,
+            emptyResponses: 0, droppedDataTriples: 0, failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+          }
+        : await withGlobalSyncBackpressure(
+            {
+              limit: syncGlobalLimit(this.config),
+              ctx,
+              label: `shared-memory:${remotePeerId.slice(-8)}`,
+              logInfo: (opCtx, message) => this.log.info(opCtx, message),
+            },
+            () => runSharedMemorySync({
+              ctx,
+              remotePeerId,
+              contextGraphIds: publicContextGraphIds,
+              createContextGraphSyncDeadline: this.createContextGraphSyncDeadline.bind(this),
+              fetchSyncPages: this.fetchSyncPages.bind(this),
+              processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
+                this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
+                  wsDataQuads,
+                  wsMetaQuads,
+                  contextGraphId,
+                  registeredSubGraphNames,
+                  excludedSubGraphNames,
+                ),
+              getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
+              getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
+              stopOnBackoffWorthyFailure,
+              ensureContextGraph: async (contextGraphId) => {
+                const graphManager = new GraphManager(this.store);
+                await graphManager.ensureContextGraph(contextGraphId);
+              },
+              storeInsert: async (quads) => {
+                // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
+                // literals BEFORE insert so the SWM page cursor advances instead
+                // of the store throwing and the page re-fetching forever.
+                const inserted = await insertWithOversizeGuard(
+                  (kept) => this.store.insert(kept, {
+                    priority: 'background',
+                    source: 'agent.sharedMemorySync.storeInsert',
+                  }),
+                  quads,
+                  { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
+                  'swm-sync',
+                );
+                this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
+              },
+              publicSnapshotStore: this.publicSnapshotStore,
+              deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+              setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+              ensureOwnedMap: (contextGraphId) => {
+                if (!this.workspaceOwnedEntities.has(contextGraphId)) {
+                  this.workspaceOwnedEntities.set(contextGraphId, new Map());
+                }
+                return this.workspaceOwnedEntities.get(contextGraphId)!;
+              },
+              logInfo: (opCtx, message) => this.log.info(opCtx, message),
+              logWarn: (opCtx, message) => this.log.warn(opCtx, message),
+              logDebug: (opCtx, message) => this.log.debug(opCtx, message),
+            }),
+          );
+
+      // PRIVATE CGs: REPLACE-recover the current state from the curator (= remotePeerId,
+      // gated above to be the curator and not self). Reuses the all-or-nothing recovery.
+      for (const contextGraphId of privateRecoverFromCurator) {
+        try {
+          const r = await this.recoverContextGraphSwmFromPeer(remotePeerId, contextGraphId);
+          summary.insertedDataTriples += r.insertedDataQuads;
+          summary.insertedMetaTriples += r.insertedMetaQuads;
+          summary.insertedTriples += r.insertedDataQuads + r.insertedMetaQuads;
+          summary.droppedDataTriples += r.droppedDataTriples;
+          // `recoverContextGraphSwmFromPeer` signals a partial / deadline-bounded
+          // fetch with `completed === false` WITHOUT throwing (all-or-nothing
+          // REPLACE mutates nothing on a partial). The on-connect accounting and
+          // the catch-up runner key success off the phase counters, so an
+          // incomplete recovery that left `failedPhases`/`completedPhases` at 0
+          // would be reported clean — stamping `lastSuccessfulSyncAt` and
+          // suppressing the next retry while the member stays stale. Count an
+          // incomplete recovery as a failed phase (forces a prompt retry); count a
+          // complete one as a completed phase so an idempotent 0-insert REPLACE
+          // still registers as progress.
+          if (r.completed) {
+            summary.completedPhases += 1;
+          } else {
+            summary.failedPhases += 1;
+            summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
+            if (stopOnBackoffWorthyFailure) {
+              this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (incomplete recovery)`);
+              break;
+            }
+          }
+        } catch (err) {
+          this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+          summary.failedPeers += 1;
           summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
-          if (options?.stopOnBackoffWorthyFailure) {
-            this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (incomplete recovery)`);
+          if (stopOnBackoffWorthyFailure) {
+            this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (backoff-worthy failure)`);
             break;
           }
         }
-      } catch (err) {
-        this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-        summary.failedPeers += 1;
-        summary.backoffWorthyFailures = (summary.backoffWorthyFailures ?? 0) + 1;
-        if (options?.stopOnBackoffWorthyFailure) {
-          this.log.info(ctx, `Stopping SWM curator-recovery fanout for ${remotePeerId} after "${contextGraphId}" (backoff-worthy failure)`);
-          break;
-        }
       }
-    }
 
-    return summary;
+      return summary;
+    };
+
+    return runSyncSingleFlight(this, singleFlightKey, runSync);
   }
 
   /**
@@ -3953,54 +4063,64 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }> {
     const ctx = createOperationContext('sync');
     const includeSharedMemory = options?.includeSharedMemory ?? false;
-    const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
     this.trackSyncContextGraph(contextGraphId);
 
-    const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
-    if (preferredPeerId) {
-      let preferredPeerAdmitted = false;
-      try {
-        preferredPeerAdmitted = await this.networkAdmissionCoordinator.ensureAdmitted(preferredPeerId, ctx);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.log.warn(ctx, `Preferred catchup peer ${preferredPeerId.slice(-8)} admission probe failed: ${message}`);
-      }
-      if (preferredPeerAdmitted) {
-        await this.ensurePeerConnected(preferredPeerId);
-      }
-    }
+    const singleFlightKey = contextGraphCatchupSingleFlightKey({
+      contextGraphId,
+      includeSharedMemory,
+      maxPeers: options?.maxPeers,
+      peerRotationKey: options?.peerRotationKey,
+    });
 
-    await this.primeCatchupConnections();
+    return runSyncSingleFlight(this, singleFlightKey, async (): Promise<ContextGraphCatchupResult> => {
+      const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
-    const connectedPeers = [...new Map(
-      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-    ).values()];
-    const admittedConnectedPeers: Array<{ toString(): string }> = [];
-    for (const peer of connectedPeers) {
-      if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-        admittedConnectedPeers.push(peer);
+      const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
+      if (preferredPeerId) {
+        let preferredPeerAdmitted = false;
+        try {
+          preferredPeerAdmitted = await this.networkAdmissionCoordinator.ensureAdmitted(preferredPeerId, ctx);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.log.warn(ctx, `Preferred catchup peer ${preferredPeerId.slice(-8)} admission probe failed: ${message}`);
+        }
+        if (preferredPeerAdmitted) {
+          await this.ensurePeerConnected(preferredPeerId);
+        }
       }
-    }
-    const orderedPeers = this.selectCatchupPeers(
-      admittedConnectedPeers,
-      preferredPeerId,
-      isPrivateContextGraph,
-    );
-    const peerPriorityRanks = new Map<string, number>();
-    for (const peer of orderedPeers) {
-      const peerId = peer.toString();
-      const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
-      if (rank > 0) peerPriorityRanks.set(peerId, rank);
-    }
-    const peers = this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
-    const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
-    this.log.info(
-      ctx,
-      `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`,
-    );
-    return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
-      totalPeers: orderedPeers.length,
+
+      await this.primeCatchupConnections();
+
+      const connectedPeers = [...new Map(
+        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+      ).values()];
+      const admittedConnectedPeers: Array<{ toString(): string }> = [];
+      for (const peer of connectedPeers) {
+        if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
+          admittedConnectedPeers.push(peer);
+        }
+      }
+      const orderedPeers = this.selectCatchupPeers(
+        admittedConnectedPeers,
+        preferredPeerId,
+        isPrivateContextGraph,
+      );
+      const peerPriorityRanks = new Map<string, number>();
+      for (const peer of orderedPeers) {
+        const peerId = peer.toString();
+        const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
+        if (rank > 0) peerPriorityRanks.set(peerId, rank);
+      }
+      const peers = this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
+      const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
+      this.log.info(
+        ctx,
+        `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`,
+      );
+      return this.runCatchupOverPeers(contextGraphId, includeSharedMemory, peers, {
+        totalPeers: orderedPeers.length,
+      });
     });
   }
 
