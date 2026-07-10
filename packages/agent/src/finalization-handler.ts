@@ -12,7 +12,7 @@ import {
   DKG_ROOT_ENTITY_LEGACY,
   ENTITY_PRED_ALT,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, loadSelectedSharedMemoryQuads, loadKaBoundedSharedMemoryQuads, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, loadSelectedSharedMemoryQuads, loadSharedMemorySliceWithKaBoundFallback, type SwmKaGraphBound, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
@@ -35,7 +35,7 @@ const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
 const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
 const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
 import { ethers } from 'ethers';
-import { unpackKnowledgeAssetId } from './ka-identity.js';
+import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
 import {
   FinalizationLifecycleLogger,
   finalizationLifecycleDecision,
@@ -86,41 +86,10 @@ function sameBigIntLiteral(left: string | bigint | null | undefined, right: stri
 }
 
 /**
- * Derives the per-author SWM under-graph bound for the finalization gossip read
- * from the message's packed `startKAId`/`endKAId`. Purely an accelerator: the
- * caller widens to the unbounded read on empty-or-mismatch before it defers, so
- * a `undefined` return (unbounded, i.e. today's behavior) is always safe.
- *
- * `startKAId`/`endKAId` are packed `(author << 96) | number` (see
- * `packKnowledgeAssetIdFromIdentity`), whereas the SWM under-graph URI's last
- * segment is only the low-96 per-author number. We therefore unpack both ends
- * and bound on `(agentAddress, [startNumber, endNumber])`. A range whose two
- * ends unpack to DIFFERENT authors is not a contiguous per-author number range
- * — the low-96 numbers wrap independently of the high-160 address — so no single
- * `SwmKaGraphBound` can describe it; we fall through to the unbounded read.
- *
- * Pure: identical inputs always yield an identical result. The ops kill-switch is
- * read by `swmKaBoundDisabled` at the orchestration boundary, not here.
- */
-export function deriveSwmKaGraphBound(startKAId: bigint, endKAId: bigint): SwmKaGraphBound | undefined {
-  if (startKAId <= 0n || endKAId < startKAId) return undefined;
-  const start = unpackKnowledgeAssetId(startKAId);
-  const end = unpackKnowledgeAssetId(endKAId);
-  // Both sides come from `unpack`, which is already lowercase, so a plain compare
-  // suffices here. The graph-URI side is NOT — see the case-insensitive compare in
-  // `resolveSharedMemoryReadGraphs`.
-  if (start.agentAddress !== end.agentAddress) return undefined;
-  return {
-    agentAddress: start.agentAddress,
-    startNumber: start.kaNumber,
-    endNumber: end.kaNumber,
-  };
-}
-
-/**
  * Ops kill-switch for the #1549 bounded SWM read. Set `DKG_DISABLE_SWM_KA_BOUND=1`
- * to fall back to the unbounded read with no redeploy. Read at the orchestration
- * boundary so `deriveSwmKaGraphBound` stays a deterministic identity transform.
+ * to fall back to the unbounded read with no redeploy. Read here at the
+ * orchestration boundary so `deriveSwmKaGraphBound` (in `swm-ka-bound.ts`) stays a
+ * deterministic identity transform.
  */
 function swmKaBoundDisabled(): boolean {
   return process.env.DKG_DISABLE_SWM_KA_BOUND === '1';
@@ -285,8 +254,9 @@ export class FinalizationHandler {
 
       // #1549: read this KA's per-author SWM under-graphs first, widening to today's
       // unbounded read on empty-or-mismatch. All of the bound/widen policy — and the
-      // reasoning for why it is safe — lives in `loadSwmSliceWithFallback`.
-      const { quads: sharedMemoryQuads, merkleMatchedQuads } = await this.loadSwmSliceWithFallback(
+      // reasoning for why it is safe — lives in storage's
+      // `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen.
+      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } = await this.loadFinalizationSwmSlice(
         contextGraphId,
         msg.rootEntities,
         subGraphName,
@@ -536,108 +506,60 @@ export class FinalizationHandler {
     }
   }
 
+  private finalizationSwmBucketUri(contextGraphId: string, subGraphName?: string): string {
+    return subGraphName
+      ? new GraphManager(this.store).sharedMemoryUri(contextGraphId, subGraphName)
+      : contextGraphWorkspaceGraphUri(contextGraphId);
+  }
+
   /**
    * Read the finalization SWM slice, preferring this KA's per-author under-graphs
-   * and widening to the unbounded read on empty-or-mismatch (#1549).
+   * and widening to the complete read on empty-or-mismatch (#1549). The widen — and
+   * the reasoning for why the bound is a safe pure accelerator (INV-1 is refuted
+   * under root recurrence, so the bounded read may miss and must widen before the
+   * caller records anything) — lives in storage's
+   * `loadSharedMemorySliceWithKaBoundFallback`. This method only resolves the bucket
+   * URI and the accept predicate; it is a thin finalization-specific adapter.
    *
-   * The bound is a PURE ACCELERATOR. INV-1 — "a root's quads live only under its own
-   * KA number" — is REFUTED under root recurrence (`dkg-agent-swm-host.ts`, an updated
-   * entity republished under a new kaId leaves its earlier quads in the older per-KA
-   * graph). So the bound may miss, and the widen is what makes correctness independent
-   * of it: a miss re-reads exactly what the unbounded code reads, BEFORE the caller
-   * records any lifecycle event.
-   *
-   * The outcome relation is asymmetric, not identity:
-   *   • Never accept→defer. The bounded graph set is a subset of the unbounded one.
-   *   • Sometimes defer→accept. Where recurrence lingers quads the PUBLISHER never
-   *     hashed, the unbounded read builds a superset and mismatches, deferring a KA
-   *     that is in fact valid; the bounded read reproduces the committed set.
-   * Acceptance stays gated on reproducing the on-chain merkle root (and `verifyOnChain`
-   * in the caller), so a bounded match cannot accept a set the chain did not commit to.
-   *
-   * `createMatcher` is invoked at most once, and only when there are quads to match, so
-   * the no-data path issues no extra `_meta` reads. The widen fires at most once.
+   * #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
+   * `…/_shared_memory/{author}/{number}`, not the bare bucket, so the read must span
+   * bucket + per-KA graphs or a replica reports "no shared memory data" and never
+   * materialises the KA into VM.
    */
-  private async loadSwmSliceWithFallback(
+  private async loadFinalizationSwmSlice(
     contextGraphId: string,
     rootEntities: string[],
     subGraphName: string | undefined,
     kaGraphBound: SwmKaGraphBound | undefined,
-    createMatcher: () => Promise<(quads: Quad[]) => Quad[] | null>,
-  ): Promise<{ quads: Quad[]; merkleMatchedQuads: Quad[] | null }> {
-    const readUnbounded = (): Promise<Quad[]> => this.getSharedMemoryQuadsForRoots(
-      contextGraphId, rootEntities, subGraphName, undefined, SWM_SLICE_SOURCE_WIDENED,
+    createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
+    const safeRoots = rootEntities.filter(isSafeIri);
+    if (safeRoots.length === 0) return { quads: [], matched: null };
+    const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      this.store,
+      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+      { rootEntities: safeRoots },
+      kaGraphBound,
+      { bounded: SWM_SLICE_SOURCE_BOUNDED, widened: SWM_SLICE_SOURCE_WIDENED, unbounded: SWM_SLICE_SOURCE },
+      createAccept,
     );
-
-    let quads = await this.getSharedMemoryQuadsForRoots(
-      contextGraphId, rootEntities, subGraphName, kaGraphBound,
-      kaGraphBound ? SWM_SLICE_SOURCE_BOUNDED : SWM_SLICE_SOURCE,
-    );
-    let widened = false;
-
-    if (kaGraphBound && quads.length === 0) {
-      quads = await readUnbounded();
-      widened = true;
-    }
-    if (quads.length === 0) return { quads, merkleMatchedQuads: null };
-
-    const matchMerkle = await createMatcher();
-    let merkleMatchedQuads = matchMerkle(quads);
-    if (kaGraphBound && !widened && !merkleMatchedQuads) {
-      quads = await readUnbounded();
-      merkleMatchedQuads = matchMerkle(quads);
-    }
-    return { quads, merkleMatchedQuads };
+    return { quads, matched: accepted };
   }
 
+  /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
   private async getSharedMemoryQuadsForRoots(
     contextGraphId: string,
     rootEntities: string[],
     subGraphName?: string,
-    kaGraphBound?: SwmKaGraphBound,
-    querySource: string = SWM_SLICE_SOURCE,
   ): Promise<Quad[]> {
-    const graphManager = new GraphManager(this.store);
-    const sharedMemoryGraph = subGraphName
-      ? graphManager.sharedMemoryUri(contextGraphId, subGraphName)
-      : contextGraphWorkspaceGraphUri(contextGraphId);
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return [];
-
-    // #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
-    // `…/_shared_memory/{author}/{number}` (workspace-handler.ts ~line 987),
-    // not the bare bucket. Reading only the bucket made every replica report
-    // "no shared memory data … peer missed SWM sharing" on finalization, so
-    // the published KA was never materialized into VM on subscribed peers
-    // (the VM-divergence half of #1098). Read-both: bucket + per-KA graphs.
-    //
-    // A3 (O(store) relief): bind the read to the exact SWM graph set up front
-    // via the fast named-graph index (`resolveSharedMemoryReadGraphs` →
-    // `listGraphsByPrefix`) instead of an unbounded `GRAPH ?g` +
-    // `sharedMemoryReadBothFilter` STRSTARTS filter, which scans EVERY quad in
-    // EVERY graph on RocksDB and starves finalization/ACK under load. The
-    // resolved set is exactly what that filter matched (bucket + `${bucket}/`
-    // minus `${bucket}/staging/`). Merkle-critical but FAIL-SAFE: if the index
-    // ever omitted a graph the recompute would MISMATCH and this KA is rejected
-    // (retried on a later round), never accepted with corrupt data.
-    // CONSTRUCT (not SELECT) so literal terms keep full datatype/lang
-    // fidelity for the merkle recompute, and so the same logical triple
-    // present in BOTH the bucket and a per-KA graph collapses to one
-    // (a constructed graph is a set).
-    // #1549: with a per-author `kaGraphBound` (derived from the finalization
-    // message's packed `startKAId`/`endKAId`), the resolved graph set drops the
-    // sibling per-KA under-graphs outside the range instead of scanning all
-    // ~120–175 of them. `loadKaBoundedSharedMemoryQuads` is UNSAFE alone — only
-    // `loadSwmSliceWithFallback` may call this with a bound, because it owns the
-    // widen to the unbounded read on an empty-or-mismatch result.
-    if (kaGraphBound) {
-      return loadKaBoundedSharedMemoryQuads(
-        this.store, sharedMemoryGraph, { rootEntities: safeRoots }, kaGraphBound, { querySource },
-      );
-    }
-    return loadSelectedSharedMemoryQuads(this.store, sharedMemoryGraph, { rootEntities: safeRoots }, {
-      querySource,
-    });
+    return loadSelectedSharedMemoryQuads(
+      this.store,
+      this.finalizationSwmBucketUri(contextGraphId, subGraphName),
+      { rootEntities: safeRoots },
+      { querySource: SWM_SLICE_SOURCE },
+    );
   }
 
   private verifyMerkleMatch(sharedMemoryQuads: Quad[], privateRoots: Uint8Array[], expectedMerkleRoot: Uint8Array): boolean {

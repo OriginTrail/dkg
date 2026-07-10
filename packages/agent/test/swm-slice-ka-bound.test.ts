@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   OxigraphStore,
   loadSelectedSharedMemoryQuads,
-  loadKaBoundedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
   type SwmKaGraphBound,
   type Quad,
 } from '@origintrail-official/dkg-storage';
@@ -17,7 +17,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
-import { FinalizationHandler, deriveSwmKaGraphBound } from '../src/finalization-handler.js';
+import { FinalizationHandler } from '../src/finalization-handler.js';
+import { deriveSwmKaGraphBound } from '../src/swm-ka-bound.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import { ethers } from 'ethers';
 
@@ -248,7 +249,14 @@ describe('bounded SWM read is merkle-equivalent to the unbounded read (T5b)', ()
     ]);
 
     const bound: SwmKaGraphBound = { agentAddress: AUTHOR_A_LOWER, startNumber: 7n, endNumber: 7n };
-    const bounded = await loadKaBoundedSharedMemoryQuads(store, bucket, { rootEntities: [root] }, bound);
+    // Identity accept never mismatches, so the fallback returns the bounded read
+    // itself (no widen) — the agent reaches the bounded read only via the safe,
+    // fallback-owning primitive, never the raw unsafe loader.
+    const { quads: bounded } = await loadSharedMemorySliceWithKaBoundFallback(
+      store, bucket, { rootEntities: [root] }, bound,
+      { bounded: 'test.bounded', widened: 'test.widened', unbounded: 'test.unbounded' },
+      async () => (qs) => qs,
+    );
     const unbounded = await loadSelectedSharedMemoryQuads(store, bucket, { rootEntities: [root] });
 
     // Both reads must return exactly r's three quads (proves the bound did NOT

@@ -1,16 +1,21 @@
 import { describe, it, expect } from 'vitest';
+import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
   loadSelectedSharedMemoryQuads,
-  loadKaBoundedSharedMemoryQuads,
+  loadSharedMemorySliceWithKaBoundFallback,
   resolveSharedMemoryReadGraphs,
   type Quad,
   type SwmKaGraphBound,
 } from '../src/index.js';
-// `resolveKaBoundedSharedMemoryReadGraphs` is deliberately NOT re-exported from
-// `src/index.ts` — pruning is not part of the package's public surface. Tests reach
-// into the module directly rather than widening that surface.
-import { resolveKaBoundedSharedMemoryReadGraphs } from '../src/graph-manager.js';
+// The unsafe bounded primitives are deliberately NOT re-exported from `src/index.ts`
+// (pruning is not part of the package's public surface — see the API-surface test at
+// the bottom). Tests that exercise the graph-set behaviour reach into the module
+// directly rather than widening that surface.
+import {
+  loadKaBoundedSharedMemoryQuads,
+  resolveKaBoundedSharedMemoryReadGraphs,
+} from '../src/graph-manager.js';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 
 // The bound's `agentAddress` arrives LOWERCASE (it is unpacked from a packed
@@ -280,6 +285,105 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
       );
 
       expect(quads.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  // The reviewer-requested API-surface regression: a non-finalization lane must not
+  // be able to import the unsafe pruning primitives from the package entrypoint.
+  it('does not publish the unsafe bounded primitives from the package public API', () => {
+    expect(storageIndex).not.toHaveProperty('loadKaBoundedSharedMemoryQuads');
+    expect(storageIndex).not.toHaveProperty('resolveKaBoundedSharedMemoryReadGraphs');
+    // The safe, fallback-owning primitive IS public.
+    expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
+  });
+});
+
+describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', () => {
+  const SOURCES = {
+    bounded: 'test.bounded',
+    widened: 'test.widened',
+    unbounded: 'test.unbounded',
+  } as const;
+
+  it('bounded hit: reads the bound and never widens or re-accepts', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-hit');
+    const r = 'urn:fb:hit';
+    try {
+      await store.insert([
+        { subject: r, predicate: 'urn:p', object: '"bucket"', graph: swm },
+        { subject: r, predicate: 'urn:p', object: '"in"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: r, predicate: 'urn:p', object: '"out"', graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      let accepts = 0;
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        store, swm, { rootEntities: [r] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        SOURCES,
+        async () => (qs) => { accepts += 1; return qs; },
+      );
+
+      // Bounded read excluded the out-of-range graph, and the accept predicate
+      // approved it, so no widen fired.
+      expect(quads.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"']);
+      expect(accepted?.map((q) => q.object).sort()).toEqual(['"bucket"', '"in"']);
+      expect(accepts).toBe(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('bounded mismatch: widens to the complete read and re-accepts', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-miss');
+    const r = 'urn:fb:miss';
+    const outObj = '"out"';
+    try {
+      await store.insert([
+        { subject: r, predicate: 'urn:p', object: '"in"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: r, predicate: 'urn:p', object: outObj, graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      // accept only when the out-of-range object is present ⇒ the bounded read is
+      // rejected and the widen must supply it.
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        store, swm, { rootEntities: [r] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        SOURCES,
+        async () => (qs) => (qs.some((q) => q.object === outObj) ? qs : null),
+      );
+
+      expect(accepted).not.toBeNull();
+      expect(quads.map((q) => q.object).sort()).toEqual(['"in"', '"out"']);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('no bound: one complete read, accept predicate applied once', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-none');
+    const r = 'urn:fb:none';
+    try {
+      await store.insert([
+        { subject: r, predicate: 'urn:p', object: '"a"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: r, predicate: 'urn:p', object: '"b"', graph: `${swm}/${AUTHOR_B}/12` },
+      ]);
+
+      let accepts = 0;
+      const { quads } = await loadSharedMemorySliceWithKaBoundFallback(
+        store, swm, { rootEntities: [r] },
+        undefined,
+        SOURCES,
+        async () => (qs) => { accepts += 1; return qs; },
+      );
+
+      // Unbounded ⇒ both authors read; accept applied exactly once.
+      expect(quads.map((q) => q.object).sort()).toEqual(['"a"', '"b"']);
+      expect(accepts).toBe(1);
     } finally {
       await store.close();
     }

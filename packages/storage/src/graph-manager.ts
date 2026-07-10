@@ -236,20 +236,14 @@ export async function loadSelectedSharedMemoryQuads(
 /**
  * Load the SWM quad slice pruned to ONE author's per-KA under-graphs (#1549).
  *
- * UNSAFE ON ITS OWN. The pruned graph set is a strict subset of the set
- * `loadSelectedSharedMemoryQuads` reads, and INV-1 — "a root's quads live only
- * under its own KA number" — is REFUTED under root recurrence, so this read can
- * legitimately miss quads the on-chain merkle root commits to. Every caller MUST
- * widen to `loadSelectedSharedMemoryQuads` on an empty-or-mismatched result and
- * recompute BEFORE it declines, defers, or otherwise acts on the miss.
- *
- * Never call this from a merkle-DEFINING read (it would change what the chain
- * commits to) or from a StorageACK decline lane (a miss costs a publish-quorum
- * vote). Today the only caller is the finalization gossip lane, via
- * `FinalizationHandler.loadSwmSliceWithFallback`, which owns the widen.
- *
- * The bound is a required positional argument, not an option, so that no generic
- * SWM read can opt into pruning by adding a field to an options object.
+ * UNSAFE ON ITS OWN, and deliberately NOT re-exported from `src/index.ts`. The
+ * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
+ * reads, and INV-1 — "a root's quads live only under its own KA number" — is
+ * REFUTED under root recurrence, so this read can legitimately miss quads the
+ * on-chain merkle root commits to. The only safe caller is
+ * `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen; this is a
+ * module-internal primitive it builds on, kept exported only so the graph-set
+ * behaviour can be unit-tested directly.
  */
 export async function loadKaBoundedSharedMemoryQuads(
   store: TripleStore,
@@ -259,6 +253,66 @@ export async function loadKaBoundedSharedMemoryQuads(
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
   return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, kaGraphBound);
+}
+
+/** Query-source tags for the three read lanes a bounded slice can take. */
+export interface SwmSliceSourceTags {
+  /** the initial narrowed read, when a bound is supplied */
+  bounded: QueryOptions['source'];
+  /** an unbounded re-read after an empty or mismatched bounded read */
+  widened: QueryOptions['source'];
+  /** the initial read when no bound is supplied */
+  unbounded: QueryOptions['source'];
+}
+
+/**
+ * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then WIDEN
+ * to the complete read on an empty-or-mismatched result before returning (#1549).
+ * This owns the two-step protocol that `loadKaBoundedSharedMemoryQuads` requires,
+ * so callers cannot hold a pruned `Quad[]` without the widen.
+ *
+ * `accept` is the caller's completeness predicate — e.g. a merkle recompute — that
+ * returns the accepted quads or `null` on mismatch. It decides both when a bounded
+ * read is "good enough" and what the caller ultimately consumes; storage stays
+ * agnostic to merkle. It is built lazily via `createAccept` and invoked at most
+ * once (only when there are quads), so a genuine no-data read triggers no extra
+ * caller-side work. The widen fires at most once.
+ *
+ * With no bound this is a single complete read (safe by construction). With a
+ * bound the result is exactly what the unbounded read would have produced on any
+ * input — never accept→defer, sometimes defer→accept under recurrence.
+ */
+export async function loadSharedMemorySliceWithKaBoundFallback(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  sources: SwmSliceSourceTags,
+  createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
+    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, { querySource: source });
+
+  let quads = kaGraphBound
+    ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+        querySource: sources.bounded,
+      })
+    : await readComplete(sources.unbounded);
+  let widened = false;
+
+  if (kaGraphBound && quads.length === 0) {
+    quads = await readComplete(sources.widened);
+    widened = true;
+  }
+  if (quads.length === 0) return { quads, accepted: null };
+
+  const accept = await createAccept();
+  let accepted = accept(quads);
+  if (kaGraphBound && !widened && !accepted) {
+    quads = await readComplete(sources.widened);
+    accepted = accept(quads);
+  }
+  return { quads, accepted };
 }
 
 async function loadSharedMemoryQuadsInternal(
