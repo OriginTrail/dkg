@@ -220,7 +220,10 @@ import { runSharedMemorySync, sharedMemoryOwnershipKeyFromGraph } from './sync/r
 import { recoverContextGraphSwm, type RecoverContextGraphSwmResult } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
-import { registerSyncHandler } from './sync/responder/sync-handler.js';
+import {
+  registerSyncHandler,
+  resolveSyncResponderSnapshotBudgetOptions,
+} from './sync/responder/sync-handler.js';
 import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
 import { mapWithConcurrency, CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/map-with-concurrency.js';
 import {
@@ -1960,6 +1963,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
+      snapshotBudget: resolveSyncResponderSnapshotBudgetOptions(process.env),
     });
 
     // Join-request protocol: receives signed join requests forwarded by peers.

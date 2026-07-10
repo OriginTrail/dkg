@@ -13,7 +13,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
   PROMOTE_PAYLOAD,
@@ -68,6 +68,59 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
   function advance(ms: number): void {
     now += ms;
+  }
+
+  /**
+   * Wrap an OxigraphStore so the first `flush()` after `arm()` parks until
+   * `releaseFlush()` is called. Used by the read/write race tests (5a–5c) to
+   * hold the claim flush open mid-mutation and prove the observability reads
+   * (`getStatus`/`list`/`getStats`) share the queue's mutation lock rather than
+   * exposing a transitional `running` row before the flush completes.
+   */
+  function makeFlushBlockingStore(base: OxigraphStore): {
+    store: TripleStore;
+    arm: () => void;
+    flushStarted: Promise<void>;
+    releaseFlush: () => void;
+  } {
+    let blockNextFlush = false;
+    let flushStartedResolve!: () => void;
+    let releaseFlushResolve!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      flushStartedResolve = resolve;
+    });
+    const flushRelease = new Promise<void>((resolve) => {
+      releaseFlushResolve = resolve;
+    });
+    const store: TripleStore = {
+      createGraph: (graphUri) => base.createGraph(graphUri),
+      dropGraph: (graphUri) => base.dropGraph(graphUri),
+      insert: (quads) => base.insert(quads),
+      delete: (quads) => base.delete(quads),
+      deleteByPattern: (pattern) => base.deleteByPattern(pattern),
+      query: (sparql, options) => base.query(sparql, options),
+      hasGraph: (graphUri, options) => base.hasGraph(graphUri, options),
+      listGraphs: (options) => base.listGraphs(options),
+      deleteBySubjectPrefix: (graphUri, prefix) => base.deleteBySubjectPrefix(graphUri, prefix),
+      countQuads: (graphUri) => base.countQuads(graphUri),
+      close: () => base.close(),
+      flush: async () => {
+        if (blockNextFlush) {
+          flushStartedResolve();
+          await flushRelease;
+          blockNextFlush = false;
+        }
+        await base.flush?.();
+      },
+    };
+    return {
+      store,
+      arm: () => {
+        blockNextFlush = true;
+      },
+      flushStarted,
+      releaseFlush: () => releaseFlushResolve(),
+    };
   }
 
   async function rewriteStoredUniquenessKey(jobId: string, key: string): Promise<void> {
@@ -319,6 +372,116 @@ describe('TripleStoreAsyncPromoteQueue', () => {
 
     const fetched = await queue.getStatus(jobId);
     expect(fetched).toEqual(claimed);
+  });
+
+  it('5a. getStatus() waits for an in-flight claim flush before exposing the running row', async () => {
+    const base = new OxigraphStore();
+    let blockNextFlush = false;
+    let flushStartedResolve!: () => void;
+    let releaseFlush!: () => void;
+    const flushStarted = new Promise<void>((resolve) => {
+      flushStartedResolve = resolve;
+    });
+    const flushRelease = new Promise<void>((resolve) => {
+      releaseFlush = resolve;
+    });
+    const blockingStore: TripleStore = {
+      createGraph: (graphUri) => base.createGraph(graphUri),
+      dropGraph: (graphUri) => base.dropGraph(graphUri),
+      insert: (quads) => base.insert(quads),
+      delete: (quads) => base.delete(quads),
+      deleteByPattern: (pattern) => base.deleteByPattern(pattern),
+      query: (sparql, options) => base.query(sparql, options),
+      hasGraph: (graphUri, options) => base.hasGraph(graphUri, options),
+      listGraphs: (options) => base.listGraphs(options),
+      deleteBySubjectPrefix: (graphUri, prefix) => base.deleteBySubjectPrefix(graphUri, prefix),
+      countQuads: (graphUri) => base.countQuads(graphUri),
+      close: () => base.close(),
+      flush: async () => {
+        if (blockNextFlush) {
+          flushStartedResolve();
+          await flushRelease;
+          blockNextFlush = false;
+        }
+        await base.flush?.();
+      },
+    };
+    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    const jobId = await queue.enqueue(makeRequest());
+    blockNextFlush = true;
+    const claimPromise = queue.claimNext('worker-1');
+    await flushStarted;
+
+    let statusSettled = false;
+    const statusPromise = queue.getStatus(jobId).finally(() => {
+      statusSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(statusSettled).toBe(false);
+
+    releaseFlush();
+    const [claimed, fetched] = await Promise.all([claimPromise, statusPromise]);
+    expect(claimed?.state).toBe('running');
+    expect(fetched?.state).toBe('running');
+    expect(fetched?.attempt.count).toBe(1);
+  });
+
+  it('5b. list({ state: ["running"] }) waits for an in-flight claim flush before exposing the running row', async () => {
+    const base = new OxigraphStore();
+    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
+    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    await queue.enqueue(makeRequest());
+    arm();
+    const claimPromise = queue.claimNext('worker-1');
+    await flushStarted;
+
+    let listSettled = false;
+    const listPromise = queue.list({ state: ['running'] }).finally(() => {
+      listSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(listSettled).toBe(false);
+
+    releaseFlush();
+    const [claimed, running] = await Promise.all([claimPromise, listPromise]);
+    expect(claimed?.state).toBe('running');
+    expect(running).toHaveLength(1);
+    expect(running[0]?.state).toBe('running');
+  });
+
+  it('5c. getStats() waits for an in-flight claim flush before counting the running row', async () => {
+    const base = new OxigraphStore();
+    const { store: blockingStore, arm, flushStarted, releaseFlush } = makeFlushBlockingStore(base);
+    const queue = new TripleStoreAsyncPromoteQueue(blockingStore, {
+      now: () => now,
+      idGenerator: () => `job-${++idCounter}`,
+    });
+
+    await queue.enqueue(makeRequest());
+    arm();
+    const claimPromise = queue.claimNext('worker-1');
+    await flushStarted;
+
+    let statsSettled = false;
+    const statsPromise = queue.getStats().finally(() => {
+      statsSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(statsSettled).toBe(false);
+
+    releaseFlush();
+    const [claimed, stats] = await Promise.all([claimPromise, statsPromise]);
+    expect(claimed?.state).toBe('running');
+    expect(stats.running).toBe(1);
+    expect(stats.queued).toBe(0);
   });
 
   // ---------------------------------------------------------------------------

@@ -222,14 +222,15 @@ JSON
   PRIV_STATUS=$(echo "$PRIV_RESULT" | pyfield "d.get('status','?')")
   if [ "$PRIV_STATUS" = "confirmed" ] || [ "$PRIV_STATUS" = "finalized" ]; then
     ok "Update with private triples confirmed, status=$PRIV_STATUS"
-  elif echo "$PRIV_RESULT" | grep -q 'NO_DATA_IN_SWM'; then
+  elif echo "$PRIV_RESULT" | grep -Eq 'NO_DATA_IN_SWM|MERKLE_MISMATCH_IN_SWM'; then
     # OT-RFC-49 (Rung-1 strip): cores hold ZERO private SWM ciphertext, so a
     # private-quad update on a curated CG cannot draw its ACK quorum FROM the
-    # cores — that decline is the privacy model working as intended, not a
-    # failure. The durable private-update path now routes through the curator
-    # and is covered by scripts/devnet-test-curator-ack-gate.sh. Treat as an
-    # expected post-RFC-49 outcome here.
-    warn "Private update declined NO_DATA_IN_SWM — expected post-RFC-49 (cores don't host private SWM; curator path covered by devnet-test-curator-ack-gate.sh)"
+    # cores. Depending on whether a peer has already retained the public SWM
+    # snapshot, it declines as NO_DATA_IN_SWM or MERKLE_MISMATCH_IN_SWM. Both
+    # are the privacy model working as intended, not a failure. The durable
+    # private-update path now routes through the curator and is covered by
+    # scripts/devnet-test-curator-ack-gate.sh.
+    warn "Private update declined by core ACK privacy guard — expected post-RFC-49 (curator path covered by devnet-test-curator-ack-gate.sh)"
   else
     fail "Private update status=$PRIV_STATUS: $PRIV_RESULT"
   fi
@@ -283,7 +284,7 @@ else
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
-section "5. GOSSIP REPLICATION — public data on other nodes"
+section "5. VM REPLICATION — public data on other nodes"
 
 # Closes #774 finding #2 — the original single `sleep 5` + one-shot
 # query was flaky on cold/warming meshes: replication did happen, but
@@ -292,6 +293,10 @@ section "5. GOSSIP REPLICATION — public data on other nodes"
 # and 2s tick — gives a warm mesh the same fast-path (first tick OK)
 # while letting a cold mesh actually exercise the sync path before we
 # fail. `RC_VALIDATION_GOSSIP_BUDGET_S` lets CI/operators tune this.
+#
+# Published KA quads live in the verifiable-memory layer on peer nodes.
+# The default query view is a legacy/local root-graph view and is not a
+# reliable cross-node replication assertion for the per-KA VM layout.
 GOSSIP_BUDGET_S="${RC_VALIDATION_GOSSIP_BUDGET_S:-60}"
 # Per-request curl timeout makes the poll budget real: if a node wedges
 # its HTTP socket, a bare `post` (no `--max-time`) would hang the whole
@@ -307,7 +312,8 @@ for PORT in 9202 9203 9204; do
       -H "$H" -H "Content-Type: application/json" \
       -X POST "http://127.0.0.1:$PORT/api/query" -d "{
       \"sparql\": \"SELECT ?name WHERE { <$ALICE_URI> <http://schema.org/name> ?name }\",
-      \"contextGraphId\": \"$CG\"
+      \"contextGraphId\": \"$CG\",
+      \"view\": \"verifiable-memory\"
     }" || echo '')
     NAME_VAL=$(echo "$REP" | pyfield "(lambda b: (b[0].get('name') if b else 'EMPTY'))(d.get('result',{}).get('bindings',[]))")
     echo "$NAME_VAL" | grep -q "Alice" && break

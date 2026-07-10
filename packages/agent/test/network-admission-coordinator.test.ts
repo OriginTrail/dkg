@@ -178,7 +178,7 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('coalesces concurrent explicit bypass attempts onto one probe', async () => {
+  it('coalesces explicit and automatic callers onto one explicit retry probe', async () => {
     let release!: (value: Uint8Array) => void;
     let attempt = 0;
     const sendIdentityProbe = vi.fn(async () => {
@@ -202,12 +202,17 @@ describe('NetworkAdmissionCoordinator', () => {
       REMOTE_PEER_ID_CID,
       createOperationContext('connect'),
     );
+    const automatic = fixture.coordinator.ensureAdmitted(
+      REMOTE_PEER_ID,
+      createOperationContext('connect'),
+    );
     await Promise.resolve();
 
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
     release(new TextEncoder().encode('not-json'));
     await expect(first).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
     await expect(second).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
+    await expect(automatic).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
   });
 
   it('grows transient retryable probe backoff up to the configured cap', async () => {

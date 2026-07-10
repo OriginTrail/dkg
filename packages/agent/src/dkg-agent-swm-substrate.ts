@@ -519,6 +519,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       this.sharedMemoryGossipRegistered.delete(contextGraphId);
       const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
       this.swmHostModeSubscribed.delete(hostKey);
+      this.swmHostModeCurated.delete(hostKey);
       this.swmHostModeHandlers.delete(hostKey);
       this.enqueueHostModePersistence(contextGraphId, false);
     }
@@ -608,6 +609,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // would see a stale entry and early-return.
         const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
         this.swmHostModeSubscribed.delete(hostKey);
+        this.swmHostModeCurated.delete(hostKey);
         this.swmHostModeHandlers.delete(hostKey);
         this.enqueueHostModePersistence(contextGraphId, false);
         this.log.warn(ctx, `SWM gossip unsubscribed for "${contextGraphId}": local node is no longer authorized`);

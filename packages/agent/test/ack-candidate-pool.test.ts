@@ -14,6 +14,7 @@ type AgentInternals = {
     libp2p: {
       peerId: { toString(): string };
       getPeers: () => Array<{ toString(): string }>;
+      getConnections: () => Array<{ remotePeer: { toString(): string } }>;
     };
   };
   peerId: string;
@@ -42,6 +43,14 @@ const ADMISSION_SAME_NETWORK = [
   '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
 ];
 
+function peer(id: string): { toString(): string } {
+  return { toString: () => id };
+}
+
+function connection(id: string): { remotePeer: { toString(): string } } {
+  return { remotePeer: peer(id) };
+}
+
 async function buildAgent(opts: {
   confirmedCores: string[];
   connected: string[];
@@ -60,7 +69,8 @@ async function buildAgent(opts: {
   internals.node = {
     libp2p: {
       peerId: { toString: () => internals.peerId },
-      getPeers: () => opts.connected.map((id) => ({ toString: () => id })),
+      getPeers: () => opts.connected.map(peer),
+      getConnections: () => opts.connected.map(connection),
     },
   };
   for (const id of opts.confirmedCores) internals.knownCorePeerIds.add(id);
@@ -217,10 +227,27 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
     a.node = {
       libp2p: {
         peerId: { toString: () => self },
-        getPeers: () => [self, ...CORE.slice(0, 3)].map((id) => ({ toString: () => id })),
+        getPeers: () => [self, ...CORE.slice(0, 3)].map(peer),
+        getConnections: () => [self, ...CORE.slice(0, 3)].map(connection),
       },
     };
     expect(a.getACKCandidatePeers()).not.toContain(self);
+  });
+
+  it('uses active connections when the peer-store peer list is still empty after startup', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 3),
+      connected: [],
+    });
+    a.node = {
+      libp2p: {
+        peerId: { toString: () => a.peerId },
+        getPeers: () => [],
+        getConnections: () => CORE.slice(0, 3).map(connection),
+      },
+    };
+
+    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 3));
   });
 
   it('V2 folded-private ACKs prefer advertised V2 peers, then keep enough candidates for wire negotiation', async () => {

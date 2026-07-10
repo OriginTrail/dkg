@@ -58,17 +58,42 @@ pass() { echo "[rfc49-catalog] ✓ $*"; }
 node_dir()   { echo "$DEVNET_DIR/node$1"; }
 node_port()  { echo $((API_PORT_BASE + $1 - 1)); }
 node_token() { grep -v '^#' "$(node_dir 1)/auth.token" 2>/dev/null | tr -d '[:space:]'; }
+node_agent_token() {
+  local node="$1"
+  AGENT_KEYSTORE="$(node_dir "$node")/agent-keystore.json" node -e '
+    const fs = require("fs");
+    try {
+      const records = Object.values(JSON.parse(fs.readFileSync(process.env.AGENT_KEYSTORE, "utf8")));
+      const token = records.find((record) => typeof record?.authToken === "string")?.authToken ?? "";
+      process.stdout.write(token);
+    } catch {
+      process.stdout.write("");
+    }
+  '
+}
 node_log()   { echo "$(node_dir "$1")/daemon.log"; }
 
-api_call() {
+api_call_with_token() {
   local node="$1" method="$2" path="$3" data="${4:-}"
+  local tok="$5"
   local url="http://127.0.0.1:$(node_port "$node")$path"
-  local tok; tok="$(node_token)"
   if [ -n "$data" ]; then
     curl -sS -X "$method" -H 'Content-Type: application/json' -H "Authorization: Bearer $tok" --data "$data" "$url"
   else
     curl -sS -X "$method" -H "Authorization: Bearer $tok" "$url"
   fi
+}
+
+api_call() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  api_call_with_token "$node" "$method" "$path" "$data" "$(node_token)"
+}
+
+api_call_agent() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local tok; tok="$(node_agent_token "$node")"
+  [ -n "$tok" ] || tok="$(node_token)"
+  api_call_with_token "$node" "$method" "$path" "$data" "$tok"
 }
 
 jq_field() { node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const p=process.argv[1].split(".").filter(Boolean);let v=j;for(const k of p)v=v?.[k];console.log(typeof v==="object"?JSON.stringify(v):(v??""))}catch(e){console.log("")}})' "$1"; }
@@ -88,12 +113,26 @@ _count_from_query() {
   node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const b=j?.result?.bindings??j?.bindings??j?.results?.bindings??[];let v=b[0]?.c?.value??b[0]?.c??"0";v=String(v).split("^^")[0].replace(/"/g,"").trim();console.log(Number.isFinite(parseInt(v,10))?parseInt(v,10):-1)}catch(e){console.log(-1)}})'
 }
 
-# COUNT(*) of rows under any urn:dkg:swm:ciphertext-chunks/* graph in a node's store.
+# COUNT(*) of rows for THIS publish's ciphertext batch under any
+# urn:dkg:swm:ciphertext-chunks/* graph in a node's store.
+#
+# The comprehensive sweep reuses one devnet across suites. Earlier harnesses may
+# intentionally put legacy-host ciphertext into a core store, so a global
+# ciphertext count would falsely fail this suite. The LU-11 subject embeds the
+# current publish batch id (`.../<batchId>/<chunkIndex>`), which is the V10 KC
+# merkleRoot returned by wm/finalize; scope to that subject prefix.
 # NOTE: NO contextGraphId — that applies a memory-layer VIEW that breaks the
 # graph-scoped COUNT (returns the whole store). Raw SPARQL scopes correctly.
 ciphertext_count() {
-  local body
-  body=$(node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), "urn:dkg:swm:ciphertext-chunks/")) } }`}))')
+  local body batch_id
+  batch_id="${BATCH_ID:-}"
+  [ -n "$batch_id" ] || { echo "-1"; return; }
+  body=$(BATCH_ID="$batch_id" node -e '
+    const subjectPrefix = `urn:dkg:swm:v10-publish-ciphertext-chunk/${process.env.BATCH_ID}/`;
+    console.log(JSON.stringify({
+      sparql: `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), "urn:dkg:swm:ciphertext-chunks/") && STRSTARTS(STR(?s), "${subjectPrefix}")) } }`,
+    }));
+  ')
   api_call "$1" POST /api/query "$body" | _count_from_query
 }
 
@@ -157,7 +196,7 @@ log "curator(edge$EDGE_CURATOR)=$CURATOR_AGENT  member(edge$EDGE_MEMBER)=$MEMBER
 # ---------------------------------------------------------------------------
 # 2. Create the private CG with BOTH edges on the allowlist; member subscribes
 # ---------------------------------------------------------------------------
-CREATE_RESP=$(api_call "$EDGE_CURATOR" POST /api/context-graph/create "$(cat <<EOF
+CREATE_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/context-graph/create "$(cat <<EOF
 {
   "id": "${CG_ID}",
   "name": "RFC-49 catalog sampling ${STAMP}",
@@ -174,7 +213,7 @@ ONCHAIN_ID=$(printf '%s' "$CREATE_RESP" | jq_field ".onChainId")
 log "on-chain CG id = $ONCHAIN_ID (catalog graph: did:dkg:context-graph:${ONCHAIN_ID}/_catalog)"
 [ "$(printf '%s' "$CREATE_RESP" | jq_field ".registered")" = "true" ] || warn "CG not reported registered (continuing)"
 sleep 4
-api_call "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
+api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
 log "member edge$EDGE_MEMBER subscribed to ${CG_ID}"
 # Give the strip-OFF baseline core time to host-mode-discover the new curated CG
 # (via the create beacon) and subscribe to its SWM topic BEFORE the publish
@@ -195,9 +234,9 @@ ASSERTION_NAME="secret-${STAMP}"
 # → vm/publish). FINALIZE is the step that injects the public `_catalog`
 # projection; the retired raw SWM shortcut used to bypass it,
 # so post-strip cores would have no catalog to ACK (NO_DATA_IN_SWM).
-api_call "$EDGE_CURATOR" POST /api/knowledge-assets \
+api_call_agent "$EDGE_CURATOR" POST /api/knowledge-assets \
   "{\"contextGraphId\":\"${CG_ID}\",\"name\":\"${ASSERTION_NAME}\"}" >/dev/null
-WRITE_RESP=$(api_call "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/wm/write" "$(cat <<EOF
+WRITE_RESP=$(api_call_agent "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/wm/write" "$(cat <<EOF
 {
   "contextGraphId": "${CG_ID}",
   "quads": [
@@ -209,12 +248,14 @@ WRITE_RESP=$(api_call "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NA
 EOF
 )")
 log "wm/write: $WRITE_RESP"
-FIN_RESP=$(api_call "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/wm/finalize" "{\"contextGraphId\":\"${CG_ID}\"}")
+FIN_RESP=$(api_call_agent "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/wm/finalize" "{\"contextGraphId\":\"${CG_ID}\"}")
 log "wm/finalize (injects _catalog): $FIN_RESP"
-SHARE_RESP=$(api_call "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/swm/share" "{\"contextGraphId\":\"${CG_ID}\",\"entities\":\"all\"}")
+BATCH_ID=$(printf '%s' "$FIN_RESP" | jq_field ".merkleRoot")
+[ -n "$BATCH_ID" ] || fail "finalize did not return merkleRoot/batchId: $FIN_RESP"
+SHARE_RESP=$(api_call_agent "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/swm/share" "{\"contextGraphId\":\"${CG_ID}\",\"entities\":\"all\"}")
 log "swm/share (promote): $SHARE_RESP"
 sleep 2
-PUBLISH_RESP=$(api_call "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/vm/publish" "{\"contextGraphId\":\"${CG_ID}\"}")
+PUBLISH_RESP=$(api_call_agent "$EDGE_CURATOR" POST "/api/knowledge-assets/${ASSERTION_NAME}/vm/publish" "{\"contextGraphId\":\"${CG_ID}\"}")
 log "vm/publish: $PUBLISH_RESP"
 PUB_STATUS=$(printf '%s' "$PUBLISH_RESP" | jq_field ".status")
 KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".kaId")
@@ -386,7 +427,7 @@ console.log(JSON.stringify([
 UPD_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
   build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS" "[]" "$CG_ID") \
   || fail "could not build curated update body (seal/owner-key resolution failed)"
-UPD_RESP=$(api_call "$EDGE_CURATOR" POST /api/update "$UPD_BODY")
+UPD_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/update "$UPD_BODY")
 log "POST /api/update: $UPD_RESP"
 UPD_STATUS=$(printf '%s' "$UPD_RESP" | jq_field ".status")
 UPD_KA=$(printf '%s' "$UPD_RESP" | jq_field ".kaId")

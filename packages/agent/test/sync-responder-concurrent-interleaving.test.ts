@@ -3,13 +3,25 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   createResponderGraphListMemo,
   createResponderSyncRowListMemo,
+  readDurableMetaPage,
   SyncRowSnapshotLimitError,
+  type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
   SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT,
+  SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+  SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT,
+  SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT,
+  SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT,
   SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
+  resolveSyncResponderSnapshotBudgetOptions,
 } from '../src/sync/responder/sync-handler.js';
+import {
+  createSyncResponderSnapshotBudget,
+  SyncRowSnapshotBudgetError,
+} from '../src/sync/responder/snapshot-budget.js';
+import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
 import {
   DKG_NS,
   lineGraphsFromNquads,
@@ -46,12 +58,30 @@ it('keeps responder snapshot defaults above the generic memo fallback', () => {
   expect(SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT).toBe(128);
   expect(SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT).toBe(64);
   expect(SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT).toBe(64);
+  expect(SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT).toBe(750_000);
+  expect(SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(384 * 1024 * 1024);
+  expect(SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT).toBe(250_000);
+  expect(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT).toBe(128 * 1024 * 1024);
+});
+
+it('allows operators to override every responder snapshot budget limit', () => {
+  expect(resolveSyncResponderSnapshotBudgetOptions({
+    DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: '101',
+    DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '202',
+    DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT: '303',
+    DKG_SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '404',
+  })).toEqual({
+    maxRows: 101,
+    maxBytesEstimate: 202,
+    maxSnapshotRows: 303,
+    maxSnapshotBytesEstimate: 404,
+  });
 });
 
 function watchBoundedPageQuery(
   store: OxigraphStore,
   graph: string,
-  expectedOffset: number,
+  expectedOffset: number | readonly number[],
   expectedLimit: number,
 ) {
   const originalQuery = store.query.bind(store);
@@ -59,13 +89,16 @@ function watchBoundedPageQuery(
   store.query = (async (sparql: string) => {
     const normalized = sparql.replace(/\s+/g, ' ').trim();
     const isTargetPageQuery = /^SELECT (?:DISTINCT )?\?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`GRAPH <${graph}>`);
+      normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY');
     const isTargetMultiGraphPageQuery = /^SELECT (?:DISTINCT )?\?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${graph}>`);
+      normalized.includes(`VALUES ?g { <${graph}>`) && normalized.includes('ORDER BY');
     if (isTargetPageQuery || isTargetMultiGraphPageQuery) {
       observedPageQueries++;
       expect(normalized).toMatch(/ORDER BY \?g \?s \?p \?o|ORDER BY \?s \?p \?o/);
-      expect(normalized).toContain(`OFFSET ${expectedOffset}`);
+      const expectedOffsets: readonly number[] = typeof expectedOffset === 'number'
+        ? [expectedOffset]
+        : expectedOffset;
+      expect(expectedOffsets.some((offset) => normalized.includes(`OFFSET ${offset}`))).toBe(true);
       expect(normalized).toContain(`LIMIT ${expectedLimit}`);
     }
     const result = await originalQuery(sparql);
@@ -78,33 +111,6 @@ function watchBoundedPageQuery(
   return {
     assertObserved() {
       expect(observedPageQueries).toBeGreaterThan(0);
-    },
-  };
-}
-
-function watchUnorderedSnapshotRead(
-  store: OxigraphStore,
-  graph: string,
-) {
-  const originalQuery = store.query.bind(store);
-  let observedSnapshotReads = 0;
-  store.query = (async (sparql: string) => {
-    const normalized = sparql.replace(/\s+/g, ' ').trim();
-    const isTargetSnapshotRead = /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
-      normalized.includes(`VALUES ?g { <${graph}>`) &&
-      normalized.includes('GRAPH ?g { ?s ?p ?o }');
-    if (isTargetSnapshotRead) {
-      observedSnapshotReads++;
-      expect(normalized).not.toContain('ORDER BY');
-      expect(normalized).not.toContain('OFFSET ');
-      expect(normalized).not.toContain('LIMIT ');
-    }
-    return originalQuery(sparql);
-  }) as OxigraphStore['query'];
-
-  return {
-    assertObserved() {
-      expect(observedSnapshotReads).toBeGreaterThan(0);
     },
   };
 }
@@ -143,6 +149,203 @@ describe('sync responder pagination interleaving', () => {
     }
     const graphs = new Set(outputs.flatMap((out) => [...lineGraphsFromNquads(out)]));
     expect(graphs).toEqual(new Set([graphA, graphB, graphC]));
+  });
+
+  it('falls back to store-bounded paging when a durable snapshot exceeds its cap', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-fallback';
+    const graph = `did:dkg:context-graph:${cgId}/data`;
+    await store.insert([q(graph, 0), q(graph, 1), q(graph, 2)]);
+    const boundedQuery = watchBoundedPageQuery(store, graph, [0, 2], 2);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 2,
+      syncSessionId: 'oversized-fallback-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+    boundedQuery.assertObserved();
+  });
+
+  it('falls back to store-bounded paging for an oversized durable-meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-durable-meta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const metaGraph = `${cgPrefix}/_meta`;
+    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    await store.insert(Array.from({ length: 3 }, (_, i) => ({
+      graph: metaGraph,
+      subject: cgPrefix,
+      predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
+      object: `"meta-${i.toString().padStart(3, '0')}"`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-durable-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-meta';
+    const swmMetaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    await store.insert(Array.from({ length: 3 }, (_, index) => q(swmMetaGraph, index)));
+    const boundedQuery = watchBoundedPageQuery(store, swmMetaGraph, [0, 2], 2);
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 0,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+    boundedQuery.assertObserved();
+  });
+
+  it('falls back to store-bounded paging for an oversized TTL-filtered SWM data snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-data-ttl';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const dataGraph = `${swmGraph}/0xabc/1`;
+    const swmMetaGraph = `${swmGraph}_meta`;
+    const now = new Date().toISOString();
+    const rows: Quad[] = [];
+    for (let index = 0; index < 3; index++) {
+      const root = `urn:interleave:${index.toString().padStart(3, '0')}`;
+      rows.push(q(dataGraph, index));
+      rows.push(...workspaceOpQuads(cgId, `op-${index}`, root, swmMetaGraph, now));
+    }
+    await store.insert(rows);
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 60_000,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-data-ttl-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(lineGraphsFromNquads(`${first}\n${second}`)).toEqual(new Set([dataGraph]));
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded delta paging for an oversized sinceBatchId snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-delta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const dataGraph = `${cgPrefix}/context/1`;
+    const metaGraph = `${cgPrefix}/context/1/_meta`;
+    const intLit = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    const quads: Quad[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const kc = `did:dkg:evm:31337/0xkc${i}`;
+      const ka = `${kc}/1`;
+      const root = `urn:delta-root:${i}`;
+      quads.push(
+        { graph: metaGraph, subject: kc, predicate: `${DKG_NS}batchId`, object: intLit(i) },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}partOf`, object: kc },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}rootEntity`, object: root },
+        { graph: dataGraph, subject: root, predicate: `${DKG_NS}label`, object: `"delta-${i}"` },
+      );
+    }
+    await store.insert(quads);
+
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 1000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 2,
+      sinceBatchId: '1',
+      syncSessionId: 'oversized-delta-session',
+    };
+
+    const collected: string[] = [];
+    for (let offset = 0, page = 0; page < 20; page += 1, offset += 2) {
+      const out = await cap.invoke({ ...base, offset });
+      const lines = linesFromNquads(out);
+      collected.push(...lines);
+      if (lines.length < 2) break;
+    }
+    const joined = collected.join('\n');
+    // Included: KCs with batchId 2, 3 (> sinceBatchId 1); excluded: batchId 1.
+    expect(joined).toContain('"delta-2"');
+    expect(joined).toContain('"delta-3"');
+    expect(joined).not.toContain('"delta-1"');
   });
 
   it('uses bounded store-side paging for deep SWM data pages without TTL', async () => {
@@ -195,7 +398,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep SWM data pages with TTL filtering', async () => {
+  it('uses store-bounded paged reads for deep TTL-filtered SWM data pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm-ttl';
     const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
@@ -210,7 +413,9 @@ describe('sync responder pagination interleaving', () => {
     }
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, dataGraph);
+    // The TTL-cutoff SWM-data read is now store-bounded (fresh roots resolved via
+    // FILTER EXISTS), so a deep page pulls only the requested rows.
+    const probe = watchBoundedPageQuery(store, dataGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: 60_000, syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -230,7 +435,7 @@ describe('sync responder pagination interleaving', () => {
     expect(out).not.toContain('"row-095"');
   });
 
-  it('uses unordered snapshot reads for deep durable meta pages', async () => {
+  it('uses store-bounded paged reads for deep durable meta pages', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-meta';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -253,7 +458,9 @@ describe('sync responder pagination interleaving', () => {
     });
     await store.insert(rows);
 
-    const probe = watchUnorderedSnapshotRead(store, metaGraph);
+    // The durable-meta read is now store-bounded (subject-membership filter
+    // pushed into the store via EXISTS), so a deep page is a paged store query.
+    const probe = watchBoundedPageQuery(store, metaGraph, 90, 5);
     const cap = registerTestSyncHandler(store, { syncPageSize: 5 });
     const out = await cap.invoke({
       contextGraphId: cgId,
@@ -881,9 +1088,7 @@ describe('sync responder pagination interleaving', () => {
     expect(loads).toBe(1);
   });
 
-  it('releases completed durable row snapshots after the completion grace window', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
+  it('evicts a released durable row snapshot before blocking new work', async () => {
     const memo = createResponderSyncRowListMemo(10_000, 1);
     const row = {
       s: 'urn:memo:row',
@@ -895,12 +1100,10 @@ describe('sync responder pagination interleaving', () => {
     await expect(memo.get('durable:complete', async () => [row])).resolves.toHaveLength(1);
     memo.release('durable:complete', { graceMs: 10 });
 
-    await expect(memo.get('durable:blocked', async () => [row])).rejects.toThrow(
-      SyncRowSnapshotLimitError,
-    );
-
-    vi.advanceTimersByTime(11);
     await expect(memo.get('durable:blocked', async () => [row])).resolves.toHaveLength(1);
+    await expect(
+      memo.get('durable:complete', async () => [], { requireExisting: true }),
+    ).resolves.toBeNull();
   });
 
   it('coalesces concurrent durable row snapshot refreshes', async () => {
@@ -929,5 +1132,362 @@ describe('sync responder pagination interleaving', () => {
     await expect(first).resolves.toHaveLength(1);
     await expect(second).resolves.toHaveLength(1);
     expect(loads).toBe(1);
+  });
+
+  it('shares one row budget across durable-data, durable-meta, and shared-memory snapshots', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 4,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 4,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const durableData = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    const durableMeta = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_meta',
+      budget,
+    });
+    const sharedMemory = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'shared_memory',
+      budget,
+    });
+    const rows = (label: string) => [0, 1].map((index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+
+    const dataRows = rows('data');
+    await expect(durableData.get('data', async () => dataRows)).resolves.toBe(dataRows);
+    await expect(durableMeta.get('meta', async () => rows('meta'))).resolves.toHaveLength(2);
+    // A hit makes durable-data most recently used; durable-meta is now the LRU.
+    await expect(durableData.get('data', async () => [])).resolves.toBe(dataRows);
+    durableMeta.release('meta', { graceMs: 10_000 });
+
+    await expect(sharedMemory.get('swm', async () => rows('swm'))).resolves.toHaveLength(2);
+
+    expect(budget.stats()).toEqual({
+      snapshots: 2,
+      rows: 4,
+      bytesEstimate: expect.any(Number),
+    });
+    await expect(
+      durableMeta.get('meta', async () => rows('must-not-reload'), { requireExisting: true }),
+    ).resolves.toBeNull();
+    await expect(
+      durableData.get('data', async () => rows('must-not-reload'), { requireExisting: true }),
+    ).resolves.toBe(dataRows);
+  });
+
+  it('rejects one oversized snapshot without retaining it or evicting unrelated data', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 10,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 2,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    const makeRows = (count: number) => Array.from({ length: count }, (_, index) => ({
+      s: `urn:row:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"row-${index}"`,
+      g: 'urn:graph',
+    }));
+    const retained = makeRows(2);
+
+    await expect(memo.get('retained', async () => retained)).resolves.toBe(retained);
+    await expect(memo.get('oversized', async () => makeRows(3))).rejects.toMatchObject({
+      name: SyncRowSnapshotBudgetError.name,
+      reason: 'snapshot_rows',
+      rows: 3,
+    });
+    expect(budget.stats()).toMatchObject({ snapshots: 1, rows: 2 });
+    await expect(memo.get('retained', async () => [], { requireExisting: true })).resolves.toBe(retained);
+  });
+
+  it('repeats a typed budget result for the same rejected session instead of reporting expiry', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 10,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 1,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    let loads = 0;
+    const loadRows = async () => {
+      loads += 1;
+      return [0, 1].map((index) => ({
+        s: `urn:retry:${index}`,
+        p: `${DKG_NS}label`,
+        o: `"retry-${index}"`,
+        g: 'urn:retry:graph',
+      }));
+    };
+
+    await expect(memo.get('same-session', loadRows)).rejects.toMatchObject({
+      name: 'SyncRowSnapshotBudgetError',
+      reason: 'snapshot_rows',
+    });
+    await expect(memo.get('same-session', loadRows)).rejects.toMatchObject({
+      name: 'SyncRowSnapshotBudgetError',
+      reason: 'snapshot_rows',
+    });
+    expect(loads).toBe(1);
+  });
+
+  it('does not resume a superseded snapshot after a refresh exceeds the budget', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 4,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 2,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+    const rows = (count: number, label: string) => Array.from({ length: count }, (_, index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+    const original = rows(2, 'original');
+
+    await expect(memo.get('refresh', async () => original)).resolves.toBe(original);
+    // The superseding session's page 0 materializes an over-cap snapshot: rejected.
+    await expect(
+      memo.get('refresh', async () => rows(3, 'oversized'), { refresh: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    // A later page of the SAME (superseding) session must NOT resume the stale
+    // 2-row snapshot; it takes the same rejection so the responder falls back
+    // consistently for every page instead of mixing two snapshots in one session.
+    await expect(
+      memo.get('refresh', async () => [], { requireExisting: true }),
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    // The superseded snapshot is released from the budget, not retained until TTL.
+    expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0 });
+  });
+
+  it('does not resume a superseded snapshot after a refresh hits the global budget', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 4,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 4, // per-snapshot allows the grown snapshot; the GLOBAL cap does not
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_data', budget });
+    const other = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_meta', budget });
+    const rows = (count: number, label: string) => Array.from({ length: count }, (_, index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+
+    // A pinned 2-row snapshot on another memo holds half the global budget.
+    await expect(other.get('other', async () => rows(2, 'other'))).resolves.toHaveLength(2);
+    // 'key' caches 1 row (global now 3/4, both pinned/active).
+    const original = rows(1, 'original');
+    await expect(memo.get('key', async () => original)).resolves.toBe(original);
+
+    // Refreshing 'key' to 3 rows needs 2+3 > 4 and cannot evict the pinned peer:
+    // a GLOBAL (not per-snapshot) rejection.
+    await expect(
+      memo.get('key', async () => rows(3, 'grown'), { refresh: true }),
+    ).rejects.toMatchObject({ reason: 'global_rows' });
+
+    // A same-token retry (refresh=false) must NOT resume the stale 1-row snapshot;
+    // it was dropped, so requireExisting sees no snapshot (and offset 0 re-loads).
+    await expect(
+      memo.get('key', async () => [], { requireExisting: true }),
+    ).resolves.toBeNull();
+    // Dropping the superseded snapshot also eases the global pressure.
+    expect(budget.stats()).toMatchObject({ rows: 2 });
+  });
+
+  it('enforces per-snapshot estimated-byte limits independently of row limits', async () => {
+    const row = {
+      s: 'urn:bytes:s',
+      p: `${DKG_NS}label`,
+      o: `"${'x'.repeat(256)}"`,
+      g: 'urn:bytes:graph',
+    };
+    const estimate = estimateStringRowHeapBytes(row.s, row.p, row.o, row.g);
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 100,
+      maxBytesEstimate: estimate * 10,
+      maxSnapshotRows: 100,
+      maxSnapshotBytesEstimate: estimate - 1,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+
+    await expect(memo.get('byte-heavy', async () => [row])).rejects.toMatchObject({
+      reason: 'snapshot_bytes',
+      bytesEstimate: estimate,
+    });
+  });
+
+  it('evicts released snapshots under byte pressure while keeping active snapshots pinned', async () => {
+    const makeRow = (label: string) => ({
+      s: `urn:${label}:s`,
+      p: `${DKG_NS}label`,
+      o: `"${'x'.repeat(128)}"`,
+      g: `urn:${label}:graph`,
+    });
+    const estimate = estimateStringRowHeapBytes(
+      makeRow('a').s,
+      makeRow('a').p,
+      makeRow('a').o,
+      makeRow('a').g,
+    );
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 100,
+      maxBytesEstimate: estimate + 32,
+      maxSnapshotRows: 100,
+      maxSnapshotBytesEstimate: estimate + 32,
+    });
+    const first = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_data', budget });
+    const second = createResponderSyncRowListMemo(10_000, 10, { phase: 'durable_meta', budget });
+
+    await first.get('first', async () => [makeRow('a')]);
+    await expect(second.get('second', async () => [makeRow('b')])).rejects.toMatchObject({
+      reason: 'global_bytes',
+    });
+    await expect(first.get('first', async () => [], { requireExisting: true })).resolves.toHaveLength(1);
+
+    first.release('first', { graceMs: 10_000 });
+    await expect(second.get('second', async () => [makeRow('b')])).resolves.toHaveLength(1);
+    await expect(first.get('first', async () => [], { requireExisting: true })).resolves.toBeNull();
+  });
+
+  it('keeps completed loads from aborted owners inside the shared retained-row budget', async () => {
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 2,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 2,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10_000, 10, {
+      phase: 'durable_data',
+      budget,
+    });
+
+    for (let session = 0; session < 5; session += 1) {
+      const rows = [0, 1].map((index) => ({
+        s: `urn:aborted:${session}:${index}`,
+        p: `${DKG_NS}label`,
+        o: `"row-${index}"`,
+        g: 'urn:aborted:graph',
+      }));
+      const snapshot = deferred<readonly typeof rows[number][]>();
+      const controller = new AbortController();
+      const request = memo.get(`aborted:${session}`, () => snapshot.promise, {
+        signal: controller.signal,
+      });
+      controller.abort(new Error('owner disconnected'));
+      snapshot.resolve(rows);
+
+      await expect(request).rejects.toThrow('owner disconnected');
+      // Join the owner-independent load so its cache admission has settled.
+      await expect(
+        memo.get(`aborted:${session}`, async () => [], { requireExisting: true }),
+      ).resolves.toBe(rows);
+      memo.release(`aborted:${session}`, { graceMs: 10_000 });
+      expect(budget.stats()).toMatchObject({ snapshots: 1, rows: 2 });
+    }
+  });
+
+  it('releases the shared budget when a cached snapshot expires by TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 2,
+      maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+      maxSnapshotRows: 2,
+      maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+    });
+    const memo = createResponderSyncRowListMemo(10, 10, { phase: 'durable_data', budget });
+    const rows = (label: string) => [0, 1].map((index) => ({
+      s: `urn:${label}:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"${label}-${index}"`,
+      g: `urn:${label}:graph`,
+    }));
+
+    await expect(memo.get('a', async () => rows('a'))).resolves.toHaveLength(2);
+    expect(budget.stats()).toMatchObject({ snapshots: 1, rows: 2 });
+
+    // Advance past the TTL; the next access prunes the expired entry.
+    vi.setSystemTime(11);
+    await expect(memo.get('b', async () => [], { requireExisting: true })).resolves.toBeNull();
+
+    // TTL expiry must release the snapshot from the shared budget, so a later
+    // session cannot hit a global limit for a snapshot the cache no longer holds.
+    expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it('extracts a cached page without iterating or copying the complete snapshot', async () => {
+    const source = Array.from({ length: 2_000 }, (_, index) => ({
+      s: `urn:row:${index}`,
+      p: `${DKG_NS}label`,
+      o: `"row-${index}"`,
+      g: 'urn:graph',
+    }));
+    const pageStart = 1_000;
+    const pageEnd = 1_500; // offset 1000 + limit 500
+    let wholeSnapshotIterations = 0;
+    let outOfPageIndexReads = 0;
+    const snapshot = new Proxy(source, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) {
+          wholeSnapshotIterations += 1;
+          throw new Error('complete snapshot must not be iterated while extracting one page');
+        }
+        // A correct slice(offset, offset+limit) reads only in-page element
+        // indices (plus non-index props like `length`). Reading any index
+        // outside the page is a full-array copy (e.g. `rows.slice()` then slice
+        // again, or an indexed clone), which the iterator guard alone misses.
+        if (typeof property === 'string' && /^\d+$/.test(property)) {
+          const index = Number(property);
+          if (index < pageStart || index >= pageEnd) {
+            outOfPageIndexReads += 1;
+            throw new Error(`page extraction must not read out-of-page index ${index}`);
+          }
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const memo: SyncRowListMemo = {
+      get: async () => snapshot,
+      release: () => {},
+    };
+
+    const page = await readDurableMetaPage({
+      store: {} as OxigraphStore,
+      contextGraphId: 'urn:cg',
+      registeredSubGraphNames: [],
+      offset: 1_000,
+      limit: 500,
+      rowListMemo: memo,
+      rowListCacheKey: 'cached-page',
+    });
+
+    expect(page).toHaveLength(500);
+    expect(page[0]?.s).toBe('urn:row:1000');
+    expect(wholeSnapshotIterations).toBe(0);
+    expect(outOfPageIndexReads).toBe(0);
   });
 });

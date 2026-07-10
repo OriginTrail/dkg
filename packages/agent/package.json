@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "benchmark:sync-responder-pages": "node --expose-gc scripts/sync-responder-page-benchmark.cjs",
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "test": "vitest run",

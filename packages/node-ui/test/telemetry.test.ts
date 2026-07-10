@@ -229,6 +229,21 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     m.syncRequestTotal.add(1, { outcome: 'ok', protocol_id: '/dkg/10.0.2/sync' });
     m.protocolSendTotal.add(1, { outcome: 'ok', protocol_id: '/dkg/10.0.2/sync' });
     m.protocolSendDuration.record(5, { protocol_id: '/dkg/10.0.2/sync' });
+    m.processHeapUsedBytes.record(1024, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.processHeapTotalBytes.record(2048, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.processHeapLimitBytes.record(4096, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.processRssBytes.record(8192, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.processExternalBytes.record(512, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.processArrayBuffersBytes.record(256, { phase: 'durable_data', boundary: 'requester_phase_start' });
+    m.syncResponderSnapshots.add(1, { phase: 'durable_data' });
+    m.syncResponderSnapshotRows.add(2, { phase: 'durable_data' });
+    m.syncResponderSnapshotBytesEstimate.add(1024, { phase: 'durable_data' });
+    m.syncResponderSnapshotEvictionsTotal.add(1, { phase: 'durable_data', reason: 'lru' });
+    m.syncResponderSnapshotLoadDurationMs.record(5, { phase: 'durable_data', outcome: 'completed' });
+    m.syncRequesterAccumulatedQuads.record(2, { phase: 'durable_data', outcome: 'completed' });
+    m.syncRequesterAccumulatedBytes.record(1024, { phase: 'durable_data', outcome: 'completed' });
+    m.syncRequesterPageCount.record(1, { phase: 'durable_data', outcome: 'completed' });
+    m.syncRequesterPhaseDurationMs.record(10, { phase: 'durable_data', outcome: 'completed' });
 
     await mp.forceFlush();
 
@@ -241,6 +256,7 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     const ALLOWED = new Set([
       'outcome', 'source', 'chain_id', 'rpc_method', 'retryable', 'result',
       'decline_code', 'protocol_id', 'method', 'module', 'role', 'reason', 'error_type',
+      'phase', 'boundary',
     ]);
     expect([...keys].filter((k) => !ALLOWED.has(k))).toEqual([]);
     // high-cardinality keys must never be metric labels

@@ -1,6 +1,7 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../../src/sync/responder/sync-handler.js';
+import type { SyncResponderSnapshotBudgetOptions } from '../../src/sync/responder/snapshot-budget.js';
 import type { SyncRequestEnvelope } from '../../src/sync/auth/request-build.js';
 
 export const TEST_SYNC_PROTOCOL = '/origintrail/dkg/sync/1.0.0';
@@ -40,6 +41,7 @@ export function registerTestSyncHandler(
   options: {
     sharedMemoryTtlMs?: number;
     syncPageSize?: number;
+    snapshotBudget?: SyncResponderSnapshotBudgetOptions;
     authorize?: (request: SyncRequestEnvelope, remotePeerId: string) => Promise<boolean>;
   } = {},
 ): CapturedSyncHandler {
@@ -56,6 +58,7 @@ export function registerTestSyncHandler(
     authorizeSyncRequest: options.authorize ?? (async () => true),
     logWarn: noopLog,
     logDebug: noopLog,
+    snapshotBudget: options.snapshotBudget,
   });
   return cap;
 }

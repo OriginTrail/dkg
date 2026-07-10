@@ -1,28 +1,16 @@
 import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import {
+  NetworkAdmissionProbeRetryState,
+  type NetworkAdmissionProbeBackoff,
+  type NetworkAdmissionProbeBackoffKind,
+  type NetworkAdmissionProbeBackoffOptions,
+} from './network-admission-probe-retry.js';
 
-const DEFAULT_MAX_PROBE_BACKOFF_ENTRIES = 10_000;
-
-export interface NetworkAdmissionProbeBackoffOptions {
-  transientBaseMs: number;
-  transientMaxMs: number;
-  unreadableResponseMs: number;
-}
-
-export type NetworkAdmissionProbeBackoffKind = 'transient' | 'unreadable-response';
-
-export interface NetworkAdmissionProbeBackoff {
-  failures: number;
-  kind: NetworkAdmissionProbeBackoffKind;
-  reason: string;
-  retryAfterMs: number;
-}
-
-interface NetworkAdmissionProbeBackoffEntry {
-  failures: number;
-  kind: NetworkAdmissionProbeBackoffKind;
-  reason: string;
-  untilMs: number;
-}
+export type {
+  NetworkAdmissionProbeBackoff,
+  NetworkAdmissionProbeBackoffKind,
+  NetworkAdmissionProbeBackoffOptions,
+};
 
 type NetworkAdmissionQuarantineEntry =
   | { kind: 'indefinite' }
@@ -57,13 +45,10 @@ export class NetworkAdmissionService {
   private readonly networkId?: string;
   private readonly selfPeerId?: CanonicalPeerId;
   private readonly now: () => number;
-  private readonly probeBackoff: NetworkAdmissionProbeBackoffOptions;
-  private readonly maxProbeBackoffEntries: number;
+  private readonly probeRetry: NetworkAdmissionProbeRetryState;
   private readonly quarantineCooldownMs: number;
   private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
   private readonly quarantinedPeers = new Map<CanonicalPeerId, NetworkAdmissionQuarantineEntry>();
-  // Map insertion order is the least-recently-updated eviction order.
-  private readonly retryableProbeBackoff = new Map<CanonicalPeerId, NetworkAdmissionProbeBackoffEntry>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
     this.networkId = options.networkId;
@@ -71,16 +56,13 @@ export class NetworkAdmissionService {
       ? canonicalAdmissionServicePeerId(options.selfPeerId)
       : undefined;
     this.now = options.now ?? Date.now;
-    this.probeBackoff = {
-      transientBaseMs: options.probeBackoff?.transientBaseMs ?? 15_000,
-      transientMaxMs: options.probeBackoff?.transientMaxMs ?? 120_000,
-      unreadableResponseMs: options.probeBackoff?.unreadableResponseMs ?? 60_000,
-    };
-    this.maxProbeBackoffEntries = options.maxProbeBackoffEntries
-      ?? DEFAULT_MAX_PROBE_BACKOFF_ENTRIES;
-    if (!Number.isInteger(this.maxProbeBackoffEntries) || this.maxProbeBackoffEntries <= 0) {
-      throw new Error('maxProbeBackoffEntries must be a positive integer');
-    }
+    this.probeRetry = new NetworkAdmissionProbeRetryState({
+      now: this.now,
+      ...(options.probeBackoff !== undefined ? { backoff: options.probeBackoff } : {}),
+      ...(options.maxProbeBackoffEntries !== undefined
+        ? { maxEntries: options.maxProbeBackoffEntries }
+        : {}),
+    });
     this.quarantineCooldownMs = options.quarantineCooldownMs ?? 300_000;
   }
 
@@ -92,7 +74,7 @@ export class NetworkAdmissionService {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.verifiedPeerIds.add(canonicalPeerId);
     this.quarantinedPeers.delete(canonicalPeerId);
-    this.retryableProbeBackoff.delete(canonicalPeerId);
+    this.probeRetry.clear(canonicalPeerId);
   }
 
   /** Preserve the existing public operation as an explicit indefinite quarantine. */
@@ -110,15 +92,7 @@ export class NetworkAdmissionService {
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    const entry = this.retryableProbeBackoff.get(canonicalPeerId);
-    const now = this.now();
-    if (!entry || entry.untilMs <= now) return undefined;
-    return {
-      failures: entry.failures,
-      kind: entry.kind,
-      reason: entry.reason,
-      retryAfterMs: Math.max(0, entry.untilMs - now),
-    };
+    return this.probeRetry.getActiveSuppression(canonicalPeerId);
   }
 
   rememberRetryableProbeFailure(
@@ -127,22 +101,7 @@ export class NetworkAdmissionService {
     kind: NetworkAdmissionProbeBackoffKind,
   ): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    const previous = this.retryableProbeBackoff.get(canonicalPeerId);
-    const failures = (previous?.failures ?? 0) + 1;
-    const delayMs = this.probeBackoffDelayMs(failures, kind);
-
-    if (previous) {
-      // Refresh recency without changing the bounded size.
-      this.retryableProbeBackoff.delete(canonicalPeerId);
-    } else {
-      this.makeRoomForProbeBackoff();
-    }
-    this.retryableProbeBackoff.set(canonicalPeerId, {
-      failures,
-      kind,
-      reason,
-      untilMs: this.now() + delayMs,
-    });
+    this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
   }
 
   isAcceptedPeer(peerId: string): boolean {
@@ -189,34 +148,11 @@ export class NetworkAdmissionService {
     return true;
   }
 
-  private makeRoomForProbeBackoff(): void {
-    if (this.retryableProbeBackoff.size < this.maxProbeBackoffEntries) return;
-
-    const now = this.now();
-    for (const [peerId, entry] of this.retryableProbeBackoff) {
-      if (entry.untilMs <= now) this.retryableProbeBackoff.delete(peerId);
-    }
-    if (this.retryableProbeBackoff.size < this.maxProbeBackoffEntries) return;
-
-    const oldest = this.retryableProbeBackoff.keys().next();
-    if (!oldest.done) this.retryableProbeBackoff.delete(oldest.value);
-  }
-
-  private probeBackoffDelayMs(failures: number, kind: NetworkAdmissionProbeBackoffKind): number {
-    if (kind === 'unreadable-response') return this.probeBackoff.unreadableResponseMs;
-
-    const exponent = Math.min(Math.max(failures - 1, 0), 8);
-    return Math.min(
-      this.probeBackoff.transientMaxMs,
-      this.probeBackoff.transientBaseMs * (2 ** exponent),
-    );
-  }
-
   private setQuarantine(peerId: string, entry: NetworkAdmissionQuarantineEntry): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.quarantinedPeers.set(canonicalPeerId, entry);
     this.verifiedPeerIds.delete(canonicalPeerId);
-    this.retryableProbeBackoff.delete(canonicalPeerId);
+    this.probeRetry.clear(canonicalPeerId);
   }
 }
 
