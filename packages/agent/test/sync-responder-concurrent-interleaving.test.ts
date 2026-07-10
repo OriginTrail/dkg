@@ -210,6 +210,171 @@ describe('sync responder pagination interleaving', () => {
     boundedQuery.assertObserved();
   });
 
+  it('falls back to store-bounded paging for an oversized durable-meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-durable-meta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const metaGraph = `${cgPrefix}/_meta`;
+    // Rows keyed on the CG entity subject survive readDurableMetaRows filtering.
+    await store.insert(Array.from({ length: 3 }, (_, i) => ({
+      graph: metaGraph,
+      subject: cgPrefix,
+      predicate: `http://schema.org/p${i.toString().padStart(3, '0')}`,
+      object: `"meta-${i.toString().padStart(3, '0')}"`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-durable-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded paging for an oversized shared-memory meta snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-meta';
+    const swmMetaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    await store.insert(Array.from({ length: 3 }, (_, index) => q(swmMetaGraph, index)));
+    const boundedQuery = watchBoundedPageQuery(store, swmMetaGraph, [0, 2], 2);
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 0,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-meta-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+    boundedQuery.assertObserved();
+  });
+
+  it('falls back to store-bounded paging for an oversized TTL-filtered SWM data snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-swm-data-ttl';
+    const swmGraph = `did:dkg:context-graph:${cgId}/_shared_memory`;
+    const dataGraph = `${swmGraph}/0xabc/1`;
+    const swmMetaGraph = `${swmGraph}_meta`;
+    const now = new Date().toISOString();
+    const rows: Quad[] = [];
+    for (let index = 0; index < 3; index++) {
+      const root = `urn:interleave:${index.toString().padStart(3, '0')}`;
+      rows.push(q(dataGraph, index));
+      rows.push(...workspaceOpQuads(cgId, `op-${index}`, root, swmMetaGraph, now));
+    }
+    await store.insert(rows);
+
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: 60_000,
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'data' as const,
+      limit: 2,
+      syncSessionId: 'oversized-swm-data-ttl-session',
+    };
+
+    const first = await cap.invoke({ ...base, offset: 0 });
+    const second = await cap.invoke({ ...base, offset: 2 });
+
+    expect(linesFromNquads(first)).toHaveLength(2);
+    expect(linesFromNquads(second)).toHaveLength(1);
+    expect(lineGraphsFromNquads(`${first}\n${second}`)).toEqual(new Set([dataGraph]));
+    expect(new Set(linesFromNquads(`${first}\n${second}`)).size).toBe(3);
+  });
+
+  it('falls back to store-bounded delta paging for an oversized sinceBatchId snapshot', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'oversized-delta';
+    const cgPrefix = `did:dkg:context-graph:${cgId}`;
+    const dataGraph = `${cgPrefix}/context/1`;
+    const metaGraph = `${cgPrefix}/context/1/_meta`;
+    const intLit = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    const quads: Quad[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const kc = `did:dkg:evm:31337/0xkc${i}`;
+      const ka = `${kc}/1`;
+      const root = `urn:delta-root:${i}`;
+      quads.push(
+        { graph: metaGraph, subject: kc, predicate: `${DKG_NS}batchId`, object: intLit(i) },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}partOf`, object: kc },
+        { graph: metaGraph, subject: ka, predicate: `${DKG_NS}rootEntity`, object: root },
+        { graph: dataGraph, subject: root, predicate: `${DKG_NS}label`, object: `"delta-${i}"` },
+      );
+    }
+    await store.insert(quads);
+
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 1000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 2,
+      sinceBatchId: '1',
+      syncSessionId: 'oversized-delta-session',
+    };
+
+    const collected: string[] = [];
+    for (let offset = 0, page = 0; page < 20; page += 1, offset += 2) {
+      const out = await cap.invoke({ ...base, offset });
+      const lines = linesFromNquads(out);
+      collected.push(...lines);
+      if (lines.length < 2) break;
+    }
+    const joined = collected.join('\n');
+    // Included: KCs with batchId 2, 3 (> sinceBatchId 1); excluded: batchId 1.
+    expect(joined).toContain('"delta-2"');
+    expect(joined).toContain('"delta-3"');
+    expect(joined).not.toContain('"delta-1"');
+  });
+
   it('uses bounded store-side paging for deep SWM data pages without TTL', async () => {
     const store = new OxigraphStore();
     const cgId = 'bounded-swm';

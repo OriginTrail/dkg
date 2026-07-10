@@ -160,4 +160,92 @@ describe('sync memory attribution metrics', () => {
     expect(byteHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
     expect(quadHistogram.buckets.boundaries.at(-1)).toBeGreaterThan(10_000);
   });
+
+  it('attributes requester phase memory to the error outcome when parsing throws', async () => {
+    const harness = createMetricsHarness();
+    provider = harness.provider;
+    const encoder = new TextEncoder();
+
+    await expect(fetchSyncPages({
+      ctx: { operationId: 'test', operationName: 'sync' },
+      remotePeerId: 'peer-not-a-label',
+      contextGraphId: 'graph-not-a-label',
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: 'urn:data',
+      deadline: Date.now() + 10_000,
+      syncPageTimeoutMs: 1_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 2,
+      syncDeniedResponse: 'denied',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      buildSyncRequest: async () => encoder.encode('request'),
+      parseAndFilter: async () => { throw new Error('parse boom'); },
+      send: async () => encoder.encode('<urn:s> <urn:p> "o" <urn:data> .'),
+      logWarn: () => {},
+      logInfo: () => {},
+      logDebug: () => {},
+    })).rejects.toThrow('parse boom');
+    await provider.forceFlush();
+
+    for (const name of [
+      'dkg.sync.requester.accumulated_quads',
+      'dkg.sync.requester.page_count',
+      'dkg.sync.requester.phase_duration_ms',
+    ]) {
+      const points = metricPoints(harness.exporter, name);
+      expect(points.some((point) =>
+        point.attributes.phase === 'durable_data' && point.attributes.outcome === 'error'
+      )).toBe(true);
+    }
+    expect(metricPoints(harness.exporter, 'process.heap_used_bytes').some((point) =>
+      point.attributes.boundary === 'requester_phase_error'
+    )).toBe(true);
+  });
+
+  it('attributes requester phase memory to the timed_out outcome past the deadline', async () => {
+    const harness = createMetricsHarness();
+    provider = harness.provider;
+    let sends = 0;
+
+    const result = await fetchSyncPages({
+      ctx: { operationId: 'test', operationName: 'sync' },
+      remotePeerId: 'peer-not-a-label',
+      contextGraphId: 'graph-not-a-label',
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: 'urn:data',
+      deadline: Date.now() - 1,
+      syncPageTimeoutMs: 1_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 2,
+      syncDeniedResponse: 'denied',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => { sends += 1; return new Uint8Array(); },
+      logWarn: () => {},
+      logInfo: () => {},
+      logDebug: () => {},
+    });
+    await provider.forceFlush();
+
+    expect(result.completed).toBe(false);
+    expect(result.timedOut).toBe(true);
+    expect(sends).toBe(0);
+
+    const pageCount = metricPoints(harness.exporter, 'dkg.sync.requester.page_count')
+      .filter((point) => point.attributes.outcome === 'timed_out');
+    expect(pageCount.length).toBeGreaterThan(0);
+    expect(pageCount.every((point) => point.attributes.phase === 'durable_data')).toBe(true);
+    expect(metricPoints(harness.exporter, 'dkg.sync.requester.accumulated_quads').some((point) =>
+      point.attributes.outcome === 'timed_out'
+    )).toBe(true);
+  });
 });

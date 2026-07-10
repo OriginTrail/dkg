@@ -178,24 +178,25 @@ export async function readSwmMetaPage(params: {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
   const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
-  if (params.rowListMemo && params.rowListCacheKey) {
-    return readCachedRowsPage(
-      {
-        memo: params.rowListMemo,
-        key: params.rowListCacheKey,
-        refresh: params.refreshRowList,
-        expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
-      },
-      () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
+  const cache = params.rowListMemo && params.rowListCacheKey
+    ? {
+      memo: params.rowListMemo,
+      key: params.rowListCacheKey,
+      refresh: params.refreshRowList,
+      expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
+    }
+    : undefined;
+  return readResponderRowsPage(
+    cache,
+    () => readSwmMetaRows(params.store, candidateGraphs, params.cutoffIso),
+    () => readSwmMetaRowsPage(
+      params.store,
+      candidateGraphs,
+      params.cutoffIso,
       params.offset,
       params.limit,
       params.signal,
-    );
-  }
-  return readSwmMetaRowsPage(
-    params.store,
-    candidateGraphs,
-    params.cutoffIso,
+    ),
     params.offset,
     params.limit,
     params.signal,
@@ -250,11 +251,20 @@ export async function readSwmDataPage(params: {
     params.cutoffIso!,
     signal,
   );
-  if (cache) {
-    return readCachedRowsPage(cache, () => loadRows(), params.offset, params.limit, params.signal);
-  }
-  const rows = await loadRows(params.signal);
-  return rows.slice(Math.max(0, Math.floor(params.offset)), Math.max(0, Math.floor(params.offset)) + Math.max(0, Math.floor(params.limit)));
+  const loadStoreBoundedPage = async (): Promise<SyncRow[]> => {
+    const rows = await loadRows(params.signal);
+    const safeOffset = Math.max(0, Math.floor(params.offset));
+    const safeLimit = Math.max(0, Math.floor(params.limit));
+    return rows.slice(safeOffset, safeOffset + safeLimit);
+  };
+  return readResponderRowsPage(
+    cache,
+    () => loadRows(),
+    loadStoreBoundedPage,
+    params.offset,
+    params.limit,
+    params.signal,
+  );
 }
 
 export async function readDurableMetaPage(params: {
@@ -270,24 +280,28 @@ export async function readDurableMetaPage(params: {
 }): Promise<SyncRow[]> {
   const loadRows = (signal?: AbortSignal) =>
     readDurableMetaRows(params.store, params.contextGraphId, params.registeredSubGraphNames, signal);
-  if (params.rowListMemo && params.rowListCacheKey) {
-    return readCachedRowsPage(
-      {
-        memo: params.rowListMemo,
-        key: params.rowListCacheKey,
-        refresh: params.refreshRowList,
-        expiredMessage: 'Durable meta sync session snapshot expired before page completion',
-      },
-      () => loadRows(),
-      params.offset,
-      params.limit,
-      params.signal,
-    );
-  }
-  const rows = await loadRows(params.signal);
-  const safeOffset = Math.max(0, Math.floor(params.offset));
-  const safeLimit = Math.max(0, Math.floor(params.limit));
-  return rows.slice(safeOffset, safeOffset + safeLimit);
+  const cache = params.rowListMemo && params.rowListCacheKey
+    ? {
+      memo: params.rowListMemo,
+      key: params.rowListCacheKey,
+      refresh: params.refreshRowList,
+      expiredMessage: 'Durable meta sync session snapshot expired before page completion',
+    }
+    : undefined;
+  const loadStoreBoundedPage = async (): Promise<SyncRow[]> => {
+    const rows = await loadRows(params.signal);
+    const safeOffset = Math.max(0, Math.floor(params.offset));
+    const safeLimit = Math.max(0, Math.floor(params.limit));
+    return rows.slice(safeOffset, safeOffset + safeLimit);
+  };
+  return readResponderRowsPage(
+    cache,
+    () => loadRows(),
+    loadStoreBoundedPage,
+    params.offset,
+    params.limit,
+    params.signal,
+  );
 }
 
 export async function readDurableDataPage(params: {
@@ -408,15 +422,7 @@ async function readPagedRowsAcrossGraphs(
   cache?: RowListCache,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  if (!cache) {
-    return readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted, signal);
-  }
-
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
-
-  const loadRows = async (): Promise<SyncRow[]> => {
+  const loadSnapshot = async (): Promise<SyncRow[]> => {
     const admittedGraphs: string[] = [];
     for (const graph of graphs) {
       if (!(await isAdmitted(graph))) continue;
@@ -424,32 +430,17 @@ async function readPagedRowsAcrossGraphs(
     }
     return readRowsAcrossGraphs(store, admittedGraphs);
   };
-
-  try {
-    return await readCachedRowsPage(
-      {
-        ...cache,
-        expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
-      },
-      loadRows,
-      safeOffset,
-      safeLimit,
-      signal,
-    );
-  } catch (error) {
-    if (!isPerSnapshotBudgetError(error)) throw error;
-    // Intrinsically-large durable snapshots must remain syncable. Fall back to
-    // the legacy store-bounded page query; the memo remembers the rejection for
-    // this session so subsequent pages avoid repeating the full materialization.
-    return readPagedRowsAcrossGraphsStoreBounded(
-      store,
-      graphs,
-      safeOffset,
-      safeLimit,
-      isAdmitted,
-      signal,
-    );
-  }
+  return readResponderRowsPage(
+    cache && {
+      ...cache,
+      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
+    },
+    loadSnapshot,
+    () => readPagedRowsAcrossGraphsStoreBounded(store, graphs, offset, limit, isAdmitted, signal),
+    offset,
+    limit,
+    signal,
+  );
 }
 
 async function readPagedRowsAcrossGraphsStoreBounded(
@@ -479,42 +470,55 @@ async function readPagedDurableDeltaRowsAcrossGraphs(
   cache?: RowListCache,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  if (!cache) {
-    return readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit, signal);
-  }
-
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
-
-  try {
-    return await readCachedRowsPage(
-      {
-        ...cache,
-        expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
-      },
-      () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
-      safeOffset,
-      safeLimit,
-      signal,
-    );
-  } catch (error) {
-    if (!isPerSnapshotBudgetError(error)) throw error;
-    return readDurableDeltaRowsPageAcrossGraphs(
-      store,
-      graphs,
-      metaGraphs,
-      sinceBatchId,
-      safeOffset,
-      safeLimit,
-      signal,
-    );
-  }
+  return readResponderRowsPage(
+    cache && {
+      ...cache,
+      expiredMessage: cache.expiredMessage ?? 'Durable data sync session snapshot expired before page completion',
+    },
+    () => readDurableDeltaRowsAcrossGraphs(store, graphs, metaGraphs, sinceBatchId),
+    () => readDurableDeltaRowsPageAcrossGraphs(store, graphs, metaGraphs, sinceBatchId, offset, limit, signal),
+    offset,
+    limit,
+    signal,
+  );
 }
 
 function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudgetError {
   return error instanceof SyncRowSnapshotBudgetError &&
     (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes');
+}
+
+/**
+ * Serve one responder page, owning the single budget-fallback policy for every
+ * memoized phase. It tries the stable-snapshot cache first, but an
+ * intrinsically-oversized snapshot (over the PER-snapshot row/byte budget) must
+ * stay syncable, so it falls back to the session-less store-bounded page read
+ * for this and every later page of the session. The memo remembers the
+ * per-snapshot rejection for the session, so subsequent pages reach this
+ * fallback without repeating the full materialization inside the memo.
+ *
+ * GLOBAL (process-wide) budget pressure is deliberately NOT swallowed here: it
+ * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
+ * retryable limit and the requester retries once other sessions drain.
+ */
+async function readResponderRowsPage(
+  cache: RowListCache | undefined,
+  loadSnapshot: () => Promise<readonly SyncRow[]>,
+  loadStoreBoundedPage: () => Promise<SyncRow[]>,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const safeOffset = Math.max(0, Math.floor(offset));
+  const safeLimit = Math.max(0, Math.floor(limit));
+  if (safeLimit === 0) return [];
+  if (!cache) return loadStoreBoundedPage();
+  try {
+    return await readCachedRowsPage(cache, loadSnapshot, safeOffset, safeLimit, signal);
+  } catch (error) {
+    if (!isPerSnapshotBudgetError(error)) throw error;
+    return loadStoreBoundedPage();
+  }
 }
 
 async function readCachedRowsPage(
