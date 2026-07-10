@@ -227,8 +227,6 @@ import {
 } from '../http-utils.js';
 import {
   normalizeRepo,
-  parseTagName,
-  isValidRef,
   isValidRepoSpec,
   repoToFetchUrl,
   githubRepoForApi,
@@ -249,6 +247,7 @@ import {
   releaseUpdateLock,
   performNpmUpdate,
 } from '../auto-update.js';
+import { isValidRef, parseTagName } from '../../auto-update-ref.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,

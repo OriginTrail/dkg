@@ -15,7 +15,14 @@
  * cost-benefit is documented in OT-RFC-41 §4.7.2.
  */
 import { join } from 'node:path';
-import { AUTO_UPDATE_GIT_ONLY_FIELDS } from '../../config.js';
+import {
+  AUTO_UPDATE_GIT_ONLY_FIELDS,
+  parseAutoUpdateVerifyTagSignature,
+} from '../../config.js';
+import {
+  formatAutoUpdateTagVerificationWarning,
+  resolveAutoUpdateGitRefPlan,
+} from '../../auto-update-ref.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]> {
@@ -108,6 +115,41 @@ export async function runConfigSanityCheck(deps: DoctorDeps): Promise<Finding[]>
         advisory: `The '${field}' field is inert unless autoUpdate.source is 'git'. Remove it from npm-mode ~/.dkg/config.json — the daemon will continue to ignore it, but its presence is misleading to anyone reading the file.`,
         subject: `autoUpdate.${field}`,
       });
+    }
+
+    if (gitMode) {
+      let verificationWarning: string | null = null;
+      const parsedVerifyTagSignature = parseAutoUpdateVerifyTagSignature(au.verifyTagSignature);
+      if (parsedVerifyTagSignature.error) {
+        findings.push({
+          check: 'config-sanity',
+          severity: 'error',
+          message: parsedVerifyTagSignature.error,
+          advisory: 'Set autoUpdate.verifyTagSignature to true or false, or remove it to inherit the network default.',
+          subject: 'autoUpdate.verifyTagSignature',
+        });
+      }
+      try {
+        const refPlan = resolveAutoUpdateGitRefPlan({
+          branch: typeof au.branch === 'string' ? au.branch : 'main',
+          ...(typeof au.ref === 'string' ? { ref: au.ref } : {}),
+          ...(parsedVerifyTagSignature.value !== undefined
+            ? { verifyTagSignature: parsedVerifyTagSignature.value }
+            : {}),
+        });
+        verificationWarning = formatAutoUpdateTagVerificationWarning(refPlan);
+      } catch {
+        verificationWarning = null;
+      }
+      if (verificationWarning) {
+        findings.push({
+          check: 'config-sanity',
+          severity: 'warning',
+          message: verificationWarning.replace(/^Auto-update \(git\): WARNING /, ''),
+          advisory: "Git tag-signature verification only applies to refs/tags/*. Set autoUpdate.ref to a signed tag ref, or set verifyTagSignature to false so the config does not imply branch updates are signature-verified.",
+          subject: 'autoUpdate.verifyTagSignature',
+        });
+      }
     }
 
     const checkIntervalMinutes = au.checkIntervalMinutes;
