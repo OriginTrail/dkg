@@ -64,6 +64,18 @@ describe('buildInitAutoUpdate', () => {
     expect(r.checkIntervalMinutes).toBe(10);
   });
 
+  it('enable preserves an explicit updateJitterMinutes override across reruns (incl. 0 = disabled)', () => {
+    const r = buildInitAutoUpdate({
+      enableAutoUpdate: true,
+      // Operator disabled rollout jitter on this node; a rerun must not drop it.
+      existingAutoUpdate: { enabled: true, source: 'npm', updateJitterMinutes: 0 },
+      networkAutoUpdate: net,
+      ...proj,
+      answers: { allowPrerelease: true, interval: 5 },
+    });
+    expect(r.updateJitterMinutes).toBe(0);
+  });
+
   it('enable preserves npm fields but drops git-only fields when forcing npm mode', () => {
     const r = buildInitAutoUpdate({
       enableAutoUpdate: true,

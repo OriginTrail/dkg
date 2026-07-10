@@ -739,37 +739,6 @@ export async function checkForNewCommitWithStatus(
   }
 }
 
-/**
- * Re-resolve the CURRENT npm channel target and map it to the version to apply,
- * or null when there is nothing to apply now. This is the post-hold-off
- * revalidation for the rollout gate: the rollout jitter delays applying a
- * detected update, and during that wait the target can be withdrawn (dist-tag
- * rolled back), rejected (prerelease policy), or caught up. Returning null in
- * those cases keeps a superseded / withdrawn release from being installed, and a
- * newer version published during the wait is applied in place of the stale one.
- */
-export async function resolveCurrentNpmTarget(
-  log: (msg: string) => void,
-  allowPrerelease: boolean,
-  channel?: string,
-): Promise<string | null> {
-  const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
-  return status.status === "available" && status.version ? status.version : null;
-}
-
-/**
- * Re-resolve the CURRENT git ref tip and map it to the commit to apply, or null
- * when the ref no longer points ahead of the running commit (moved back / caught
- * up). Post-hold-off revalidation counterpart to {@link resolveCurrentNpmTarget}.
- */
-export async function resolveCurrentGitTarget(
-  au: ResolvedAutoUpdateConfig,
-  log: (msg: string) => void,
-): Promise<string | null> {
-  const status = await checkForNewCommitWithStatus(au, log);
-  return status.status === "available" && status.commit ? status.commit : null;
-}
-
 let _updateInProgress = false;
 let _lockToken: string | null = null;
 export type UpdateStatus = "updated" | "up-to-date" | "failed";

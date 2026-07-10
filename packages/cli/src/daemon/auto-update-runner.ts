@@ -14,31 +14,46 @@
 import {
   checkForNpmVersionUpdate,
   deriveUpdateCheckState,
-  resolveCurrentNpmTarget,
   performNpmUpdate,
   performNpmUpdateEdge,
   getCurrentCliVersion,
   checkForNewCommitWithStatus,
-  resolveCurrentGitTarget,
   performUpdateWithStatus,
 } from './auto-update.js';
 import type { UpdateHoldoffGate } from './auto-update-jitter.js';
+import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
 
-/** The mutable `/api/status` update-check state (a view of daemonState). */
-export interface AutoUpdateLastCheck {
-  upToDate: boolean;
-  checkedAt: number;
-  latestCommit: string;
-  latestVersion: string;
-  channelTargetMissing: boolean;
+/**
+ * Re-resolve the CURRENT npm channel target after the hold-off, mapping to the
+ * version to apply or null when there is nothing to apply now (withdrawn /
+ * rolled back / caught up). Private to the runner — a one-line adapter over the
+ * already-public `checkForNpmVersionUpdate`, not part of the daemon's API.
+ */
+export async function resolveCurrentNpmTarget(
+  log: (msg: string) => void,
+  allowPrerelease: boolean,
+  channel?: string,
+): Promise<string | null> {
+  const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
+  return status.status === 'available' && status.version ? status.version : null;
+}
+
+/** Git counterpart to {@link resolveCurrentNpmTarget}: the current ref tip, or
+ *  null when it no longer points ahead of the running commit. Runner-private. */
+export async function resolveCurrentGitTarget(
+  au: ResolvedAutoUpdateConfig,
+  log: (msg: string) => void,
+): Promise<string | null> {
+  const status = await checkForNewCommitWithStatus(au, log);
+  return status.status === 'available' && status.commit ? status.commit : null;
 }
 
 export interface NpmUpdateRunCheckDeps {
   /** null = version-check-only (auto-apply disabled): detect + record, never apply. */
   gate: UpdateHoldoffGate | null;
   log: (msg: string) => void;
-  lastUpdateCheck: AutoUpdateLastCheck;
+  lastUpdateCheck: LastUpdateCheck;
   allowPrerelease: boolean;
   channel?: string;
   nodeRole: 'edge' | 'core';
@@ -102,7 +117,7 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
 export interface GitUpdateRunCheckDeps {
   gate: UpdateHoldoffGate;
   log: (msg: string) => void;
-  lastUpdateCheck: AutoUpdateLastCheck;
+  lastUpdateCheck: LastUpdateCheck;
   au: ResolvedAutoUpdateConfig;
   onRestart: () => Promise<void>;
 }

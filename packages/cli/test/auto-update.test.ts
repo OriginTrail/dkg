@@ -205,7 +205,8 @@ import {
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
 import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
-import { createNpmUpdateRunCheck, createGitUpdateRunCheck, type AutoUpdateLastCheck } from '../src/daemon/auto-update-runner.js';
+import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
+import type { LastUpdateCheck } from '../src/daemon/state.js';
 
 const AU: AutoUpdateConfig = {
   enabled: true,
@@ -2117,14 +2118,14 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
   afterEach(() => { restoreIo(); });
 
   it('returns the version when the channel target is still available and ahead', async () => {
-    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
     expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
   });
 
   it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
-    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // 9.1.0 pulled; latest rolled back to what the node already runs.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
@@ -2132,7 +2133,7 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
   });
 
   it('returns null when a pinned channel no longer has an acceptable target', async () => {
-    const { resolveCurrentNpmTarget } = await import('../src/daemon.js');
+    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
@@ -2153,14 +2154,14 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
   afterEach(() => { restoreIo(); });
 
   it('returns the fresh remote commit when the ref is still ahead', async () => {
-    const { resolveCurrentGitTarget } = await import('../src/daemon.js');
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111'; // current commit
     remoteSha('bbb2222');
     expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
   });
 
   it('returns null when the ref moved back to the running commit during the hold-off', async () => {
-    const { resolveCurrentGitTarget } = await import('../src/daemon.js');
+    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111';
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
     expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
@@ -2171,7 +2172,7 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
 // gate and skip a target that was withdrawn during the hold-off — i.e. that the
 // production path uses the post-hold-off revalidation, not the pre-hold-off
 // detected target. (Guards against a `revalidate: () => detectedTarget` regression.)
-function freshLastCheck(): AutoUpdateLastCheck {
+function freshLastCheck(): LastUpdateCheck {
   return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
 }
 function noJitterGate(log: (m: string) => void) {
@@ -2278,7 +2279,10 @@ describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
 
     await runCheck();
 
-    expect(logs.some((m) => m.includes('update started')), 'performUpdateWithStatus must not run').toBe(false);
+    // Direct signal, not a log substring: performUpdateWithStatus's first act is
+    // acquireUpdateLock -> openSync(".update.lock"). Zero openSync calls proves
+    // the updater was never entered (detect/revalidate never openSync).
+    expect(openSyncCalls.length, 'the updater (performUpdateWithStatus) must not be entered').toBe(0);
     expect(onRestart).not.toHaveBeenCalled();
     expect(logs.some((m) => m.includes('superseded'))).toBe(true);
     expect(lastUpdateCheck.latestCommit).toBe('bbb2222'); // detect recorded the then-available tip
