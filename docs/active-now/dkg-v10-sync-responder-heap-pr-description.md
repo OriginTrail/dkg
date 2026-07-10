@@ -306,6 +306,15 @@ uncached) instead of buffering the complete filtered set or returning a
 permanent retryable limit. Global (process-wide) budget pressure remains a quiet
 retryable limit so the requester retries once other sessions drain.
 
+That uncached fallback pages via `OFFSET`, which — unlike a retained session
+snapshot — is not stable if the graph mutates between two pages of the same
+session. This is inherent to any non-cached fallback and pre-dates this PR
+(durable-data already paged this way). Blast radius is bounded: durable data is
+Merkle-verified end-to-end, so an inconsistent assembly fails verification and
+the requester restarts the phase (churn, not silent corruption), and it only
+affects an oversized *and* concurrently-mutating context graph. A stable
+keyset/seek cursor for the fallback is tracked in Follow-up Work (#7).
+
 This PR also does not yet bound:
 
 - requester `allQuads` accumulation across every page in a phase;
@@ -444,6 +453,11 @@ New regression coverage includes:
 5. Make subscription rehydration rolling and pressure-aware.
 6. Add a constrained-heap restart/rehydration/finalization soak test and require
    a stable plateau.
+7. Give the oversized store-bounded fallback a **stable keyset/seek cursor**
+   (page on `(g,s,p,o) > lastKey` instead of `OFFSET`) so an oversized snapshot
+   that is served uncached keeps stable pagination even while the graph mutates
+   between pages. Today the fallback pages via `OFFSET` (as durable-data already
+   did pre-PR); see "What remains unbounded or amplified".
 
 ## Related Issues
 

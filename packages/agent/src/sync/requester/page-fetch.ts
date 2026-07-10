@@ -199,8 +199,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   } = params;
 
   const allQuads: Quad[] = [];
-  const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
+  // Check for a pre-aborted signal BEFORE starting phase telemetry so a caller
+  // that passes an already-aborted signal never records a phase_start without a
+  // terminal outcome. Every started phase is guaranteed a finish() below.
   throwIfAborted(signal);
+  const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery);
   let offset = checkpointStore.get(checkpointKey)?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);

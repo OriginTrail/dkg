@@ -248,4 +248,45 @@ describe('sync memory attribution metrics', () => {
       point.attributes.outcome === 'timed_out'
     )).toBe(true);
   });
+
+  it('does not start requester phase telemetry for a pre-aborted signal', async () => {
+    const harness = createMetricsHarness();
+    provider = harness.provider;
+    const controller = new AbortController();
+    controller.abort(new Error('pre-aborted'));
+
+    await expect(fetchSyncPages({
+      ctx: { operationId: 'test', operationName: 'sync' },
+      remotePeerId: 'peer-not-a-label',
+      contextGraphId: 'graph-not-a-label',
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: 'urn:data',
+      deadline: Date.now() + 10_000,
+      syncPageTimeoutMs: 1_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 2,
+      syncDeniedResponse: 'denied',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      buildSyncRequest: async () => new TextEncoder().encode('request'),
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => new Uint8Array(),
+      logWarn: () => {},
+      logInfo: () => {},
+      logDebug: () => {},
+      signal: controller.signal,
+    })).rejects.toThrow();
+    await provider.forceFlush();
+
+    // The phase never starts, so there is no started-without-terminal series and
+    // no requester_phase_start checkpoint dangling for a pre-aborted call.
+    expect(metricPoints(harness.exporter, 'dkg.sync.requester.page_count')).toHaveLength(0);
+    expect(metricPoints(harness.exporter, 'dkg.sync.requester.phase_duration_ms')).toHaveLength(0);
+    expect(metricPoints(harness.exporter, 'process.heap_used_bytes').some((point) =>
+      point.attributes.boundary === 'requester_phase_start'
+    )).toBe(false);
+  });
 });

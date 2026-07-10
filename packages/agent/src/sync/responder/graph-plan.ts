@@ -504,6 +504,18 @@ function isPerSnapshotBudgetError(error: unknown): error is SyncRowSnapshotBudge
  * GLOBAL (process-wide) budget pressure is deliberately NOT swallowed here: it
  * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
  * retryable limit and the requester retries once other sessions drain.
+ *
+ * KNOWN LIMITATION (tracked as follow-up): the store-bounded fallback pages via
+ * `OFFSET`, which — unlike a retained session snapshot — is NOT stable if the
+ * graph mutates between two page requests of the same session (a row inserted
+ * before the current offset can shift the window, duplicating or skipping a
+ * row). This is inherent to any non-cached fallback and pre-dates the meta/SWM
+ * work (durable-data already paged this way). It is bounded in blast radius:
+ * durable data is Merkle-verified end-to-end, so an inconsistent assembly fails
+ * verification and the requester restarts the phase (churn, not silent
+ * corruption); it only bites an oversized AND concurrently-mutating context
+ * graph. The durable fix is a stable keyset/seek cursor for the fallback (page
+ * on `(g,s,p,o) > lastKey` instead of `OFFSET`); see the PR follow-up list.
  */
 async function readResponderRowsPage(
   cache: RowListCache | undefined,

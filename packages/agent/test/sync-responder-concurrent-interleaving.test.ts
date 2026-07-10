@@ -1244,7 +1244,7 @@ describe('sync responder pagination interleaving', () => {
     expect(loads).toBe(1);
   });
 
-  it('preserves a previously-good snapshot when its refresh exceeds the budget', async () => {
+  it('does not resume a superseded snapshot after a refresh exceeds the budget', async () => {
     const budget = createSyncResponderSnapshotBudget({
       maxRows: 4,
       maxBytesEstimate: Number.MAX_SAFE_INTEGER,
@@ -1264,13 +1264,18 @@ describe('sync responder pagination interleaving', () => {
     const original = rows(2, 'original');
 
     await expect(memo.get('refresh', async () => original)).resolves.toBe(original);
+    // The superseding session's page 0 materializes an over-cap snapshot: rejected.
     await expect(
       memo.get('refresh', async () => rows(3, 'oversized'), { refresh: true }),
     ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    // A later page of the SAME (superseding) session must NOT resume the stale
+    // 2-row snapshot; it takes the same rejection so the responder falls back
+    // consistently for every page instead of mixing two snapshots in one session.
     await expect(
       memo.get('refresh', async () => [], { requireExisting: true }),
-    ).resolves.toBe(original);
-    expect(budget.stats()).toMatchObject({ snapshots: 1, rows: 2 });
+    ).rejects.toMatchObject({ reason: 'snapshot_rows' });
+    // The superseded snapshot is released from the budget, not retained until TTL.
+    expect(budget.stats()).toMatchObject({ snapshots: 0, rows: 0 });
   });
 
   it('enforces per-snapshot estimated-byte limits independently of row limits', async () => {

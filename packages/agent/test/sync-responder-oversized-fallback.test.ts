@@ -216,6 +216,46 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(joined).not.toContain('A-stale-should-be-excluded');
     expect(joined).not.toContain('orphan-should-be-excluded');
   });
+
+  it('does not mix a stale cached snapshot into a superseding over-budget session', async () => {
+    const store = new OxigraphStore();
+    const cgId = 'refresh-over-budget';
+    const dataGraph = `did:dkg:context-graph:${cgId}/context/1`;
+    const row = (index: number): Quad => ({
+      graph: dataGraph,
+      subject: `urn:rob:${index.toString().padStart(3, '0')}`,
+      predicate: `${DKG_NS}label`,
+      object: `"row-${index.toString().padStart(3, '0')}"`,
+    });
+    await store.insert([row(0), row(1)]);
+
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 2,
+      snapshotBudget: {
+        maxRows: 1000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 2, // the 2-row snapshot fits; a later 3-row snapshot does not
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const base = { contextGraphId: cgId, includeSharedMemory: false, phase: 'data' as const, limit: 2 };
+
+    // Session T1 caches the stable 2-row snapshot.
+    expect(linesFromNquads(await cap.invoke({ ...base, offset: 0, syncSessionId: 'T1' }))).toHaveLength(2);
+
+    // The graph grows past the per-snapshot cap.
+    await store.insert([row(2)]);
+
+    // Session T2 supersedes T1 at offset 0 (refresh): over cap → fresh fallback page.
+    const t2page0 = await cap.invoke({ ...base, offset: 0, syncSessionId: 'T2' });
+    // A later page of T2 must fall back too — never resume T1's stale 2-row snapshot.
+    const t2page1 = await cap.invoke({ ...base, offset: 2, syncSessionId: 'T2' });
+
+    const t2 = new Set(linesFromNquads(`${t2page0}\n${t2page1}`));
+    // All three CURRENT rows, no stale mix and no dropped grown row (row-002).
+    expect(t2.size).toBe(3);
+    expect([...t2].join('\n')).toContain('"row-002"');
+  });
 });
 
 /** Assert the durable-meta fallback issued a bounded, single-graph paged query. */

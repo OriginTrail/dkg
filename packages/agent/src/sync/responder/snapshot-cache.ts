@@ -9,7 +9,11 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 
-export type SyncRow = { s: string; p: string; o: string; g: string };
+// Readonly at the object level, not just the array: the memo hands out its
+// retained snapshot array by reference, so a mutation to any row would corrupt
+// later pages served from the same snapshot. The type makes that invariant a
+// compile-time boundary rather than a comment.
+export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
 
 export interface SyncRowListMemo {
   get(
@@ -212,13 +216,21 @@ export function createResponderSyncRowListMemo(
         });
       } catch (error) {
         if (
-          !existing &&
           error instanceof SyncRowSnapshotBudgetError &&
           (error.reason === 'snapshot_rows' || error.reason === 'snapshot_bytes')
         ) {
           // Remember an intrinsically-oversized snapshot for this session so
           // later pages can take the store-paged fallback without repeating the
           // full materialization. A refresh/new session clears this marker.
+          //
+          // On a refresh (existing present) the prior snapshot was kept by
+          // admit()'s atomic replace, but the token that produced it is already
+          // superseded — so drop it here. Leaving it cached would let a later
+          // same-session page (requireExisting) resume the STALE snapshot after
+          // page 0 fell back to fresh store paging, mixing two snapshots in one
+          // session. Dropping it forces every page of the superseding session
+          // down the same fallback path.
+          if (existing) deleteCached(key, 'replaced');
           rememberRejected(key, error);
         }
         throw error;
