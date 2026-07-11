@@ -239,9 +239,13 @@ export class RpcFailoverClient {
     return errorCode(err) === 'TIMEOUT' ? 'timeout' : 'error';
   }
 
-  private servedKey(phase: string, detail?: string): string {
-    const suffix = detail ? `|${detail}` : '';
-    return `${this.chainId()}|${phase}${suffix}`;
+  private servedWriteKey(phase: 'tx-preparation' | 'tx-broadcast' | 'receipt-lookup'): string {
+    return `${this.chainId()}|write|${phase}`;
+  }
+
+  private servedReadBucketKey(policy: ReadPolicy, skipPreferred: boolean): string {
+    const preference = skipPreferred ? 'transparent' : 'sticky';
+    return `${this.chainId()}|read-bucket|${policy}|${preference}`;
   }
 
   /**
@@ -427,7 +431,7 @@ export class RpcFailoverClient {
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.
         attempt.recordSuccess();
-        noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { key: this.servedKey('tx-preparation') });
+        noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('tx-preparation') });
         return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
@@ -500,7 +504,7 @@ export class RpcFailoverClient {
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
               attempt.recordSuccess();
-              noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { alwaysLog: true, key: this.servedKey('tx-broadcast') });
+              noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -509,7 +513,7 @@ export class RpcFailoverClient {
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
                 attempt.recordSuccess();
-                noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { alwaysLog: true, key: this.servedKey('tx-broadcast') });
+                noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -591,7 +595,7 @@ export class RpcFailoverClient {
                 // (no single winning endpoint), so we only note on a real
                 // receipt — the self-heal still polls every endpoint per tick.
                 attempt.recordSuccess();
-                noteRpcServed('receipt lookup', endpoint.rpcUrl, { key: this.servedKey('receipt-lookup') });
+                noteRpcServed('receipt lookup', endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('receipt-lookup') });
                 return receipt;
               }
             } catch (err) {
@@ -691,7 +695,7 @@ export class RpcFailoverClient {
           continue;
         }
         attempt.recordSuccess();
-        noteRpcServed(label, endpoint.rpcUrl, { key: this.servedKey('read', `${policy}|${skipPreferred ? 'transparent' : 'sticky'}`) });
+        noteRpcServed(label, endpoint.rpcUrl, { mode: 'read', key: this.servedReadBucketKey(policy, skipPreferred) });
         return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;

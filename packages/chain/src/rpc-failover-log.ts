@@ -100,6 +100,10 @@ interface MutableStats {
 const MAX_TRACKED_HOSTS = 64;
 const MAX_DEDUP_KEYS = 256;
 
+export type RpcServedAttribution =
+  | { mode: 'read'; key: string }
+  | { mode: 'write' };
+
 function freshStats(): MutableStats {
   return {
     failovers: 0,
@@ -302,23 +306,24 @@ export function notePreferredEndpoint(label: string, preferredUrl: string): void
  *
  * @param label   human operation label, e.g. `V10 publish broadcast`
  * @param servedUrl the RPC URL that served the call (reduced to host before logging)
- * @param options `alwaysLog` logs every success (writes); `key` is the stable
- *                low-cardinality operation identity used for read shift gating
+ * @param attribution explicit read/write attribution mode. Reads require a
+ *                    stable low-cardinality suppression key; writes log every
+ *                    success for per-transaction attribution.
  */
 export function noteRpcServed(
   label: string,
   servedUrl: string,
-  options: boolean | { alwaysLog?: boolean; key?: string } = false,
+  attribution: RpcServedAttribution,
 ): void {
   try {
-    const alwaysLog = typeof options === 'boolean' ? options : options.alwaysLog === true;
-    const key = typeof options === 'boolean' ? label : (options.key ?? label);
     const host = rpcHost(servedUrl);
     bump(stats.servedByEndpointHost, host, MAX_TRACKED_HOSTS);
-    const prior = lastServedByKey.get(key);
+    const alwaysLog = attribution.mode === 'write';
+    const key = attribution.mode === 'read' ? attribution.key : undefined;
+    const prior = key === undefined ? undefined : lastServedByKey.get(key);
     const changed = prior !== host;
     if (!alwaysLog && !changed) return; // same provider on a read — count only, don't log
-    if (!alwaysLog) {
+    if (key !== undefined) {
       if (lastServedByKey.has(key)) lastServedByKey.delete(key);
       lastServedByKey.set(key, host);
       while (lastServedByKey.size > MAX_TRACKED_HOSTS) {

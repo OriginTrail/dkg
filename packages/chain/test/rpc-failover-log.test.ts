@@ -126,8 +126,8 @@ describe('rpc-failover-log', () => {
     afterEach(() => { logSpy.mockRestore(); });
 
     it('counts every successful call per host, host-only (no key leak)', () => {
-      noteRpcServed('read cgKaCount', 'https://a.example/secretkey');
-      noteRpcServed('read cgKaCount', 'https://a.example/secretkey');
+      noteRpcServed('read cgKaCount', 'https://a.example/secretkey', { mode: 'read', key: 'read-cg-count' });
+      noteRpcServed('read cgKaCount', 'https://a.example/secretkey', { mode: 'read', key: 'read-cg-count' });
       const snap = getRpcFailoverStats();
       expect(snap.servedByEndpointHost).toEqual({ 'a.example': 2 });
       // never the full URL / key
@@ -136,12 +136,12 @@ describe('rpc-failover-log', () => {
     });
 
     it('reads log only on a provider CHANGE, not per call', () => {
-      noteRpcServed('read x', 'https://a.example');   // first sighting -> logs
-      noteRpcServed('read x', 'https://a.example');   // same host    -> silent
-      noteRpcServed('read x', 'https://a.example');   // same host    -> silent
+      noteRpcServed('read x', 'https://a.example', { mode: 'read', key: 'read-x' });   // first sighting -> logs
+      noteRpcServed('read x', 'https://a.example', { mode: 'read', key: 'read-x' });   // same host    -> silent
+      noteRpcServed('read x', 'https://a.example', { mode: 'read', key: 'read-x' });   // same host    -> silent
       expect(logSpy).toHaveBeenCalledTimes(1);
       expect(String(logSpy.mock.calls[0][0])).toContain('via a.example');
-      noteRpcServed('read x', 'https://b.example');   // shift        -> logs
+      noteRpcServed('read x', 'https://b.example', { mode: 'read', key: 'read-x' });   // shift        -> logs
       expect(logSpy).toHaveBeenCalledTimes(2);
       expect(String(logSpy.mock.calls[1][0])).toContain('via b.example (provider shift)');
       // ...but every call was still counted
@@ -149,8 +149,8 @@ describe('rpc-failover-log', () => {
     });
 
     it('uses a stable key for read suppression, independent from display-label wording', () => {
-      noteRpcServed('read cgKaCount', 'https://a.example', { key: 'evm:31337|read|cg-count' });
-      noteRpcServed('read cgKaCount renamed', 'https://a.example', { key: 'evm:31337|read|cg-count' });
+      noteRpcServed('read cgKaCount', 'https://a.example', { mode: 'read', key: 'evm:31337|read|cg-count' });
+      noteRpcServed('read cgKaCount renamed', 'https://a.example', { mode: 'read', key: 'evm:31337|read|cg-count' });
 
       expect(logSpy).toHaveBeenCalledTimes(1);
       expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'a.example': 2 });
@@ -158,27 +158,27 @@ describe('rpc-failover-log', () => {
 
     it('keeps overflow read labels bounded without logging every repeated same-host success', () => {
       for (let i = 0; i < 64; i += 1) {
-        noteRpcServed(`read ${i}`, 'https://seed.example');
+        noteRpcServed(`read ${i}`, 'https://seed.example', { mode: 'read', key: `read-${i}` });
       }
       logSpy.mockClear();
 
-      noteRpcServed('read overflow', 'https://overflow.example');
-      noteRpcServed('read overflow', 'https://overflow.example');
+      noteRpcServed('read overflow', 'https://overflow.example', { mode: 'read', key: 'read-overflow' });
+      noteRpcServed('read overflow', 'https://overflow.example', { mode: 'read', key: 'read-overflow' });
 
       expect(logSpy).toHaveBeenCalledTimes(1);
       expect(getRpcFailoverStats().servedByEndpointHost['overflow.example']).toBe(2);
     });
 
     it('tx broadcasts (alwaysLog) log every success for per-tx attribution', () => {
-      noteRpcServed('V10 publish broadcast', 'https://a.example', true);
-      noteRpcServed('V10 publish broadcast', 'https://a.example', true); // same host, still logs
+      noteRpcServed('V10 publish broadcast', 'https://a.example', { mode: 'write' });
+      noteRpcServed('V10 publish broadcast', 'https://a.example', { mode: 'write' }); // same host, still logs
       expect(logSpy).toHaveBeenCalledTimes(2);
       expect(String(logSpy.mock.calls[0][0])).toBe('[chain] RPC served: V10 publish broadcast via a.example');
     });
 
     it('never throws even if console.log throws — the call path must not abort', () => {
       logSpy.mockImplementation(() => { throw new Error('sink down'); });
-      expect(() => noteRpcServed('read x', 'https://a.example', true)).not.toThrow();
+      expect(() => noteRpcServed('read x', 'https://a.example', { mode: 'write' })).not.toThrow();
       expect(getRpcFailoverStats().servedByEndpointHost['a.example']).toBe(1);
     });
   });

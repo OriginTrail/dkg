@@ -97,6 +97,22 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
     expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'served.example': 1 });
   });
 
+  it('read success logging is bucketed by chain, read policy, and preference mode', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const primary = { read: recorder(async () => 'PRIMARY') };
+      const client = makeClient([primary], ['https://served.example/key']);
+
+      await client.read('token.allowance', (p: any) => p.read());
+      await client.read('hub.version', (p: any) => p.read());
+
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'served.example': 2 });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
   it('read MULTI-RPC pointRead: an attempt over the 4s cap aborts and fails over', async () => {
     vi.useFakeTimers();
     const slow = recorder(() => new Promise<string>((r) => { setTimeout(() => r('PRIMARY'), 5_000); }));
@@ -323,6 +339,7 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     const passedSigner: any = signPopulated.calls[0][0];
     expect(passedSigner.address).toBe(SIGNER_ADDR); // signed by the right wallet (no mid-flight rotation)
     expect(passedSigner.boundTo).toBe(providerObj);  // bound to the active provider
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'only.example': 1 });
   });
 
   it('a RETRYABLE gas-estimate error rethrows and FAILS OVER when another provider remains (buffer applied on the backup)', async () => {

@@ -23,14 +23,14 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
+  ChainRpcTransportError,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
   getRpcFailoverStats,
-  ChainRpcTransportError,
+  _resetRpcFailoverStatsForTest,
 } from '@origintrail-official/dkg-chain';
-import { _resetRpcFailoverStatsForTest } from '../../chain/src/rpc-failover-log.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { loadNetworkConfig } from '../src/config.js';
@@ -185,7 +185,7 @@ describe('/api/status selected overlay details', () => {
       noteRpcFailover('status-test publish', 'https://other.example', { status: 503 }, 'https://backup.example');
       noteRpcExhaustion('status-test publish', ['https://primary.example', 'https://backup.example']);
       notePreferredEndpoint('status-test publish', 'https://backup.example');
-      noteRpcServed('status-test read', 'https://served.example/key');
+      noteRpcServed('status-test read', 'https://served.example/key', { mode: 'read', key: 'status-test-read' });
 
       const server = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
