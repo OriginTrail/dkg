@@ -1818,7 +1818,6 @@ export class DKGNode {
     // reservation recovery on connections that were recreated from
     // scratch (otReviewAgent on PR #1613).
     this.relayForcedRedialState.clear();
-    this.relayReservationRedialAt.clear();
     this.relayWatchdogConsecutiveFailures = 0;
     this.relayReservationRedialAt.clear();
     this.relayedPeers.clear();

@@ -1402,6 +1402,52 @@ describe('Relay watchdog: review-round-1 hardening', () => {
     ).toBe(false);
   }, 30000);
 
+  it('bypasses an active cooldown when NO reservation exists anywhere (urgency wins)', async () => {
+    // Liveness-critical counterpart of the cooldown test (otReviewAgent
+    // round 2): with zero reservations the node is inbound-unreachable,
+    // so an active cooldown must NOT suppress the forced redial — if
+    // every relay were cooled simultaneously nothing would ever retry.
+    const deadRelay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(deadRelay);
+    await deadRelay.start();
+    const deadAddr = deadRelay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [deadAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const deadPid = deadRelay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayForcedRedialState: Map<string, { strikes: number; cooldownUntil: number; busyDeferralTicks: number }>;
+    };
+    // Active cooldown, zero reservations (dead relay runs no relay server,
+    // so no /p2p-circuit self-addr can exist).
+    internals.relayForcedRedialState.set(deadPid, {
+      strikes: 0,
+      cooldownUntil: Date.now() + 600_000,
+      busyDeferralTicks: 0,
+    });
+    expect(
+      edge.libp2p.getMultiaddrs().some(ma => ma.toString().includes('/p2p-circuit')),
+      'test setup: edge must hold no reservation',
+    ).toBe(false);
+
+    const logSpy = spyConsole('log');
+    try {
+      await internals.watchdogTick.call(edge);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        `cooldown must be bypassed with zero reservations; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
+      ).toBe(true);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 30000);
+
   it('busy-deferral cap: forced redial proceeds once RELAY_BUSY_DEFERRAL_MAX_TICKS is exceeded', async () => {
     const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
     nodes.push(relay);
