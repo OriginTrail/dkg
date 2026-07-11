@@ -43,7 +43,7 @@ import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isKnownTransactionError } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
-import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, rpcHost } from './rpc-failover-log.js';
+import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
@@ -239,6 +239,15 @@ export class RpcFailoverClient {
     return errorCode(err) === 'TIMEOUT' ? 'timeout' : 'error';
   }
 
+  private servedWriteKey(phase: 'tx-preparation' | 'tx-broadcast' | 'receipt-lookup'): string {
+    return `${this.chainId()}|write|${phase}`;
+  }
+
+  private servedReadBucketKey(policy: ReadPolicy, skipPreferred: boolean): string {
+    const preference = skipPreferred ? 'transparent' : 'sticky';
+    return `${this.chainId()}|read-bucket|${policy}|${preference}`;
+  }
+
   /**
    * Single chain-RPC outcome boundary: records `dkg.chain.rpc.total` (and the
    * `dkg.chain.rpc.failover.total` exhaustion counter) with ONE identical,
@@ -422,6 +431,7 @@ export class RpcFailoverClient {
         // so it's preferred for the read-your-write ops that follow (the caller's
         // broadcast + receipt + confirming re-reads) AND for subsequent populates.
         attempt.recordSuccess();
+        noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('tx-preparation') });
         return signed;
       } catch (err) {
         if (!isRetryableRpcError(err)) throw err;
@@ -494,6 +504,7 @@ export class RpcFailoverClient {
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
               attempt.recordSuccess();
+              noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
               return;
             } catch (err) {
               if (isKnownTransactionError(err)) {
@@ -502,6 +513,7 @@ export class RpcFailoverClient {
                 span.addEvent('broadcast.already_known', { attempt: i + 1 });
                 this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
                 attempt.recordSuccess();
+                noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
                 return;
               }
               if (!isRetryableRpcError(err)) {
@@ -583,6 +595,7 @@ export class RpcFailoverClient {
                 // (no single winning endpoint), so we only note on a real
                 // receipt — the self-heal still polls every endpoint per tick.
                 attempt.recordSuccess();
+                noteRpcServed('receipt lookup', endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('receipt-lookup') });
                 return receipt;
               }
             } catch (err) {
@@ -682,6 +695,7 @@ export class RpcFailoverClient {
           continue;
         }
         attempt.recordSuccess();
+        noteRpcServed(label, endpoint.rpcUrl, { mode: 'read', key: this.servedReadBucketKey(policy, skipPreferred) });
         return out;
       } catch (err) {
         if (!isRetryable(err)) throw err;
