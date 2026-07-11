@@ -321,7 +321,16 @@ const DEFAULT_CHANGELOG_PAGE_BYTES = 4 * 1024 * 1024;
  * (assertion-graph membership + child-CG descendant rejection). `assertionGraphs`
  * is memoised per invocation, matching the original inline closure.
  */
-function createAdmissionContext(store: TripleStore, contextGraphId: string): {
+function createAdmissionContext(
+  store: TripleStore,
+  contextGraphId: string,
+  // The durable-DATA phase (readDurableDataPage) excludes the top-level `_meta`
+  // graph because the separate durable-META phase serves it. The changelog lane
+  // serves data AND meta in ONE delta stream, so it must INCLUDE topMeta —
+  // otherwise a public CG routed to changelog-only never converges its top-level
+  // metadata (OT-RFC-59 review 🔴 3594). SWM (own phase) and `/_private` stay out.
+  opts: { includeTopMeta?: boolean } = {},
+): {
   cgPrefix: string;
   topMetaGraph: string;
   isCandidateGraph: (graph: string) => boolean;
@@ -331,7 +340,7 @@ function createAdmissionContext(store: TripleStore, contextGraphId: string): {
   const topMetaGraph = contextGraphMetaGraphUri(contextGraphId);
   const isCandidateGraph = (graph: string): boolean => {
     if (graph !== cgPrefix && !graph.startsWith(`${cgPrefix}/`)) return false;
-    if (graph === topMetaGraph) return false;
+    if (!opts.includeTopMeta && graph === topMetaGraph) return false;
     // SWM graphs are the dedicated SWM phase's exclusive domain; `/_private` is
     // never durable-served (see readDurableDataPage's original inline note).
     if (graph.includes('/_shared_memory')) return false;
@@ -393,10 +402,16 @@ export async function readChangelogDeltaPage(params: {
 
   // (3) Re-apply the candidate exclusions (readChanges bypassed every phase
   // filter) and collapse to the latest op per graph (ascending seq ⇒ last wins).
-  const { isCandidateGraph, isAdmitted } = createAdmissionContext(params.store, params.contextGraphId);
+  // The changelog lane serves data AND meta in one stream, so — unlike the durable
+  // DATA phase — it INCLUDES the top-level `_meta` graph (the requester applies meta
+  // as a trusted anchor, legacy-parity), so a changelog-only public CG converges its
+  // top-level metadata rather than silently skipping it.
+  const { isCandidateGraph, isAdmitted } = createAdmissionContext(
+    params.store, params.contextGraphId, { includeTopMeta: true },
+  );
   const lastOp = new Map<string, { seq: number; op: ChangeOp }>();
   for (const r of raw) {
-    if (!isCandidateGraph(r.graph)) continue; // wrong-CG / topMeta / SWM / private — hides other/private-CG URIs
+    if (!isCandidateGraph(r.graph)) continue; // wrong-CG / SWM / private — hides other/private-CG URIs
     lastOp.set(r.graph, { seq: r.seq, op: r.op });
   }
 

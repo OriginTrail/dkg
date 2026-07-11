@@ -133,6 +133,19 @@ describe('planPageApply — verified-apply planner', () => {
     expect(p.ops).toEqual([{ seq: 9, graph: DATA, op: 'drop', quads: [] }]);
     expect(p.advanceTo).toBe(9);
   });
+
+  it('applies a META-only page as a trusted anchor (top-level metadata convergence, no data sibling)', () => {
+    // Top-level `_meta` (CG config) with no merkle root and no data sibling in-page —
+    // legacy trusts served meta, so the changelog lane must apply it, not defer forever.
+    const TOP_META = 'did:dkg:context-graph:cg/_meta';
+    const page = buildPage([{ seq: 7, graph: TOP_META, count: 2, noRoot: true }]);
+    const p = plan(page, { nextSeq: 7 });
+    expect(p.deferred).toBe(false);
+    expect(p.ops.map((o) => o.graph)).toEqual([TOP_META]);
+    expect(p.ops[0].op).toBe('upsert');
+    expect(p.ops[0].quads).toHaveLength(2);
+    expect(p.advanceTo).toBe(7);
+  });
 });
 
 // ── runChangelogSync (transport/cursor loop + resync backstop) ──────────────

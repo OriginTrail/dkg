@@ -82,9 +82,17 @@ export function planPageApply(params: {
     if ((params.recordQuadCountByGraph.get(rec.graph) ?? 0) === 0) {
       continue;
     }
-    const isMeta = rec.graph.endsWith('/_meta');
-    const dataGraph = isMeta ? rec.graph.slice(0, -'/_meta'.length) : rec.graph;
-    if (!dataGraphTrusted(dataGraph)) {
+    if (rec.graph.endsWith('/_meta')) {
+      // META graphs are trusted ANCHORS, exactly like legacy sync: the served meta is
+      // applied as-is (rejected-KC rows already dropped from verifiedMeta), and DATA is
+      // what gets merkle-verified against it. This is what lets the top-level `_meta`
+      // graph (whose data sibling is often empty) converge instead of deferring forever.
+      ops.push({ seq: rec.seq, graph: rec.graph, op: 'upsert', quads: params.verifiedByGraph.get(rec.graph) ?? [] });
+      applied += 1;
+      continue;
+    }
+    // DATA graphs apply ONLY if they merkle-verify against their in-page meta.
+    if (!dataGraphTrusted(rec.graph)) {
       deferred = true;
       earliestUnresolvedSeq = Math.min(earliestUnresolvedSeq, rec.seq);
       break; // STOP at the first unresolved record — contiguous-prefix cursor safety.

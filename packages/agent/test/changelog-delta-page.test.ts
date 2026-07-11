@@ -113,6 +113,22 @@ describe('readChangelogDeltaPage — delta serving', () => {
     await store.close();
   });
 
+  it('INCLUDES the top-level _meta graph (unlike the durable-data phase) so it converges', async () => {
+    // OT-RFC-59 review 🔴 3594: the changelog lane serves data AND meta in one stream, so
+    // it must emit topMeta — otherwise a changelog-only public CG never syncs its top-level
+    // metadata. The durable-DATA phase still excludes it (its META phase serves it).
+    const topMeta = `${cgPrefix}/_meta`;
+    const store = await storeWith([['urn:s', 'http://dkg.io/ontology/merkleRoot', '"0xabc"', topMeta]]);
+    const resp = await readChangelogDeltaPage({
+      reader: new FakeReader({ era: 'E1', seq: 2 }, [rec(1, topMeta, 'upsert'), rec(2, G1, 'upsert')]),
+      store, contextGraphId: CG, sinceSeq: 0, requesterEra: 'E1', limit: 100,
+    });
+    expect(resp.kind).toBe('delta');
+    if (resp.kind !== 'delta') return;
+    expect(resp.records.map((r) => r.graph)).toContain(topMeta); // topMeta now emitted
+    await store.close();
+  });
+
   it('nextSeq is the scanned high-water (not head) when the scan window is full', async () => {
     const store = await storeWith([['urn:s', 'urn:p', '"v"', G1], ['urn:s2', 'urn:p', '"v"', G2]]);
     // limit 1 ⇒ readChanges returns only seq 1; head is 2 ⇒ not drained.
