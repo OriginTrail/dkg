@@ -15,7 +15,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -827,6 +827,22 @@ export class DashboardDB {
           seq INTEGER NOT NULL CHECK (seq >= 0),
           updated_at INTEGER NOT NULL,
           PRIMARY KEY (peer_id, context_graph_id)
+        );
+      `);
+    }
+
+    if (version < 24) {
+      // OT-RFC-59 §6 P0 durable era guard: the write-side ChangelogStore's
+      // restore-detection needs the (era, highSeq) high-water in a store that a
+      // `store.nq` restore does NOT roll back with the RDF store. node-ui.db
+      // survives such a restore, so a rollback under the same era rotates the era
+      // (forcing peers to full-resync instead of silently skipping). Single row.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_era (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          era TEXT NOT NULL,
+          high_seq INTEGER NOT NULL CHECK (high_seq >= 0),
+          updated_at INTEGER NOT NULL
         );
       `);
     }
@@ -2474,6 +2490,46 @@ export class SqliteChangelogCursorStore {
         seq = excluded.seq,
         updated_at = excluded.updated_at
     `).run(peerId, contextGraphId, era, seq, nowMs);
+  }
+}
+
+/**
+ * OT-RFC-59 §6 P0 durable era guard (duck-compatible with storage's
+ * ChangelogEraGuard). Persists the single (era, high_seq) high-water in
+ * node-ui.db — which a `store.nq` RDF-store restore does NOT roll back — so the
+ * write-side ChangelogStore can detect a restore/rollback (seq regressed under
+ * the same era) and rotate the era, forcing peers to full-resync instead of
+ * silently skipping. `save` is called after every committed seq, so it must be a
+ * single fast upsert.
+ */
+export class SqliteChangelogEraGuard {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  async load(): Promise<{ era: string; highSeq: number } | null> {
+    const row = this.db.prepare(
+      `SELECT era, high_seq FROM changelog_era WHERE id = 1`,
+    ).get() as { era: string; high_seq: number } | undefined;
+    return row ? { era: row.era, highSeq: row.high_seq } : null;
+  }
+
+  async save(era: string, highSeq: number): Promise<void> {
+    if (!Number.isSafeInteger(highSeq) || highSeq < 0) {
+      throw new Error(`Invalid changelog era high_seq: ${highSeq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_era (id, era, high_seq, updated_at)
+      VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        era = excluded.era,
+        high_seq = excluded.high_seq,
+        updated_at = excluded.updated_at
+    `).run(era, highSeq, this.clock());
   }
 }
 
