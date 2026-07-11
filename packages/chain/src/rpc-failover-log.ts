@@ -88,12 +88,21 @@ interface MutableStats {
   preferredEstablishments: number;
   byErrorClass: Map<RpcFailoverErrorClass, number>;
   byEndpointHost: Map<string, number>;
+  // Per-host count of successful calls each endpoint SERVED — symmetric with
+  // `byEndpointHost` (which counts failures). This is the operator's "which
+  // provider is actually carrying the traffic" distribution, the success-side
+  // complement to the failover log.
+  servedByEndpointHost: Map<string, number>;
 }
 
 /** Cap the per-host map so a pathological churn of hosts can't grow it
  *  without bound (real configs have <=~4 endpoints per chain). */
 const MAX_TRACKED_HOSTS = 64;
 const MAX_DEDUP_KEYS = 256;
+
+export type RpcServedAttribution =
+  | { mode: 'read'; key: string }
+  | { mode: 'write' };
 
 function freshStats(): MutableStats {
   return {
@@ -102,10 +111,18 @@ function freshStats(): MutableStats {
     preferredEstablishments: 0,
     byErrorClass: new Map(),
     byEndpointHost: new Map(),
+    servedByEndpointHost: new Map(),
   };
 }
 
 let stats: MutableStats = freshStats();
+
+// Last host that successfully served each stable operation key — drives the
+// log-on-change gate for high-volume reads (so we log a provider shift, not
+// every call). This deliberately does NOT key by the human log label: call-site
+// wording is presentation, not process-wide state. Bounded with LRU eviction so
+// overflow labels can still suppress repeated same-host read logs.
+const lastServedByKey = new Map<string, string>();
 
 function bump(map: Map<string, number>, key: string, cap: number): void {
   if (!map.has(key) && map.size >= cap) return; // bounded; drop new keys past the cap
@@ -119,6 +136,7 @@ export interface RpcFailoverStatsSnapshot {
   preferredEstablishments: number;
   byErrorClass: Record<string, number>;
   byEndpointHost: Record<string, number>;
+  servedByEndpointHost: Record<string, number>;
 }
 
 export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
@@ -128,6 +146,7 @@ export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
     preferredEstablishments: stats.preferredEstablishments,
     byErrorClass: Object.fromEntries(stats.byErrorClass),
     byEndpointHost: Object.fromEntries(stats.byEndpointHost),
+    servedByEndpointHost: Object.fromEntries(stats.servedByEndpointHost),
   };
 }
 
@@ -135,6 +154,7 @@ export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
 export function _resetRpcFailoverStatsForTest(): void {
   stats = freshStats();
   dedup.clear();
+  lastServedByKey.clear();
   clockOverride = undefined;
 }
 
@@ -267,5 +287,57 @@ export function notePreferredEndpoint(label: string, preferredUrl: string): void
     }
   } catch {
     // Observability must never break the failover path.
+  }
+}
+
+/**
+ * Record + log which endpoint SERVED a successful call/tx — the success-side
+ * complement to {@link noteRpcFailover}. Host-only, never-throwing, safe on the
+ * hot success path. Answers "which provider is actually carrying the traffic",
+ * which the failure-only failover log cannot.
+ *
+ *  - `alwaysLog` (tx / write broadcasts): logs EVERY success. Broadcasts are
+ *    low-volume and operators want per-tx attribution — "which provider
+ *    broadcast this tx".
+ *  - default (reads): high-volume, so it logs ONLY when the serving host CHANGES
+ *    for this label (a provider shift), never once per call. The full per-host
+ *    distribution is always available via {@link getRpcFailoverStats}
+ *    (`servedByEndpointHost`) and `/api/status`.
+ *
+ * @param label   human operation label, e.g. `V10 publish broadcast`
+ * @param servedUrl the RPC URL that served the call (reduced to host before logging)
+ * @param attribution explicit read/write attribution mode. Reads require a
+ *                    stable low-cardinality suppression key; writes log every
+ *                    success for per-transaction attribution.
+ */
+export function noteRpcServed(
+  label: string,
+  servedUrl: string,
+  attribution: RpcServedAttribution,
+): void {
+  try {
+    const host = rpcHost(servedUrl);
+    bump(stats.servedByEndpointHost, host, MAX_TRACKED_HOSTS);
+    const alwaysLog = attribution.mode === 'write';
+    const key = attribution.mode === 'read' ? attribution.key : undefined;
+    const prior = key === undefined ? undefined : lastServedByKey.get(key);
+    const changed = prior !== host;
+    if (!alwaysLog && !changed) return; // same provider on a read — count only, don't log
+    if (key !== undefined) {
+      if (lastServedByKey.has(key)) lastServedByKey.delete(key);
+      lastServedByKey.set(key, host);
+      while (lastServedByKey.size > MAX_TRACKED_HOSTS) {
+        const oldest = lastServedByKey.keys().next().value;
+        if (oldest === undefined || oldest === key) break;
+        lastServedByKey.delete(oldest);
+      }
+    }
+    // Mark a genuine provider SHIFT (had a prior, different host) — not the first
+    // sighting, and not the always-log tx path.
+    const shift = changed && prior !== undefined && !alwaysLog;
+    // eslint-disable-next-line no-console
+    console.log(`[chain] RPC served: ${label} via ${host}${shift ? ' (provider shift)' : ''}`);
+  } catch {
+    // Observability must never break the call path.
   }
 }
