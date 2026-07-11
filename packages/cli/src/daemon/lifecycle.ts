@@ -95,6 +95,7 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
@@ -1499,6 +1500,7 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
@@ -1606,6 +1608,7 @@ export async function runDaemonInner(
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
     syncCheckpointStore,
+    changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {
