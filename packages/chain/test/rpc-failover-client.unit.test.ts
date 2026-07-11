@@ -41,7 +41,7 @@ import {
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
-import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
+import { _resetRpcFailoverStatsForTest, getRpcFailoverStats } from '../src/rpc-failover-log.js';
 import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
 
 const callExceptionErr = (msg = 'execution reverted: TooLowAllowance') => {
@@ -87,6 +87,15 @@ describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => 
 // ── read / readContract — the matrix APPLIED + view classifier ───────────────
 describe('RpcFailoverClient.read / readContract — policy matrix applied + view classifier', () => {
   afterEach(() => { vi.useRealTimers(); });
+
+  it('successful read records the serving endpoint host', async () => {
+    const primary = { read: recorder(async () => 'PRIMARY') };
+    const client = makeClient([primary], ['https://served.example/key']);
+
+    await expect(client.read('human read label', (p: any) => p.read())).resolves.toBe('PRIMARY');
+
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'served.example': 1 });
+  });
 
   it('read MULTI-RPC pointRead: an attempt over the 4s cap aborts and fails over', async () => {
     vi.useFakeTimers();
@@ -189,6 +198,15 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
 
 // ── broadcast (write transport) ──────────────────────────────────────────────
 describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhaustion', () => {
+  it('successful broadcast records the broadcast endpoint host', async () => {
+    const primary = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary], ['https://broadcast.example/key']);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).resolves.toBeUndefined();
+
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'broadcast.example': 1 });
+  });
+
   it('an isKnownTransactionError is treated as SUCCESS (idempotent re-broadcast) — no failover', async () => {
     const primary = { broadcastTransaction: recorder(async () => { throw knownTxError(); }) };
     const backup = { broadcastTransaction: recorder(async () => undefined) };
@@ -196,6 +214,7 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
 
     await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).resolves.toBeUndefined();
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'primary.example': 1 });
     // "already known" = the byte-identical tx is already in the mempool → success.
     // The set-retry MUST NOT fail over to a second endpoint and re-submit.
     expect(backup.broadcastTransaction.calls).toEqual([]);
@@ -237,6 +256,7 @@ describe('RpcFailoverClient.getReceipt — sawNonErrorResponse/null vs RPC_RECEI
 
     await expect(client.getReceipt('0xhash')).resolves.toBe(receipt);
     expect(backup.getTransactionReceipt.calls).toEqual([]); // found on the primary
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'primary.example': 1 });
   });
 
   it('a backend that RESPONDS with null (not yet mined) yields null — NOT an exhaustion — even after an earlier error', async () => {
@@ -250,6 +270,7 @@ describe('RpcFailoverClient.getReceipt — sawNonErrorResponse/null vs RPC_RECEI
     await expect(client.getReceipt('0xhash')).resolves.toBeNull();
     expect(primary.getTransactionReceipt.calls).toHaveLength(1);
     expect(backup.getTransactionReceipt.calls).toHaveLength(1);
+    expect(getRpcFailoverStats().servedByEndpointHost).toEqual({});
   });
 
   it('all endpoints ERRORED → RPC_RECEIPT_LOOKUP_FAILED, DISTINCT from RPC_ENDPOINTS_EXHAUSTED', async () => {

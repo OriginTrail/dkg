@@ -148,6 +148,27 @@ describe('rpc-failover-log', () => {
       expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'a.example': 3, 'b.example': 1 });
     });
 
+    it('uses a stable key for read suppression, independent from display-label wording', () => {
+      noteRpcServed('read cgKaCount', 'https://a.example', { key: 'evm:31337|read|cg-count' });
+      noteRpcServed('read cgKaCount renamed', 'https://a.example', { key: 'evm:31337|read|cg-count' });
+
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(getRpcFailoverStats().servedByEndpointHost).toEqual({ 'a.example': 2 });
+    });
+
+    it('keeps overflow read labels bounded without logging every repeated same-host success', () => {
+      for (let i = 0; i < 64; i += 1) {
+        noteRpcServed(`read ${i}`, 'https://seed.example');
+      }
+      logSpy.mockClear();
+
+      noteRpcServed('read overflow', 'https://overflow.example');
+      noteRpcServed('read overflow', 'https://overflow.example');
+
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(getRpcFailoverStats().servedByEndpointHost['overflow.example']).toBe(2);
+    });
+
     it('tx broadcasts (alwaysLog) log every success for per-tx attribution', () => {
       noteRpcServed('V10 publish broadcast', 'https://a.example', true);
       noteRpcServed('V10 publish broadcast', 'https://a.example', true); // same host, still logs

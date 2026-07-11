@@ -113,10 +113,12 @@ function freshStats(): MutableStats {
 
 let stats: MutableStats = freshStats();
 
-// Last host that successfully served each operation label — drives the
+// Last host that successfully served each stable operation key — drives the
 // log-on-change gate for high-volume reads (so we log a provider shift, not
-// every call). Bounded like the host map so a churn of labels can't grow it.
-const lastServedByLabel = new Map<string, string>();
+// every call). This deliberately does NOT key by the human log label: call-site
+// wording is presentation, not process-wide state. Bounded with LRU eviction so
+// overflow labels can still suppress repeated same-host read logs.
+const lastServedByKey = new Map<string, string>();
 
 function bump(map: Map<string, number>, key: string, cap: number): void {
   if (!map.has(key) && map.size >= cap) return; // bounded; drop new keys past the cap
@@ -148,7 +150,7 @@ export function getRpcFailoverStats(): RpcFailoverStatsSnapshot {
 export function _resetRpcFailoverStatsForTest(): void {
   stats = freshStats();
   dedup.clear();
-  lastServedByLabel.clear();
+  lastServedByKey.clear();
   clockOverride = undefined;
 }
 
@@ -298,19 +300,32 @@ export function notePreferredEndpoint(label: string, preferredUrl: string): void
  *    distribution is always available via {@link getRpcFailoverStats}
  *    (`servedByEndpointHost`) and `/api/status`.
  *
- * @param label      operation label, e.g. `V10 publish broadcast`
- * @param servedUrl  the RPC URL that served the call (reduced to host before logging)
- * @param alwaysLog  log every success (writes); default logs only on host change (reads)
+ * @param label   human operation label, e.g. `V10 publish broadcast`
+ * @param servedUrl the RPC URL that served the call (reduced to host before logging)
+ * @param options `alwaysLog` logs every success (writes); `key` is the stable
+ *                low-cardinality operation identity used for read shift gating
  */
-export function noteRpcServed(label: string, servedUrl: string, alwaysLog = false): void {
+export function noteRpcServed(
+  label: string,
+  servedUrl: string,
+  options: boolean | { alwaysLog?: boolean; key?: string } = false,
+): void {
   try {
+    const alwaysLog = typeof options === 'boolean' ? options : options.alwaysLog === true;
+    const key = typeof options === 'boolean' ? label : (options.key ?? label);
     const host = rpcHost(servedUrl);
     bump(stats.servedByEndpointHost, host, MAX_TRACKED_HOSTS);
-    const prior = lastServedByLabel.get(label);
+    const prior = lastServedByKey.get(key);
     const changed = prior !== host;
     if (!alwaysLog && !changed) return; // same provider on a read — count only, don't log
-    if (lastServedByLabel.has(label) || lastServedByLabel.size < MAX_TRACKED_HOSTS) {
-      lastServedByLabel.set(label, host);
+    if (!alwaysLog) {
+      if (lastServedByKey.has(key)) lastServedByKey.delete(key);
+      lastServedByKey.set(key, host);
+      while (lastServedByKey.size > MAX_TRACKED_HOSTS) {
+        const oldest = lastServedByKey.keys().next().value;
+        if (oldest === undefined || oldest === key) break;
+        lastServedByKey.delete(oldest);
+      }
     }
     // Mark a genuine provider SHIFT (had a prior, different host) — not the first
     // sighting, and not the always-log tx path.
