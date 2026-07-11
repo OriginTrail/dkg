@@ -48,6 +48,57 @@ const RELAY_REDIAL_DELAY_MS = 1_500;
 const RELAY_RESERVATION_GRACE_MS = 15_000;
 
 /**
+ * Protocol prefixes whose in-flight streams mark a relay connection "busy"
+ * for the watchdog's forced reservation-redial: application request/response
+ * exchanges (StorageACK collection, durable sync, verify fan-out, …) that an
+ * abrupt `close()` aborts mid-flight. 2026-07-12 testnet outage: a NAT'd
+ * edge's watchdog severed its relay-target connections every grace-window
+ * expiry while the bootstraps' reservation slots were exhausted — and the
+ * relay targets doubled as the publish quorum's ACK cores, so every burst
+ * publish lost its ACK streams (same failure shape as the 2026-07-07 Gnosis
+ * incident documented on `nodeIsPubliclyReachable` below, but on NAT'd nodes
+ * where that bypass can't apply).
+ *
+ * Long-lived infrastructure streams (gossipsub mesh, identify, ping, dcutr,
+ * circuit hop/stop) are deliberately NOT counted: they sit open on virtually
+ * every connection, so counting them would defer reservation recovery
+ * forever.
+ */
+export const WATCHDOG_BUSY_PROTOCOL_PREFIXES = ['/dkg/'] as const;
+
+/**
+ * Distinct busy app protocols across a peer's connections (see
+ * WATCHDOG_BUSY_PROTOCOL_PREFIXES). Exported for tests.
+ */
+export function connectionsBusyAppProtocols(
+  conns: ReadonlyArray<{ streams?: ReadonlyArray<{ protocol?: string | null }> }>,
+): string[] {
+  const busy = new Set<string>();
+  for (const conn of conns) {
+    for (const stream of conn.streams ?? []) {
+      const protocol = stream.protocol;
+      if (!protocol) continue;
+      if (WATCHDOG_BUSY_PROTOCOL_PREFIXES.some((prefix) => protocol.startsWith(prefix))) {
+        busy.add(protocol);
+      }
+    }
+  }
+  return [...busy];
+}
+
+/**
+ * Consecutive forced reservation-redials against the same relay that failed
+ * to yield a reservation before that relay's forced path is put on cooldown.
+ * Tonight's outage shape: both configured relays' slots were exhausted, so
+ * every forced drop+redial was guaranteed futile — and permanent (measured:
+ * one relay torn down 95× in 2h). Strikes convert "futile forever" into
+ * "5 attempts, then leave the connection alone for the cooldown window".
+ * The regular reconnect-on-disconnect path is unaffected.
+ */
+const RELAY_FORCED_REDIAL_MAX_STRIKES = 5;
+const RELAY_FORCED_REDIAL_COOLDOWN_MS = 10 * 60_000;
+
+/**
  * Default relay server capacity — the number of simultaneous circuit-relay v2
  * reservations a Core Node will hold. All other relay-related caps (HOP/STOP
  * stream limits, connectionManager.maxConnections) derive from this at a 1:2
@@ -520,6 +571,10 @@ export class DKGNode {
    * the new reservation on the wire.
    */
   private relayReservationRedialAt: Map<string, number> = new Map();
+  /** Consecutive futile forced reservation-redials per relay (see RELAY_FORCED_REDIAL_MAX_STRIKES). */
+  private relayForcedRedialStrikes: Map<string, number> = new Map();
+  /** Per-relay epoch-ms until which the forced reservation-redial path is on cooldown. */
+  private relayForcedRedialCooldownUntil: Map<string, number> = new Map();
   /**
    * Target number of simultaneous relay reservations for this edge node
    * (1 by default, up to `relayReservationCount` for multi-reservation
@@ -1324,6 +1379,8 @@ export class DKGNode {
         reservedRelayCount >= this.relayReservationCountTarget;
       if (transportUp && reservationGateSatisfied) {
         this.relayReservationRedialAt.delete(relayPidStr);
+        this.relayForcedRedialStrikes.delete(relayPidStr);
+        this.relayForcedRedialCooldownUntil.delete(relayPidStr);
         continue;
       }
 
@@ -1380,6 +1437,38 @@ export class DKGNode {
           continue;
         }
 
+        // Thrash cap: after RELAY_FORCED_REDIAL_MAX_STRIKES consecutive
+        // futile forced redials (reservation never appeared — e.g. the
+        // relay's slots are exhausted), stop tearing this relay's
+        // connection down for RELAY_FORCED_REDIAL_COOLDOWN_MS. The
+        // connection keeps carrying app traffic; only the forced
+        // reservation-recovery close is suppressed. Benign wait — no
+        // backoff escalation (leave `onlyWaitingOnGraceWindow` alone).
+        const cooldownUntil = this.relayForcedRedialCooldownUntil.get(relayPidStr) ?? 0;
+        if (now < cooldownUntil) {
+          allHealthy = false;
+          continue;
+        }
+
+        // Stream-aware deferral: never sever a connection carrying
+        // in-flight application request streams — an abrupt close aborts
+        // the exchange (StorageACK collection, sync). Deferral is benign:
+        // the deficit persists to the next tick, which retries once the
+        // request streams have drained. See WATCHDOG_BUSY_PROTOCOL_PREFIXES
+        // for why long-lived infra streams don't count. A continuously
+        // busy publisher can defer reservation recovery indefinitely —
+        // that trade is deliberate: live app traffic outranks inbound
+        // reachability freshness.
+        const busyProtocols = connectionsBusyAppProtocols(conns);
+        if (busyProtocols.length > 0) {
+          allHealthy = false;
+          console.log(
+            `[${ts()}] Relay watchdog: deferring forced redial of ${short(relayPidStr)} — ` +
+            `in-flight app stream(s): ${busyProtocols.join(', ')}`,
+          );
+          continue;
+        }
+
         allHealthy = false;
         // Actual corrective action below (drop + redial); this is a
         // real failure the watchdog must back off on.
@@ -1392,6 +1481,24 @@ export class DKGNode {
           `dropping + redialing ${short(relayPidStr)} to force reserve`,
         );
         this.relayReservationRedialAt.set(relayPidStr, now);
+        // Strike accounting: this forced teardown is only ever reached when
+        // the previous ones (if any) failed to yield a reservation — the
+        // happy path above clears the counter the moment one appears.
+        const strikes = (this.relayForcedRedialStrikes.get(relayPidStr) ?? 0) + 1;
+        if (strikes >= RELAY_FORCED_REDIAL_MAX_STRIKES) {
+          this.relayForcedRedialStrikes.delete(relayPidStr);
+          this.relayForcedRedialCooldownUntil.set(
+            relayPidStr,
+            now + RELAY_FORCED_REDIAL_COOLDOWN_MS,
+          );
+          console.log(
+            `[${ts()}] Relay watchdog: ${strikes} consecutive forced redials of ${short(relayPidStr)} ` +
+            `yielded no reservation (slots likely exhausted); cooling down forced redials for ` +
+            `${Math.round(RELAY_FORCED_REDIAL_COOLDOWN_MS / 60_000)}min (connection left alone)`,
+          );
+        } else {
+          this.relayForcedRedialStrikes.set(relayPidStr, strikes);
+        }
 
         for (const c of conns) {
           try {
