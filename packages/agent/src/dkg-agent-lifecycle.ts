@@ -3684,17 +3684,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
       return { result: emptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
     }
-    const result = emptyDurableSyncResult();
+    let result = emptyDurableSyncResult();
     const legacyCgs: string[] = [];
     for (const cg of contextGraphIds) {
       if (await this.isPrivateContextGraph(cg)) { legacyCgs.push(cg); continue; }
       try {
-        const applied = await this.runChangelogSyncForCg(ctx, remotePeerId, cg);
-        result.insertedTriples += applied.insertedDataTriples + applied.insertedMetaTriples;
-        result.insertedDataTriples += applied.insertedDataTriples;
-        result.insertedMetaTriples += applied.insertedMetaTriples;
-        result.completedPhases += 1;
-        if (applied.denied) { result.deniedPhases += 1; onAccessDenied?.(cg); }
+        const cgResult = await this.runChangelogSyncForCg(ctx, remotePeerId, cg);
+        result = mergeDurableSyncResults(result, cgResult);
+        if (cgResult.deniedPhases > 0) onAccessDenied?.(cg);
       } catch (err) {
         this.log.warn(ctx, `Changelog sync failed for CG ${cg} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(err)}`);
         legacyCgs.push(cg);
@@ -3707,15 +3704,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Drive the OT-RFC-59 changelog delta lane for ONE public context graph: page from the
    * durable cursor, verify each page (data merkle-checked against its sibling meta via
    * {@link processDurableBatchInWorker}), REPLACE only the verified graphs, and advance the
-   * cursor along the verified prefix. `runResync` bootstraps via the legacy lane.
+   * cursor along the verified prefix. `runResync` bootstraps via the legacy lane and its
+   * DurableSyncResult (inserts + completeness) is folded into the returned result so a
+   * first-contact/resynced CG still reports its inserts (drives the "synced" flags).
    */
   async runChangelogSyncForCg(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
     contextGraphId: string,
-  ): Promise<{ insertedDataTriples: number; insertedMetaTriples: number; denied: boolean }> {
+  ): Promise<DurableSyncResult> {
+    // `did:dkg:*` public triples anchor a `dkg:merkleRoot` literal in their meta graph.
+    const MERKLE_ROOT_PREDICATE = 'http://dkg.io/ontology/merkleRoot';
     let insertedDataTriples = 0;
     let insertedMetaTriples = 0;
+    let result = emptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
     const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
     const cgDataUri = contextGraphDataUri(contextGraphId);
     // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
@@ -3739,15 +3741,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         timeoutMs: SYNC_PAGE_TIMEOUT_MS,
         signal: this.node.stopSignal ?? undefined,
       }),
-      // Resync = the legacy verified lane for just this CG (no re-entry into the changelog branch).
-      runResync: async () => { await this.runLegacyDurableSync(ctx, remotePeerId, [contextGraphId]); },
+      // Resync = the legacy verified lane for just this CG (no re-entry into the changelog
+      // branch). Fold its result in, and report completeness so the driver only advances
+      // the cursor to headSeq when the resync verifiably fetched everything below it.
+      runResync: async () => {
+        const r = await this.runLegacyDurableSync(ctx, remotePeerId, [contextGraphId]);
+        result = mergeDurableSyncResults(result, r);
+        const complete = r.timedOutPhases === 0 && r.failedPhases === 0
+          && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0;
+        return { complete, insertedTriples: r.insertedTriples };
+      },
       logWarn: (m) => this.log.warn(ctx, m),
       applyPage: async (page) => {
         // Parse the page's upsert records per plane (parseAndFilter validates + CG-filters).
         const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
         const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
         const recordQuadCountByGraph = new Map<string, number>();
-        const metaGraphsInPage = new Set<string>();
+        const metaGraphsWithRoot = new Set<string>();
         const dataQuads: Quad[] = [];
         const metaQuads: Quad[] = [];
         for (const rec of dataRecs) {
@@ -3759,7 +3769,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const { quads } = await worker.parseAndFilter(rec.quads ?? '', rec.graph, contextGraphId);
           metaQuads.push(...quads);
           recordQuadCountByGraph.set(rec.graph, quads.length);
-          metaGraphsInPage.add(rec.graph);
+          // A meta graph can bind data only if it actually carries a merkle root.
+          if (quads.some((q) => q.predicate === MERKLE_ROOT_PREDICATE)) metaGraphsWithRoot.add(rec.graph);
         }
         // Merkle-verify data against meta (same worker path legacy sync uses).
         const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, acceptUnverified);
@@ -3775,14 +3786,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           isForeignGraph,
           verifiedByGraph,
           recordQuadCountByGraph,
-          metaGraphsInPage,
+          metaGraphsWithRoot,
+          batchVerifiedCleanly: processed.rejectedKcs === 0 && processed.dataRejectedMissingMeta === 0,
         });
         // Apply REPLACE per graph and COMMIT before the driver persists the cursor
         // (crash-safe: upsert=drop+insert and drop are idempotent, so a crash between
-        // commit and cursor-persist re-fetches and re-applies harmlessly).
+        // commit and cursor-persist re-fetches and re-applies harmlessly). Never dropGraph
+        // for a zero-quad upsert — planPageApply never emits one, but guard defensively so a
+        // future change cannot reintroduce the silent-delete vector.
         for (const op of plan.ops) {
+          if (op.op === 'upsert' && op.quads.length === 0) continue;
           await this.store.dropGraph(op.graph);
-          if (op.op === 'upsert' && op.quads.length > 0) {
+          if (op.op === 'upsert') {
             await this.insertSyncedQuadsAndInvalidateListCache(op.quads, {
               priority: 'background', source: 'agent.changelogSync.apply',
             });
@@ -3793,7 +3808,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return { advanceTo: plan.advanceTo, applied: plan.applied, deferred: plan.deferred };
       },
     });
-    return { insertedDataTriples, insertedMetaTriples, denied: outcome.kind === 'denied' };
+    result.insertedDataTriples += insertedDataTriples;
+    result.insertedMetaTriples += insertedMetaTriples;
+    result.insertedTriples += insertedDataTriples + insertedMetaTriples;
+    result.completedPhases += 1;
+    if (outcome.kind === 'denied') result.deniedPhases += 1;
+    return result;
   }
 
   /**
