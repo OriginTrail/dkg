@@ -95,7 +95,6 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
@@ -1500,7 +1499,6 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
-  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
@@ -1560,12 +1558,6 @@ export async function runDaemonInner(
       backend: runtimeStore.backend,
       options: runtimeStore.options,
       graphSetIndex: runtimeStore.graphSetIndex,
-      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
-      // Sourced from config.store (operator intent), NOT runtimeStore — the
-      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
-      // this wraps the store in ChangelogStore, which is what makes
-      // asChangelogReader(store) non-null and registers the responder delta lane.
-      changelog: config.store?.changelog,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
@@ -1608,7 +1600,6 @@ export async function runDaemonInner(
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
     syncCheckpointStore,
-    changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {

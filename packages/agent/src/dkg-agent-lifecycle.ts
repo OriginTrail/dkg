@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -96,10 +96,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
-import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
-import { runChangelogSync, planPageApply } from './sync/requester/changelog-sync.js';
+import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -652,10 +649,6 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
   return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
 }
 
-/** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
- *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
-const CHANGELOG_MAX_SCAN_LIMIT = 2000;
-
 function emptyDurableSyncResult(): DurableSyncResult {
   return {
     insertedTriples: 0,
@@ -675,30 +668,6 @@ function emptyDurableSyncResult(): DurableSyncResult {
     failedPeers: 0,
     failedPhases: 0,
     deniedPhases: 0,
-  };
-}
-
-/** Field-wise sum of two DurableSyncResults (OT-RFC-59 changelog lane + legacy lane). */
-function mergeDurableSyncResults(a: DurableSyncResult, b: DurableSyncResult): DurableSyncResult {
-  return {
-    insertedTriples: a.insertedTriples + b.insertedTriples,
-    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
-    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
-    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
-    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
-    bytesReceived: a.bytesReceived + b.bytesReceived,
-    resumedPhases: a.resumedPhases + b.resumedPhases,
-    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
-    completedPhases: a.completedPhases + b.completedPhases,
-    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
-    emptyResponses: a.emptyResponses + b.emptyResponses,
-    metaOnlyResponses: a.metaOnlyResponses + b.metaOnlyResponses,
-    dataRejectedMissingMeta: a.dataRejectedMissingMeta + b.dataRejectedMissingMeta,
-    rejectedKcs: a.rejectedKcs + b.rejectedKcs,
-    failedPeers: a.failedPeers + b.failedPeers,
-    failedPhases: a.failedPhases + b.failedPhases,
-    deniedPhases: a.deniedPhases + b.deniedPhases,
-    backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
   };
 }
 
@@ -2015,20 +1984,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotBudget: resolveSyncResponderSnapshotBudgetOptions(process.env),
     });
 
-    // OT-RFC-59 changelog delta lane. Registered ONLY when the changelog is
-    // enabled — asChangelogReader resolves the ChangelogStore behind the daemon's
-    // store wrapper, which is non-null only if config.store.changelog is on and
-    // wrapped the store. Default-off: with the flag off the store is not wrapped,
-    // this is null, PROTOCOL_SYNC_CHANGELOG is never advertised (identify omits
-    // it), and every requester cleanly falls back to PROTOCOL_SYNC. Separate raw-
-    // router registration (off-substrate, like PROTOCOL_SYNC) reusing the SAME
-    // per-CG RFC-49 authorization as the legacy lane.
-    const changelogReader = asChangelogReader(this.store);
-    if (changelogReader) {
-      this.router.register(PROTOCOL_SYNC_CHANGELOG, (data, peerIdObj, options) =>
-        this.handleChangelogSync(data, peerIdObj.toString(), options, changelogReader));
-    }
-
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
     // rc.9 PR-10: migrated onto the Universal Messenger substrate
@@ -2640,56 +2595,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (rsStart === 'retryable') {
       this.scheduleRandomSamplingBindRetry(ctx);
     }
-  }
-
-  /**
-   * OT-RFC-59 changelog delta lane handler (PROTOCOL_SYNC_CHANGELOG). Reuses the
-   * SAME per-CG RFC-49 authorization as the legacy sync lane, then serves a
-   * bounded O(delta) page from the change log via {@link readChangelogDeltaPage}
-   * instead of the O(store) scan. Registered only when the changelog is enabled
-   * (see start()).
-   */
-  private async handleChangelogSync(
-    this: DKGAgent,
-    data: Uint8Array,
-    peerId: string,
-    options: { signal?: AbortSignal } | undefined,
-    reader: ChangelogReader,
-  ): Promise<Uint8Array> {
-    let request;
-    try {
-      request = decodeChangelogRequest(data);
-    } catch {
-      // Malformed peer bytes → deny (mirrors the legacy lane's parse-fail path).
-      return encodeChangelogResponse({ kind: 'denied' });
-    }
-    // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
-    // private CGs verify the signed digest — a bare (unsigned) changelog request
-    // carries no digest, so `authorizePrivateSyncRequest` denies it. Any throw on a
-    // malformed envelope must fail CLOSED (deny), never escape as a handler error.
-    let authorized = false;
-    try {
-      authorized = await this.authorizeSyncRequest(
-        request as unknown as SyncRequestEnvelope,
-        peerId,
-        { signal: options?.signal },
-      );
-    } catch {
-      return encodeChangelogResponse({ kind: 'denied' });
-    }
-    if (!authorized) return encodeChangelogResponse({ kind: 'denied' });
-    const resp = await readChangelogDeltaPage({
-      reader,
-      store: this.store,
-      contextGraphId: request.contextGraphId,
-      sinceSeq: request.sinceSeq,
-      requesterEra: request.era,
-      // Clamp the peer-controlled scan limit: an unbounded value would let a peer
-      // force an O(limit) log scan (DoS). Honest requesters send SYNC_PAGE_SIZE.
-      limit: Math.min(Math.max(1, request.limit), CHANGELOG_MAX_SCAN_LIMIT),
-      signal: options?.signal,
-    });
-    return encodeChangelogResponse(resp);
   }
 
   randomSamplingLogger(this: DKGAgent, ctx: OperationContext) {
@@ -3591,50 +3496,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return emptyDurableSyncResult();
     }
-    // OT-RFC-59 — peel off the public CGs this peer serves via the O(delta) changelog
-    // lane; the rest fall through to the legacy full-scan lane below. STRICTLY ADDITIVE:
-    // gated on this node's `store.changelog` flag, and ANY failure returns every CG to
-    // the legacy lane, so a broken/disabled changelog lane degrades to exactly today's
-    // behaviour rather than dropping sync.
-    let legacyContextGraphIds = contextGraphIds;
-    let changelogResult: DurableSyncResult | undefined;
-    // Gate = this node's own changelog is enabled (its store is ChangelogStore-wrapped) —
-    // the same flag that makes it a responder. Same signal SC4 uses to advertise the protocol.
-    if (asChangelogReader(this.store) !== null && contextGraphIds.length > 0) {
-      try {
-        const lane = await this.runChangelogLane(ctx, remotePeerId, contextGraphIds, onAccessDenied);
-        changelogResult = lane.result;
-        legacyContextGraphIds = lane.remainingLegacyCgs;
-      } catch (err) {
-        this.log.warn(ctx, `Changelog sync lane failed for ${remotePeerId.slice(-8)}; using legacy sync: ${String(err)}`);
-        legacyContextGraphIds = contextGraphIds;
-        changelogResult = undefined;
-      }
-    }
-    if (legacyContextGraphIds.length === 0) {
-      return changelogResult ?? emptyDurableSyncResult();
-    }
-    const legacyResult = await this.runLegacyDurableSync(
-      ctx, remotePeerId, legacyContextGraphIds, onPhase, onAccessDenied, sinceBatchIdFor, options,
-    );
-    return changelogResult ? mergeDurableSyncResults(changelogResult, legacyResult) : legacyResult;
-  }
-
-  /**
-   * The legacy full-scan durable-sync lane (PROTOCOL_SYNC). Extracted verbatim from
-   * `syncFromPeerDetailed` so the OT-RFC-59 changelog lane can (a) run it for the CGs it
-   * does not handle and (b) fall back to it on `resync` / stall — without re-entering the
-   * changelog branch.
-   */
-  async runLegacyDurableSync(this: DKGAgent,
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphIds: string[],
-    onPhase?: PhaseCallback,
-    onAccessDenied?: (contextGraphId: string) => void,
-    sinceBatchIdFor?: (contextGraphId: string) => string | undefined,
-    options?: { stopOnBackoffWorthyFailure?: boolean },
-  ): Promise<DurableSyncResult> {
     const syncAgentsMeta = resolveSyncAgentsMeta(this.config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META);
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
     const runSync = () => withGlobalSyncBackpressure(
@@ -3678,155 +3539,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSinceBatchIdResolver: Boolean(sinceBatchIdFor),
     });
     return singleFlightKey ? runSyncSingleFlight(this, singleFlightKey, runSync) : runSync();
-  }
-
-  /**
-   * OT-RFC-59 requester lane. For each PUBLIC context graph the peer advertises the
-   * changelog protocol for, runs the O(delta) verified-apply driver; returns the CGs it
-   * did NOT handle (private, peer lacks the protocol, or per-CG failure) for the legacy
-   * lane. Public CGs need no request signing (the responder's ACL gate returns true), so
-   * they are the safe first lane; private CGs stay legacy until signed requests land.
-   */
-  async runChangelogLane(this: DKGAgent,
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphIds: string[],
-    onAccessDenied?: (contextGraphId: string) => void,
-  ): Promise<{ result: DurableSyncResult; remainingLegacyCgs: string[] }> {
-    const peerProtocols = await this.getPeerProtocols(remotePeerId);
-    if (!peerProtocols.includes(PROTOCOL_SYNC_CHANGELOG)) {
-      return { result: emptyDurableSyncResult(), remainingLegacyCgs: contextGraphIds };
-    }
-    let result = emptyDurableSyncResult();
-    const legacyCgs: string[] = [];
-    for (const cg of contextGraphIds) {
-      if (await this.isPrivateContextGraph(cg)) { legacyCgs.push(cg); continue; }
-      try {
-        const cgResult = await this.runChangelogSyncForCg(ctx, remotePeerId, cg);
-        result = mergeDurableSyncResults(result, cgResult);
-        if (cgResult.deniedPhases > 0) onAccessDenied?.(cg);
-      } catch (err) {
-        this.log.warn(ctx, `Changelog sync failed for CG ${cg} from ${remotePeerId.slice(-8)}; deferring to legacy: ${String(err)}`);
-        legacyCgs.push(cg);
-      }
-    }
-    return { result, remainingLegacyCgs: legacyCgs };
-  }
-
-  /**
-   * Drive the OT-RFC-59 changelog delta lane for ONE public context graph: page from the
-   * durable cursor, verify each page (data merkle-checked against its sibling meta via
-   * {@link processDurableBatchInWorker}), REPLACE only the verified graphs, and advance the
-   * cursor along the verified prefix. `runResync` bootstraps via the legacy lane and its
-   * DurableSyncResult (inserts + completeness) is folded into the returned result so a
-   * first-contact/resynced CG still reports its inserts (drives the "synced" flags).
-   */
-  async runChangelogSyncForCg(this: DKGAgent,
-    ctx: OperationContext,
-    remotePeerId: string,
-    contextGraphId: string,
-  ): Promise<DurableSyncResult> {
-    // `did:dkg:*` public triples anchor a `dkg:merkleRoot` literal in their meta graph.
-    const MERKLE_ROOT_PREDICATE = 'http://dkg.io/ontology/merkleRoot';
-    let insertedDataTriples = 0;
-    let insertedMetaTriples = 0;
-    let result = emptyDurableSyncResult(); // folds every resync's legacy DurableSyncResult
-    const acceptUnverified = (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId);
-    const cgDataUri = contextGraphDataUri(contextGraphId);
-    // In-scope iff the graph is this CG's own public data plane. Rejects the reserved
-    // changelog graph, any other CG, and the private/SWM planes (deferred to legacy).
-    const isForeignGraph = (graph: string): boolean => {
-      const inCg = graph === cgDataUri || graph.startsWith(`${cgDataUri}/`);
-      if (!inCg) return true;
-      return graph.includes('/_private') || graph.includes('/_shared_memory');
-    };
-    const worker = this.getOrCreateSyncVerifyWorker();
-
-    const outcome = await runChangelogSync({
-      contextGraphId,
-      limit: SYNC_PAGE_SIZE,
-      getCursor: () => {
-        const c = this.changelogCursors.get(remotePeerId, contextGraphId);
-        return c ? { era: c.era, seq: c.seq } : undefined;
-      },
-      setCursor: (era, seq) => this.changelogCursors.set(remotePeerId, contextGraphId, era, seq),
-      send: (bytes) => this.messenger.sendToPeer(remotePeerId, PROTOCOL_SYNC_CHANGELOG, bytes, {
-        timeoutMs: SYNC_PAGE_TIMEOUT_MS,
-        signal: this.node.stopSignal ?? undefined,
-      }),
-      // Resync = the legacy verified lane for just this CG (no re-entry into the changelog
-      // branch). Fold its result in, and report completeness so the driver only advances
-      // the cursor to headSeq when the resync verifiably fetched everything below it.
-      runResync: async () => {
-        const r = await this.runLegacyDurableSync(ctx, remotePeerId, [contextGraphId]);
-        result = mergeDurableSyncResults(result, r);
-        const complete = r.timedOutPhases === 0 && r.failedPhases === 0
-          && r.failedPeers === 0 && r.dataRejectedMissingMeta === 0;
-        return { complete, insertedTriples: r.insertedTriples };
-      },
-      logWarn: (m) => this.log.warn(ctx, m),
-      applyPage: async (page) => {
-        // Parse the page's upsert records per plane (parseAndFilter validates + CG-filters).
-        const dataRecs = page.records.filter((r) => r.op === 'upsert' && !r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
-        const metaRecs = page.records.filter((r) => r.op === 'upsert' && r.graph.endsWith('/_meta') && !isForeignGraph(r.graph));
-        const recordQuadCountByGraph = new Map<string, number>();
-        const metaGraphsWithRoot = new Set<string>();
-        const dataQuads: Quad[] = [];
-        const metaQuads: Quad[] = [];
-        for (const rec of dataRecs) {
-          const { quads } = await worker.parseAndFilter(rec.quads ?? '', rec.graph, contextGraphId);
-          dataQuads.push(...quads);
-          recordQuadCountByGraph.set(rec.graph, quads.length);
-        }
-        for (const rec of metaRecs) {
-          const { quads } = await worker.parseAndFilter(rec.quads ?? '', rec.graph, contextGraphId);
-          metaQuads.push(...quads);
-          recordQuadCountByGraph.set(rec.graph, quads.length);
-          // A meta graph can bind data only if it actually carries a merkle root.
-          if (quads.some((q) => q.predicate === MERKLE_ROOT_PREDICATE)) metaGraphsWithRoot.add(rec.graph);
-        }
-        // Merkle-verify data against meta (same worker path legacy sync uses).
-        const processed = await this.processDurableBatchInWorker(dataQuads, metaQuads, ctx, acceptUnverified);
-        const verifiedByGraph = new Map<string, Quad[]>();
-        for (const q of [...processed.verifiedData, ...processed.verifiedMeta]) {
-          const arr = verifiedByGraph.get(q.graph);
-          if (arr) arr.push(q); else verifiedByGraph.set(q.graph, [q]);
-        }
-        const plan = planPageApply({
-          records: page.records,
-          nextSeq: page.nextSeq,
-          priorSeq: page.priorSeq,
-          isForeignGraph,
-          verifiedByGraph,
-          recordQuadCountByGraph,
-          metaGraphsWithRoot,
-          batchVerifiedCleanly: processed.rejectedKcs === 0 && processed.dataRejectedMissingMeta === 0,
-        });
-        // Apply REPLACE per graph and COMMIT before the driver persists the cursor
-        // (crash-safe: upsert=drop+insert and drop are idempotent, so a crash between
-        // commit and cursor-persist re-fetches and re-applies harmlessly). Never dropGraph
-        // for a zero-quad upsert — planPageApply never emits one, but guard defensively so a
-        // future change cannot reintroduce the silent-delete vector.
-        for (const op of plan.ops) {
-          if (op.op === 'upsert' && op.quads.length === 0) continue;
-          await this.store.dropGraph(op.graph);
-          if (op.op === 'upsert') {
-            await this.insertSyncedQuadsAndInvalidateListCache(op.quads, {
-              priority: 'background', source: 'agent.changelogSync.apply',
-            });
-            if (op.graph.endsWith('/_meta')) insertedMetaTriples += op.quads.length;
-            else insertedDataTriples += op.quads.length;
-          }
-        }
-        return { advanceTo: plan.advanceTo, applied: plan.applied, deferred: plan.deferred };
-      },
-    });
-    result.insertedDataTriples += insertedDataTriples;
-    result.insertedMetaTriples += insertedMetaTriples;
-    result.insertedTriples += insertedDataTriples + insertedMetaTriples;
-    result.completedPhases += 1;
-    if (outcome.kind === 'denied') result.deniedPhases += 1;
-    return result;
   }
 
   /**

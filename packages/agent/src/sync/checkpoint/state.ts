@@ -67,52 +67,6 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
   }
 }
 
-// ── OT-RFC-59 changelog cursor (SC5) ─────────────────────────────────────────
-
-export interface ChangelogCursorEntry {
-  /** Log generation id of the responder this cursor tracks (era mismatch ⇒ resync). */
-  era: string;
-  /** Last seq successfully APPLIED from that responder for this CG. */
-  seq: number;
-  updatedAtMs: number;
-}
-
-/**
- * Durable per-(peer, contextGraph) OT-RFC-59 changelog cursor. Unlike
- * {@link SyncCheckpointStore} this is **NEVER TTL-pruned** — the whole point is
- * O(delta) catch-up across restarts, which a TTL would defeat by forcing a full
- * rescan. Keyed by (peerId, contextGraphId): `seq` is the responder node's
- * per-node counter, so a cursor is never shared across peers.
- */
-export interface ChangelogCursorStore {
-  get(peerId: string, contextGraphId: string): ChangelogCursorEntry | undefined;
-  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs?: number): void;
-}
-
-export class MemoryChangelogCursorStore implements ChangelogCursorStore {
-  private readonly entries = new Map<string, ChangelogCursorEntry>();
-  private readonly clock: () => number;
-
-  constructor(options: { clock?: () => number } = {}) {
-    this.clock = options.clock ?? (() => Date.now());
-  }
-
-  private static key(peerId: string, contextGraphId: string): string {
-    return `${peerId}\n${contextGraphId}`;
-  }
-
-  get(peerId: string, contextGraphId: string): ChangelogCursorEntry | undefined {
-    return this.entries.get(MemoryChangelogCursorStore.key(peerId, contextGraphId));
-  }
-
-  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(seq) || seq < 0) {
-      throw new Error(`Invalid changelog cursor seq for ${peerId}/${contextGraphId}: ${seq}`);
-    }
-    this.entries.set(MemoryChangelogCursorStore.key(peerId, contextGraphId), { era, seq, updatedAtMs: nowMs });
-  }
-}
-
 export function getSyncCheckpointKey(
   remotePeerId: string,
   contextGraphId: string,

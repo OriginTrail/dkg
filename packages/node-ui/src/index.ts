@@ -4,7 +4,6 @@ export {
   SqliteProtocolOutboxStore,
   type SqliteProtocolOutboxStoreOptions,
   SqliteSyncCheckpointStore,
-  SqliteChangelogCursorStore,
   SqliteKaNumberStore,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.

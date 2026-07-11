@@ -547,12 +547,6 @@ async function createPublisherStore(dataDir: string, config: DkgConfig): Promise
     const storeConfig = config.store as any;
     return await createTripleStore({
       ...storeConfig,
-      // OT-RFC-59 §5.3: the daemon-down CLI publisher is a SECOND writer against
-      // the same store. It MUST NOT maintain the change log — a second in-memory
-      // seq allocator would fork the log (commit order ≠ seq order across
-      // processes). Only the single-writer daemon owns the changelog; force it
-      // off here regardless of config.store.changelog.
-      changelog: false,
       largeLiteralStorage: config.largeLiteralStorage ?? (
         isLocalOxigraphStoreConfig(storeConfig)
           ? defaultLargeLiteralStorage(dataDir, config)
