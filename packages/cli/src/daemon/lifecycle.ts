@@ -1558,6 +1558,12 @@ export async function runDaemonInner(
       backend: runtimeStore.backend,
       options: runtimeStore.options,
       graphSetIndex: runtimeStore.graphSetIndex,
+      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
+      // Sourced from config.store (operator intent), NOT runtimeStore — the
+      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
+      // this wraps the store in ChangelogStore, which is what makes
+      // asChangelogReader(store) non-null and registers the responder delta lane.
+      changelog: config.store?.changelog,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,

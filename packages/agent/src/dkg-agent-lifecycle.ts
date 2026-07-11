@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -96,7 +96,9 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
+import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -1984,6 +1986,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotBudget: resolveSyncResponderSnapshotBudgetOptions(process.env),
     });
 
+    // OT-RFC-59 changelog delta lane. Registered ONLY when the changelog is
+    // enabled — asChangelogReader resolves the ChangelogStore behind the daemon's
+    // store wrapper, which is non-null only if config.store.changelog is on and
+    // wrapped the store. Default-off: with the flag off the store is not wrapped,
+    // this is null, PROTOCOL_SYNC_CHANGELOG is never advertised (identify omits
+    // it), and every requester cleanly falls back to PROTOCOL_SYNC. Separate raw-
+    // router registration (off-substrate, like PROTOCOL_SYNC) reusing the SAME
+    // per-CG RFC-49 authorization as the legacy lane.
+    const changelogReader = asChangelogReader(this.store);
+    if (changelogReader) {
+      this.router.register(PROTOCOL_SYNC_CHANGELOG, (data, peerIdObj, options) =>
+        this.handleChangelogSync(data, peerIdObj.toString(), options, changelogReader));
+    }
+
     // Join-request protocol: receives signed join requests forwarded by peers.
     // Stores them locally if this node is the curator; ACKs with "ok" or "error".
     // rc.9 PR-10: migrated onto the Universal Messenger substrate
@@ -2595,6 +2611,47 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (rsStart === 'retryable') {
       this.scheduleRandomSamplingBindRetry(ctx);
     }
+  }
+
+  /**
+   * OT-RFC-59 changelog delta lane handler (PROTOCOL_SYNC_CHANGELOG). Reuses the
+   * SAME per-CG RFC-49 authorization as the legacy sync lane, then serves a
+   * bounded O(delta) page from the change log via {@link readChangelogDeltaPage}
+   * instead of the O(store) scan. Registered only when the changelog is enabled
+   * (see start()).
+   */
+  private async handleChangelogSync(
+    this: DKGAgent,
+    data: Uint8Array,
+    peerId: string,
+    options: { signal?: AbortSignal } | undefined,
+    reader: ChangelogReader,
+  ): Promise<Uint8Array> {
+    let request;
+    try {
+      request = decodeChangelogRequest(data);
+    } catch {
+      // Malformed peer bytes → deny (mirrors the legacy lane's parse-fail path).
+      return encodeChangelogResponse({ kind: 'denied' });
+    }
+    // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
+    // private CGs verify the signed digest the requester rode on the request.
+    const authorized = await this.authorizeSyncRequest(
+      request as unknown as SyncRequestEnvelope,
+      peerId,
+      { signal: options?.signal },
+    );
+    if (!authorized) return encodeChangelogResponse({ kind: 'denied' });
+    const resp = await readChangelogDeltaPage({
+      reader,
+      store: this.store,
+      contextGraphId: request.contextGraphId,
+      sinceSeq: request.sinceSeq,
+      requesterEra: request.era,
+      limit: request.limit,
+      signal: options?.signal,
+    });
+    return encodeChangelogResponse(resp);
   }
 
   randomSamplingLogger(this: DKGAgent, ctx: OperationContext) {
