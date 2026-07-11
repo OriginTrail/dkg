@@ -15,7 +15,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 23;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -812,6 +812,22 @@ export class DashboardDB {
       this.db.exec(`
         CREATE INDEX IF NOT EXISTS idx_runtime_cursors_namespace_scope
           ON runtime_cursors(namespace, scope);
+      `);
+    }
+
+    if (version < 23) {
+      // OT-RFC-59 SC5: durable per-(peer, contextGraph) changelog cursor. NEVER
+      // pruned (see SqliteChangelogCursorStore) — a TTL would defeat the O(delta)
+      // cross-restart catch-up this table exists for.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS changelog_cursors (
+          peer_id TEXT NOT NULL,
+          context_graph_id TEXT NOT NULL,
+          era TEXT NOT NULL,
+          seq INTEGER NOT NULL CHECK (seq >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (peer_id, context_graph_id)
+        );
       `);
     }
 
@@ -2419,6 +2435,45 @@ export class SqliteSyncCheckpointStore {
 
   pruneExpired(nowMs = this.clock()): number {
     return this.db.prepare(`DELETE FROM sync_checkpoints WHERE expires_at < ?`).run(nowMs).changes;
+  }
+}
+
+/**
+ * OT-RFC-59 SC5 durable changelog cursor store (duck-compatible with the agent's
+ * ChangelogCursorStore). Keyed by (peer_id, context_graph_id); stores the last
+ * APPLIED (era, seq) from that responder. Like `ka_numbers` / `protocol_outbox`
+ * this state is durable: it is NEVER added to `prune()` — a TTL would defeat the
+ * O(delta) cross-restart catch-up the changelog lane exists for.
+ */
+export class SqliteChangelogCursorStore {
+  private readonly db: Database.Database;
+  private readonly clock: () => number;
+
+  constructor(dashboard: DashboardDB, options: { clock?: () => number } = {}) {
+    this.db = dashboard.db;
+    this.clock = options.clock ?? (() => Date.now());
+  }
+
+  get(peerId: string, contextGraphId: string): { era: string; seq: number; updatedAtMs: number } | undefined {
+    const row = this.db.prepare(
+      `SELECT era, seq, updated_at FROM changelog_cursors WHERE peer_id = ? AND context_graph_id = ?`,
+    ).get(peerId, contextGraphId) as { era: string; seq: number; updated_at: number } | undefined;
+    if (!row) return undefined;
+    return { era: row.era, seq: row.seq, updatedAtMs: row.updated_at };
+  }
+
+  set(peerId: string, contextGraphId: string, era: string, seq: number, nowMs = this.clock()): void {
+    if (!Number.isSafeInteger(seq) || seq < 0) {
+      throw new Error(`Invalid changelog cursor seq for ${peerId}/${contextGraphId}: ${seq}`);
+    }
+    this.db.prepare(`
+      INSERT INTO changelog_cursors (peer_id, context_graph_id, era, seq, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(peer_id, context_graph_id) DO UPDATE SET
+        era = excluded.era,
+        seq = excluded.seq,
+        updated_at = excluded.updated_at
+    `).run(peerId, contextGraphId, era, seq, nowMs);
   }
 }
 
