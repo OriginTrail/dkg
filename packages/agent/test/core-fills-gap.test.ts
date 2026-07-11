@@ -772,8 +772,13 @@ describe('Phase D - VM reconcile damping', () => {
     connectedPeers = ['peer-empty', 'peer-newly-reachable'];
 
     await expect(internals.reconcileChainOrdinal('54', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    // The sweep-level cache entry is NOT reused — the fetch re-ran for the new
+    // topology (1 → 3 calls). The scan itself is served by the handler-level
+    // write-generation negative memo (#1609): no local write touched the CG
+    // between passes, so rescanning the unchanged store cannot change the
+    // verdict. Peer topology gates the FETCH, not the scan.
     expect(fetch.calls).toHaveLength(3);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(expensiveScans).toBe(0);
   });
 
   it('reuses a negative cache entry when connected peers only reorder', async () => {
@@ -843,8 +848,11 @@ describe('Phase D - VM reconcile damping', () => {
 
     await expect(internals.reconcileChainOrdinal('57', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     expect(primeCalls).toBeGreaterThanOrEqual(1);
+    // Fetch re-ran against the primed topology (sweep entry not reused); the
+    // scan is served by the #1609 write-gen negative memo — see the topology
+    // test above.
     expect(fetch.calls).toHaveLength(3);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(expensiveScans).toBe(0);
   });
 
   it('does not reuse a negative cache entry when catchup ranking changes for the same peer set', async () => {
@@ -873,8 +881,11 @@ describe('Phase D - VM reconcile damping', () => {
     (internals as any).knownCorePeerIds.add('peer-reclassified');
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
+    // Fetch re-ran for the reclassified peer (sweep entry not reused); the
+    // scan is served by the #1609 write-gen negative memo — see the topology
+    // test above.
     expect(fetch.calls).toHaveLength(2);
-    expect(expensiveScans).toBeGreaterThan(0);
+    expect(expensiveScans).toBe(0);
   });
 
   it('does not reuse a negative cache entry when the same KA has a newer merkle root', async () => {
