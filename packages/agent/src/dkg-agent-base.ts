@@ -216,7 +216,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
-import { getSyncCheckpointKey, MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
+import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -354,7 +354,7 @@ import {
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
-import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
+import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -1367,6 +1367,7 @@ export class DKGAgentBase {
    * by PR #237 (sync-refactor-rebased).
    */
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
+  protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
@@ -1449,6 +1450,7 @@ export class DKGAgentBase {
     this.publisher.setWorkspaceAgentRecipientResolver((input) => (this as unknown as DKGAgent).resolveWorkspaceRecipientsGated(input));
     this.publisher.setWorkspaceSenderKeyEncryptor((input) => (this as unknown as DKGAgent).encryptWorkspacePayloadWithSenderKey(input));
     this.syncCheckpoints = config.syncCheckpointStore ?? this.syncCheckpoints;
+    this.changelogCursors = config.changelogCursorStore ?? this.changelogCursors;
   }
 
   /**

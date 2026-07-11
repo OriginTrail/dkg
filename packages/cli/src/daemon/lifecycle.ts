@@ -95,6 +95,8 @@ import {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
+  SqliteChangelogCursorStore,
+  SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
@@ -1499,6 +1501,11 @@ export async function runDaemonInner(
     },
   });
   const syncCheckpointStore = new SqliteSyncCheckpointStore(dashDb);
+  const changelogCursorStore = new SqliteChangelogCursorStore(dashDb);
+  // OT-RFC-59 §6 P0: the durable era guard MUST back the changelog when enabled —
+  // it lives in node-ui.db (survives a `store.nq` RDF restore) so a restore/rollback
+  // rotates the era and forces peers to full-resync instead of silently skipping.
+  const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
 
@@ -1558,6 +1565,16 @@ export async function runDaemonInner(
       backend: runtimeStore.backend,
       options: runtimeStore.options,
       graphSetIndex: runtimeStore.graphSetIndex,
+      // OT-RFC-59: operator opt-in to the append-only change log (default OFF).
+      // Sourced from config.store (operator intent), NOT runtimeStore — the
+      // managed-oxigraph path rebuilds runtimeStore and would drop it. Enabling
+      // this wraps the store in ChangelogStore, which is what makes
+      // asChangelogReader(store) non-null and registers the responder delta lane.
+      // Wire the DURABLE era guard (§6 P0) so restore/rollback rotates the era —
+      // enabling the changelog fleet-wide without it is unsafe (silent skips).
+      changelog: config.store?.changelog
+        ? { enabled: true, eraGuard: changelogEraGuard }
+        : undefined,
     } : undefined,
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
@@ -1600,6 +1617,7 @@ export async function runDaemonInner(
     randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
     storageAckTiming,
     syncCheckpointStore,
+    changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphSubscriptionStore: {

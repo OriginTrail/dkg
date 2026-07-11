@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -545,7 +545,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(22);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(24);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -785,7 +785,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -806,7 +806,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
   });
 });
 
@@ -890,7 +890,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -919,7 +919,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -956,7 +956,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1049,7 +1049,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1115,7 +1115,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
@@ -1564,7 +1564,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1630,7 +1630,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1659,7 +1659,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -1902,10 +1902,61 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(22);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(24);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);
     upgraded.close();
+  });
+});
+
+describe('SqliteChangelogCursorStore — OT-RFC-59 durable (era,seq) cursor (SC5)', () => {
+  it('upserts per (peer,cg), keeps keys independent, is durable across reopen, validates seq', () => {
+    const store = new SqliteChangelogCursorStore(db);
+    expect(store.get('peerA', 'cg1')).toBeUndefined();
+    store.set('peerA', 'cg1', 'era-1', 5);
+    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-1', seq: 5 });
+    // upsert (same key) replaces era + seq
+    store.set('peerA', 'cg1', 'era-2', 9);
+    expect(store.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
+    // distinct (peer,cg) keys are independent (seq is per-responder-node)
+    store.set('peerB', 'cg1', 'era-x', 3);
+    store.set('peerA', 'cg2', 'era-y', 7);
+    expect(store.get('peerB', 'cg1')!.seq).toBe(3);
+    expect(store.get('peerA', 'cg2')!.seq).toBe(7);
+    expect(store.get('peerA', 'cg1')!.seq).toBe(9);
+    // seq 0 is valid (first contact / reseed); negative rejected
+    store.set('peerC', 'cg1', 'era-1', 0);
+    expect(store.get('peerC', 'cg1')!.seq).toBe(0);
+    expect(() => store.set('peerC', 'cg1', 'era-1', -1)).toThrow(/Invalid changelog cursor seq/);
+    // durable across a fresh DashboardDB on the same dir (never TTL-pruned)
+    const db2 = new DashboardDB({ dataDir: dir });
+    const store2 = new SqliteChangelogCursorStore(db2);
+    expect(store2.get('peerA', 'cg1')).toMatchObject({ era: 'era-2', seq: 9 });
+  });
+});
+
+describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () => {
+  it('round-trips (era, highSeq) as a singleton, is durable across reopen, validates highSeq', async () => {
+    const guard = new SqliteChangelogEraGuard(db);
+    expect(await guard.load()).toBeNull();
+    await guard.save('era-1', 10);
+    expect(await guard.load()).toEqual({ era: 'era-1', highSeq: 10 });
+    // singleton: a second save REPLACES (not a second row) — this is the node-global high-water
+    await guard.save('era-2', 42);
+    expect(await guard.load()).toEqual({ era: 'era-2', highSeq: 42 });
+    await expect(guard.save('era-2', -1)).rejects.toThrow(/Invalid changelog era high_seq/);
+    // survives a fresh DashboardDB on the same dir (the whole point — outlives a store.nq restore)
+    const guard2 = new SqliteChangelogEraGuard(new DashboardDB({ dataDir: dir }));
+    expect(await guard2.load()).toEqual({ era: 'era-2', highSeq: 42 });
+  });
+
+  it('an existing pre-v24 db upgrades and gains the changelog_era + changelog_cursors tables', () => {
+    // Fresh db is already at current version; assert both OT-RFC-59 tables exist after migration.
+    const tables = (db.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
+      .map((t) => t.name);
+    expect(tables).toContain('changelog_cursors');
+    expect(tables).toContain('changelog_era');
+    expect(db.db.pragma('user_version', { simple: true })).toBe(24);
   });
 });
