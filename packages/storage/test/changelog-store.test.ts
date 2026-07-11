@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
-import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader } from '../src/changelog-store.js';
+import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
 
@@ -627,6 +627,67 @@ describe('ChangelogStore — era foundation & reader capability', () => {
     // A plain (non-changelog) store is not a reader → capability probe is false.
     expect(asChangelogReader(base)).toBeNull();
     expect(asChangelogReader(null)).toBeNull();
+    await base.close();
+  });
+
+  it('era-restore guard: a seq rollback under the same era rotates the era (P0)', async () => {
+    class MemGuard implements ChangelogEraGuard {
+      state: { era: string; highSeq: number } | null;
+      constructor(initial: { era: string; highSeq: number } | null = null) { this.state = initial; }
+      async load() { return this.state; }
+      async save(era: string, highSeq: number) { this.state = { era, highSeq }; }
+    }
+
+    // A store that reached seq 5 under era E1.
+    const base = new OxigraphStore();
+    const era1 = (await new ChangelogStore(base).changelogHead()).era;
+    for (let i = 0; i < 5; i++) await new ChangelogStore(base).insert([q(`http://ex.org/s${i}`, `${G1}${i}`)]);
+
+    // Simulate a restore: the durable guard says this era once reached seq 10,
+    // but the (restored) store is only at seq 5 → rollback under the same era.
+    const guard = new MemGuard({ era: era1, highSeq: 10 });
+    const head = await new ChangelogStore(base, { eraGuard: guard }).changelogHead();
+    expect(head.seq).toBe(5);
+    expect(head.era).not.toBe(era1);              // era rotated → peers full-resync
+    expect(guard.state).toEqual({ era: head.era, highSeq: 5 });
+    await base.close();
+  });
+
+  it('era-restore guard: normal restart (no rollback) keeps the era and advances the high-water', async () => {
+    class MemGuard implements ChangelogEraGuard {
+      state: { era: string; highSeq: number } | null = null;
+      async load() { return this.state; }
+      async save(era: string, highSeq: number) { this.state = { era, highSeq }; }
+    }
+    const base = new OxigraphStore();
+    const guard = new MemGuard();
+    const log1 = new ChangelogStore(base, { eraGuard: guard });
+    const era1 = (await log1.changelogHead()).era;
+    await log1.insert([q('http://ex.org/a', G1)]);
+    await log1.insert([q('http://ex.org/b', G2)]);
+    expect(guard.state).toEqual({ era: era1, highSeq: 2 }); // high-water tracked per write
+
+    // Fresh store (restart) over the same base + same guard: seq(2) == highSeq(2) ⇒ no rotation.
+    const head = await new ChangelogStore(base, { eraGuard: guard }).changelogHead();
+    expect(head.era).toBe(era1);
+    expect(head.seq).toBe(2);
+    await base.close();
+  });
+
+  it('era-restore guard: a wipe (era absent) mints a fresh era and resets the guard, not a rollback', async () => {
+    class MemGuard implements ChangelogEraGuard {
+      state: { era: string; highSeq: number } | null;
+      constructor(initial: { era: string; highSeq: number } | null) { this.state = initial; }
+      async load() { return this.state; }
+      async save(era: string, highSeq: number) { this.state = { era, highSeq }; }
+    }
+    // Guard remembers a prior era at high seq, but the store was wiped (no era/markers).
+    const base = new OxigraphStore();
+    const guard = new MemGuard({ era: 'old-era-uuid', highSeq: 99 });
+    const head = await new ChangelogStore(base, { eraGuard: guard }).changelogHead();
+    expect(head.seq).toBe(0);
+    expect(head.era).not.toBe('old-era-uuid');    // fresh era, not a rotation of the old one
+    expect(guard.state).toEqual({ era: head.era, highSeq: 0 });
     await base.close();
   });
 
