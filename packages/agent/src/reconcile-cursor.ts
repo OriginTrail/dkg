@@ -46,6 +46,18 @@ export interface CursorState {
    * sweep re-derives everything from chain + the persisted watermark.
    */
   ahead: Map<number, number>;
+  /**
+   * Per-ordinal skip-backoff: ordinals that keep returning `pending`/`skip`
+   * (no local SWM snapshot yet, or a transient chain-read failure) mapped to
+   * `{ untilMs, attempts }`. Without this, a never-matching ordinal (e.g. a KA
+   * whose SWM this node never received) is re-attempted on EVERY sweep, each
+   * attempt re-running the expensive finalization SWM search — the reconcile
+   * storm in #1609. This is purely an attempt-rate limiter: it NEVER advances or
+   * blocks the watermark, so invariant 1 (no gap permanently skipped) is
+   * untouched — a backed-off ordinal is still `[watermark, head)`, just probed
+   * less often. In-memory only (a restart re-derives it with one extra attempt).
+   */
+  backoff: Map<number, { untilMs: number; attempts: number }>;
 }
 
 /** A reconciled ordinal plus the chain block its registration was observed at. */
@@ -55,7 +67,39 @@ export interface CompletedOrdinal {
 }
 
 export function createCursorState(watermark = 0): CursorState {
-  return { watermark: Math.max(0, watermark), ahead: new Map() };
+  return { watermark: Math.max(0, watermark), ahead: new Map(), backoff: new Map() };
+}
+
+// Exponential, capped skip-backoff schedule. First skip → 30s, then ×2 up to a
+// 15-min ceiling. Early windows stay short so a KA whose SWM merely lags the
+// chain event still materialises within a few minutes; the ceiling is what
+// tames a permanently-never-matching ordinal (probed ~every 15 min instead of
+// every sweep). The reconcile sweep is a backstop — a bounded materialisation
+// delay for a late-synced KA is acceptable (the primary path materialises when
+// the SWM is already present on the first attempt).
+export const RECONCILE_BACKOFF_BASE_MS = 30_000;
+export const RECONCILE_BACKOFF_FACTOR = 2;
+export const RECONCILE_BACKOFF_CAP_MS = 900_000;
+
+/** True if `ordinal` is inside an active backoff window (skip it this pass). */
+export function isOrdinalBackedOff(state: CursorState, ordinal: number, nowMs: number): boolean {
+  const entry = state.backoff.get(ordinal);
+  return entry !== undefined && entry.untilMs > nowMs;
+}
+
+/** Record a not-actionable outcome for `ordinal`, growing its backoff window. */
+export function recordOrdinalBackoff(state: CursorState, ordinal: number, nowMs: number): void {
+  const attempts = (state.backoff.get(ordinal)?.attempts ?? 0) + 1;
+  const delay = Math.min(
+    RECONCILE_BACKOFF_BASE_MS * RECONCILE_BACKOFF_FACTOR ** (attempts - 1),
+    RECONCILE_BACKOFF_CAP_MS,
+  );
+  state.backoff.set(ordinal, { untilMs: nowMs + delay, attempts });
+}
+
+/** Clear an ordinal's backoff (it reconciled — no longer a retry candidate). */
+export function clearOrdinalBackoff(state: CursorState, ordinal: number): void {
+  state.backoff.delete(ordinal);
 }
 
 /**

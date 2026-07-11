@@ -4,6 +4,10 @@ import {
   recordCompletion,
   absorbConfirmed,
   ordinalsToReconcile,
+  isOrdinalBackedOff,
+  recordOrdinalBackoff,
+  clearOrdinalBackoff,
+  RECONCILE_BACKOFF_CAP_MS,
   type CursorState,
 } from '../src/reconcile-cursor.js';
 
@@ -124,5 +128,39 @@ describe('reconcile-cursor — ordinalsToReconcile (sweep planning)', () => {
     expect(ordinalsToReconcile(s, 45)).toEqual([43]);
     // 43 finally lands → watermark jumps past 44 too.
     expect(recordCompletion(s, { ordinal: 43, blockNumber: 1 }, 1, 0)).toBe(45);
+  });
+});
+
+describe('reconcile-cursor — ordinal skip-backoff (#1609)', () => {
+  it('grows the window exponentially (30s ×2) then caps at 15 min', () => {
+    const s = createCursorState(0);
+    const expectedDelays = [30_000, 60_000, 120_000, 240_000, 480_000, RECONCILE_BACKOFF_CAP_MS, RECONCILE_BACKOFF_CAP_MS];
+    let now = 0;
+    for (const expected of expectedDelays) {
+      recordOrdinalBackoff(s, 0, now);
+      expect(s.backoff.get(0)!.untilMs - now).toBe(expected);
+      now = s.backoff.get(0)!.untilMs; // jump to the window edge for the next attempt
+    }
+    expect(RECONCILE_BACKOFF_CAP_MS).toBe(900_000);
+  });
+
+  it('isOrdinalBackedOff respects the window boundary and unknown ordinals', () => {
+    const s = createCursorState(0);
+    recordOrdinalBackoff(s, 0, 1_000); // window until 31_000
+    expect(isOrdinalBackedOff(s, 0, 30_999)).toBe(true);
+    expect(isOrdinalBackedOff(s, 0, 31_000)).toBe(false); // untilMs > now is false at the boundary
+    expect(isOrdinalBackedOff(s, 0, 40_000)).toBe(false);
+    expect(isOrdinalBackedOff(s, 1, 0)).toBe(false); // no entry
+  });
+
+  it('clearOrdinalBackoff removes the entry; the window never touches the watermark', () => {
+    const s = createCursorState(5);
+    recordOrdinalBackoff(s, 5, 1_000);
+    expect(s.backoff.has(5)).toBe(true);
+    // Backoff is a rate-limiter only: it must NOT advance/block the watermark or ahead.
+    expect(s.watermark).toBe(5);
+    expect(s.ahead.size).toBe(0);
+    clearOrdinalBackoff(s, 5);
+    expect(s.backoff.has(5)).toBe(false);
   });
 });

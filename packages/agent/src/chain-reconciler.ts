@@ -28,6 +28,9 @@ import {
   recordCompletion,
   absorbConfirmed,
   ordinalsToReconcile,
+  isOrdinalBackedOff,
+  recordOrdinalBackoff,
+  clearOrdinalBackoff,
 } from './reconcile-cursor.js';
 
 /**
@@ -74,6 +77,11 @@ export interface ChainReconcilerDeps {
   /** Confirmation depth (blocks) before a completed ordinal advances the watermark. */
   confirmationDepth: number;
   log: (msg: string) => void;
+  /**
+   * Clock (ms since epoch). Injectable for tests; defaults to `Date.now`. Used
+   * only for the per-ordinal skip-backoff window (#1609).
+   */
+  now?: () => number;
 }
 
 export interface ReconcileResult {
@@ -81,6 +89,11 @@ export interface ReconcileResult {
   watermark: number;
   reconciled: number;
   pending: number;
+  /**
+   * Ordinals skipped this pass because they are inside an active skip-backoff
+   * window (they are still counted in `pending` — they block the watermark).
+   */
+  backedOff: number;
 }
 
 /**
@@ -116,16 +129,27 @@ export async function reconcileContextGraph(
   // new completions this pass. Skipped when the head is unobservable.
   if (headBlock !== undefined) absorbConfirmed(state, headBlock, deps.confirmationDepth);
 
+  const now = deps.now?.() ?? Date.now();
   let reconciled = 0;
   let pending = 0;
+  let backedOff = 0;
   const ordinals = ordinalsToReconcile(state, head);
   if (headUnavailable) {
     pending = ordinals.length;
   } else {
     for (const ordinal of ordinals) {
+      if (isOrdinalBackedOff(state, ordinal, now)) {
+        // Inside an active skip-backoff window: still pending (it blocks the
+        // watermark), but don't re-run the expensive reconcile this pass — a
+        // never-matching ordinal must not be re-probed on every sweep (#1609).
+        pending += 1;
+        backedOff += 1;
+        continue;
+      }
       const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
       if (outcome.status === 'reconciled' || outcome.status === 'already') {
         reconciled += 1;
+        clearOrdinalBackoff(state, ordinal);
         // With a known head, apply the reorg-depth gate; otherwise (no chain
         // head) absorb as soon as contiguous (depth 0) using the registration
         // block as a self-consistent head.
@@ -137,18 +161,22 @@ export async function reconcileContextGraph(
         );
       } else {
         pending += 1;
+        // `pending`/`skip` both mean "not actionable this pass, retry later"
+        // (no local SWM snapshot yet, or a transient chain-read failure) — grow
+        // the backoff so the next sweeps don't immediately re-run the search.
+        recordOrdinalBackoff(state, ordinal, now);
       }
     }
   }
 
   if (state.watermark !== before) {
     deps.persistWatermark(localCgId, state.watermark);
-    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending})`);
+    deps.log(`reconcile ${localCgId}: watermark ${before} -> ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}, backedOff=${backedOff})`);
   } else if (reconciled > 0 || pending > 0) {
-    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}${headUnavailable ? ', headUnavailable' : ''})`);
+    deps.log(`reconcile ${localCgId}: watermark held at ${state.watermark} (head=${head}, reconciled=${reconciled}, pending=${pending}, backedOff=${backedOff}${headUnavailable ? ', headUnavailable' : ''})`);
   }
 
-  return { head, watermark: state.watermark, reconciled, pending };
+  return { head, watermark: state.watermark, reconciled, pending, backedOff };
 }
 
 /**

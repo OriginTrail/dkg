@@ -55,9 +55,11 @@ describe('reconcileContextGraph — sweep', () => {
   });
 
   it('a pending ordinal holds the watermark; a later sweep fills the gap', async () => {
+    let now = 1_000_000;
     let firstPass = true;
     const { deps, persisted } = makeDeps({
       getKCCount: async () => 3,
+      now: () => now,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => {
         // ordinal 1 is missing SWM on the first pass only.
         if (ordinal === 1 && firstPass) return { status: 'pending' } as OrdinalOutcome;
@@ -72,6 +74,7 @@ describe('reconcileContextGraph — sweep', () => {
     expect(persisted).toEqual([{ cg: 'cg', watermark: 1 }]);
 
     firstPass = false;
+    now += 30_000; // past ordinal 1's skip-backoff window so the later sweep retries it
     const r2 = await reconcileContextGraph(deps, state, 'cg', 1n);
     // 1 now reconciled -> absorbs 1 and the held 2 -> watermark 3.
     expect(r2.watermark).toBe(3);
@@ -84,10 +87,12 @@ describe('reconcileContextGraph — sweep', () => {
   it('does not re-attempt an ordinal already held in the cursor', async () => {
     // ordinal 2 completes out of order on pass 1 (held because 1 is pending),
     // then must NOT be re-attempted on pass 2.
+    let now = 1_000_000;
     let pass = 0;
     const attempts: number[][] = [[], []];
     const { deps } = makeDeps({
       getKCCount: async () => 3,
+      now: () => now,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => {
         attempts[pass].push(ordinal);
         if (ordinal === 1 && pass === 0) return { status: 'pending' };
@@ -97,9 +102,10 @@ describe('reconcileContextGraph — sweep', () => {
     const state = createCursorState(0);
     await reconcileContextGraph(deps, state, 'cg', 1n);
     pass = 1;
+    now += 30_000; // past ordinal 1's skip-backoff window so it retries
     await reconcileContextGraph(deps, state, 'cg', 1n);
     expect(attempts[0]).toEqual([0, 1, 2]);
-    expect(attempts[1]).toEqual([1]); // only the gap, not the held 2
+    expect(attempts[1]).toEqual([1]); // only the gap (1 retried), not the held 2
   });
 
   it('respects the reorg confirmation depth: a shallow ordinal holds, a buried one advances', async () => {
@@ -149,6 +155,76 @@ describe('reconcileContextGraph — sweep', () => {
     expect(r2.watermark).toBe(2);
     expect(attempted).toEqual([0, 1]);
     expect(persisted).toEqual([{ cg: 'cg', watermark: 2 }]);
+  });
+});
+
+describe('reconcileContextGraph — skip-backoff (#1609)', () => {
+  it('does not re-run reconcileOrdinal for an ordinal inside its backoff window', async () => {
+    let now = 1_000_000;
+    const attempts: number[] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      now: () => now,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => { attempts.push(ordinal); return { status: 'pending' }; },
+    });
+    const state = createCursorState(0);
+    await reconcileContextGraph(deps, state, 'cg', 1n); // attempt -> pending -> 30s backoff
+    const res = await reconcileContextGraph(deps, state, 'cg', 1n); // immediate re-sweep, still in window
+    expect(attempts).toEqual([0]); // NOT re-attempted — the storm this fixes
+    expect(res).toMatchObject({ pending: 1, backedOff: 1, watermark: 0 });
+  });
+
+  it('retries once the backoff window expires', async () => {
+    let now = 1_000_000;
+    const attempts: number[] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      now: () => now,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => { attempts.push(ordinal); return { status: 'pending' }; },
+    });
+    const state = createCursorState(0);
+    await reconcileContextGraph(deps, state, 'cg', 1n); // window until now+30s
+    now += 29_999;
+    await reconcileContextGraph(deps, state, 'cg', 1n); // still inside -> skipped
+    expect(attempts).toEqual([0]);
+    now += 1; // now == untilMs -> retryable
+    await reconcileContextGraph(deps, state, 'cg', 1n); // retried
+    expect(attempts).toEqual([0, 0]);
+  });
+
+  it('a long-backed-off ordinal that finally reconciles clears its backoff and advances the watermark', async () => {
+    let now = 1_000_000;
+    let outcome: OrdinalOutcome = { status: 'pending' };
+    const attempts: number[] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 1,
+      now: () => now,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => { attempts.push(ordinal); return outcome; },
+    });
+    const state = createCursorState(0);
+    await reconcileContextGraph(deps, state, 'cg', 1n); // pending -> backoff
+    now += 30_000;                                       // window expires
+    outcome = { status: 'reconciled', blockNumber: 0 };  // SWM finally arrived
+    const res = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(res.watermark).toBe(1);                       // convergence NOT broken
+    expect(res.backedOff).toBe(0);
+    expect(state.backoff.has(0)).toBe(false);            // backoff cleared on success
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 1 }]);
+    expect(attempts).toEqual([0, 0]);
+  });
+
+  it('backs off a transient skip (chain-read failure) the same way', async () => {
+    let now = 1_000_000;
+    const attempts: number[] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 1,
+      now: () => now,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => { attempts.push(ordinal); return { status: 'skip' }; },
+    });
+    const state = createCursorState(0);
+    await reconcileContextGraph(deps, state, 'cg', 1n);
+    await reconcileContextGraph(deps, state, 'cg', 1n); // within window
+    expect(attempts).toEqual([0]);
   });
 });
 
