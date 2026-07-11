@@ -23,6 +23,15 @@ export const PROTOCOL_DISCOVER = '/dkg/10.0.0/discover';
 // (sync is a self-healing catch-up net, so the brief mixed-version
 // window during auto-update is no-data-loss).
 export const PROTOCOL_SYNC = '/dkg/10.0.2/sync';
+// OT-RFC-59 changelog read-lane — a SEPARATE protocol id, not a field on
+// PROTOCOL_SYNC: the legacy sync response is bare N-Quads with no envelope, so a
+// structured (era, headSeq, nextSeq, records) head cannot ride the existing
+// wire. Same 10.0.2 family; the distinct suffix means legacy peers never dial it
+// and identify simply omits it. Advertised ONLY when config.changelog is on
+// (the responder registers it iff asChangelogReader(store) is non-null), so it
+// is default-off and mixed-version-safe: a changelog-capable requester falls
+// back to PROTOCOL_SYNC when a peer does not advertise this id.
+export const PROTOCOL_SYNC_CHANGELOG = '/dkg/10.0.2/sync-changelog';
 export const PROTOCOL_GET_ASSERTION_ARTIFACT = '/dkg/10.0.2/get-assertion-artifact';
 // Universal Messenger pilot protocol (rc.9 PR-3). Bumped from
 // /dkg/10.0.0/message to /dkg/10.0.1/message to opt into the

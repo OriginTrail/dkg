@@ -527,6 +527,9 @@ describe('chainResetWipe — external SPARQL wipe', () => {
     expect(update).toContain('DELETE');
     expect(update).toContain('did:dkg:context-graph:');
     expect(update).toContain('strstarts');
+    // OT-RFC-59: the reserved changelog graph is a `urn:` graph outside the CG
+    // prefix, so a scoped wipe must clear it too (clean reseed, no stale markers).
+    expect(update).toContain('urn:dkg:changelog');
     expect(update).not.toBe('DROP ALL');
   });
 
