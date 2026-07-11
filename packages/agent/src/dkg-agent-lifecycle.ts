@@ -652,6 +652,10 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
   return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
 }
 
+/** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
+ *  requesters send SYNC_PAGE_SIZE (500); the headroom tolerates larger legitimate pages. */
+const CHANGELOG_MAX_SCAN_LIMIT = 2000;
+
 function emptyDurableSyncResult(): DurableSyncResult {
   return {
     insertedTriples: 0,
@@ -2660,12 +2664,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return encodeChangelogResponse({ kind: 'denied' });
     }
     // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
-    // private CGs verify the signed digest the requester rode on the request.
-    const authorized = await this.authorizeSyncRequest(
-      request as unknown as SyncRequestEnvelope,
-      peerId,
-      { signal: options?.signal },
-    );
+    // private CGs verify the signed digest — a bare (unsigned) changelog request
+    // carries no digest, so `authorizePrivateSyncRequest` denies it. Any throw on a
+    // malformed envelope must fail CLOSED (deny), never escape as a handler error.
+    let authorized = false;
+    try {
+      authorized = await this.authorizeSyncRequest(
+        request as unknown as SyncRequestEnvelope,
+        peerId,
+        { signal: options?.signal },
+      );
+    } catch {
+      return encodeChangelogResponse({ kind: 'denied' });
+    }
     if (!authorized) return encodeChangelogResponse({ kind: 'denied' });
     const resp = await readChangelogDeltaPage({
       reader,
@@ -2673,7 +2684,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId: request.contextGraphId,
       sinceSeq: request.sinceSeq,
       requesterEra: request.era,
-      limit: request.limit,
+      // Clamp the peer-controlled scan limit: an unbounded value would let a peer
+      // force an O(limit) log scan (DoS). Honest requesters send SYNC_PAGE_SIZE.
+      limit: Math.min(Math.max(1, request.limit), CHANGELOG_MAX_SCAN_LIMIT),
       signal: options?.signal,
     });
     return encodeChangelogResponse(resp);
