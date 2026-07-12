@@ -108,6 +108,83 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
   HUB_BINDING_INVALIDATOR_ENTRIES,
 );
 
+/**
+ * Contract names deliberately EXCLUDED from the `resolvedContractAddressCache`
+ * address memo (#1583 — the 100-KA publish-burst RPC read amplifier that funnels
+ * ~150-250 redundant `Hub.getContractAddress` eth_calls through the chain RPC).
+ * The memo caches a resolved proxy address to skip that read, but two families
+ * MUST always resolve fresh:
+ *
+ *   - `RandomSampling` / `RandomSamplingStorage` — already owned by
+ *     `randomSamplingPairCache`, which uses a deliberately SHORTER TTL
+ *     (`randomSamplingHubRefreshMs`) as a missed-rotation backstop for the
+ *     read-only prover paths plus its own `invalidateRandomSamplingPair()`
+ *     lifecycle. Its loader calls `resolveContract`, so memoizing these addresses
+ *     in the 1h memo would shadow that shorter backstop (and is redundant with
+ *     the pair cache).
+ *
+ *   - `PublishingConviction` / `ShardingTable` / `DKGStakingConvictionNFT` — these
+ *     three are resolved per-call (not lazy-bound) on COLD paths only: the PCA UI
+ *     `version()`/`clearAgentsSupported` gate (evm-adapter-conviction.ts:610), the
+ *     `listDesignatableNodes` logic read (itself behind a 30s cache), and the
+ *     one-shot conviction-NFT provisioning write (evm-adapter-identity.ts:350).
+ *     They are NOT excluded for a correctness reason — the round-2 unconditional
+ *     rotation flush (`applyHubRotationEventName`) would self-heal them on an
+ *     observed rotation exactly like the memoized names — but because memoizing a
+ *     cold path saves ~nothing, keeping them fresh-every-call is a zero-cost strict
+ *     non-regression (identical to pre-#1583). Excluding them also keeps this list
+ *     as documentation of "which names the memo intentionally skips."
+ *
+ * NOTE on the two ACK-verify-floor contracts, `IdentityStorage` and
+ * `ShardingTableStorage`, which ARE memoized (not excluded): both are on the
+ * per-ACK hot path (`verifyACKIdentityDetailed` resolves both on every ACK, so a
+ * 100-KA burst re-resolved each ~once per ACK ≈ hundreds of redundant Hub reads),
+ * and both are security-sensitive only in their RESULTS — `keyHasPurpose` (key
+ * revoked) and `nodeExists` (node left the table), which are NEVER cached and so
+ * stay live within a single ACK regardless of this memo. The only thing memoized
+ * is the proxy ADDRESS, which changes only on a Hub re-registration of the
+ * contract itself (a rare, coordinated migration — NOT a key revocation or a
+ * table exit). Any OBSERVED such rotation of EITHER flushes the whole memo
+ * immediately: `applyHubRotationEventName` calls `resolvedContractAddressCache`
+ * `.invalidateAll()` unconditionally on every Hub rotation event (round-2 fix —
+ * this is what covers ShardingTableStorage, which has no lazy binding and so no
+ * `HUB_BINDING_INVALIDATORS` entry). The only residual — a poller-MISSED contract
+ * rotation of either — is bounded to `RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS` (30s,
+ * the staleness the codebase already accepts for the sibling `listDesignatableNodes`
+ * read), across a compound edge (rare contract rotation × rare poller miss × ≤30s).
+ * Memoizing these two is a deliberate reversal of the first cut's ShardingTableStorage
+ * exclusion (review of PR #1615): excluding it while memoizing its ACK-path twin
+ * IdentityStorage was inconsistent and left ~half of ACK-verify address
+ * amplification uncut.
+ */
+const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
+  'RandomSampling',
+  'RandomSamplingStorage',
+  'PublishingConviction',
+  'ShardingTable',
+  'DKGStakingConvictionNFT',
+]);
+
+/**
+ * TTL for the `resolvedContractAddressCache` address memo. Deliberately SHORT
+ * (30s) rather than the 1h `PREFLIGHT_TTL_MS` (review of PR #1615): it matches
+ * the staleness the codebase ALREADY accepts for the same class of read — the
+ * `listDesignatableNodes` sharding-table cache is 30s (evm-adapter-conviction.ts)
+ * — and it bounds the only residual risk of memoizing a contract address (a Hub
+ * contract-rotation the event poller MISSES → a memoized-stale address, e.g.
+ * IdentityStorage behind ACK `keyHasPurpose`) to ≤30s instead of ≤1h, while a
+ * publish burst (seconds–minutes) still resolves each contract from ~1 read
+ * instead of ~150. Observed rotations still invalidate immediately via the
+ * unconditional flush in `applyHubRotationEventName`; contract rotation is itself
+ * a rare coordinated migration event.
+ *
+ * Exported (not a class member) so the memo unit test can couple its TTL-backstop
+ * assertion to the production value without widening the adapter's protected
+ * surface — the same idiom already used for `decodeConvictionCostCovered` and the
+ * `CG_REGISTRY_*` consts. (Review of PR #1615, round-2.)
+ */
+export const RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS = 30_000;
+
 const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 
 type IdentityIdCacheEntry = {
@@ -698,6 +775,30 @@ export class EVMChainAdapterBase {
 
   protected readonly pcaReadCache = new PcaReadCache();
 
+  /**
+   * #1583 — resolved-address memo for `resolveContract`. Caches the Hub-resolved
+   * proxy ADDRESS (string) per contract name so a sustained 100-KA publish burst
+   * stops funnelling ~150-250 redundant `Hub.getContractAddress` eth_calls
+   * (identity resolution, ACK verification, token-amount) through the chain RPC —
+   * on that workload the RPC was ~99% reads, almost all address re-resolution.
+   *
+   * Only the ADDRESS is memoized; the `Contract` handle is still built fresh per
+   * call (a cheap object build, not an RPC). `this.signer` is a constant readonly
+   * pool[0], so caching the handle would be behaviourally safe — but reads go via
+   * `staticCall` and writes `.connect()` an explicitly-passed signer, so the fresh
+   * build is the simplest correct thing and avoids an ABI-vs-address cache pairing.
+   * Keyed `${hubAddress}:${chainId}:${name}` — the hub+chain scope is
+   * constant for an adapter instance but is kept explicit so the key survives any
+   * future shared-cache refactor. Proxy addresses are immutable except on a Hub
+   * re-registration, so the memo is cleared at the SAME rotation/invalidation
+   * hooks as `identityIdCache`, with a `PREFLIGHT_TTL_MS` backstop so a missed
+   * hook cannot strand a stale address forever. A zero/missing result is never
+   * cached (only a successfully-resolved non-zero address). See
+   * `RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED` for names that always resolve fresh.
+   * Assigned in the constructor (TTL sourced from the `PREFLIGHT_TTL_MS` static).
+   */
+  protected readonly resolvedContractAddressCache: ReadThroughTtlCache<string, string>;
+
   protected readonly hubRotationPoller: HubRotationPoller;
 
   /**
@@ -824,6 +925,11 @@ export class EVMChainAdapterBase {
 
   protected clearIdentityIdForAddress(address: string): void {
     this.identityIdCache.invalidate(address);
+    // #1583 — this fires on the identity-management / RS-challenge paths (NOT
+    // the per-KA-publish hot path), so dropping the address memo here is cheap
+    // and keeps the resolved-address cache flushed whenever we suspect an
+    // identity binding shifted.
+    this.resolvedContractAddressCache.invalidateAll();
   }
 
   protected seedIdentityIdForAddress(address: string, identityId: bigint): void {
@@ -833,6 +939,9 @@ export class EVMChainAdapterBase {
   protected invalidateIdentityStorageBinding(): void {
     this.contracts.identityStorage = undefined;
     this.identityIdCache.invalidateAll();
+    // #1583 — an IdentityStorage rotation changes its proxy address; drop the
+    // memoized address so the next resolve re-hits the Hub.
+    this.resolvedContractAddressCache.invalidateAll();
   }
 
   protected async identityStorageAddressChanged(
@@ -853,9 +962,25 @@ export class EVMChainAdapterBase {
     const checksum = ethers.getAddress(address);
     await this.init();
     const previousIdentityStorage = this.contracts.identityStorage;
+    // #1583 — keep the `{ refresh: true }` re-resolve. Pre-#1583 this re-hit the
+    // Hub on every getIdentityId miss (a major RPC amplifier during publish
+    // bursts); now `resolveContractAddress` memoizes the address, so the
+    // re-resolve is memo-served (no RPC on the hot path) yet still rebinds the
+    // lazy Contract to whatever the memo currently holds. That coupling is the
+    // point: a Hub rotation the event poller MISSES no longer strands this
+    // binding on a dead proxy — the address memo TTL-expires within
+    // RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS (30s) and this re-resolve picks up the
+    // new address, bounding the missed-rotation window to ≤30s. (An OBSERVED
+    // rotation clears both binding and memo immediately via
+    // `invalidateIdentityStorageBinding`.) The `getIdentityId` VALUE read below
+    // stays fresh/uncached; `identityStorageChanged` flushes the identity caches
+    // when the re-resolve lands on a new address.
     const identityStorage = await this.getIdentityStorage({ refresh: true });
     const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
-    if (identityStorageChanged) this.identityIdCache.invalidateAll();
+    if (identityStorageChanged) {
+      this.identityIdCache.invalidateAll();
+      this.resolvedContractAddressCache.invalidateAll();
+    }
     const id: bigint = await this.readContract(
       identityStorage, 'identityStorage.getIdentityId', 'getIdentityId', checksum,
     );
@@ -1082,6 +1207,11 @@ export class EVMChainAdapterBase {
       EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
       EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
     );
+    // #1583 — resolved-contract-address memo, 30s TTL backstop
+    // (RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS — bounds a poller-missed rotation).
+    this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
+      ttlMs: RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS,
+    });
     this.hubAddress = config.hubAddress;
     if (config.tokenAddress && !ethers.isAddress(config.tokenAddress)) {
       throw new Error(`Invalid tokenAddress: ${config.tokenAddress}`);
@@ -2213,6 +2343,39 @@ export class EVMChainAdapterBase {
   }
 
   protected async resolveContract(name: string, abiName?: string): Promise<Contract> {
+    const address = await this.resolveContractAddress(name);
+    // Build the handle fresh every call — a cheap object build (no RPC). Only the
+    // ADDRESS is memoized (#1583); reads use staticCall and writes .connect() an
+    // explicit signer, so no stale-signer risk from the constant readonly signer.
+    return new Contract(address, loadAbi(abiName ?? name), this.signer);
+  }
+
+  /**
+   * #1583 — resolve a Hub-registered contract's proxy address, served from
+   * `resolvedContractAddressCache` when memoizable. Names in
+   * `RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED` always hit the Hub. The loader
+   * (`readHubContractAddress`) throws on a missing/zero result so the memo only
+   * ever holds a successfully-resolved non-zero address (a negative result must
+   * not poison the cache — the next call re-tries).
+   *
+   * `private`: the only production caller is `resolveContract` (same class). The
+   * memo is an implementation detail of `resolveContract`, not a subclass
+   * extension point (review of PR #1615, round-2). Unit tests reach it via the
+   * usual `any`-cast on the adapter under test.
+   */
+  private async resolveContractAddress(name: string): Promise<string> {
+    if (RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED.has(name)) {
+      return this.readHubContractAddress(name);
+    }
+    const key = `${this.hubAddress}:${this.chainId}:${name}`;
+    return this.resolvedContractAddressCache.getOrLoad(
+      key,
+      key,
+      () => this.readHubContractAddress(name),
+    );
+  }
+
+  private async readHubContractAddress(name: string): Promise<string> {
     let address: string;
     try {
       address = await this.readContract(
@@ -2230,7 +2393,7 @@ export class EVMChainAdapterBase {
     if (address === ethers.ZeroAddress) {
       throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
     }
-    return new Contract(address, loadAbi(abiName ?? name), this.signer);
+    return address;
   }
 
   protected async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
@@ -3629,6 +3792,20 @@ export class EVMChainAdapterBase {
   }
 
   protected applyHubRotationEventName(name: string): void {
+    // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
+    // Hub rotation, unconditionally and first. The memo caches the address of
+    // any non-excluded name, including per-call names with no lazy binding and
+    // so no `HUB_BINDING_INVALIDATORS` entry (`ShardingTableStorage`, resolved
+    // fresh per ACK in `verifyACKIdentityDetailed`). The pre-round-2 code only
+    // flushed inside `finalizeKnownHubRotation`, reached solely for names WITH a
+    // policy — so an observed ShardingTableStorage rotation left `nodeExists`
+    // pinned to the retired proxy for up to the 30s TTL. A memoized address is a
+    // pure function of Hub-registry state, so any ContractChanged / NewContract /
+    // AssetStorageChanged / NewAssetStorage event (all delivered here via the one
+    // `onContractName` callback) is exactly the signal that some memoized address
+    // may have moved; flushing all of them is correct and keeps the 30s TTL as a
+    // pure missed-rotation backstop.
+    this.resolvedContractAddressCache.invalidateAll();
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;
@@ -3653,6 +3830,11 @@ export class EVMChainAdapterBase {
 
   protected finalizeKnownHubRotation(): void {
     this.invalidatePublishPreflightCache();
+    // #1583 — redundant-but-harmless second flush (the unconditional flush at the
+    // top of `applyHubRotationEventName` already cleared the memo for this event).
+    // Kept so the memo stays invalidated if `finalizeKnownHubRotation` ever gains
+    // another caller. `invalidateAll()` is idempotent.
+    this.resolvedContractAddressCache.invalidateAll();
     // Force the next public-method entry through `init()` so it re-resolves
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
@@ -3681,6 +3863,9 @@ export class EVMChainAdapterBase {
       this.invalidateHubBinding(policy);
     }
     this.invalidatePublishPreflightCache();
+    // #1583 — the write-side self-heal cannot tell which name rotated, so drop
+    // the entire resolved-address memo along with every bound handle.
+    this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
     this.initialized = false;
   }
