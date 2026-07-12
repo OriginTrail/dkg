@@ -19,6 +19,7 @@ import { peerIdFromString, peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { ed25519GetPublicKey } from './crypto/ed25519.js';
 import type { ConnectionTransport, DKGNodeConfig } from './types.js';
 import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js';
+import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
@@ -46,6 +47,99 @@ const RELAY_REDIAL_DELAY_MS = 1_500;
  * give it a generous grace window to absorb transient latency.
  */
 const RELAY_RESERVATION_GRACE_MS = 15_000;
+
+/**
+ * Protocol prefixes whose in-flight streams mark a relay connection "busy"
+ * for the watchdog's forced reservation-redial: application request/response
+ * exchanges (StorageACK collection, durable sync, verify fan-out, …) that an
+ * abrupt `close()` aborts mid-flight. 2026-07-12 testnet outage: a NAT'd
+ * edge's watchdog severed its relay-target connections every grace-window
+ * expiry while the bootstraps' reservation slots were exhausted — and the
+ * relay targets doubled as the publish quorum's ACK cores, so every burst
+ * publish lost its ACK streams (same failure shape as the 2026-07-07 Gnosis
+ * incident documented on `nodeIsPubliclyReachable` below, but on NAT'd nodes
+ * where that bypass can't apply).
+ *
+ * Long-lived infrastructure streams (gossipsub mesh, identify, ping, dcutr,
+ * circuit hop/stop) are deliberately NOT counted: they sit open on virtually
+ * every connection, so counting them would defer reservation recovery
+ * forever.
+ */
+export const WATCHDOG_BUSY_PROTOCOL_PREFIXES = ['/dkg/'] as const;
+
+/**
+ * `/dkg/`-prefixed protocols that are NOT request/response exchanges and must
+ * not defer the forced redial (adversarial review of this fix, round 1):
+ * - The pooled message wire stream (`/dkg/10.0.2/message`) is deliberately
+ *   immortal — 10s keepalive PINGs re-arm its idle timer — so its existence
+ *   ≠ in-flight work, and severing it is recoverable by design
+ *   (PooledStreamResetError → outbox retry → stream reopens on next send).
+ * - DKG namespaces its Kademlia DHT under `/dkg/[…/]kad/1.0.0`; DHT RPCs are
+ *   ambient infrastructure whose abort the query layer routes around.
+ */
+export function isWatchdogBusyProtocol(protocol: string): boolean {
+  if (!WATCHDOG_BUSY_PROTOCOL_PREFIXES.some((prefix) => protocol.startsWith(prefix))) return false;
+  if (protocol === POOLED_MESSAGE_PROTOCOL) return false;
+  if (protocol.includes('/kad/')) return false;
+  return true;
+}
+
+/**
+ * Distinct busy app protocols across a peer's connections (see
+ * isWatchdogBusyProtocol). Stream access goes through
+ * `readConnectionStreams` — the one place that owns libp2p's
+ * not-quite-public `connection.streams` shape. Exported for tests.
+ */
+export function connectionsBusyAppProtocols(conns: readonly unknown[]): string[] {
+  const busy = new Set<string>();
+  for (const conn of conns) {
+    for (const stream of readConnectionStreams(conn) ?? []) {
+      const protocol = stream.protocol;
+      if (protocol && isWatchdogBusyProtocol(protocol)) {
+        busy.add(protocol);
+      }
+    }
+  }
+  return [...busy];
+}
+
+/**
+ * Per-relay forced-redial bookkeeping (one object per relay instead of
+ * parallel maps, so the invariants live in one place): `strikes` counts
+ * consecutive futile forced redials, `cooldownUntil` suppresses the forced
+ * path after the strike cap, `busyDeferralTicks` counts consecutive
+ * busy-stream deferrals toward RELAY_BUSY_DEFERRAL_MAX_TICKS. The whole
+ * entry is dropped the moment the relay's reservation gate is satisfied,
+ * and the whole map is cleared on node stop (state must not leak into a
+ * restarted node's fresh connections).
+ */
+interface RelayForcedRedialState {
+  strikes: number;
+  cooldownUntil: number;
+  busyDeferralTicks: number;
+}
+
+/**
+ * Consecutive busy-deferrals per relay before the forced redial proceeds
+ * anyway. Bounds the liveness cost of the deferral: ANY long-lived or leaked
+ * half-open `/dkg/` stream (current or future) can only DELAY reservation
+ * recovery — never permanently disable it (~30 ticks ≈ 5 min at the base
+ * interval). The teardown that then proceeds also doubles as the reaper for
+ * stuck streams the deferral would otherwise preserve forever.
+ */
+const RELAY_BUSY_DEFERRAL_MAX_TICKS = 30;
+
+/**
+ * Consecutive forced reservation-redials against the same relay that failed
+ * to yield a reservation before that relay's forced path is put on cooldown.
+ * Tonight's outage shape: both configured relays' slots were exhausted, so
+ * every forced drop+redial was guaranteed futile — and permanent (measured:
+ * one relay torn down 95× in 2h). Strikes convert "futile forever" into
+ * "5 attempts, then leave the connection alone for the cooldown window".
+ * The regular reconnect-on-disconnect path is unaffected.
+ */
+const RELAY_FORCED_REDIAL_MAX_STRIKES = 5;
+const RELAY_FORCED_REDIAL_COOLDOWN_MS = 10 * 60_000;
 
 /**
  * Default relay server capacity — the number of simultaneous circuit-relay v2
@@ -520,6 +614,8 @@ export class DKGNode {
    * the new reservation on the wire.
    */
   private relayReservationRedialAt: Map<string, number> = new Map();
+  /** Per-relay forced-redial bookkeeping; see RelayForcedRedialState. */
+  private relayForcedRedialState: Map<string, RelayForcedRedialState> = new Map();
   /**
    * Target number of simultaneous relay reservations for this edge node
    * (1 by default, up to `relayReservationCount` for multi-reservation
@@ -1324,6 +1420,7 @@ export class DKGNode {
         reservedRelayCount >= this.relayReservationCountTarget;
       if (transportUp && reservationGateSatisfied) {
         this.relayReservationRedialAt.delete(relayPidStr);
+        this.relayForcedRedialState.delete(relayPidStr);
         continue;
       }
 
@@ -1380,6 +1477,67 @@ export class DKGNode {
           continue;
         }
 
+        // Thrash cap: after RELAY_FORCED_REDIAL_MAX_STRIKES consecutive
+        // futile forced redials (reservation never appeared — e.g. the
+        // relay's slots are exhausted), stop tearing this relay's
+        // connection down for RELAY_FORCED_REDIAL_COOLDOWN_MS. The
+        // connection keeps carrying app traffic; only the forced
+        // reservation-recovery close is suppressed. Benign wait — no
+        // backoff escalation (leave `onlyWaitingOnGraceWindow` alone).
+        //
+        // Honoured only while we hold at least one reservation SOMEWHERE:
+        // with zero reservations the node is inbound-unreachable, and if
+        // every relay were cooled simultaneously nothing would ever retry
+        // (adversarial review round 1). Urgency wins when nothing works;
+        // the cap's job is protecting working connections from churn, and
+        // the global tick backoff (5-min max) already paces the retries.
+        const redialState = this.relayForcedRedialState.get(relayPidStr)
+          ?? { strikes: 0, cooldownUntil: 0, busyDeferralTicks: 0 };
+        if (now < redialState.cooldownUntil && haveAnyReservation) {
+          allHealthy = false;
+          continue;
+        }
+
+        // Stream-aware deferral: never sever a connection carrying
+        // in-flight application request streams — an abrupt close aborts
+        // the exchange (StorageACK collection, sync). Deferral is benign:
+        // the deficit persists to the next tick, which retries once the
+        // request streams have drained. See isWatchdogBusyProtocol for why
+        // long-lived streams (gossipsub, pooled messages, kad) don't count.
+        //
+        // The scan ALSO covers connections relayed THROUGH this relay
+        // (`…/p2p/<relay>/p2p-circuit/p2p/<peer>`): tearing down the relay
+        // connection severs those circuits and their in-flight exchanges
+        // (adversarial review round 1). Only the scan widens — the
+        // teardown below still closes just the direct connections.
+        //
+        // Capped at RELAY_BUSY_DEFERRAL_MAX_TICKS consecutive deferrals so
+        // a leaked half-open stream (or any future immortal /dkg/ stream)
+        // can only delay recovery, never disable it — after the cap the
+        // teardown proceeds and doubles as the stuck-stream reaper.
+        const relayedConns = node.getConnections().filter((c: { remoteAddr?: { toString(): string } }) =>
+          c.remoteAddr?.toString().includes(`/p2p/${relayPidStr}/p2p-circuit`),
+        );
+        const busyProtocols = connectionsBusyAppProtocols([...conns, ...relayedConns]);
+        if (busyProtocols.length > 0) {
+          const busyTicks = redialState.busyDeferralTicks + 1;
+          if (busyTicks <= RELAY_BUSY_DEFERRAL_MAX_TICKS) {
+            this.relayForcedRedialState.set(relayPidStr, { ...redialState, busyDeferralTicks: busyTicks });
+            allHealthy = false;
+            console.log(
+              `[${ts()}] Relay watchdog: deferring forced redial of ${short(relayPidStr)} — ` +
+              `in-flight app stream(s): ${busyProtocols.join(', ')} ` +
+              `(deferral ${busyTicks}/${RELAY_BUSY_DEFERRAL_MAX_TICKS})`,
+            );
+            continue;
+          }
+          console.log(
+            `[${ts()}] Relay watchdog: busy-deferral cap reached for ${short(relayPidStr)} ` +
+            `(streams: ${busyProtocols.join(', ')}); proceeding with forced redial`,
+          );
+        }
+        redialState.busyDeferralTicks = 0;
+
         allHealthy = false;
         // Actual corrective action below (drop + redial); this is a
         // real failure the watchdog must back off on.
@@ -1392,6 +1550,25 @@ export class DKGNode {
           `dropping + redialing ${short(relayPidStr)} to force reserve`,
         );
         this.relayReservationRedialAt.set(relayPidStr, now);
+        // Strike accounting: this forced teardown is only ever reached when
+        // the previous ones (if any) failed to yield a reservation — the
+        // happy path above drops the whole state entry the moment one
+        // appears.
+        const strikes = redialState.strikes + 1;
+        if (strikes >= RELAY_FORCED_REDIAL_MAX_STRIKES) {
+          this.relayForcedRedialState.set(relayPidStr, {
+            strikes: 0,
+            cooldownUntil: now + RELAY_FORCED_REDIAL_COOLDOWN_MS,
+            busyDeferralTicks: 0,
+          });
+          console.log(
+            `[${ts()}] Relay watchdog: ${strikes} consecutive forced redials of ${short(relayPidStr)} ` +
+            `yielded no reservation (slots likely exhausted); cooling down forced redials for ` +
+            `${Math.round(RELAY_FORCED_REDIAL_COOLDOWN_MS / 60_000)}min (connection left alone)`,
+          );
+        } else {
+          this.relayForcedRedialState.set(relayPidStr, { ...redialState, strikes, busyDeferralTicks: 0 });
+        }
 
         for (const c of conns) {
           try {
@@ -1458,11 +1635,17 @@ export class DKGNode {
     if (allHealthy) {
       this.relayWatchdogConsecutiveFailures = 0;
     } else if (onlyWaitingOnGraceWindow) {
-      // Every unhealthy relay this tick was just the reservation
-      // grace window after a forced redial. Don't inflate the backoff
+      // Every unhealthy relay this tick was just a benign wait (grace
+      // window, busy deferral, or cooldown). Don't inflate the backoff
       // — the next scheduled tick needs to actually arrive while the
       // grace window is still the active state, otherwise a missing
-      // reservation can sit uncorrected for minutes.
+      // reservation can sit uncorrected for minutes. DECAY the counter
+      // instead of freezing it (adversarial review round 1): an
+      // indefinitely-persistent benign state (long cooldown, busy
+      // publisher) previously pinned the shared tick interval at
+      // whatever the prior strike sequence escalated it to — walking it
+      // back restores base-granularity checks while the state is benign.
+      this.relayWatchdogConsecutiveFailures = Math.max(0, this.relayWatchdogConsecutiveFailures - 1);
       const nextDelay = Math.min(
         RELAY_WATCHDOG_BASE_INTERVAL_MS * Math.pow(2, this.relayWatchdogConsecutiveFailures),
         RELAY_WATCHDOG_MAX_INTERVAL_MS,
@@ -1630,6 +1813,11 @@ export class DKGNode {
       this.relayWatchdogTimer = null;
     }
     this.relayTargets = [];
+    // Watchdog bookkeeping must not leak into a restarted node: a stale
+    // cooldown/strike entry from the previous run would suppress
+    // reservation recovery on connections that were recreated from
+    // scratch (otReviewAgent on PR #1613).
+    this.relayForcedRedialState.clear();
     this.relayWatchdogConsecutiveFailures = 0;
     this.relayReservationRedialAt.clear();
     this.relayedPeers.clear();

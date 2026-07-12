@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { DKGNode, nodeHasDirectPublicAddress } from '../src/node.js';
+import { DKGNode, nodeHasDirectPublicAddress, connectionsBusyAppProtocols } from '../src/node.js';
 import { ProtocolRouter } from '../src/protocol-router.js';
 import { PeerDiscoveryManager } from '../src/discovery.js';
 import { TypedEventBus } from '../src/event-bus.js';
@@ -1140,4 +1140,404 @@ describe('Circuit Relay', () => {
       console.log = ORIG_CONSOLE_LOG;
     }
   }, 20000);
+});
+
+describe('Relay watchdog: stream-aware deferral + forced-redial thrash cap (2026-07-12 testnet outage)', () => {
+  const nodes: DKGNode[] = [];
+
+  afterEach(async () => {
+    console.warn = ORIG_CONSOLE_WARN;
+    console.log = ORIG_CONSOLE_LOG;
+    for (const n of nodes) {
+      try {
+        await n.stop();
+      } catch (err) {
+        console.warn('Teardown: node.stop() failed', err);
+      }
+    }
+    nodes.length = 0;
+  });
+
+  it('connectionsBusyAppProtocols counts /dkg/ request streams and ignores infra streams', () => {
+    const conn = (streams: Array<{ protocol?: string | null }>) => ({ streams });
+    // /dkg/ streams count, deduped across connections.
+    expect(connectionsBusyAppProtocols([
+      conn([{ protocol: '/dkg/10.0.1/storage-ack' }, { protocol: '/dkg/10.0.2/sync' }]),
+      conn([{ protocol: '/dkg/10.0.1/storage-ack' }]),
+    ]).sort()).toEqual(['/dkg/10.0.1/storage-ack', '/dkg/10.0.2/sync']);
+    // Long-lived infra streams never count (they exist on ~every
+    // connection; counting them would defer reservation recovery forever).
+    expect(connectionsBusyAppProtocols([
+      conn([
+        { protocol: '/meshsub/1.1.0' },
+        { protocol: '/ipfs/id/1.0.0' },
+        { protocol: '/ipfs/ping/1.0.0' },
+        { protocol: '/libp2p/circuit/relay/0.2.0/hop' },
+        { protocol: '/libp2p/circuit/relay/0.2.0/stop' },
+        { protocol: '/libp2p/dcutr' },
+        { protocol: null },
+        {},
+      ]),
+    ])).toEqual([]);
+    // /dkg/-prefixed protocols that are NOT request/response exchanges
+    // (adversarial review round 1): the pooled message wire stream is
+    // deliberately immortal, and DKG's own kad-dht (network-scoped or not)
+    // is ambient infrastructure — neither may defer the forced redial.
+    expect(connectionsBusyAppProtocols([
+      conn([
+        { protocol: '/dkg/10.0.2/message' },
+        { protocol: '/dkg/kad/1.0.0' },
+        { protocol: '/dkg/testnet.base:84532/kad/1.0.0' },
+      ]),
+    ])).toEqual([]);
+    // No connections / no streams.
+    expect(connectionsBusyAppProtocols([])).toEqual([]);
+    expect(connectionsBusyAppProtocols([conn([])])).toEqual([]);
+  });
+
+  it('defers the forced reservation-redial while a /dkg/ stream is in flight, and resumes after it drains', async () => {
+    // "Relay" that runs NO relay server: the edge can connect but a
+    // reservation can never form, so every tick enters the
+    // forced-redial branch — the 2026-07-12 outage shape (relay slots
+    // exhausted ⇒ reservation never appears).
+    const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const BUSY_PROTOCOL = '/dkg/test-busy/1.0.0';
+    // Handler holds the inbound stream open — an in-flight exchange.
+    const held: Array<{ close: () => Promise<void> }> = [];
+    await relay.libp2p.handle(BUSY_PROTOCOL, ({ stream }) => { held.push(stream as never); });
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const relayPid = relay.libp2p.peerId.toString();
+    const tick = (edge as unknown as { watchdogTick: () => Promise<void> }).watchdogTick.bind(edge);
+    const redialAt = (edge as unknown as { relayReservationRedialAt: Map<string, number> }).relayReservationRedialAt;
+
+    // Baseline (no busy stream): the forced redial DOES run.
+    const logSpy = spyConsole('log');
+    try {
+      await tick();
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        'baseline tick without app streams should force-redial',
+      ).toBe(true);
+
+      // Open an in-flight /dkg/ stream, expire the grace window, tick:
+      // the watchdog must DEFER (no close, no redial) and say why.
+      const stream = await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+      const busyConnId = edge.libp2p.getConnections(relay.libp2p.peerId)
+        .find(c => connectionsBusyAppProtocols([c]).includes(BUSY_PROTOCOL))?.id;
+      expect(busyConnId, 'test setup: the busy stream must be visible on a connection').toBeTruthy();
+      redialAt.set(relayPid, Date.now() - 16_000);
+      logSpy.calls.length = 0;
+      await tick();
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('deferring forced redial')
+          && c[0].includes(BUSY_PROTOCOL)),
+        `expected deferral log; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
+      ).toBe(true);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        'must not force-redial while a /dkg/ stream is in flight',
+      ).toBe(false);
+      // Prove the SAME connection object survived (not closed+redialed)
+      // and the in-flight stream is still on it (otReviewAgent on
+      // PR #1613: a regression could log the deferral, still tear down,
+      // and a redial would keep the connection COUNT positive).
+      const connsAfter = edge.libp2p.getConnections(relay.libp2p.peerId);
+      expect(connsAfter.length).toBeGreaterThan(0);
+      expect(connsAfter.map(c => c.id)).toContain(busyConnId);
+      expect(
+        connectionsBusyAppProtocols(connsAfter),
+        'the in-flight stream must still be open on the surviving connection',
+      ).toContain(BUSY_PROTOCOL);
+
+      // Drain the stream — BOTH halves: closing only the dialer side
+      // leaves the half-open stream (protocol still set) in
+      // conn.streams until the responder closes too.
+      await stream.abort(new Error('test-drain'));
+      for (const h of held) { try { await h.close(); } catch { /* drained */ } }
+      const drainDeadline = Date.now() + 5_000;
+      while (Date.now() < drainDeadline
+        && connectionsBusyAppProtocols(edge.libp2p.getConnections(relay.libp2p.peerId)).length > 0) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      redialAt.set(relayPid, Date.now() - 16_000);
+      logSpy.calls.length = 0;
+      await tick();
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        'forced redial should resume once the app stream has drained',
+      ).toBe(true);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 40000);
+
+  it('puts a never-reserving relay on cooldown after repeated futile forced redials (while a reservation exists elsewhere)', async () => {
+    // Cooldown semantics (review round 1): the thrash cap only suppresses
+    // the forced path while the node holds >=1 reservation SOMEWHERE —
+    // with zero reservations, urgency wins and the watchdog keeps trying.
+    // So the fixture needs BOTH: a real relay server (provides the
+    // reservation) and a never-reserving plain peer (accumulates strikes).
+    const realRelay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false, enableRelayServer: true });
+    const deadRelay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(realRelay, deadRelay);
+    await realRelay.start();
+    await deadRelay.start();
+    const realAddr = realRelay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const deadAddr = deadRelay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [realAddr, deadAddr],
+      relayReservationCount: 2,
+    });
+    nodes.push(edge);
+    await edge.start();
+    // Wait for the real relay's reservation so haveAnyReservation=true.
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline
+      && !edge.libp2p.getMultiaddrs().some(ma => ma.toString().includes('/p2p-circuit'))) {
+      await new Promise(r => setTimeout(r, 250));
+    }
+    const deadPid = deadRelay.libp2p.peerId.toString();
+    const tick = (edge as unknown as { watchdogTick: () => Promise<void> }).watchdogTick.bind(edge);
+    const redialAt = (edge as unknown as { relayReservationRedialAt: Map<string, number> }).relayReservationRedialAt;
+
+    const logSpy = spyConsole('log');
+    try {
+      // Five forced redials of the dead relay (grace window expired
+      // manually each round — in production these are >=15s apart). None
+      // can yield a reservation (no relay server), so the 5th trips the
+      // cooldown. The real relay's gate stays satisfied throughout.
+      for (let i = 0; i < 5; i++) {
+        if (i > 0) redialAt.set(deadPid, Date.now() - 16_000);
+        await tick();
+      }
+      const forced = logSpy.calls.filter(c => typeof c[0] === 'string' && c[0].includes('to force reserve'));
+      expect(forced.length, `exactly 5 forced redials before the cap trips; got: ${JSON.stringify(forced.map(c => c[0]))}`).toBe(5);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('cooling down forced redials')),
+        `expected cooldown log after 5 strikes; got: ${JSON.stringify(logSpy.calls.map(c => c[0]).slice(-6))}`,
+      ).toBe(true);
+
+      // On cooldown (and holding a reservation on the real relay): even
+      // with the grace window expired, no further teardown of the dead
+      // relay — its connection is left alone.
+      redialAt.set(deadPid, Date.now() - 16_000);
+      logSpy.calls.length = 0;
+      await tick();
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        'no forced redial while the relay is on cooldown',
+      ).toBe(false);
+      expect(edge.libp2p.getConnections(deadRelay.libp2p.peerId).length).toBeGreaterThan(0);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 60000);
+});
+
+describe('Relay watchdog: review-round-1 hardening', () => {
+  const nodes: DKGNode[] = [];
+
+  afterEach(async () => {
+    console.warn = ORIG_CONSOLE_WARN;
+    console.log = ORIG_CONSOLE_LOG;
+    for (const n of nodes) {
+      try {
+        await n.stop();
+      } catch (err) {
+        console.warn('Teardown: node.stop() failed', err);
+      }
+    }
+    nodes.length = 0;
+  });
+
+  it('clears strikes, cooldown, and busy-deferral state the moment a reservation appears (happy path)', async () => {
+    // Real relay SERVER so a reservation actually forms.
+    const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false, enableRelayServer: true });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    // Wait for the circuit reservation.
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline
+      && !edge.libp2p.getMultiaddrs().some(ma => ma.toString().includes('/p2p-circuit'))) {
+      await new Promise(r => setTimeout(r, 250));
+    }
+    const relayPid = relay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayForcedRedialState: Map<string, { strikes: number; cooldownUntil: number; busyDeferralTicks: number }>;
+    };
+    // Poison the whole state entry as if a strike sequence had just run.
+    internals.relayForcedRedialState.set(relayPid, {
+      strikes: 4,
+      cooldownUntil: Date.now() + 600_000,
+      busyDeferralTicks: 7,
+    });
+
+    await internals.watchdogTick.call(edge);
+
+    expect(
+      internals.relayForcedRedialState.has(relayPid),
+      'forced-redial state dropped entirely on happy path',
+    ).toBe(false);
+  }, 30000);
+
+  it('bypasses an active cooldown when NO reservation exists anywhere (urgency wins)', async () => {
+    // Liveness-critical counterpart of the cooldown test (otReviewAgent
+    // round 2): with zero reservations the node is inbound-unreachable,
+    // so an active cooldown must NOT suppress the forced redial — if
+    // every relay were cooled simultaneously nothing would ever retry.
+    const deadRelay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(deadRelay);
+    await deadRelay.start();
+    const deadAddr = deadRelay.multiaddrs.find(a => a.includes('/tcp/'))!;
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [deadAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const deadPid = deadRelay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayForcedRedialState: Map<string, { strikes: number; cooldownUntil: number; busyDeferralTicks: number }>;
+    };
+    // Active cooldown, zero reservations (dead relay runs no relay server,
+    // so no /p2p-circuit self-addr can exist).
+    internals.relayForcedRedialState.set(deadPid, {
+      strikes: 0,
+      cooldownUntil: Date.now() + 600_000,
+      busyDeferralTicks: 0,
+    });
+    expect(
+      edge.libp2p.getMultiaddrs().some(ma => ma.toString().includes('/p2p-circuit')),
+      'test setup: edge must hold no reservation',
+    ).toBe(false);
+
+    const logSpy = spyConsole('log');
+    try {
+      await internals.watchdogTick.call(edge);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        `cooldown must be bypassed with zero reservations; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
+      ).toBe(true);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 30000);
+
+  it('decays the shared backoff counter during a benign busy-deferral wait (does not freeze at an escalated interval)', async () => {
+    // otReviewAgent round 3: benign waits reduce relayWatchdogConsecutiveFailures
+    // so a persistent benign state (busy publisher, cooldown) walks the tick
+    // interval back toward base granularity instead of ratcheting at the 5-min
+    // cap. A regression removing the decay would keep the counter frozen.
+    const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const BUSY_PROTOCOL = '/dkg/test-decay/1.0.0';
+    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold open */ });
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const relayPid = relay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayReservationRedialAt: Map<string, number>;
+      relayWatchdogConsecutiveFailures: number;
+    };
+    // In-flight app stream ⇒ every tick is a benign busy-deferral.
+    await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+    internals.relayReservationRedialAt.set(relayPid, Date.now() - 16_000);
+    // Pretend a prior failure sequence escalated the interval.
+    internals.relayWatchdogConsecutiveFailures = 3;
+
+    const logSpy = spyConsole('log');
+    try {
+      await internals.watchdogTick.call(edge);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+    expect(
+      internals.relayWatchdogConsecutiveFailures,
+      'benign busy-deferral tick must decay the counter (3 → 2), not freeze it',
+    ).toBe(2);
+  }, 30000);
+
+  it('busy-deferral cap: forced redial proceeds once RELAY_BUSY_DEFERRAL_MAX_TICKS is exceeded', async () => {
+    const relay = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
+    nodes.push(relay);
+    await relay.start();
+    const relayAddr = relay.multiaddrs.find(a => a.includes('/tcp/'))!;
+    const BUSY_PROTOCOL = '/dkg/test-busy-cap/1.0.0';
+    await relay.libp2p.handle(BUSY_PROTOCOL, () => { /* hold the stream open */ });
+
+    const edge = new DKGNode({
+      listenAddresses: ['/ip4/127.0.0.1/tcp/0'],
+      enableMdns: false,
+      relayPeers: [relayAddr],
+    });
+    nodes.push(edge);
+    await edge.start();
+    const relayPid = relay.libp2p.peerId.toString();
+    const internals = edge as unknown as {
+      watchdogTick: () => Promise<void>;
+      relayReservationRedialAt: Map<string, number>;
+      relayForcedRedialState: Map<string, { strikes: number; cooldownUntil: number; busyDeferralTicks: number }>;
+    };
+    await edge.libp2p.dialProtocol(relay.libp2p.getMultiaddrs(), BUSY_PROTOCOL);
+    internals.relayReservationRedialAt.set(relayPid, Date.now() - 16_000);
+    // One tick below the cap: still deferring.
+    internals.relayForcedRedialState.set(relayPid, { strikes: 0, cooldownUntil: 0, busyDeferralTicks: 29 });
+    const logSpy = spyConsole('log');
+    try {
+      await internals.watchdogTick.call(edge);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('deferring forced redial')),
+        'tick 30/30 still defers',
+      ).toBe(true);
+      // Over the cap: teardown proceeds despite the busy stream.
+      internals.relayReservationRedialAt.set(relayPid, Date.now() - 16_000);
+      internals.relayForcedRedialState.set(relayPid, { strikes: 0, cooldownUntil: 0, busyDeferralTicks: 30 });
+      logSpy.calls.length = 0;
+      await internals.watchdogTick.call(edge);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('busy-deferral cap reached')),
+        `expected cap-reached log; got: ${JSON.stringify(logSpy.calls.map(c => c[0]))}`,
+      ).toBe(true);
+      expect(
+        logSpy.calls.some(c => typeof c[0] === 'string' && c[0].includes('to force reserve')),
+        'forced redial proceeds past the cap',
+      ).toBe(true);
+    } finally {
+      console.log = ORIG_CONSOLE_LOG;
+    }
+  }, 40000);
 });

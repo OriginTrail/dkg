@@ -14,6 +14,7 @@ import type {
   UpdateOptions,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
@@ -29,6 +30,11 @@ export class OxigraphStore implements TripleStore {
 
   private store: OxStore;
   private persistPath: string | undefined;
+  // #1609: per-graph write generations, bumped on every local mutation (the
+  // same choke points the sparql-http adapter pairs with its listGraphs-cache
+  // invalidation). Feeds the chain-reconcile negative memo via
+  // `asGraphWriteGenSource` / `getWriteGen`.
+  private readonly writeGen = new GraphWriteGenTracker();
 
   /**
    * @param persistPath  If provided, the store will dump/load N-Quads
@@ -217,6 +223,7 @@ export class OxigraphStore implements TripleStore {
     const nquads = quads.map(quadToNQuad).join('\n') + '\n';
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
+    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
   }
 
   async delete(quads: DKGQuad[]): Promise<void> {
@@ -225,6 +232,7 @@ export class OxigraphStore implements TripleStore {
       if (oxQuad) this.store.delete(oxQuad);
     }
     this.scheduleFlush();
+    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>): Promise<number> {
@@ -238,6 +246,8 @@ export class OxigraphStore implements TripleStore {
       this.store.delete(q);
     }
     if (matches.length > 0) this.scheduleFlush();
+    if (pattern.graph) this.writeGen.recordGraphWrites([pattern.graph]);
+    else this.writeGen.recordUnscopedWrite();
     return matches.length;
   }
 
@@ -294,9 +304,15 @@ export class OxigraphStore implements TripleStore {
     // Oxigraph creates graphs implicitly on insert — no-op.
   }
 
+  /** {@link GraphWriteGenSource} capability (#1609) — see graph-write-gen.ts. */
+  getWriteGen(graphPrefix: string): number {
+    return this.writeGen.getWriteGen(graphPrefix);
+  }
+
   async dropGraph(graphUri: string): Promise<void> {
     this.store.update(`DROP SILENT GRAPH <${escapeUri(graphUri)}>`);
     this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri]);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
@@ -326,6 +342,7 @@ export class OxigraphStore implements TripleStore {
     );
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
+    this.writeGen.recordGraphWrites([graphUri]);
     return removed;
   }
 
@@ -341,6 +358,9 @@ export class OxigraphStore implements TripleStore {
     // update contract, ignored.
     this.store.update(sparql);
     this.scheduleFlush();
+    // A raw UPDATE's write scope is not derivable at the call site
+    // (`touchedGraphs` hints only membership changes) — unscoped bump.
+    this.writeGen.recordUnscopedWrite();
   }
 
   async countQuads(graphUri?: string): Promise<number> {
