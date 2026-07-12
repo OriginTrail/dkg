@@ -285,9 +285,11 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
     expect(sendReliable).toHaveBeenNthCalledWith(1, 'peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
+      queueOnFailure: false,
     });
     expect(sendReliable).toHaveBeenNthCalledWith(2, 'peer-b', '/dkg/test/storage-update-ack', payload, {
       timeoutMs: 60_000,
+      queueOnFailure: false,
     });
   });
 
@@ -309,6 +311,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
     expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
+      queueOnFailure: false,
     });
   });
 
@@ -357,6 +360,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     });
     expect(sendReliable).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 20_000,
+      queueOnFailure: false,
     });
   });
 
@@ -376,6 +380,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     ).rejects.toThrow(/substrate queued \(transport\): queued/);
     expect(queuedSend).toHaveBeenCalledWith('peer-a', '/dkg/test/storage-ack', payload, {
       timeoutMs: 60_000,
+      queueOnFailure: false,
     });
 
     const missingResponseSend = vi.fn(async () => ({

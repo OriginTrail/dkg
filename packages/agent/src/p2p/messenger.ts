@@ -184,6 +184,11 @@ export interface SendReliableOpts {
    * (e.g. join-approval).
    */
   maxAgeMs?: number;
+  /**
+   * Disable durable sender retries for bounded request/response flows whose
+   * caller owns retry and response lifetime (for example StorageACK).
+   */
+  queueOnFailure?: boolean;
 }
 
 /**
@@ -667,6 +672,9 @@ export class Messenger {
       // the outbox stays out of it because retrying an encoding
       // bug / unhandled protocol won't help.
       if (!isRecoverableMessengerSendError(err, errMsg)) {
+        throw err;
+      }
+      if (opts.queueOnFailure === false) {
         throw err;
       }
       const entry = outbox.enqueueFailure(
