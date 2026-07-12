@@ -1,4 +1,8 @@
-import { escapeRdfLiteral } from '@origintrail-official/dkg-rdf-utils';
+import {
+  escapeRdfLiteral,
+  isRdfTerm,
+  normalizeRdfObject,
+} from '@origintrail-official/dkg-rdf-utils';
 
 export interface DkgPublisherExtensionQuadInput {
   subject: unknown;
@@ -148,26 +152,14 @@ export function normalizeDkgPublisherQuads(
   }));
 }
 
-// NOTE: the MCP adapter keeps a dependency-light copy of the term classifier and
-// wrapper as `normalizeRdfObject` in `packages/mcp-dkg/src/tools/assertions.ts`.
-// Both adapters delegate literal escaping to `@origintrail-official/dkg-rdf-utils`.
-// If you change the surrounding normalization behavior here, update the MCP copy
-// AND its golden fixture in
-// `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts` so the
-// public `dkg_knowledge_asset_create({quads})` object contract stays identical
-// across the MCP / OpenClaw / Hermes adapters.
+// Core and MCP preserve their public names as thin compatibility wrappers around
+// the complete dependency-free normalizer in @origintrail-official/dkg-rdf-utils.
 export function normalizeDkgPublisherObject(value: unknown): string {
-  const raw = String(value ?? '');
-  if (isDkgRdfTerm(raw)) return raw;
-  return `"${escapeDkgRdfLiteral(raw)}"`;
+  return normalizeRdfObject(value);
 }
 
 export function isDkgRdfTerm(value: string): boolean {
-  return (
-    /^(?:https?:\/\/|urn:|did:)/i.test(value) ||
-    value.startsWith('_:') ||
-    value.startsWith('"')
-  );
+  return isRdfTerm(value);
 }
 
 /**

@@ -15,7 +15,11 @@
  * assertion name.
  */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { escapeRdfLiteral } from '@origintrail-official/dkg-rdf-utils';
+import {
+  escapeRdfLiteral,
+  isRdfTerm as isSharedRdfTerm,
+  normalizeRdfObject as normalizeSharedRdfObject,
+} from '@origintrail-official/dkg-rdf-utils';
 import { z } from 'zod';
 import type { DkgClient } from '../client.js';
 import { DkgHttpError } from '../client.js';
@@ -106,10 +110,10 @@ function validateAssertionName(name: string): { valid: boolean; reason?: string 
 
 /**
  * Object-term normalizer for the `dkg_knowledge_asset_create` one-shot `quads`
- * path. The term classifier and wrapper mirror `@origintrail-official/dkg-core`
- * `normalizeDkgPublisherObject` / `isDkgRdfTerm`, while literal escaping delegates
- * to the shared, dependency-free `@origintrail-official/dkg-rdf-utils` package.
- * MCP remains independent of the full dkg-core runtime. OpenClaw + Hermes
+ * path. The complete dependency-free normalization boundary (term classification,
+ * literal escaping, and quote wrapping) lives in
+ * `@origintrail-official/dkg-rdf-utils`. MCP remains independent of the full
+ * dkg-core runtime. OpenClaw + Hermes
  * route the SAME create-tool `quads` shape through that core normalizer, so a bare
  * literal object must auto-quote identically across all three runtimes
  * (portable-agent parity). A value that is already an http(s)/urn/did URI, a blank
@@ -119,18 +123,12 @@ function validateAssertionName(name: string): { valid: boolean; reason?: string 
  *
  * DRIFT GUARD: the public contract of these three functions is pinned by a GOLDEN
  * conformance fixture in `packages/mcp-dkg/test/rdf-object-normalization-conformance.test.ts`
- * whose expected strings are HAND-WRITTEN (not derived from this impl). If core's
- * `normalizeDkgPublisherObject` changes, update this wrapper and that fixture
- * together (core carries a back-pointer to that test).
+ * whose expected strings are HAND-WRITTEN (not derived from this impl).
  *
  * Exported so the conformance test can pin them directly.
  */
 export function isRdfTerm(value: string): boolean {
-  return (
-    /^(?:https?:\/\/|urn:|did:)/i.test(value) ||
-    value.startsWith('_:') ||
-    value.startsWith('"')
-  );
+  return isSharedRdfTerm(value);
 }
 
 export function escapeRdfLiteralBody(value: string): string {
@@ -138,7 +136,7 @@ export function escapeRdfLiteralBody(value: string): string {
 }
 
 export function normalizeRdfObject(value: string): string {
-  return isRdfTerm(value) ? value : `"${escapeRdfLiteralBody(value)}"`;
+  return normalizeSharedRdfObject(value);
 }
 
 function resolveProject(

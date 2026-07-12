@@ -22,3 +22,18 @@ export function escapeRdfLiteral(value: string): string {
     return `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
   });
 }
+
+/** Return whether a string already represents an RDF term accepted by DKG publishers. */
+export function isRdfTerm(value: string): boolean {
+  return (
+    /^(?:https?:\/\/|urn:|did:)/i.test(value) ||
+    value.startsWith('_:') ||
+    value.startsWith('"')
+  );
+}
+
+/** Preserve RDF terms and quote/escape every other value as a plain literal. */
+export function normalizeRdfObject(value: unknown): string {
+  const raw = String(value ?? '');
+  return isRdfTerm(raw) ? raw : `"${escapeRdfLiteral(raw)}"`;
+}
