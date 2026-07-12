@@ -1355,7 +1355,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             code: "async_publisher_unavailable",
             error: "The asynchronous publisher cannot accept jobs on this node.",
             reason,
-            retryable: true,
+            retryable: reason === "publisher_startup_failed",
+            operatorActionRequired: reason !== "publisher_startup_failed",
           });
         }
         const opts = resolveStandaloneVmPublishOptions(ctx, parsed);

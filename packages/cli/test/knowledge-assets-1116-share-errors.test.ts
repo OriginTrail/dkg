@@ -397,9 +397,27 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body).toMatchObject({
       code: 'async_publisher_unavailable',
       reason: 'publisher_disabled',
-      retryable: true,
+      retryable: false,
+      operatorActionRequired: true,
     });
     expect(resolved).toBe(0);
+    expect(enqueued).toBe(0);
+  });
+
+  it('vm/publish-async treats an empty-wallet runtime as operator-actionable', async () => {
+    let enqueued = 0;
+    await startWith({}, {}, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => { enqueued += 1; },
+    }, { wallets: [] });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: 'async_publisher_unavailable',
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
     expect(enqueued).toBe(0);
   });
 
