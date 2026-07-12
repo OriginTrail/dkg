@@ -80,6 +80,7 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
   'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress
+  'reservePublisherAddressForPublish', // cost-aware pool reservation; mock has one signerAddress
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below

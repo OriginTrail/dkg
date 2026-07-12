@@ -1157,16 +1157,19 @@ export interface ChainAdapter {
   ): Promise<string>;
 
   /**
-   * Reserve the adapter signer that should be used for a publish to the given
-   * context graph and return its address. Signer-pool implementations should
-   * advance their cursor atomically here so concurrent publishers do not bind
-   * multiple off-chain signatures to the same tx signer by accident. Used by
-   * publishers that need the off-chain signature address to match the eventual
-   * tx signer.
+   * Return an authorized signer for early, cost-independent publisher work.
+   * This does not prove that the signer can fund a later publish. Once the
+   * exact quote exists, publishers should use
+   * {@link reservePublisherAddressForPublish} before binding signatures.
    */
   getAuthorizedPublisherAddress?(contextGraphId: bigint): Promise<string>;
 
-  /** Strict, cost-aware reservation used only once an exact publish quote exists. */
+  /**
+   * Strict, cost-aware signer reservation used once an exact publish quote
+   * exists. Signer-pool adapters advance their cursor atomically here so
+   * concurrent publishers do not bind multiple off-chain signatures to the
+   * same transaction signer by accident.
+   */
   reservePublisherAddressForPublish?(request: {
     contextGraphId: bigint;
     requiredTracWei: bigint;
