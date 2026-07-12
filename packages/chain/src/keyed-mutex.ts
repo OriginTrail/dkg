@@ -15,7 +15,15 @@
  * (OriginTrail/dkg#953). Serializing per wallet keeps the nonce monotonic
  * while preserving cross-wallet concurrency.
  */
-export const DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS = 60_000;
+// One serialized write may legitimately hold the lane for the 180s receipt
+// window plus populate/broadcast overhead. Keep one queue-position budget above
+// that bound; deeper callers receive one budget per predecessor.
+export const DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS = 240_000;
+
+interface SerializerLane {
+  tail: Promise<void>;
+  depth: number;
+}
 
 export class KeyedSerializerAcquireTimeoutError extends Error {
   readonly code = 'KEYED_SERIALIZER_ACQUIRE_TIMEOUT';
@@ -31,8 +39,7 @@ export class KeyedSerializerAcquireTimeoutError extends Error {
 }
 
 export class KeyedSerializer {
-  private readonly tails = new Map<string, Promise<void>>();
-  private readonly depths = new Map<string, number>();
+  private readonly lanes = new Map<string, SerializerLane>();
 
   constructor(
     private readonly acquireTimeoutMs = DEFAULT_KEYED_SERIALIZER_ACQUIRE_TIMEOUT_MS,
@@ -47,10 +54,29 @@ export class KeyedSerializer {
    * settled. Returns `fn`'s result (or rejection) verbatim.
    */
   run<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const prev = this.tails.get(key) ?? Promise.resolve();
-    const queueDepth = (this.depths.get(key) ?? 0) + 1;
-    this.depths.set(key, queueDepth);
+    const lane = this.lanes.get(key) ?? { tail: Promise.resolve(), depth: 0 };
+    if (!this.lanes.has(key)) this.lanes.set(key, lane);
+    const prev = lane.tail;
+    const queueDepth = ++lane.depth;
+    const waitMs = this.acquireTimeoutMs * Math.max(1, queueDepth - 1);
 
+    const entry = this.createEntry(key, queueDepth, waitMs, prev, fn);
+    lane.tail = entry.tail;
+    void entry.tail.then(() => {
+      lane.depth -= 1;
+      if (lane.depth === 0 && this.lanes.get(key) === lane) this.lanes.delete(key);
+    });
+    return entry.result;
+  }
+
+  /** Build one named queue entry: caller result plus the non-rejecting lane tail. */
+  private createEntry<T>(
+    key: string,
+    queueDepth: number,
+    waitMs: number,
+    prev: Promise<void>,
+    fn: () => Promise<T>,
+  ): { result: Promise<T>; tail: Promise<void> } {
     let acquired = false;
     let timedOut = false;
     let resolveResult!: (value: T) => void;
@@ -62,8 +88,8 @@ export class KeyedSerializer {
     const timeout = setTimeout(() => {
       if (acquired) return;
       timedOut = true;
-      rejectResult(new KeyedSerializerAcquireTimeoutError(key, this.acquireTimeoutMs, queueDepth));
-    }, this.acquireTimeoutMs);
+      rejectResult(new KeyedSerializerAcquireTimeoutError(key, waitMs, queueDepth));
+    }, waitMs);
     timeout.unref?.();
 
     // `prev` is a non-rejecting queue tail. A caller that times out is skipped
@@ -79,34 +105,27 @@ export class KeyedSerializer {
       }
     });
     // The queue tail never rejects, so chaining the next op off it is safe.
-    const tail = execution.then(
+    return {
+      result,
+      tail: execution.then(
       () => undefined,
       () => undefined,
-    );
-    this.tails.set(key, tail);
-    // Keep the map bounded by in-flight keys, not history: once this tail
-    // settles, drop it if nothing newer has been queued behind it.
-    void tail.then(() => {
-      const remaining = (this.depths.get(key) ?? 1) - 1;
-      if (remaining > 0) this.depths.set(key, remaining);
-      else this.depths.delete(key);
-      if (this.tails.get(key) === tail) this.tails.delete(key);
-    });
-    return result;
+      ),
+    };
   }
 
   /** True while `key` has an in-flight or queued operation. */
   isActive(key: string): boolean {
-    return this.tails.has(key);
+    return this.lanes.has(key);
   }
 
   /** Number of keys with an in-flight or queued operation. */
   get activeKeyCount(): number {
-    return this.tails.size;
+    return this.lanes.size;
   }
 
   /** In-flight plus queued operations for one key. */
   queueDepth(key: string): number {
-    return this.depths.get(key) ?? 0;
+    return this.lanes.get(key)?.depth ?? 0;
   }
 }

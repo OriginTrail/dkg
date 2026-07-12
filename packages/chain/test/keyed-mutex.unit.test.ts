@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { KeyedSerializer, KeyedSerializerAcquireTimeoutError } from '../src/keyed-mutex.js';
 
 const tick = (ms = 0) => new Promise<void>((r) => setTimeout(r, ms));
@@ -113,6 +113,27 @@ describe('KeyedSerializer', () => {
     await tick(0);
     expect(ran).toBe(false);
     expect(s.queueDepth('0xwallet')).toBe(0);
+  });
+
+  it('does not drop a queued write after 60s while its predecessor is within the receipt window', async () => {
+    vi.useFakeTimers();
+    try {
+      const s = new KeyedSerializer();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const first = s.run('0xslow-wallet', async () => gate);
+      let ran = false;
+      const second = s.run('0xslow-wallet', async () => { ran = true; return 'sent'; });
+
+      await vi.advanceTimersByTimeAsync(65_000);
+      expect(ran).toBe(false);
+      expect(s.queueDepth('0xslow-wallet')).toBe(2);
+      release();
+      await first;
+      await expect(second).resolves.toBe('sent');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('prevents the publisher nonce race: same-wallet sends get distinct, monotonic nonces', async () => {
